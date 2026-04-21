@@ -5,7 +5,6 @@
     "buildCommand": "yarn install && yarn build"
   },
   "deploy": {
-    "startCommand": "npx serve -s build -l $PORT",
     "restartPolicyType": "ON_FAILURE"
   }
 }
