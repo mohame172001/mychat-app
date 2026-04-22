@@ -927,8 +927,22 @@ async def instagram_webhook(request: Request):
 
 
 @api.get('/instagram/webhook-log')
-async def instagram_webhook_log(user_id: str = Depends(get_current_user_id), limit: int = 20):
-    """Return the most recent raw webhook payloads — for debugging deliveries."""
+async def instagram_webhook_log(request: Request, limit: int = 20, token: Optional[str] = None):
+    """Return the most recent raw webhook payloads — for debugging deliveries.
+    Accepts JWT via Authorization header OR ?token=... query for easy browser debug."""
+    # Accept either Authorization header or ?token= query
+    auth = request.headers.get('authorization') or request.headers.get('Authorization') or ''
+    jwt_token = None
+    if auth.lower().startswith('bearer '):
+        jwt_token = auth.split(' ', 1)[1]
+    elif token:
+        jwt_token = token
+    if not jwt_token:
+        raise HTTPException(401, 'Provide JWT via Authorization header or ?token=')
+    try:
+        decode_token(jwt_token)
+    except Exception:
+        raise HTTPException(401, 'Invalid token')
     docs = await db.webhook_log.find().sort('received', -1).limit(max(1, min(limit, 50))).to_list(50)
     for d in docs:
         d.pop('_id', None)
