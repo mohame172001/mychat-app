@@ -796,21 +796,36 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
     if not u or not u.get('instagramConnected'):
         raise HTTPException(400, 'Instagram not connected')
     token = u.get('meta_access_token', '')
-    # Look up page id fresh
+    # Look up page id fresh. The stored token is usually a PAGE access token
+    # (set during OAuth callback) so /me/accounts may return nothing — fall
+    # back to /me which, for a page token, returns the Page itself.
     async with httpx.AsyncClient(timeout=20) as c:
+        page_id = None
+        page_token = token
         accs = await c.get('https://graph.facebook.com/v21.0/me/accounts',
                            params={'access_token': token,
                                    'fields': 'id,name,access_token,instagram_business_account'})
-        data = accs.json().get('data', [])
-        page_id = None
-        page_token = token
+        data = accs.json().get('data', []) if accs.status_code == 200 else []
         for acc in data:
             if acc.get('instagram_business_account'):
                 page_id = acc.get('id')
                 page_token = acc.get('access_token') or token
                 break
         if not page_id:
-            raise HTTPException(404, 'No page with linked IG business account')
+            # Page-token fallback: /me returns the page itself
+            me = await c.get('https://graph.facebook.com/v21.0/me',
+                             params={'access_token': token,
+                                     'fields': 'id,name,instagram_business_account'})
+            if me.status_code == 200:
+                mb = me.json()
+                if mb.get('instagram_business_account') or mb.get('id'):
+                    page_id = mb.get('id')
+                    page_token = token
+        if not page_id and u.get('fb_page_id'):
+            page_id = u['fb_page_id']
+            page_token = token
+        if not page_id:
+            raise HTTPException(404, f'No page found. /me/accounts={accs.text[:200]}')
         sub = await c.post(
             f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
             params={
