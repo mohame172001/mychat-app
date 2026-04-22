@@ -830,10 +830,13 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
             f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
             params={
                 'access_token': page_token,
+                # Valid Page-level fields only. comments/mentions for
+                # Instagram are subscribed at the App level on the
+                # "instagram" webhook object (Meta App Dashboard).
                 'subscribed_fields': (
                     'messages,messaging_postbacks,messaging_optins,'
                     'message_deliveries,message_reads,feed,'
-                    'comments,mentions,message_reactions'
+                    'message_reactions,messaging_referrals'
                 ),
             },
         )
