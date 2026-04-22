@@ -661,7 +661,12 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
 
 
 # ---------------- Instagram OAuth ----------------
-IG_SCOPES = 'instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_show_list,pages_manage_metadata,business_management'
+IG_SCOPES = (
+    'instagram_basic,instagram_manage_messages,instagram_manage_comments,'
+    'instagram_manage_insights,'
+    'pages_show_list,pages_manage_metadata,pages_messaging,'
+    'business_management'
+)
 
 
 @api.get('/instagram/auth-url')
@@ -826,22 +831,35 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
             page_token = token
         if not page_id:
             raise HTTPException(404, f'No page found. /me/accounts={accs.text[:200]}')
-        sub = await c.post(
-            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
-            params={
-                'access_token': page_token,
-                # Valid Page-level fields only. comments/mentions for
-                # Instagram are subscribed at the App level on the
-                # "instagram" webhook object (Meta App Dashboard).
-                'subscribed_fields': (
-                    'messages,messaging_postbacks,messaging_optins,'
-                    'message_deliveries,message_reads,feed,'
-                    'message_reactions,messaging_referrals'
-                ),
-            },
-        )
-        body = sub.text
-        ok = sub.status_code == 200
+        # Try each field independently so a missing permission on one
+        # doesn't block the others.
+        candidate_fields = [
+            'feed',
+            'messages', 'messaging_postbacks', 'messaging_optins',
+            'message_deliveries', 'message_reads',
+            'message_reactions', 'messaging_referrals',
+        ]
+        field_results = {}
+        any_ok = False
+        for f in candidate_fields:
+            try:
+                r = await c.post(
+                    f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+                    params={'access_token': page_token, 'subscribed_fields': f},
+                )
+                field_results[f] = {'status': r.status_code, 'body': r.text[:300]}
+                if r.status_code == 200:
+                    any_ok = True
+            except Exception as e:
+                field_results[f] = {'status': 0, 'body': str(e)}
+        ok = any_ok
+        import json as _json
+        body = _json.dumps(field_results)[:2000]
+        # Keep `sub` defined for the legacy return keys
+        class _S: pass
+        sub = _S()
+        sub.status_code = 200 if any_ok else 403
+        sub.text = body
         # Verify the subscription
         verify = await c.get(f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
                              params={'access_token': page_token})
