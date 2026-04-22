@@ -3,7 +3,7 @@ import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import {
-  Users, Zap, Send, TrendingUp, ArrowUpRight, Instagram, Plus
+  Users, Zap, Send, TrendingUp, Instagram, Plus
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -34,10 +34,10 @@ const Dashboard = () => {
   const maxVal = chart.length ? Math.max(...chart.map(d => d.messages)) : 1;
 
   const statsCards = [
-    { label: 'Total Contacts', value: stats?.total_contacts ?? '—', icon: Users, change: '+18.2%' },
-    { label: 'Active Automations', value: stats?.active_automations ?? '—', icon: Zap, change: '+3' },
-    { label: 'Messages Sent', value: (stats?.messages_sent ?? 0).toLocaleString(), icon: Send, change: '+24.5%' },
-    { label: 'Conversion Rate', value: `${stats?.conversion_rate ?? 0}%`, icon: TrendingUp, change: '+2.1%' },
+    { label: 'Total Contacts', value: stats?.total_contacts ?? '—', icon: Users },
+    { label: 'Active Automations', value: stats?.active_automations ?? '—', icon: Zap },
+    { label: 'Messages Sent', value: (stats?.messages_sent ?? 0).toLocaleString(), icon: Send },
+    { label: 'Conversion Rate', value: `${stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
   ];
 
   return (
@@ -59,13 +59,8 @@ const Dashboard = () => {
           const Icon = s.icon;
           return (
             <Card key={s.label} className="p-5 rounded-2xl border-slate-100 hover:shadow-md transition-shadow">
-              <div className="flex items-start justify-between">
-                <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
-                  <Icon className="w-5 h-5 text-slate-700" />
-                </div>
-                <Badge className="bg-emerald-50 text-emerald-700 border-emerald-100 rounded-full">
-                  <ArrowUpRight className="w-3 h-3 mr-0.5" />{s.change}
-                </Badge>
+              <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
+                <Icon className="w-5 h-5 text-slate-700" />
               </div>
               <div className="mt-4 text-3xl font-extrabold font-display">{s.value}</div>
               <div className="text-sm text-slate-500 mt-1">{s.label}</div>
@@ -103,11 +98,11 @@ const Dashboard = () => {
           <Instagram className="w-8 h-8" />
           <h3 className="mt-4 font-display font-bold text-xl">{user?.instagramConnected ? 'Instagram Connected' : 'Connect Instagram'}</h3>
           <p className="mt-1 text-sm text-white/90">{user?.instagramHandle || '@your_handle'} is {user?.instagramConnected ? 'linked and actively responding' : 'not connected yet'}.</p>
-          <div className="mt-6 space-y-3">
-            <div className="flex justify-between text-sm"><span className="text-white/80">Response rate</span><span className="font-bold">98.2%</span></div>
-            <div className="flex justify-between text-sm"><span className="text-white/80">Avg response</span><span className="font-bold">&lt; 1s</span></div>
-            <div className="flex justify-between text-sm"><span className="text-white/80">Uptime</span><span className="font-bold">100%</span></div>
-          </div>
+          {user?.instagramConnected && user?.instagramFollowers ? (
+            <div className="mt-6 space-y-3">
+              <div className="flex justify-between text-sm"><span className="text-white/80">Followers</span><span className="font-bold">{user.instagramFollowers.toLocaleString()}</span></div>
+            </div>
+          ) : null}
           <Link to="/app/settings"><Button className="mt-6 w-full bg-white text-slate-900 hover:bg-slate-100 rounded-xl">Manage Connection</Button></Link>
         </Card>
       </div>

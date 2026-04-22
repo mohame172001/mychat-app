@@ -2,10 +2,10 @@ import os
 import asyncio
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -205,67 +205,10 @@ def _public_user(u: dict) -> UserPublic:
 
 
 async def _seed_user(user_id: str):
-    """Seed starter data so dashboard feels alive after signup."""
-    contacts = [
-        {'id': 'c1', 'user_id': user_id, 'name': 'Jessica Martinez', 'username': '@jessicam',
-         'avatar': 'https://i.pravatar.cc/150?img=1', 'tags': ['Customer', 'VIP'], 'subscribed': True,
-         'lastActive': datetime.utcnow(), 'created': datetime.utcnow()},
-        {'id': 'c2', 'user_id': user_id, 'name': 'Michael Brown', 'username': '@mikebrown',
-         'avatar': 'https://i.pravatar.cc/150?img=3', 'tags': ['Lead'], 'subscribed': True,
-         'lastActive': datetime.utcnow(), 'created': datetime.utcnow()},
-        {'id': 'c3', 'user_id': user_id, 'name': 'Olivia Wilson', 'username': '@oliviaw',
-         'avatar': 'https://i.pravatar.cc/150?img=5', 'tags': ['Customer'], 'subscribed': True,
-         'lastActive': datetime.utcnow(), 'created': datetime.utcnow()},
-        {'id': 'c4', 'user_id': user_id, 'name': 'Daniel Garcia', 'username': '@dangarcia',
-         'avatar': 'https://i.pravatar.cc/150?img=7', 'tags': ['Prospect'], 'subscribed': False,
-         'lastActive': datetime.utcnow(), 'created': datetime.utcnow()},
-    ]
-    await db.contacts.insert_many(contacts)
-
-    automations = [
-        {'id': 'a1', 'user_id': user_id, 'name': 'Welcome New Followers', 'trigger': 'New Follower',
-         'status': 'active', 'sent': 2847, 'clicks': 892, 'nodes': [], 'edges': [],
-         'updated': datetime.utcnow(), 'created': datetime.utcnow()},
-        {'id': 'a2', 'user_id': user_id, 'name': 'Comment to DM - Product Launch', 'trigger': 'Keyword: LAUNCH',
-         'status': 'active', 'sent': 5621, 'clicks': 1834, 'nodes': [], 'edges': [],
-         'updated': datetime.utcnow(), 'created': datetime.utcnow()},
-        {'id': 'a3', 'user_id': user_id, 'name': 'Story Reply Auto-Response', 'trigger': 'Story Reply',
-         'status': 'active', 'sent': 1203, 'clicks': 421, 'nodes': [], 'edges': [],
-         'updated': datetime.utcnow(), 'created': datetime.utcnow()},
-    ]
-    await db.automations.insert_many(automations)
-
-    broadcasts = [
-        {'id': 'b1', 'user_id': user_id, 'name': 'Black Friday Sale', 'message': 'Sale live now!',
-         'status': 'sent', 'audience': 8421, 'openRate': '68%', 'clickRate': '32%', 'date': 'Nov 24, 2025',
-         'created': datetime.utcnow()},
-        {'id': 'b2', 'user_id': user_id, 'name': 'Weekly Newsletter', 'message': 'Tips this week',
-         'status': 'sent', 'audience': 7832, 'openRate': '54%', 'clickRate': '21%', 'date': 'Nov 18, 2025',
-         'created': datetime.utcnow()},
-    ]
-    await db.broadcasts.insert_many(broadcasts)
-
-    conversations = [
-        {'id': 'conv1', 'user_id': user_id,
-         'contact': {'name': 'Jessica Martinez', 'username': '@jessicam', 'avatar': 'https://i.pravatar.cc/150?img=1'},
-         'messages': [
-             {'id': 'm1', 'from': 'contact', 'text': 'Hey! Saw your latest post', 'time': '10:42 AM'},
-             {'id': 'm2', 'from': 'contact', 'text': 'Is this still in stock?', 'time': '10:43 AM'},
-             {'id': 'm3', 'from': 'me', 'text': 'Hi Jessica! Yes it is available in all sizes.', 'time': '10:45 AM'},
-         ],
-         'lastMessage': 'Is this still in stock?', 'time': '2m', 'unread': 2,
-         'created': datetime.utcnow()},
-        {'id': 'conv2', 'user_id': user_id,
-         'contact': {'name': 'Michael Brown', 'username': '@mikebrown', 'avatar': 'https://i.pravatar.cc/150?img=3'},
-         'messages': [
-             {'id': 'm1', 'from': 'contact', 'text': 'LAUNCH', 'time': '9:30 AM'},
-             {'id': 'm2', 'from': 'me', 'text': 'Welcome! Here is your 20% off code: LAUNCH20', 'time': '9:30 AM'},
-             {'id': 'm3', 'from': 'contact', 'text': 'Thanks, got the discount code!', 'time': '9:31 AM'},
-         ],
-         'lastMessage': 'Thanks, got the discount code!', 'time': '15m', 'unread': 0,
-         'created': datetime.utcnow()},
-    ]
-    await db.conversations.insert_many(conversations)
+    """No fake data. New users start with a clean slate — contacts,
+    conversations, automations and comments will be populated by real
+    Instagram webhook events once the account is connected."""
+    return
 
 
 # ---------------- auth ----------------
@@ -369,6 +312,65 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
     copy['updated'] = datetime.utcnow()
     await db.automations.insert_one(copy)
     return _strip_mongo(copy)
+
+
+@api.post('/automations/quick-comment-rule')
+async def create_quick_comment_rule(
+    data: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create an automation that:
+      - watches comments on a specific IG media (or the latest post)
+      - replies to the comment with `comment_reply`
+      - sends a DM to the commenter with `dm_text`
+    Body: {media_id?: str, latest?: bool, comment_reply: str, dm_text?: str, name?: str}
+    """
+    import uuid
+    media_id = (data.get('media_id') or '').strip() or None
+    latest = bool(data.get('latest'))
+    if not media_id and not latest:
+        raise HTTPException(400, 'Provide media_id or set latest=true')
+    comment_reply = (data.get('comment_reply') or '').strip()
+    dm_text = (data.get('dm_text') or 'شكرا').strip()
+    if not comment_reply and not dm_text:
+        raise HTTPException(400, 'comment_reply or dm_text is required')
+
+    trigger = 'comment:latest' if latest else f'comment:{media_id}'
+    name = data.get('name') or (
+        'Reply to latest post comments' if latest
+        else f'Reply to comments on {media_id[:10]}'
+    )
+
+    # Build a simple flow: trigger -> reply_comment -> message
+    nodes = [{'id': 'n_trigger', 'type': 'trigger',
+              'data': {'label': 'Comment trigger', 'trigger': trigger}}]
+    edges = []
+    prev = 'n_trigger'
+    if comment_reply:
+        nodes.append({'id': 'n_reply', 'type': 'reply_comment',
+                      'data': {'text': comment_reply}})
+        edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
+        prev = 'n_reply'
+    if dm_text:
+        nodes.append({'id': 'n_dm', 'type': 'message',
+                      'data': {'text': dm_text}})
+        edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
+
+    doc = {
+        'id': str(uuid.uuid4()),
+        'user_id': user_id,
+        'name': name,
+        'status': 'active',
+        'trigger': trigger,
+        'nodes': nodes,
+        'edges': edges,
+        'sent': 0,
+        'clicks': 0,
+        'created': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    }
+    await db.automations.insert_one(doc)
+    return _strip_mongo({**doc})
 
 
 # ---------------- contacts ----------------
@@ -488,11 +490,13 @@ async def _send_broadcast_task(bid: str, broadcast: dict, user_doc: dict, contac
                 failed += 1
             await asyncio.sleep(0.5)  # respect rate limits
         else:
-            sent += 1  # simulate send when not connected to IG
+            # Not connected to Instagram, or contact has no IG id — cannot deliver
+            failed += 1
 
     total = sent + failed
-    open_rate = f'{round(sent / total * 68)}%' if total else '0%'
-    click_rate = f'{round(sent / total * 28)}%' if total else '0%'
+    # Open/click rates require Meta Insights — not wired yet, so leave blank
+    open_rate = '-'
+    click_rate = '-'
     await db.broadcasts.update_one(
         {'id': bid},
         {'$set': {
@@ -622,16 +626,31 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     clicks = sum(a.get('clicks', 0) for a in autos)
     conv_rate = round((clicks / messages_sent * 100), 1) if messages_sent else 0.0
 
-    # static sample weekly chart (derived)
-    chart = [
-        {'day': 'Mon', 'messages': 3200, 'conversions': 980},
-        {'day': 'Tue', 'messages': 4100, 'conversions': 1240},
-        {'day': 'Wed', 'messages': 3800, 'conversions': 1180},
-        {'day': 'Thu', 'messages': 5200, 'conversions': 1680},
-        {'day': 'Fri', 'messages': 6100, 'conversions': 2020},
-        {'day': 'Sat', 'messages': 4800, 'conversions': 1520},
-        {'day': 'Sun', 'messages': 4300, 'conversions': 1380},
-    ]
+    # Real 7-day chart built from actual conversation messages
+    from collections import OrderedDict
+    today = datetime.utcnow().date()
+    buckets = OrderedDict()
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        buckets[d.isoformat()] = {
+            'day': d.strftime('%a'), 'messages': 0, 'conversions': 0,
+        }
+    convs = await db.conversations.find({'user_id': user_id}).to_list(5000)
+    for conv in convs:
+        for m in conv.get('messages', []) or []:
+            ts = m.get('ts') or m.get('created')
+            try:
+                if isinstance(ts, datetime):
+                    dkey = ts.date().isoformat()
+                elif isinstance(ts, str):
+                    dkey = datetime.fromisoformat(ts.replace('Z', '+00:00')).date().isoformat()
+                else:
+                    continue
+            except Exception:
+                continue
+            if dkey in buckets:
+                buckets[dkey]['messages'] += 1
+    chart = list(buckets.values())
     return {
         'total_contacts': total_contacts,
         'active_automations': active_automations,
@@ -808,6 +827,54 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
                 'page_id': page_id, 'subscribed_apps': verify.json()}
 
 
+@api.get('/instagram/media')
+async def instagram_media(user_id: str = Depends(get_current_user_id), limit: int = 25):
+    """List the user's recent Instagram posts via Graph API."""
+    u = await db.users.find_one({'id': user_id})
+    if not u or not u.get('instagramConnected'):
+        raise HTTPException(400, 'Instagram not connected')
+    token = u.get('meta_access_token', '')
+    ig_id = u.get('ig_user_id', '')
+    if not ig_id:
+        raise HTTPException(400, 'Missing ig_user_id')
+    url = f'https://graph.facebook.com/v21.0/{ig_id}/media'
+    params = {
+        'access_token': token,
+        'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
+        'limit': max(1, min(limit, 50)),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(url, params=params)
+            if r.status_code != 200:
+                logger.error('IG media fetch error %s: %s', r.status_code, r.text)
+                raise HTTPException(r.status_code, f'Graph API error: {r.text}')
+            body = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('IG media fetch failed')
+        raise HTTPException(500, str(e))
+    return {'items': body.get('data', [])}
+
+
+async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional[str]:
+    if not access_token or not ig_user_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f'https://graph.facebook.com/v21.0/{ig_user_id}/media',
+                params={'access_token': access_token, 'fields': 'id,timestamp', 'limit': 1},
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json().get('data') or []
+            return data[0]['id'] if data else None
+    except Exception:
+        return None
+
+
 @api.post('/instagram/disconnect')
 async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
     await db.users.update_one(
@@ -923,19 +990,36 @@ async def _process_webhook(payload: dict):
                         await db.comments.insert_one(doc)
                         await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
-                        # Run matching automations: keyword-triggered flows
+                        # Run matching automations
                         automations = await db.automations.find(
                             {'user_id': user_id, 'status': 'active'}
                         ).to_list(100)
+                        latest_media_id = None  # resolved lazily
                         for auto in automations:
-                            trigger = (auto.get('trigger') or '').lower()
+                            raw_trigger = auto.get('trigger') or ''
+                            trigger = raw_trigger.lower()
+                            fire = False
                             if trigger.startswith('keyword:'):
                                 keyword = trigger.split(':', 1)[1].strip()
                                 if keyword and keyword.lower() in comment_text.lower():
-                                    asyncio.create_task(execute_flow(
-                                        user_doc, auto, commenter_id, comment_text,
-                                        comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
-                                    ))
+                                    fire = True
+                            elif trigger.startswith('comment:'):
+                                target = raw_trigger.split(':', 1)[1].strip()
+                                if target.lower() == 'latest':
+                                    if latest_media_id is None:
+                                        latest_media_id = await _fetch_latest_media_id(
+                                            user_doc.get('meta_access_token', ''),
+                                            user_doc.get('ig_user_id', ''),
+                                        ) or ''
+                                    if media_id and latest_media_id and media_id == latest_media_id:
+                                        fire = True
+                                elif target and media_id and target == media_id:
+                                    fire = True
+                            if fire:
+                                asyncio.create_task(execute_flow(
+                                    user_doc, auto, commenter_id, comment_text,
+                                    comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
+                                ))
                 elif field == 'story_insights':
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
