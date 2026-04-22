@@ -759,6 +759,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                     'instagramHandle': handle or '@instagram',
                     'instagramFollowers': followers,
                     'ig_user_id': ig_user_id,
+                    'fb_page_id': page_id,
                     'meta_access_token': page_access_token or long_token,
                 }},
             )
@@ -799,22 +800,25 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
     async with httpx.AsyncClient(timeout=20) as c:
         accs = await c.get('https://graph.facebook.com/v21.0/me/accounts',
                            params={'access_token': token,
-                                   'fields': 'id,name,instagram_business_account'})
+                                   'fields': 'id,name,access_token,instagram_business_account'})
         data = accs.json().get('data', [])
         page_id = None
+        page_token = token
         for acc in data:
             if acc.get('instagram_business_account'):
                 page_id = acc.get('id')
+                page_token = acc.get('access_token') or token
                 break
         if not page_id:
             raise HTTPException(404, 'No page with linked IG business account')
         sub = await c.post(
             f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
             params={
-                'access_token': token,
+                'access_token': page_token,
                 'subscribed_fields': (
                     'messages,messaging_postbacks,messaging_optins,'
-                    'message_deliveries,message_reads,feed'
+                    'message_deliveries,message_reads,feed,'
+                    'comments,mentions,message_reactions'
                 ),
             },
         )
@@ -822,7 +826,12 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
         ok = sub.status_code == 200
         # Verify the subscription
         verify = await c.get(f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
-                             params={'access_token': token})
+                             params={'access_token': page_token})
+        # Persist the fresh page id + page token on the user
+        await db.users.update_one(
+            {'id': user_id},
+            {'$set': {'fb_page_id': page_id, 'meta_access_token': page_token}},
+        )
         return {'ok': ok, 'status': sub.status_code, 'body': body,
                 'page_id': page_id, 'subscribed_apps': verify.json()}
 
@@ -899,8 +908,33 @@ async def instagram_webhook_verify(request: Request):
 async def instagram_webhook(request: Request):
     payload = await request.json()
     logger.info('IG webhook: %s', payload)
+    # Store raw payload for debugging — keep only most recent 50
+    try:
+        await db.webhook_log.insert_one({
+            'received': datetime.utcnow(),
+            'payload': payload,
+            'object': payload.get('object'),
+        })
+        count = await db.webhook_log.count_documents({})
+        if count > 50:
+            oldest = await db.webhook_log.find().sort('received', 1).limit(count - 50).to_list(count)
+            for o in oldest:
+                await db.webhook_log.delete_one({'_id': o['_id']})
+    except Exception:
+        logger.exception('webhook_log write failed')
     asyncio.create_task(_process_webhook(payload))
     return {'ok': True}
+
+
+@api.get('/instagram/webhook-log')
+async def instagram_webhook_log(user_id: str = Depends(get_current_user_id), limit: int = 20):
+    """Return the most recent raw webhook payloads — for debugging deliveries."""
+    docs = await db.webhook_log.find().sort('received', -1).limit(max(1, min(limit, 50))).to_list(50)
+    for d in docs:
+        d.pop('_id', None)
+        if isinstance(d.get('received'), datetime):
+            d['received'] = d['received'].isoformat()
+    return {'items': docs, 'count': await db.webhook_log.count_documents({})}
 
 
 async def _process_webhook(payload: dict):
@@ -908,11 +942,18 @@ async def _process_webhook(payload: dict):
     try:
         for entry in payload.get('entry', []):
             ig_account_id = entry.get('id')
-            # Find which user owns this IG account
-            user_doc = await db.users.find_one({'ig_user_id': ig_account_id})
+            # Find which user owns this IG account — entry.id can be either the
+            # Instagram Business account id OR the Facebook Page id depending on
+            # how the subscription was created, so try both.
+            user_doc = await db.users.find_one({'$or': [
+                {'ig_user_id': ig_account_id},
+                {'fb_page_id': ig_account_id},
+            ]})
             if not user_doc:
-                logger.warning('No user found for ig_user_id %s', ig_account_id)
+                logger.warning('No user found for webhook entry id %s', ig_account_id)
                 continue
+            # Normalize so downstream code uses the real IG account id
+            ig_account_id = user_doc.get('ig_user_id') or ig_account_id
             user_id = user_doc['id']
 
             for event in entry.get('messaging', []):
@@ -966,13 +1007,16 @@ async def _process_webhook(payload: dict):
             for change in entry.get('changes', []):
                 field = change.get('field')
                 value = change.get('value', {})
-                if field == 'comments':
-                    comment_text = value.get('text', '')
+                # Normalize: IG sends field='comments'; FB Page feed sends field='feed' with item='comment'
+                is_comment = field == 'comments' or (field == 'feed' and value.get('item') == 'comment')
+                if is_comment:
+                    comment_text = value.get('text') or value.get('message', '')
                     commenter = value.get('from', {}) or {}
                     commenter_id = commenter.get('id')
-                    commenter_username = commenter.get('username') or f'ig_{(commenter_id or "")[:8]}'
-                    ig_comment_id = value.get('id')
-                    media_id = (value.get('media') or {}).get('id')
+                    commenter_username = commenter.get('username') or commenter.get('name') or f'ig_{(commenter_id or "")[:8]}'
+                    ig_comment_id = value.get('comment_id') or value.get('id')
+                    media_obj = value.get('media') or {}
+                    media_id = media_obj.get('id') or value.get('post_id') or value.get('parent_id')
                     if commenter_id and commenter_id != ig_account_id and ig_comment_id:
                         import uuid as _uuid
                         # Store the comment so UI can list + reply
@@ -1020,7 +1064,7 @@ async def _process_webhook(payload: dict):
                                     user_doc, auto, commenter_id, comment_text,
                                     comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
                                 ))
-                elif field == 'story_insights':
+                elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
                         automations = await db.automations.find(
