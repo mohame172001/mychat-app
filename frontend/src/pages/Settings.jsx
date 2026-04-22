@@ -99,19 +99,32 @@ const Settings = () => {
                       </Badge>
                     </div>
                   </div>
-                  <div className="mt-6 flex justify-between">
+                  <div className="mt-6 flex justify-between flex-wrap gap-2">
                     <Button variant="outline" className="rounded-xl text-red-600 border-red-200 hover:bg-red-50" onClick={async () => {
                       try { await api.post('/instagram/disconnect'); await refreshUser(); toast.success('Disconnected'); }
                       catch { toast.error('Failed to disconnect'); }
                     }}>Disconnect</Button>
-                    <Button onClick={async () => {
-                      setIgConnecting(true);
-                      try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
-                      catch (e) { toast.error(e?.response?.data?.detail || 'Failed'); setIgConnecting(false); }
-                    }} variant="outline" className="rounded-xl" disabled={igConnecting}>
-                      {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                      Refresh Token
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button onClick={async () => {
+                        try {
+                          const { data } = await api.post('/instagram/subscribe-webhook');
+                          toast.success(`Webhook ${data.ok ? 'subscribed' : 'call sent'} on page ${data.page_id}`);
+                          console.log('[subscribe-webhook]', data);
+                        } catch (e) {
+                          toast.error(e?.response?.data?.detail || 'Subscribe failed');
+                        }
+                      }} variant="outline" className="rounded-xl">
+                        Subscribe Webhook
+                      </Button>
+                      <Button onClick={async () => {
+                        setIgConnecting(true);
+                        try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
+                        catch (e) { toast.error(e?.response?.data?.detail || 'Failed'); setIgConnecting(false); }
+                      }} variant="outline" className="rounded-xl" disabled={igConnecting}>
+                        {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                        Refresh Token
+                      </Button>
+                    </div>
                   </div>
                 </>
               ) : (

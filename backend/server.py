@@ -92,9 +92,30 @@ async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, t
         return False
 
 
+# ---------------- Comment reply helper ----------------
+async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) -> bool:
+    """Reply to an Instagram comment via Graph API."""
+    if not access_token or not ig_comment_id:
+        return False
+    url = f'https://graph.facebook.com/v21.0/{ig_comment_id}/replies'
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(url, data={'message': text, 'access_token': access_token})
+            if r.status_code == 200:
+                return True
+            logger.error('reply_to_ig_comment error %s: %s', r.status_code, r.text)
+            return False
+    except Exception as e:
+        logger.exception('reply_to_ig_comment exception: %s', e)
+        return False
+
+
 # ---------------- Automation engine ----------------
-async def execute_flow(user: dict, automation: dict, sender_ig_id: str, trigger_text: str = ''):
-    """Walk the flow graph and execute each node in order."""
+async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
+                       trigger_text: str = '', comment_context: Optional[dict] = None):
+    """Walk the flow graph and execute each node in order.
+    comment_context: when the trigger was an Instagram comment, holds
+        {'ig_comment_id': ..., 'comment_doc_id': ...} so reply_comment nodes work."""
     nodes = automation.get('nodes', [])
     edges = automation.get('edges', [])
     if not nodes:
@@ -130,6 +151,17 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str, trigger_
             if msg_text and sender_ig_id:
                 ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
                 logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+        elif ntype == 'reply_comment':
+            msg_text = data.get('text') or data.get('message', '')
+            if msg_text and comment_context and comment_context.get('ig_comment_id'):
+                ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
+                logger.info('Flow comment reply on %s: %s (ok=%s)',
+                            comment_context['ig_comment_id'], msg_text[:40], ok)
+                if ok and comment_context.get('comment_doc_id'):
+                    await db.comments.update_one(
+                        {'id': comment_context['comment_doc_id']},
+                        {'$set': {'replied': True, 'reply_text': msg_text}}
+                    )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
             if secs > 0:
@@ -491,18 +523,93 @@ async def get_conversation(cid: str, user_id: str = Depends(get_current_user_id)
 
 @api.post('/conversations/{cid}/messages')
 async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_current_user_id)):
+    """Send a message. If the conversation is tied to a real IG contact and the
+    user is connected to Instagram, send via Graph API. No fake auto-reply."""
     import uuid
     conv = await db.conversations.find_one({'id': cid, 'user_id': user_id})
     if not conv:
         raise HTTPException(404, 'Not found')
-    msg_me = {'id': str(uuid.uuid4()), 'from': 'me', 'text': data.text, 'time': 'now'}
-    reply = {'id': str(uuid.uuid4()), 'from': 'contact', 'text': 'Got it, thanks! 🙏', 'time': 'now'}
-    new_messages = conv['messages'] + [msg_me, reply]
+    text = (data.text or '').strip()
+    if not text:
+        raise HTTPException(400, 'Empty message')
+
+    msg_me = {'id': str(uuid.uuid4()), 'from': 'me', 'text': text,
+              'time': datetime.utcnow().strftime('%I:%M %p')}
+    new_messages = conv['messages'] + [msg_me]
+
+    # Try to deliver to Instagram if we have a real recipient
+    user_doc = await db.users.find_one({'id': user_id})
+    delivered = False
+    delivery_error = None
+    ig_recipient = (conv.get('contact') or {}).get('ig_id')
+    if user_doc and user_doc.get('instagramConnected') and ig_recipient:
+        try:
+            delivered = await send_ig_dm(
+                user_doc.get('meta_access_token', ''),
+                user_doc.get('ig_user_id', ''),
+                ig_recipient, text,
+            )
+            if not delivered:
+                delivery_error = 'Graph API rejected the message'
+        except Exception as e:
+            delivery_error = str(e)
+            logger.exception('send_message graph call failed')
+
+    msg_me['delivered'] = delivered
+    if delivery_error:
+        msg_me['error'] = delivery_error
     await db.conversations.update_one(
         {'id': cid, 'user_id': user_id},
-        {'$set': {'messages': new_messages, 'lastMessage': reply['text'], 'time': 'now', 'unread': 0}}
+        {'$set': {'messages': new_messages, 'lastMessage': text,
+                  'time': 'now', 'unread': 0}}
     )
-    return {'messages': new_messages}
+    # Push to WS so other tabs stay in sync
+    await ws_manager.send(user_id, {'type': 'message', 'conv_id': cid, 'message': msg_me})
+    return {'messages': new_messages, 'delivered': delivered, 'error': delivery_error}
+
+
+# ---------------- comments ----------------
+@api.get('/comments')
+async def list_comments(user_id: str = Depends(get_current_user_id)):
+    docs = await db.comments.find({'user_id': user_id}).sort('created', -1).to_list(500)
+    return [_strip_mongo(d) for d in docs]
+
+
+@api.post('/comments/{cid}/reply')
+async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get_current_user_id)):
+    """Reply to an Instagram comment via Graph API.
+    POST /{comment-id}/replies with message=..."""
+    comment = await db.comments.find_one({'id': cid, 'user_id': user_id})
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    user_doc = await db.users.find_one({'id': user_id})
+    if not user_doc or not user_doc.get('instagramConnected'):
+        raise HTTPException(400, 'Instagram not connected')
+    ig_comment_id = comment.get('ig_comment_id')
+    if not ig_comment_id:
+        raise HTTPException(400, 'Comment has no Instagram ID (seed data cannot be replied to)')
+    access_token = user_doc.get('meta_access_token', '')
+    text = (data.text or '').strip()
+    if not text:
+        raise HTTPException(400, 'Empty reply')
+    url = f'https://graph.facebook.com/v21.0/{ig_comment_id}/replies'
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(url, data={'message': text, 'access_token': access_token})
+            if r.status_code != 200:
+                logger.error('Comment reply error %s: %s', r.status_code, r.text)
+                raise HTTPException(r.status_code, f'Graph API error: {r.text}')
+            body = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('Comment reply failed')
+        raise HTTPException(500, str(e))
+    await db.comments.update_one(
+        {'id': cid},
+        {'$set': {'replied': True, 'reply_text': text, 'reply_id': body.get('id')}}
+    )
+    return {'ok': True, 'graph_reply_id': body.get('id')}
 
 
 # ---------------- dashboard ----------------
@@ -596,18 +703,35 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
             ig_user_id = None
             followers = 0
             page_access_token = None
+            page_id = None
             for acc in accounts:
                 ig = acc.get('instagram_business_account')
                 if ig and ig.get('username'):
                     handle = '@' + ig['username']
                     ig_user_id = ig.get('id')
                     followers = ig.get('followers_count', 0)
+                    page_id = acc.get('id')
                     # Get page-level access token for messaging
                     page_r = await c.get(
-                        f"https://graph.facebook.com/v21.0/{acc['id']}",
+                        f"https://graph.facebook.com/v21.0/{page_id}",
                         params={'fields': 'access_token', 'access_token': long_token}
                     )
                     page_access_token = page_r.json().get('access_token', long_token)
+                    # Subscribe the Page to webhook events so Meta forwards DMs + comments
+                    try:
+                        sub = await c.post(
+                            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+                            params={
+                                'access_token': page_access_token,
+                                'subscribed_fields': (
+                                    'messages,messaging_postbacks,messaging_optins,'
+                                    'message_deliveries,message_reads,feed'
+                                ),
+                            },
+                        )
+                        logger.info('Page subscribe status=%s body=%s', sub.status_code, sub.text[:200])
+                    except Exception as e:
+                        logger.warning('Page subscribe failed: %s', e)
                     break
             await db.users.update_one(
                 {'id': user_id},
@@ -642,6 +766,46 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
         'ig_user_id': u.get('ig_user_id'),
         'meta_configured': bool(META_APP_ID and META_APP_SECRET),
     }
+
+
+@api.post('/instagram/subscribe-webhook')
+async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id)):
+    """Force-subscribe the user's connected Page to webhook fields. Used after
+    the initial OAuth (pre-fix) where subscription didn't happen yet."""
+    u = await db.users.find_one({'id': user_id})
+    if not u or not u.get('instagramConnected'):
+        raise HTTPException(400, 'Instagram not connected')
+    token = u.get('meta_access_token', '')
+    # Look up page id fresh
+    async with httpx.AsyncClient(timeout=20) as c:
+        accs = await c.get('https://graph.facebook.com/v21.0/me/accounts',
+                           params={'access_token': token,
+                                   'fields': 'id,name,instagram_business_account'})
+        data = accs.json().get('data', [])
+        page_id = None
+        for acc in data:
+            if acc.get('instagram_business_account'):
+                page_id = acc.get('id')
+                break
+        if not page_id:
+            raise HTTPException(404, 'No page with linked IG business account')
+        sub = await c.post(
+            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+            params={
+                'access_token': token,
+                'subscribed_fields': (
+                    'messages,messaging_postbacks,messaging_optins,'
+                    'message_deliveries,message_reads,feed'
+                ),
+            },
+        )
+        body = sub.text
+        ok = sub.status_code == 200
+        # Verify the subscription
+        verify = await c.get(f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+                             params={'access_token': token})
+        return {'ok': ok, 'status': sub.status_code, 'body': body,
+                'page_id': page_id, 'subscribed_apps': verify.json()}
 
 
 @api.post('/instagram/disconnect')
@@ -737,8 +901,29 @@ async def _process_webhook(payload: dict):
                 value = change.get('value', {})
                 if field == 'comments':
                     comment_text = value.get('text', '')
-                    commenter_id = value.get('from', {}).get('id')
-                    if commenter_id and commenter_id != ig_account_id:
+                    commenter = value.get('from', {}) or {}
+                    commenter_id = commenter.get('id')
+                    commenter_username = commenter.get('username') or f'ig_{(commenter_id or "")[:8]}'
+                    ig_comment_id = value.get('id')
+                    media_id = (value.get('media') or {}).get('id')
+                    if commenter_id and commenter_id != ig_account_id and ig_comment_id:
+                        import uuid as _uuid
+                        # Store the comment so UI can list + reply
+                        doc = {
+                            'id': str(_uuid.uuid4()),
+                            'user_id': user_id,
+                            'ig_comment_id': ig_comment_id,
+                            'media_id': media_id,
+                            'commenter_id': commenter_id,
+                            'commenter_username': commenter_username,
+                            'text': comment_text,
+                            'replied': False,
+                            'created': datetime.utcnow(),
+                        }
+                        await db.comments.insert_one(doc)
+                        await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
+
+                        # Run matching automations: keyword-triggered flows
                         automations = await db.automations.find(
                             {'user_id': user_id, 'status': 'active'}
                         ).to_list(100)
@@ -747,7 +932,10 @@ async def _process_webhook(payload: dict):
                             if trigger.startswith('keyword:'):
                                 keyword = trigger.split(':', 1)[1].strip()
                                 if keyword and keyword.lower() in comment_text.lower():
-                                    asyncio.create_task(execute_flow(user_doc, auto, commenter_id, comment_text))
+                                    asyncio.create_task(execute_flow(
+                                        user_doc, auto, commenter_id, comment_text,
+                                        comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
+                                    ))
                 elif field == 'story_insights':
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
@@ -796,25 +984,25 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...
                 conv = await db.conversations.find_one({'id': conv_id, 'user_id': user_id})
                 if not conv:
                     continue
+                # Try Graph API first so we can report delivery status
+                user_doc = await db.users.find_one({'id': user_id})
+                ig_recipient = conv.get('contact', {}).get('ig_id')
+                delivered = False
+                if user_doc and user_doc.get('instagramConnected') and ig_recipient:
+                    delivered = await send_ig_dm(
+                        user_doc.get('meta_access_token', ''),
+                        user_doc.get('ig_user_id', ''),
+                        ig_recipient, text
+                    )
                 msg = {'id': str(_uuid.uuid4()), 'from': 'me', 'text': text,
-                       'time': datetime.utcnow().strftime('%I:%M %p')}
+                       'time': datetime.utcnow().strftime('%I:%M %p'),
+                       'delivered': delivered}
                 await db.conversations.update_one(
                     {'id': conv_id},
                     {'$push': {'messages': msg},
                      '$set': {'lastMessage': text, 'time': 'now', 'unread': 0}}
                 )
                 await ws_manager.send(user_id, {'type': 'message', 'conv_id': conv_id, 'message': msg})
-
-                # If user has IG connected, send via Meta API
-                user_doc = await db.users.find_one({'id': user_id})
-                if user_doc and user_doc.get('instagramConnected'):
-                    ig_recipient = conv.get('contact', {}).get('ig_id')
-                    if ig_recipient:
-                        await send_ig_dm(
-                            user_doc.get('meta_access_token', ''),
-                            user_doc.get('ig_user_id', ''),
-                            ig_recipient, text
-                        )
 
             elif msg_type == 'ping':
                 await ws_manager.send(user_id, {'type': 'pong'})

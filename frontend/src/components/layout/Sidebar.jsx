@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Users, Send, MessageSquare, Settings,
-  MessageCircle, HelpCircle, LogOut
+  MessageCircle, HelpCircle, LogOut, AtSign
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
@@ -12,6 +12,7 @@ const navItems = [
   { to: '/app/automations', icon: Zap, label: 'Automations' },
   { to: '/app/contacts', icon: Users, label: 'Contacts' },
   { to: '/app/live-chat', icon: MessageSquare, label: 'Live Chat' },
+  { to: '/app/comments', icon: AtSign, label: 'Comments' },
   { to: '/app/broadcasting', icon: Send, label: 'Broadcasting' },
   { to: '/app/settings', icon: Settings, label: 'Settings' }
 ];

@@ -14,6 +14,7 @@ import FlowBuilder from './pages/FlowBuilder';
 import Contacts from './pages/Contacts';
 import Broadcasting from './pages/Broadcasting';
 import LiveChat from './pages/LiveChat';
+import Comments from './pages/Comments';
 import Settings from './pages/Settings';
 
 const ProtectedRoute = ({ children }) => {
@@ -40,6 +41,7 @@ function App() {
               <Route path="contacts" element={<Contacts />} />
               <Route path="broadcasting" element={<Broadcasting />} />
               <Route path="live-chat" element={<LiveChat />} />
+              <Route path="comments" element={<Comments />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>
