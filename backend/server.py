@@ -845,13 +845,31 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
         # Verify the subscription
         verify = await c.get(f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
                              params={'access_token': page_token})
+        # Also subscribe the Instagram user itself (required for comments/mentions
+        # webhooks to route to our app under the new IG Graph API).
+        ig_user_id = u.get('ig_user_id', '')
+        ig_sub_status = None
+        ig_sub_body = None
+        if ig_user_id:
+            try:
+                ig_sub = await c.post(
+                    f"https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps",
+                    params={'access_token': page_token,
+                            'subscribed_fields': 'comments,messages,mentions,message_reactions,live_comments'},
+                )
+                ig_sub_status = ig_sub.status_code
+                ig_sub_body = ig_sub.text
+            except Exception as e:
+                ig_sub_body = str(e)
         # Persist the fresh page id + page token on the user
         await db.users.update_one(
             {'id': user_id},
             {'$set': {'fb_page_id': page_id, 'meta_access_token': page_token}},
         )
         return {'ok': ok, 'status': sub.status_code, 'body': body,
-                'page_id': page_id, 'subscribed_apps': verify.json()}
+                'page_id': page_id, 'ig_user_id': ig_user_id,
+                'ig_subscribe_status': ig_sub_status, 'ig_subscribe_body': ig_sub_body,
+                'subscribed_apps': verify.json()}
 
 
 @api.get('/instagram/media')
