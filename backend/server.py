@@ -664,7 +664,7 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
 IG_SCOPES = (
     'instagram_basic,instagram_manage_messages,instagram_manage_comments,'
     'instagram_manage_insights,'
-    'pages_show_list,pages_manage_metadata,pages_messaging,'
+    'pages_show_list,pages_manage_metadata,'
     'business_management'
 )
 
