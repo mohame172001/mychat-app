@@ -13,17 +13,15 @@ const Dashboard = () => {
   const { user } = useAuth();
   const [stats, setStats] = useState(null);
   const [autos, setAutos] = useState([]);
-  const [convos, setConvos] = useState([]);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, a, c] = await Promise.all([
+        const [s, a] = await Promise.all([
           api.get('/dashboard/stats'),
           api.get('/automations'),
-          api.get('/conversations'),
         ]);
-        setStats(s.data); setAutos(a.data); setConvos(c.data);
+        setStats(s.data); setAutos(a.data);
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
       }
@@ -107,14 +105,14 @@ const Dashboard = () => {
         </Card>
       </div>
 
-      <div className="mt-6 grid lg:grid-cols-2 gap-4">
+      <div className="mt-6">
         <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
             <h3 className="font-display font-bold text-lg">Top Automations</h3>
             <Link to="/app/automations" className="text-sm font-medium text-slate-600 hover:text-slate-900">View all</Link>
           </div>
           <div className="mt-4 space-y-3">
-            {autos.slice(0, 4).map(a => (
+            {autos.slice(0, 6).map(a => (
               <div key={a.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center"><Zap className="w-5 h-5 text-white" /></div>
                 <div className="flex-1 min-w-0">
@@ -127,29 +125,6 @@ const Dashboard = () => {
               </div>
             ))}
             {autos.length === 0 && <div className="text-sm text-slate-500 text-center py-6">No automations yet</div>}
-          </div>
-        </Card>
-
-        <Card className="p-6 rounded-2xl border-slate-100">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display font-bold text-lg">Recent Conversations</h3>
-            <Link to="/app/live-chat" className="text-sm font-medium text-slate-600 hover:text-slate-900">View all</Link>
-          </div>
-          <div className="mt-4 space-y-3">
-            {convos.slice(0, 4).map(c => (
-              <div key={c.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
-                <img src={c.contact.avatar} alt={c.contact.name} className="w-10 h-10 rounded-full object-cover" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <div className="font-semibold text-sm">{c.contact.name}</div>
-                    <div className="text-xs text-slate-500">{c.time}</div>
-                  </div>
-                  <div className="text-sm text-slate-600 truncate">{c.lastMessage}</div>
-                </div>
-                {c.unread > 0 && <Badge className="bg-pink-500 text-white rounded-full border-0">{c.unread}</Badge>}
-              </div>
-            ))}
-            {convos.length === 0 && <div className="text-sm text-slate-500 text-center py-6">No conversations yet</div>}
           </div>
         </Card>
       </div>

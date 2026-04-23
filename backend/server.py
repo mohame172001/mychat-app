@@ -319,41 +319,63 @@ async def create_quick_comment_rule(
     data: dict = Body(...),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Create an automation that:
-      - watches comments on a specific IG media (or the latest post)
-      - replies to the comment with `comment_reply`
-      - sends a DM to the commenter with `dm_text`
-    Body: {media_id?: str, latest?: bool, comment_reply: str, dm_text?: str, name?: str}
+    """Create an automation that watches comments on an IG media (specific or latest).
+
+    Body:
+      media_id?: str
+      latest?: bool                         - watch whatever is currently newest
+      media_preview?: {caption, thumbnail_url, media_type}  - cached for display
+      mode?: 'reply_and_dm' | 'reply_only'  - default 'reply_and_dm'
+      match?: 'any' | 'keyword'             - default 'any'
+      keyword?: str                         - required if match=='keyword'
+      comment_reply: str                    - public reply text
+      dm_text?: str                         - DM text (ignored when mode=='reply_only')
+      name?: str
     """
     import uuid
     media_id = (data.get('media_id') or '').strip() or None
     latest = bool(data.get('latest'))
     if not media_id and not latest:
         raise HTTPException(400, 'Provide media_id or set latest=true')
+
+    mode = (data.get('mode') or 'reply_and_dm').strip()
+    if mode not in ('reply_and_dm', 'reply_only'):
+        raise HTTPException(400, "mode must be 'reply_and_dm' or 'reply_only'")
+
+    match = (data.get('match') or 'any').strip()
+    keyword = (data.get('keyword') or '').strip()
+    if match == 'keyword' and not keyword:
+        raise HTTPException(400, 'keyword is required when match=keyword')
+    if match not in ('any', 'keyword'):
+        raise HTTPException(400, "match must be 'any' or 'keyword'")
+
     comment_reply = (data.get('comment_reply') or '').strip()
-    dm_text = (data.get('dm_text') or 'شكرا').strip()
-    if not comment_reply and not dm_text:
-        raise HTTPException(400, 'comment_reply or dm_text is required')
+    dm_text = (data.get('dm_text') or '').strip() if mode == 'reply_and_dm' else ''
+    if not comment_reply:
+        raise HTTPException(400, 'comment_reply is required')
+    if mode == 'reply_and_dm' and not dm_text:
+        dm_text = 'شكرا'
 
     trigger = 'comment:latest' if latest else f'comment:{media_id}'
-    name = data.get('name') or (
-        'Reply to latest post comments' if latest
-        else f'Reply to comments on {media_id[:10]}'
-    )
+    preview = data.get('media_preview') or {}
+    if latest:
+        default_name = 'Latest post — ' + (f'keyword "{keyword}"' if match == 'keyword' else 'any comment')
+    else:
+        label = (preview.get('caption') or '')[:30] or (media_id[:10] if media_id else '')
+        default_name = f'{label} — ' + (f'keyword "{keyword}"' if match == 'keyword' else 'any comment')
+    name = (data.get('name') or default_name).strip()
 
-    # Build a simple flow: trigger -> reply_comment -> message
     nodes = [{'id': 'n_trigger', 'type': 'trigger',
-              'data': {'label': 'Comment trigger', 'trigger': trigger}}]
+              'data': {'label': 'Comment trigger', 'trigger': trigger,
+                       'match': match, 'keyword': keyword}}]
     edges = []
     prev = 'n_trigger'
-    if comment_reply:
-        nodes.append({'id': 'n_reply', 'type': 'reply_comment',
-                      'data': {'text': comment_reply}})
-        edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
-        prev = 'n_reply'
+    nodes.append({'id': 'n_reply', 'type': 'reply_comment',
+                  'data': {'text': comment_reply}})
+    edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
+    prev = 'n_reply'
     if dm_text:
-        nodes.append({'id': 'n_dm', 'type': 'message',
-                      'data': {'text': dm_text}})
+        nodes.append({'id': 'n_dm', 'type': 'message', 'data': {'text': dm_text}})
         edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
 
     doc = {
@@ -362,6 +384,14 @@ async def create_quick_comment_rule(
         'name': name,
         'status': 'active',
         'trigger': trigger,
+        'match': match,
+        'keyword': keyword,
+        'mode': mode,
+        'comment_reply': comment_reply,
+        'dm_text': dm_text,
+        'media_id': media_id,
+        'latest': latest,
+        'media_preview': preview,
         'nodes': nodes,
         'edges': edges,
         'sent': 0,
@@ -1117,6 +1147,7 @@ async def _process_webhook(payload: dict):
                                     fire = True
                             elif trigger.startswith('comment:'):
                                 target = raw_trigger.split(':', 1)[1].strip()
+                                media_hit = False
                                 if target.lower() == 'latest':
                                     if latest_media_id is None:
                                         latest_media_id = await _fetch_latest_media_id(
@@ -1124,9 +1155,17 @@ async def _process_webhook(payload: dict):
                                             user_doc.get('ig_user_id', ''),
                                         ) or ''
                                     if media_id and latest_media_id and media_id == latest_media_id:
-                                        fire = True
+                                        media_hit = True
                                 elif target and media_id and target == media_id:
-                                    fire = True
+                                    media_hit = True
+                                if media_hit:
+                                    match_mode = (auto.get('match') or 'any').lower()
+                                    kw = (auto.get('keyword') or '').strip()
+                                    if match_mode == 'keyword' and kw:
+                                        if kw.lower() in comment_text.lower():
+                                            fire = True
+                                    else:
+                                        fire = True
                             if fire:
                                 asyncio.create_task(execute_flow(
                                     user_doc, auto, commenter_id, comment_text,
