@@ -1033,6 +1033,17 @@ async def instagram_debug_dump(email: str, key: str):
                 out['ig_subscribe_attempt'] = {'status': igp.status_code, 'body': igp.text[:500]}
             except Exception as e:
                 out['ig_subscribe_attempt'] = {'error': str(e)}
+    # Include recent webhook deliveries for diagnosis
+    try:
+        hooks = await db.webhook_log.find().sort('received', -1).limit(15).to_list(15)
+        for h in hooks:
+            h.pop('_id', None)
+            if isinstance(h.get('received'), datetime):
+                h['received'] = h['received'].isoformat()
+        out['recent_webhooks'] = hooks
+        out['webhook_count'] = await db.webhook_log.count_documents({})
+    except Exception as e:
+        out['recent_webhooks'] = {'error': str(e)}
     return out
 
 
