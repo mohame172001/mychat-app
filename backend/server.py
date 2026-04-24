@@ -947,7 +947,12 @@ async def instagram_debug_dump(email: str, key: str):
         raise HTTPException(403, 'bad key')
     u = await db.users.find_one({'email': email.lower()})
     if not u:
-        return {'error': 'user not found', 'email': email}
+        u = await db.users.find_one({'email': email})
+    if not u:
+        all_users = await db.users.find({}, {'email': 1, 'username': 1, 'instagramConnected': 1}).to_list(50)
+        for x in all_users:
+            x.pop('_id', None)
+        return {'error': 'user not found', 'email': email, 'available_users': all_users}
     token = u.get('meta_access_token', '')
     ig_user_id = u.get('ig_user_id', '')
     page_id = u.get('fb_page_id', '')
