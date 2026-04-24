@@ -28,6 +28,10 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ.get('DB_NAME', 'mychat')
 META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
+# Instagram API with Business Login uses a separate App ID/Secret from the Facebook App.
+# Fall back to META_* for backward compatibility if IG_* are not set.
+IG_APP_ID = os.environ.get('IG_APP_ID', '') or META_APP_ID
+IG_APP_SECRET = os.environ.get('IG_APP_SECRET', '') or META_APP_SECRET
 META_VERIFY_TOKEN = os.environ.get('META_VERIFY_TOKEN', 'mychat_verify_123')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
@@ -704,13 +708,13 @@ IG_SCOPES = (
 
 @api.get('/instagram/auth-url')
 async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
-    if not META_APP_ID or not META_APP_SECRET:
-        raise HTTPException(503, 'META_APP_ID and META_APP_SECRET are not configured. Set them in .env')
+    if not IG_APP_ID or not IG_APP_SECRET:
+        raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
     url = (
         f"https://www.instagram.com/oauth/authorize?"
         f"enable_fb_login=0&force_authentication=1"
-        f"&client_id={META_APP_ID}"
+        f"&client_id={IG_APP_ID}"
         f"&redirect_uri={redirect_uri}"
         f"&response_type=code"
         f"&scope={IG_SCOPES}"
@@ -734,8 +738,8 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
             r = await c.post(
                 'https://api.instagram.com/oauth/access_token',
                 data={
-                    'client_id': META_APP_ID,
-                    'client_secret': META_APP_SECRET,
+                    'client_id': IG_APP_ID,
+                    'client_secret': IG_APP_SECRET,
                     'grant_type': 'authorization_code',
                     'redirect_uri': redirect_uri,
                     'code': code,
@@ -752,7 +756,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                 'https://graph.instagram.com/access_token',
                 params={
                     'grant_type': 'ig_exchange_token',
-                    'client_secret': META_APP_SECRET,
+                    'client_secret': IG_APP_SECRET,
                     'access_token': token,
                 },
             )
