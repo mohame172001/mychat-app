@@ -973,9 +973,13 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
 
 
 @api.get('/instagram/debug-dump')
-async def instagram_debug_dump(email: str, key: str):
+async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
     """FULL diagnostic dump — returns everything about a user's IG link and
-    live Meta subscription state. Protected by META_APP_SECRET as admin key."""
+    live Meta subscription state. Protected by META_APP_SECRET as admin key.
+
+    If `media_id` is provided, also fetches that post's comments via Graph API
+    to verify whether IG actually recorded a comment (and thus whether the
+    missing webhook is an IG-side spam filter or a subscription-wiring issue)."""
     if not META_APP_SECRET or key != META_APP_SECRET:
         raise HTTPException(403, 'bad key')
     u = await db.users.find_one({'email': email.lower()})
@@ -1035,7 +1039,7 @@ async def instagram_debug_dump(email: str, key: str):
                 out['ig_subscribe_attempt'] = {'error': str(e)}
     # Include recent webhook deliveries for diagnosis
     try:
-        hooks = await db.webhook_log.find().sort('received', -1).limit(15).to_list(15)
+        hooks = await db.webhook_log.find().sort('received', -1).limit(30).to_list(30)
         for h in hooks:
             h.pop('_id', None)
             if isinstance(h.get('received'), datetime):
@@ -1044,6 +1048,45 @@ async def instagram_debug_dump(email: str, key: str):
         out['webhook_count'] = await db.webhook_log.count_documents({})
     except Exception as e:
         out['recent_webhooks'] = {'error': str(e)}
+    # Fetch comments directly from IG Graph API to see whether the "HI" comment
+    # even reached IG. Use media_id from query if provided, else fall back to
+    # every automation's trigger_media_id.
+    target_media_ids: list = []
+    if media_id:
+        target_media_ids.append(media_id)
+    for a in automations:
+        mid = a.get('trigger_media_id') or a.get('media_id')
+        if mid and mid not in target_media_ids:
+            target_media_ids.append(mid)
+    if token and target_media_ids:
+        media_checks = {}
+        async with httpx.AsyncClient(timeout=20) as c:
+            for mid in target_media_ids[:5]:
+                try:
+                    # Fetch comments on the media
+                    cr = await c.get(
+                        f'https://graph.instagram.com/v21.0/{mid}/comments',
+                        params={'access_token': token,
+                                'fields': 'id,text,username,timestamp,from',
+                                'limit': 25},
+                    )
+                    body = cr.json() if cr.status_code == 200 else cr.text[:500]
+                    # Also fetch basic media info
+                    mr = await c.get(
+                        f'https://graph.instagram.com/v21.0/{mid}',
+                        params={'access_token': token,
+                                'fields': 'id,caption,comments_count,like_count,timestamp,permalink,media_type'},
+                    )
+                    minfo = mr.json() if mr.status_code == 200 else mr.text[:300]
+                    media_checks[mid] = {
+                        'comments_status': cr.status_code,
+                        'comments': body,
+                        'media_info_status': mr.status_code,
+                        'media_info': minfo,
+                    }
+                except Exception as e:
+                    media_checks[mid] = {'error': str(e)}
+        out['media_checks'] = media_checks
     return out
 
 
