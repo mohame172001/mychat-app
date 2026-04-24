@@ -1253,6 +1253,96 @@ async def instagram_webhook_log(request: Request, limit: int = 20, token: Option
     return {'items': docs, 'count': await db.webhook_log.count_documents({})}
 
 
+async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 'webhook'):
+    """Process one incoming Instagram comment.
+    Deduplicates by ig_comment_id, saves to db.comments, pushes to WS,
+    and runs matching automations. Works for BOTH webhook events and polling.
+
+    comment_data keys:
+      ig_comment_id, media_id, commenter_id, commenter_username, text
+    """
+    import uuid as _uuid
+    user_id = user_doc['id']
+    ig_account_id = user_doc.get('ig_user_id') or ''
+    ig_comment_id = comment_data.get('ig_comment_id')
+    commenter_id = comment_data.get('commenter_id')
+    if not ig_comment_id or not commenter_id:
+        return False
+    if commenter_id == ig_account_id:
+        return False  # skip self-comments
+
+    # Dedupe: if this ig_comment_id already exists for this user, skip.
+    existing = await db.comments.find_one({
+        'user_id': user_id, 'ig_comment_id': ig_comment_id
+    })
+    if existing:
+        return False
+
+    comment_text = comment_data.get('text') or ''
+    media_id = comment_data.get('media_id')
+    commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
+
+    doc = {
+        'id': str(_uuid.uuid4()),
+        'user_id': user_id,
+        'ig_comment_id': ig_comment_id,
+        'media_id': media_id,
+        'commenter_id': commenter_id,
+        'commenter_username': commenter_username,
+        'text': comment_text,
+        'replied': False,
+        'source': source,  # 'webhook' or 'polling'
+        'created': datetime.utcnow(),
+    }
+    await db.comments.insert_one(doc)
+    await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
+
+    # Run matching automations
+    automations = await db.automations.find(
+        {'user_id': user_id, 'status': 'active'}
+    ).to_list(100)
+    latest_media_id = None  # resolved lazily
+    fired_any = False
+    for auto in automations:
+        raw_trigger = auto.get('trigger') or ''
+        trigger = raw_trigger.lower()
+        fire = False
+        if trigger.startswith('keyword:'):
+            keyword = trigger.split(':', 1)[1].strip()
+            if keyword and keyword.lower() in comment_text.lower():
+                fire = True
+        elif trigger.startswith('comment:'):
+            target = raw_trigger.split(':', 1)[1].strip()
+            media_hit = False
+            if target.lower() == 'latest':
+                if latest_media_id is None:
+                    latest_media_id = await _fetch_latest_media_id(
+                        user_doc.get('meta_access_token', ''),
+                        user_doc.get('ig_user_id', ''),
+                    ) or ''
+                if media_id and latest_media_id and media_id == latest_media_id:
+                    media_hit = True
+            elif target and media_id and target == media_id:
+                media_hit = True
+            if media_hit:
+                match_mode = (auto.get('match') or 'any').lower()
+                kw = (auto.get('keyword') or '').strip()
+                if match_mode == 'keyword' and kw:
+                    if kw.lower() in comment_text.lower():
+                        fire = True
+                else:
+                    fire = True
+        if fire:
+            fired_any = True
+            asyncio.create_task(execute_flow(
+                user_doc, auto, commenter_id, comment_text,
+                comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
+            ))
+    logger.info('Comment %s (source=%s) on media=%s by @%s: "%s" — fired=%s',
+                ig_comment_id, source, media_id, commenter_username, comment_text[:60], fired_any)
+    return True
+
+
 async def _process_webhook(payload: dict):
     """Process Instagram webhook events asynchronously."""
     try:
@@ -1326,69 +1416,15 @@ async def _process_webhook(payload: dict):
                 # Normalize: IG sends field='comments'; FB Page feed sends field='feed' with item='comment'
                 is_comment = field == 'comments' or (field == 'feed' and value.get('item') == 'comment')
                 if is_comment:
-                    comment_text = value.get('text') or value.get('message', '')
                     commenter = value.get('from', {}) or {}
-                    commenter_id = commenter.get('id')
-                    commenter_username = commenter.get('username') or commenter.get('name') or f'ig_{(commenter_id or "")[:8]}'
-                    ig_comment_id = value.get('comment_id') or value.get('id')
                     media_obj = value.get('media') or {}
-                    media_id = media_obj.get('id') or value.get('post_id') or value.get('parent_id')
-                    if commenter_id and commenter_id != ig_account_id and ig_comment_id:
-                        import uuid as _uuid
-                        # Store the comment so UI can list + reply
-                        doc = {
-                            'id': str(_uuid.uuid4()),
-                            'user_id': user_id,
-                            'ig_comment_id': ig_comment_id,
-                            'media_id': media_id,
-                            'commenter_id': commenter_id,
-                            'commenter_username': commenter_username,
-                            'text': comment_text,
-                            'replied': False,
-                            'created': datetime.utcnow(),
-                        }
-                        await db.comments.insert_one(doc)
-                        await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
-
-                        # Run matching automations
-                        automations = await db.automations.find(
-                            {'user_id': user_id, 'status': 'active'}
-                        ).to_list(100)
-                        latest_media_id = None  # resolved lazily
-                        for auto in automations:
-                            raw_trigger = auto.get('trigger') or ''
-                            trigger = raw_trigger.lower()
-                            fire = False
-                            if trigger.startswith('keyword:'):
-                                keyword = trigger.split(':', 1)[1].strip()
-                                if keyword and keyword.lower() in comment_text.lower():
-                                    fire = True
-                            elif trigger.startswith('comment:'):
-                                target = raw_trigger.split(':', 1)[1].strip()
-                                media_hit = False
-                                if target.lower() == 'latest':
-                                    if latest_media_id is None:
-                                        latest_media_id = await _fetch_latest_media_id(
-                                            user_doc.get('meta_access_token', ''),
-                                            user_doc.get('ig_user_id', ''),
-                                        ) or ''
-                                    if media_id and latest_media_id and media_id == latest_media_id:
-                                        media_hit = True
-                                elif target and media_id and target == media_id:
-                                    media_hit = True
-                                if media_hit:
-                                    match_mode = (auto.get('match') or 'any').lower()
-                                    kw = (auto.get('keyword') or '').strip()
-                                    if match_mode == 'keyword' and kw:
-                                        if kw.lower() in comment_text.lower():
-                                            fire = True
-                                    else:
-                                        fire = True
-                            if fire:
-                                asyncio.create_task(execute_flow(
-                                    user_doc, auto, commenter_id, comment_text,
-                                    comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
-                                ))
+                    await _handle_new_comment(user_doc, {
+                        'ig_comment_id': value.get('comment_id') or value.get('id'),
+                        'media_id': media_obj.get('id') or value.get('post_id') or value.get('parent_id'),
+                        'commenter_id': commenter.get('id'),
+                        'commenter_username': commenter.get('username') or commenter.get('name'),
+                        'text': value.get('text') or value.get('message', ''),
+                    }, source='webhook')
                 elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
@@ -1399,6 +1435,145 @@ async def _process_webhook(payload: dict):
                             asyncio.create_task(execute_flow(user_doc, auto, replier_id, ''))
     except Exception:
         logger.exception('Webhook processing error')
+
+
+# ---------------- Comment polling service ----------------
+# Works around the Meta limitation that comment webhooks only fire when the app
+# is in Live mode with Advanced Access for instagram_business_manage_comments.
+# Until App Review completes, we poll GET /{media_id}/comments directly.
+# Source: https://developers.facebook.com/docs/instagram-platform/webhooks/ —
+# "Advanced Access is required to receive comments and live_comments webhook notifications."
+IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '30'))
+IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
+_poll_task: Optional[asyncio.Task] = None
+
+
+async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
+    """Resolve the set of media IDs we need to poll for this user."""
+    target: list = []
+    needs_latest = False
+    for a in automations:
+        raw_trigger = a.get('trigger') or ''
+        trigger = raw_trigger.lower()
+        if trigger.startswith('comment:'):
+            t = raw_trigger.split(':', 1)[1].strip()
+            if t.lower() == 'latest':
+                needs_latest = True
+            elif t and t not in target:
+                target.append(t)
+        # Also honor explicit trigger_media_id on the automation doc
+        mid = a.get('trigger_media_id') or a.get('media_id')
+        if mid and mid not in target:
+            target.append(mid)
+    if needs_latest:
+        latest = await _fetch_latest_media_id(
+            user_doc.get('meta_access_token', ''),
+            user_doc.get('ig_user_id', ''),
+        )
+        if latest and latest not in target:
+            target.append(latest)
+    return target
+
+
+async def _poll_user_comments(user_doc: dict) -> dict:
+    """Poll comments for one user's automations. Returns per-media stats."""
+    user_id = user_doc['id']
+    token = user_doc.get('meta_access_token', '')
+    ig_id = user_doc.get('ig_user_id', '')
+    stats: dict = {'user_id': user_id, 'media': {}, 'errors': []}
+
+    if not token or not ig_id:
+        stats['errors'].append('missing_token_or_ig_id')
+        return stats
+
+    automations = await db.automations.find(
+        {'user_id': user_id, 'status': 'active'}
+    ).to_list(200)
+    if not automations:
+        return stats
+
+    media_ids = await _collect_target_media_ids(user_doc, automations)
+    if not media_ids:
+        return stats
+
+    async with httpx.AsyncClient(timeout=20) as c:
+        for mid in media_ids[:10]:  # cap per-user per-tick
+            try:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{mid}/comments',
+                    params={
+                        'access_token': token,
+                        'fields': 'id,text,username,timestamp,from',
+                        'limit': 25,
+                    },
+                )
+                if r.status_code != 200:
+                    stats['media'][mid] = {'http': r.status_code, 'error': r.text[:200]}
+                    continue
+                data = (r.json() or {}).get('data') or []
+                new_count = 0
+                for cm in data:
+                    ig_comment_id = cm.get('id')
+                    from_obj = cm.get('from') or {}
+                    commenter_id = from_obj.get('id')
+                    commenter_username = (
+                        from_obj.get('username') or cm.get('username') or
+                        (f'ig_{commenter_id[:8]}' if commenter_id else None)
+                    )
+                    # username-only comments (no "from.id") happen when the
+                    # commenter is not on the business role; synthesize a stable id.
+                    if not commenter_id and commenter_username:
+                        commenter_id = f'u:{commenter_username}'
+                    ok = await _handle_new_comment(user_doc, {
+                        'ig_comment_id': ig_comment_id,
+                        'media_id': mid,
+                        'commenter_id': commenter_id,
+                        'commenter_username': commenter_username,
+                        'text': cm.get('text') or '',
+                    }, source='polling')
+                    if ok:
+                        new_count += 1
+                stats['media'][mid] = {'total': len(data), 'new': new_count}
+            except Exception as e:
+                stats['media'][mid] = {'error': f'exc:{e}'}
+                stats['errors'].append(f'{mid}:{e}')
+    return stats
+
+
+async def _comment_poller_loop():
+    """Runs forever: every IG_POLL_INTERVAL_SECONDS, poll comments for all
+    connected users that have active comment automations."""
+    logger.info('Comment poller started (interval=%ss)', IG_POLL_INTERVAL_SECONDS)
+    while True:
+        try:
+            cursor = db.users.find({'instagramConnected': True})
+            users = await cursor.to_list(500)
+            for u in users:
+                try:
+                    s = await _poll_user_comments(u)
+                    if s.get('media'):
+                        any_new = sum((v.get('new') or 0) for v in s['media'].values() if isinstance(v, dict))
+                        if any_new:
+                            logger.info('Poller user=%s new_comments=%s media=%s',
+                                        u.get('email'), any_new, list(s['media'].keys()))
+                except Exception:
+                    logger.exception('Poller per-user error for %s', u.get('id'))
+        except Exception:
+            logger.exception('Poller outer loop error')
+        await asyncio.sleep(IG_POLL_INTERVAL_SECONDS)
+
+
+@api.get('/instagram/poll-now')
+async def instagram_poll_now(email: str, key: str):
+    """Manually trigger a single poll for one user (debug endpoint).
+    Protected by META_APP_SECRET like the other debug endpoints."""
+    if not META_APP_SECRET or key != META_APP_SECRET:
+        raise HTTPException(403, 'bad key')
+    u = await db.users.find_one({'email': email})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    stats = await _poll_user_comments(u)
+    return stats
 
 
 # ---------------- root ----------------
@@ -1471,6 +1646,30 @@ app.add_middleware(
 )
 
 
+@app.on_event('startup')
+async def _startup():
+    global _poll_task
+    # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
+    try:
+        await db.comments.create_index(
+            [('user_id', 1), ('ig_comment_id', 1)],
+            unique=True, sparse=True, name='uniq_user_ig_comment'
+        )
+    except Exception as e:
+        logger.warning('comments index create: %s', e)
+    if IG_POLL_ENABLED:
+        _poll_task = asyncio.create_task(_comment_poller_loop())
+    else:
+        logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
+
+
 @app.on_event('shutdown')
 async def shutdown_db_client():
+    global _poll_task
+    if _poll_task:
+        _poll_task.cancel()
+        try:
+            await _poll_task
+        except Exception:
+            pass
     client.close()
