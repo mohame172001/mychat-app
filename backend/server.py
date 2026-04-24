@@ -939,6 +939,69 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
                 'subscribed_apps': verify.json()}
 
 
+@api.get('/instagram/debug-dump')
+async def instagram_debug_dump(email: str, key: str):
+    """FULL diagnostic dump — returns everything about a user's IG link and
+    live Meta subscription state. Protected by META_APP_SECRET as admin key."""
+    if not META_APP_SECRET or key != META_APP_SECRET:
+        raise HTTPException(403, 'bad key')
+    u = await db.users.find_one({'email': email.lower()})
+    if not u:
+        return {'error': 'user not found', 'email': email}
+    token = u.get('meta_access_token', '')
+    ig_user_id = u.get('ig_user_id', '')
+    page_id = u.get('fb_page_id', '')
+    automations = await db.automations.find({'user_id': u.get('id')}).to_list(100)
+    for a in automations:
+        a.pop('_id', None)
+    out = {
+        'user': {
+            'id': u.get('id'),
+            'email': u.get('email'),
+            'instagramConnected': u.get('instagramConnected'),
+            'instagramHandle': u.get('instagramHandle'),
+            'ig_user_id': ig_user_id,
+            'fb_page_id': page_id,
+            'has_meta_token': bool(token),
+            'meta_token_prefix': (token or '')[:20],
+        },
+        'automations': automations,
+    }
+    async with httpx.AsyncClient(timeout=20) as c:
+        try:
+            me = await c.get('https://graph.facebook.com/v21.0/me',
+                             params={'access_token': token,
+                                     'fields': 'id,name,instagram_business_account{id,username}'})
+            out['graph_me'] = {'status': me.status_code, 'body': me.json()}
+        except Exception as e:
+            out['graph_me'] = {'error': str(e)}
+        if page_id:
+            try:
+                ps = await c.get(f'https://graph.facebook.com/v21.0/{page_id}/subscribed_apps',
+                                 params={'access_token': token})
+                out['page_subscribed_apps'] = {'status': ps.status_code, 'body': ps.json()}
+            except Exception as e:
+                out['page_subscribed_apps'] = {'error': str(e)}
+        if ig_user_id:
+            try:
+                igs = await c.get(f'https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps',
+                                  params={'access_token': token})
+                out['ig_subscribed_apps'] = {'status': igs.status_code, 'body': igs.json()}
+            except Exception as e:
+                out['ig_subscribed_apps'] = {'error': str(e)}
+            try:
+                # Try to re-subscribe NOW and capture exact response
+                igp = await c.post(
+                    f'https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps',
+                    params={'access_token': token,
+                            'subscribed_fields': 'comments,messages,mentions,message_reactions,live_comments'},
+                )
+                out['ig_subscribe_attempt'] = {'status': igp.status_code, 'body': igp.text[:500]}
+            except Exception as e:
+                out['ig_subscribe_attempt'] = {'error': str(e)}
+    return out
+
+
 @api.get('/instagram/media')
 async def instagram_media(user_id: str = Depends(get_current_user_id), limit: int = 25):
     """List the user's recent Instagram posts via Graph API."""
