@@ -972,6 +972,54 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
                 'subscribed_apps': verify.json()}
 
 
+@api.get('/instagram/force-resubscribe')
+async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
+    """Admin tool: DELETE then POST the user's webhook subscription to force
+    Meta to re-establish delivery. Accepts optional `fields` override; by
+    default subscribes to `comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments`.
+    Protected by META_APP_SECRET as admin key."""
+    if not META_APP_SECRET or key != META_APP_SECRET:
+        raise HTTPException(403, 'bad key')
+    u = await db.users.find_one({'email': email.lower()})
+    if not u:
+        u = await db.users.find_one({'email': email})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    token = u.get('meta_access_token', '')
+    ig_user_id = u.get('ig_user_id', '')
+    if not (token and ig_user_id):
+        raise HTTPException(400, 'user missing token or ig_user_id')
+    want_fields = fields or 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'
+    out = {'email': email, 'ig_user_id': ig_user_id, 'requested_fields': want_fields}
+    async with httpx.AsyncClient(timeout=30) as c:
+        try:
+            d = await c.delete(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'access_token': token},
+            )
+            out['delete'] = {'status': d.status_code, 'body': d.text[:500]}
+        except Exception as e:
+            out['delete'] = {'error': str(e)}
+        try:
+            p = await c.post(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'access_token': token, 'subscribed_fields': want_fields},
+            )
+            out['post'] = {'status': p.status_code, 'body': p.text[:500]}
+        except Exception as e:
+            out['post'] = {'error': str(e)}
+        try:
+            g = await c.get(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'access_token': token},
+            )
+            out['verify'] = {'status': g.status_code,
+                             'body': g.json() if g.status_code == 200 else g.text[:500]}
+        except Exception as e:
+            out['verify'] = {'error': str(e)}
+    return out
+
+
 @api.get('/instagram/debug-dump')
 async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
     """FULL diagnostic dump — returns everything about a user's IG link and
