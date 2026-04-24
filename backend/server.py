@@ -786,6 +786,25 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                         logger.info('Page subscribe status=%s body=%s', sub.status_code, sub.text[:200])
                     except Exception as e:
                         logger.warning('Page subscribe failed: %s', e)
+                    # Also subscribe the Instagram user itself — required for
+                    # `comments` webhooks to route through the Instagram object
+                    # under Instagram API with Business Login.
+                    if ig_user_id:
+                        try:
+                            ig_sub = await c.post(
+                                f"https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps",
+                                params={
+                                    'access_token': page_access_token or long_token,
+                                    'subscribed_fields': (
+                                        'comments,messages,mentions,'
+                                        'message_reactions,live_comments'
+                                    ),
+                                },
+                            )
+                            logger.info('IG-user subscribe status=%s body=%s',
+                                        ig_sub.status_code, ig_sub.text[:300])
+                        except Exception as e:
+                            logger.warning('IG-user subscribe failed: %s', e)
                     break
             await db.users.update_one(
                 {'id': user_id},
