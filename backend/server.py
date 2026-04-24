@@ -74,11 +74,10 @@ async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, t
     if not access_token or not ig_user_id:
         logger.warning('send_ig_dm: missing access_token or ig_user_id')
         return False
-    url = f'https://graph.facebook.com/v21.0/{ig_user_id}/messages'
+    url = f'https://graph.instagram.com/v21.0/{ig_user_id}/messages'
     payload = {
         'recipient': {'id': recipient_ig_id},
         'message': {'text': text},
-        'messaging_type': 'RESPONSE',
     }
     try:
         async with httpx.AsyncClient(timeout=15) as c:
@@ -97,7 +96,7 @@ async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) 
     """Reply to an Instagram comment via Graph API."""
     if not access_token or not ig_comment_id:
         return False
-    url = f'https://graph.facebook.com/v21.0/{ig_comment_id}/replies'
+    url = f'https://graph.instagram.com/v21.0/{ig_comment_id}/replies'
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
@@ -626,7 +625,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     text = (data.text or '').strip()
     if not text:
         raise HTTPException(400, 'Empty reply')
-    url = f'https://graph.facebook.com/v21.0/{ig_comment_id}/replies'
+    url = f'https://graph.instagram.com/v21.0/{ig_comment_id}/replies'
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
@@ -690,12 +689,16 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     }
 
 
-# ---------------- Instagram OAuth ----------------
+# ---------------- Instagram OAuth (Business Login) ----------------
+# Uses Instagram API with Business Login flow — required for the
+# /{ig_user_id}/subscribed_apps endpoint to accept our access token.
+# Facebook Login for Business (Pages) returns a Page token that the
+# new IG Graph API rejects with "Application does not have the capability".
 IG_SCOPES = (
-    'instagram_basic,instagram_manage_messages,instagram_manage_comments,'
-    'instagram_manage_insights,'
-    'pages_show_list,pages_manage_metadata,'
-    'business_management'
+    'instagram_business_basic,'
+    'instagram_business_manage_messages,'
+    'instagram_business_manage_comments,'
+    'instagram_business_content_publish'
 )
 
 
@@ -705,8 +708,13 @@ async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
         raise HTTPException(503, 'META_APP_ID and META_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
     url = (
-        f"https://www.facebook.com/v21.0/dialog/oauth?"
-        f"client_id={META_APP_ID}&redirect_uri={redirect_uri}&state={user_id}&scope={IG_SCOPES}"
+        f"https://www.instagram.com/oauth/authorize?"
+        f"enable_fb_login=0&force_authentication=1"
+        f"&client_id={META_APP_ID}"
+        f"&redirect_uri={redirect_uri}"
+        f"&response_type=code"
+        f"&scope={IG_SCOPES}"
+        f"&state={user_id}"
     )
     return {'url': url, 'configured': True, 'redirect_uri': redirect_uri}
 
@@ -722,102 +730,84 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(
-                'https://graph.facebook.com/v21.0/oauth/access_token',
-                params={
+            # 1) Exchange code for short-lived IG user token (form-encoded POST)
+            r = await c.post(
+                'https://api.instagram.com/oauth/access_token',
+                data={
                     'client_id': META_APP_ID,
                     'client_secret': META_APP_SECRET,
+                    'grant_type': 'authorization_code',
                     'redirect_uri': redirect_uri,
                     'code': code,
                 },
             )
-            data = r.json()
+            data = r.json() if r.status_code == 200 else {'raw': r.text, 'status': r.status_code}
             token = data.get('access_token')
+            ig_user_id_from_oauth = str(data.get('user_id') or '')
             if not token:
-                logger.error('Token exchange failed: %s', data)
+                logger.error('IG token exchange failed: %s', data)
                 raise HTTPException(400, f'Token exchange failed: {data}')
-            # Exchange for long-lived token
+            # 2) Exchange short-lived for long-lived IG user token (60 days)
             ll = await c.get(
-                'https://graph.facebook.com/v21.0/oauth/access_token',
+                'https://graph.instagram.com/access_token',
                 params={
-                    'grant_type': 'fb_exchange_token',
-                    'client_id': META_APP_ID,
+                    'grant_type': 'ig_exchange_token',
                     'client_secret': META_APP_SECRET,
-                    'fb_exchange_token': token,
+                    'access_token': token,
                 },
             )
-            ll_data = ll.json()
+            ll_data = ll.json() if ll.status_code == 200 else {}
             long_token = ll_data.get('access_token', token)
-            # Get IG handle via /me/accounts → instagram_business_account
-            u = await c.get('https://graph.facebook.com/v21.0/me/accounts',
-                            params={'access_token': long_token,
-                                    'fields': 'id,name,instagram_business_account{id,username,followers_count}'})
-            accounts = u.json().get('data', [])
-            handle = None
-            ig_user_id = None
-            followers = 0
-            page_access_token = None
-            page_id = None
-            for acc in accounts:
-                ig = acc.get('instagram_business_account')
-                if ig and ig.get('username'):
-                    handle = '@' + ig['username']
-                    ig_user_id = ig.get('id')
-                    followers = ig.get('followers_count', 0)
-                    page_id = acc.get('id')
-                    # Get page-level access token for messaging
-                    page_r = await c.get(
-                        f"https://graph.facebook.com/v21.0/{page_id}",
-                        params={'fields': 'access_token', 'access_token': long_token}
+            # 3) Get IG user info via the Instagram Graph
+            me = await c.get(
+                'https://graph.instagram.com/v21.0/me',
+                params={
+                    'access_token': long_token,
+                    'fields': 'user_id,username,name,followers_count,account_type',
+                },
+            )
+            me_data = me.json() if me.status_code == 200 else {}
+            ig_user_id = str(me_data.get('user_id') or me_data.get('id') or ig_user_id_from_oauth)
+            handle = '@' + me_data.get('username', 'instagram') if me_data.get('username') else '@instagram'
+            followers = me_data.get('followers_count', 0) or 0
+            # 4) Subscribe the IG user to webhook fields — this is THE key call
+            #    that the Facebook-Login flow couldn't perform. With an IG user
+            #    token it's accepted.
+            ig_sub_status = None
+            ig_sub_body = None
+            if ig_user_id:
+                try:
+                    ig_sub = await c.post(
+                        f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                        params={
+                            'access_token': long_token,
+                            'subscribed_fields': (
+                                'comments,messages,messaging_postbacks,'
+                                'messaging_seen,message_reactions,live_comments'
+                            ),
+                        },
                     )
-                    page_access_token = page_r.json().get('access_token', long_token)
-                    # Subscribe the Page to webhook events so Meta forwards DMs + comments
-                    try:
-                        sub = await c.post(
-                            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
-                            params={
-                                'access_token': page_access_token,
-                                'subscribed_fields': (
-                                    'messages,messaging_postbacks,messaging_optins,'
-                                    'message_deliveries,message_reads,feed'
-                                ),
-                            },
-                        )
-                        logger.info('Page subscribe status=%s body=%s', sub.status_code, sub.text[:200])
-                    except Exception as e:
-                        logger.warning('Page subscribe failed: %s', e)
-                    # Also subscribe the Instagram user itself — required for
-                    # `comments` webhooks to route through the Instagram object
-                    # under Instagram API with Business Login.
-                    if ig_user_id:
-                        try:
-                            ig_sub = await c.post(
-                                f"https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps",
-                                params={
-                                    'access_token': page_access_token or long_token,
-                                    'subscribed_fields': (
-                                        'comments,messages,mentions,'
-                                        'message_reactions,live_comments'
-                                    ),
-                                },
-                            )
-                            logger.info('IG-user subscribe status=%s body=%s',
-                                        ig_sub.status_code, ig_sub.text[:300])
-                        except Exception as e:
-                            logger.warning('IG-user subscribe failed: %s', e)
-                    break
+                    ig_sub_status = ig_sub.status_code
+                    ig_sub_body = ig_sub.text
+                    logger.info('IG-user subscribe status=%s body=%s',
+                                ig_sub.status_code, ig_sub.text[:300])
+                except Exception as e:
+                    logger.warning('IG-user subscribe failed: %s', e)
             await db.users.update_one(
                 {'id': user_id},
                 {'$set': {
                     'instagramConnected': True,
-                    'instagramHandle': handle or '@instagram',
+                    'instagramHandle': handle,
                     'instagramFollowers': followers,
                     'ig_user_id': ig_user_id,
-                    'fb_page_id': page_id,
-                    'meta_access_token': page_access_token or long_token,
+                    'meta_access_token': long_token,
+                    'ig_auth_kind': 'instagram_business_login',
+                    'ig_subscribe_status': ig_sub_status,
+                    'ig_subscribe_body': (ig_sub_body or '')[:500],
                 }},
             )
-            logger.info('IG connected for user %s: %s (%s followers)', user_id, handle, followers)
+            logger.info('IG connected (Business Login) for user %s: %s (ig_id=%s)',
+                        user_id, handle, ig_user_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -844,8 +834,47 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
 
 @api.post('/instagram/subscribe-webhook')
 async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id)):
-    """Force-subscribe the user's connected Page to webhook fields. Used after
-    the initial OAuth (pre-fix) where subscription didn't happen yet."""
+    """Force-subscribe the user's connected IG user to webhook fields via
+    Instagram API (graph.instagram.com). Requires an IG user access token
+    obtained through Instagram Business Login."""
+    u = await db.users.find_one({'id': user_id})
+    if not u or not u.get('instagramConnected'):
+        raise HTTPException(400, 'Instagram not connected')
+    token = u.get('meta_access_token', '')
+    ig_user_id = u.get('ig_user_id', '')
+    if not ig_user_id:
+        raise HTTPException(400, 'ig_user_id missing — reconnect Instagram')
+    async with httpx.AsyncClient(timeout=20) as c:
+        try:
+            ig_sub = await c.post(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={
+                    'access_token': token,
+                    'subscribed_fields': (
+                        'comments,messages,messaging_postbacks,'
+                        'messaging_seen,message_reactions,live_comments'
+                    ),
+                },
+            )
+            verify = await c.get(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'access_token': token},
+            )
+            return {
+                'ok': ig_sub.status_code == 200,
+                'ig_user_id': ig_user_id,
+                'subscribe_status': ig_sub.status_code,
+                'subscribe_body': ig_sub.text[:500],
+                'verify_status': verify.status_code,
+                'verify_body': verify.json() if verify.status_code == 200 else verify.text[:500],
+            }
+        except Exception as e:
+            raise HTTPException(500, str(e))
+
+
+@api.post('/instagram/subscribe-webhook-legacy')
+async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_user_id)):
+    """Legacy Page-based subscribe (kept for old Facebook-Login-flow users)."""
     u = await db.users.find_one({'id': user_id})
     if not u or not u.get('instagramConnected'):
         raise HTTPException(400, 'Instagram not connected')
@@ -974,32 +1003,28 @@ async def instagram_debug_dump(email: str, key: str):
     }
     async with httpx.AsyncClient(timeout=20) as c:
         try:
-            me = await c.get('https://graph.facebook.com/v21.0/me',
+            me = await c.get('https://graph.instagram.com/v21.0/me',
                              params={'access_token': token,
-                                     'fields': 'id,name,instagram_business_account{id,username}'})
-            out['graph_me'] = {'status': me.status_code, 'body': me.json()}
+                                     'fields': 'user_id,username,name,account_type,followers_count'})
+            out['graph_me'] = {'status': me.status_code,
+                               'body': me.json() if me.status_code == 200 else me.text[:300]}
         except Exception as e:
             out['graph_me'] = {'error': str(e)}
-        if page_id:
-            try:
-                ps = await c.get(f'https://graph.facebook.com/v21.0/{page_id}/subscribed_apps',
-                                 params={'access_token': token})
-                out['page_subscribed_apps'] = {'status': ps.status_code, 'body': ps.json()}
-            except Exception as e:
-                out['page_subscribed_apps'] = {'error': str(e)}
         if ig_user_id:
             try:
-                igs = await c.get(f'https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps',
+                igs = await c.get(f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
                                   params={'access_token': token})
-                out['ig_subscribed_apps'] = {'status': igs.status_code, 'body': igs.json()}
+                out['ig_subscribed_apps'] = {
+                    'status': igs.status_code,
+                    'body': igs.json() if igs.status_code == 200 else igs.text[:500]
+                }
             except Exception as e:
                 out['ig_subscribed_apps'] = {'error': str(e)}
             try:
-                # Try to re-subscribe NOW and capture exact response
                 igp = await c.post(
-                    f'https://graph.facebook.com/v21.0/{ig_user_id}/subscribed_apps',
+                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
                     params={'access_token': token,
-                            'subscribed_fields': 'comments,messages,mentions,message_reactions,live_comments'},
+                            'subscribed_fields': 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'},
                 )
                 out['ig_subscribe_attempt'] = {'status': igp.status_code, 'body': igp.text[:500]}
             except Exception as e:
@@ -1017,7 +1042,7 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
     ig_id = u.get('ig_user_id', '')
     if not ig_id:
         raise HTTPException(400, 'Missing ig_user_id')
-    url = f'https://graph.facebook.com/v21.0/{ig_id}/media'
+    url = f'https://graph.instagram.com/v21.0/{ig_id}/media'
     params = {
         'access_token': token,
         'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
@@ -1044,7 +1069,7 @@ async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(
-                f'https://graph.facebook.com/v21.0/{ig_user_id}/media',
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/media',
                 params={'access_token': access_token, 'fields': 'id,timestamp', 'limit': 1},
             )
             if r.status_code != 200:
