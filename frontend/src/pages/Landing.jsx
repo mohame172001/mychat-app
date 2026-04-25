@@ -289,9 +289,9 @@ const Landing = () => {
             <span className="text-sm text-slate-500 ml-2">© 2025 All rights reserved.</span>
           </div>
           <div className="flex gap-6 text-sm text-slate-500">
-            <a href="#" className="hover:text-slate-900">Privacy</a>
-            <a href="#" className="hover:text-slate-900">Terms</a>
-            <a href="#" className="hover:text-slate-900">Contact</a>
+            <Link to="/privacy" className="hover:text-slate-900">Privacy</Link>
+            <Link to="/terms" className="hover:text-slate-900">Terms</Link>
+            <a href="mailto:mm.mohame172000@gmail.com" className="hover:text-slate-900">Contact</a>
           </div>
         </div>
       </footer>
