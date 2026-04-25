@@ -270,21 +270,28 @@ const DmAutomation = () => {
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                      <th className="py-1">Time</th><th>Object</th><th>Fields</th><th>Msg array</th>
-                      <th>Sender</th><th>Msg id</th><th>Text</th><th>Echo</th><th>Preview</th>
+                      <th className="py-1">Time</th><th>Kind</th><th>Item keys</th>
+                      <th>Msg keys</th><th>Sender</th><th>Recip</th>
+                      <th>Msg id</th><th>Text</th><th>Read</th><th>Deliv</th>
+                      <th>Postback</th><th>React</th><th>Echo</th><th>Preview</th>
                     </tr></thead>
                     <tbody>
-                      {debug.recentWebhookEvents.map((e, i) => (
-                        <tr key={i} className="border-b border-slate-50">
-                          <td className="py-1 whitespace-nowrap">{fmtTime(e.createdAt)}</td>
-                          <td>{e.object}</td>
-                          <td>{(e.fields || []).join(',')}</td>
-                          <td>{e.hasMessagingArray ? '✓' : '—'}</td>
-                          <td>{e.senderIdPresent ? (e.senderIdRedacted || '✓') : '✗'}</td>
-                          <td>{e.messageIdPresent ? '✓' : '✗'}</td>
-                          <td>{e.messageTextPresent ? '✓' : '✗'}</td>
-                          <td>{e.isEcho ? '✓' : '—'}</td>
-                          <td className="font-mono">{e.textPreview}</td>
+                      {debug.recentWebhookEvents.map((ev, i) => (
+                        <tr key={i} className="border-b border-slate-50 align-top">
+                          <td className="py-1 whitespace-nowrap">{fmtTime(ev.createdAt)}</td>
+                          <td><Badge className="rounded-full border-0 bg-slate-100 text-slate-700">{ev.eventKind}</Badge></td>
+                          <td className="font-mono text-[10px]">{(ev.messagingItemKeys || []).join(',')}</td>
+                          <td className="font-mono text-[10px]">{(ev.messageKeys || []).join(',')}</td>
+                          <td>{ev.senderPresent ? (ev.senderIdRedacted || '✓') : '✗'}</td>
+                          <td>{ev.recipientPresent ? '✓' : '✗'}</td>
+                          <td>{ev.messageIdPresent ? '✓' : '✗'}</td>
+                          <td>{ev.messageTextPresent ? '✓' : '✗'}</td>
+                          <td>{ev.hasRead ? '✓' : '—'}</td>
+                          <td>{ev.hasDelivery ? '✓' : '—'}</td>
+                          <td>{ev.hasPostback ? '✓' : '—'}</td>
+                          <td>{ev.hasReaction ? '✓' : '—'}</td>
+                          <td>{ev.isEcho ? '✓' : '—'}</td>
+                          <td className="font-mono">{ev.textPreview}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -302,15 +309,16 @@ const DmAutomation = () => {
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                      <th className="py-1">Time</th><th>Sender</th><th>Text</th><th>Rule</th>
-                      <th>Status</th><th>Skip reason</th><th>Error</th>
+                      <th className="py-1">Time</th><th>Kind</th><th>Sender</th><th>Text</th>
+                      <th>Rule</th><th>Status</th><th>Skip reason</th><th>Error</th>
                     </tr></thead>
                     <tbody>
                       {debug.recentDmLogs.map((l, i) => (
                         <tr key={i} className="border-b border-slate-50 align-top">
                           <td className="py-1 whitespace-nowrap">{fmtTime(l.createdAt)}</td>
+                          <td><Badge className="rounded-full border-0 bg-slate-100 text-slate-700">{l.eventKind || '—'}</Badge></td>
                           <td className="font-mono">{l.senderId}</td>
-                          <td className="max-w-xs truncate">{l.incomingText}</td>
+                          <td className="max-w-xs truncate">{l.incomingText || ''}</td>
                           <td>{l.matchedRuleName || '—'}</td>
                           <td><Badge className={`rounded-full border-0 ${STATUS_COLORS[l.status] || 'bg-slate-100 text-slate-700'}`}>{l.status}</Badge></td>
                           <td>{l.skipReason || ''}</td>

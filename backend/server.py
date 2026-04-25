@@ -1456,37 +1456,148 @@ def _dm_match(text: str, keyword: str, mode: str) -> bool:
     return k in t
 
 
-async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'webhook'):
-    """Process one incoming Instagram DM event for DM automation.
+def _classify_messaging_event(event: dict) -> dict:
+    """Classify a raw Instagram messaging-item dict into our internal kind.
+    Returns: {kind, sender_id, recipient_id, message_id, text, is_echo,
+              has_message, has_read, has_delivery, has_postback, has_reaction,
+              has_referral, has_attachments, message_keys, item_keys, timestamp}
+    eventKind ∈ message_text | message_echo | message_attachment |
+                read | delivery | postback | reaction | referral | unknown
+    """
+    item_keys = sorted(list(event.keys())) if isinstance(event, dict) else []
+    sender = event.get('sender') if isinstance(event, dict) else None
+    recipient = event.get('recipient') if isinstance(event, dict) else None
+    message = event.get('message') if isinstance(event, dict) else None
+    sender_id = (sender or {}).get('id') if isinstance(sender, dict) else None
+    recipient_id = (recipient or {}).get('id') if isinstance(recipient, dict) else None
+    message_keys = sorted(list(message.keys())) if isinstance(message, dict) else []
 
-    event keys (from Meta Messenger payload):
+    has_read = 'read' in event if isinstance(event, dict) else False
+    has_delivery = 'delivery' in event if isinstance(event, dict) else False
+    has_postback = 'postback' in event if isinstance(event, dict) else False
+    has_reaction = 'reaction' in event if isinstance(event, dict) else False
+    has_referral = 'referral' in event if isinstance(event, dict) else False
+    has_message = isinstance(message, dict)
+    is_echo = bool(message.get('is_echo')) if has_message else False
+    text = (message.get('text') if has_message else None) or ''
+    attachments = message.get('attachments') if has_message else None
+    has_attachments = bool(attachments)
+    message_id = (message.get('mid') or message.get('id')) if has_message else None
+    timestamp = event.get('timestamp') if isinstance(event, dict) else None
+
+    if has_read:
+        kind = 'read'
+    elif has_delivery:
+        kind = 'delivery'
+    elif has_reaction:
+        kind = 'reaction'
+    elif has_referral:
+        kind = 'referral'
+    elif has_postback:
+        kind = 'postback'
+    elif has_message:
+        if is_echo:
+            kind = 'message_echo'
+        elif text:
+            kind = 'message_text'
+        elif has_attachments:
+            kind = 'message_attachment'
+        else:
+            kind = 'unknown'
+    else:
+        kind = 'unknown'
+
+    return {
+        'kind': kind,
+        'sender_id': sender_id,
+        'recipient_id': recipient_id,
+        'message_id': message_id,
+        'text': text,
+        'is_echo': is_echo,
+        'has_message': has_message,
+        'has_read': has_read,
+        'has_delivery': has_delivery,
+        'has_postback': has_postback,
+        'has_reaction': has_reaction,
+        'has_referral': has_referral,
+        'has_attachments': has_attachments,
+        'message_keys': message_keys,
+        'item_keys': item_keys,
+        'timestamp': timestamp,
+    }
+
+
+async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'webhook'):
+    """Process one incoming Instagram DM messaging-item.
+
+    `event` is the RAW messaging-item dict from
+      payload.entry[].messaging[]
+    OR a legacy flattened dict with keys
       sender_id, message_id, text, timestamp, is_echo
-    Returns dict: {processed, matched, status, rule_id, log_id}
+    Returns dict: {processed, matched, status, rule_id, log_id, event_kind}
     Status values: received | matched | replied | failed | skipped
     skip_reason values: duplicate | echo | self_message | missing_sender |
-                       missing_text | no_active_rules | no_rule_match | send_failed
+                       missing_text | no_active_rules | no_rule_match | send_failed |
+                       read_receipt | delivery_receipt | reaction |
+                       postback_unsupported | attachment_unsupported |
+                       non_message_event
     """
     import uuid as _uuid
     import hashlib as _hashlib
     user_id = user_doc['id']
     ig_account_id = user_doc.get('ig_user_id') or ''
-    sender_id = event.get('sender_id')
-    message_id = event.get('message_id')
-    text = event.get('text') or ''
-    is_echo = bool(event.get('is_echo'))
-    ts = event.get('timestamp')
     now = datetime.utcnow()
 
-    logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s',
-                ig_account_id, sender_id, message_id, is_echo)
+    # Accept both raw shape (sender/recipient/message) and legacy flattened.
+    if isinstance(event, dict) and ('sender' in event or 'message' in event
+                                    or 'read' in event or 'delivery' in event
+                                    or 'postback' in event or 'reaction' in event
+                                    or 'referral' in event):
+        cls = _classify_messaging_event(event)
+        sender_id = cls['sender_id']
+        message_id = cls['message_id']
+        text = cls['text']
+        is_echo = cls['is_echo']
+        ts = cls['timestamp']
+        event_kind = cls['kind']
+        message_keys = cls['message_keys']
+        item_keys = cls['item_keys']
+    else:
+        # Legacy flattened input
+        sender_id = event.get('sender_id')
+        message_id = event.get('message_id')
+        text = event.get('text') or ''
+        is_echo = bool(event.get('is_echo'))
+        ts = event.get('timestamp')
+        event_kind = 'message_echo' if is_echo else ('message_text' if text else 'unknown')
+        message_keys = []
+        item_keys = sorted(list(event.keys())) if isinstance(event, dict) else []
+
+    logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s kind=%s',
+                ig_account_id, sender_id, message_id, is_echo, event_kind)
 
     # Compute a dedup key that NEVER collides on null. Prefer Meta's mid/id;
-    # fall back to a content-derived hash so a missing id cannot poison dedup.
+    # otherwise hash the available identifying surface for THIS event kind so
+    # read/delivery/reaction events also dedup deterministically.
     if message_id:
         dedup_key = f'mid:{message_id}'
     else:
+        watermark = ''
+        try:
+            if isinstance(event, dict):
+                if isinstance(event.get('read'), dict):
+                    watermark = str(event['read'].get('watermark') or '')
+                elif isinstance(event.get('delivery'), dict):
+                    watermark = str(event['delivery'].get('watermark') or '')
+                elif isinstance(event.get('reaction'), dict):
+                    watermark = str(event['reaction'].get('mid') or '') + ':' + \
+                                str(event['reaction'].get('action') or '')
+                elif isinstance(event.get('postback'), dict):
+                    watermark = str(event['postback'].get('mid') or event['postback'].get('payload') or '')
+        except Exception:
+            watermark = ''
         h = _hashlib.sha256(
-            f'{ig_account_id}|{sender_id or ""}|{ts or ""}|{text or ""}'.encode('utf-8')
+            f'{ig_account_id}|{sender_id or ""}|{ts or ""}|{text or ""}|{event_kind}|{watermark}'.encode('utf-8')
         ).hexdigest()
         dedup_key = f'sha:{h}'
 
@@ -1496,9 +1607,13 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             'user_id': user_id,
             'ig_user_id': ig_account_id,
             'sender_id': sender_id,
+            'recipient_id': locals().get('recipient_id') if 'recipient_id' in locals() else None,
             'message_id': message_id,
             'dedup_key': dedup_key,
-            'incoming_text': text,
+            'event_kind': event_kind,
+            'message_keys': message_keys,
+            'item_keys': item_keys,
+            'incoming_text': text if text else None,
             'matched_rule_id': matched_rule.get('id') if matched_rule else None,
             'matched_rule_name': matched_rule.get('name') if matched_rule else None,
             'reply_text': matched_rule.get('reply_text') if matched_rule else None,
@@ -1524,21 +1639,56 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     if existing:
         logger.info('dm_message_duplicate_skipped dedup_key=%s', dedup_key)
         return {'processed': False, 'status': 'skipped', 'reason': 'duplicate',
-                'log_id': existing.get('id')}
+                'log_id': existing.get('id'), 'event_kind': event_kind}
 
-    # Filter: echoes (messages the business sent) and self-sends.
-    if is_echo:
+    # Classify non-text messaging events explicitly. Always log them so the
+    # debug panel can show why nothing was sent.
+    if event_kind == 'read':
+        await _persist(_mk_log('skipped', skip_reason='read_receipt'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'read_receipt',
+                'event_kind': event_kind}
+    if event_kind == 'delivery':
+        await _persist(_mk_log('skipped', skip_reason='delivery_receipt'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'delivery_receipt',
+                'event_kind': event_kind}
+    if event_kind == 'reaction':
+        await _persist(_mk_log('skipped', skip_reason='reaction'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'reaction',
+                'event_kind': event_kind}
+    if event_kind == 'referral':
+        await _persist(_mk_log('skipped', skip_reason='referral'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'referral',
+                'event_kind': event_kind}
+    if event_kind == 'postback' and not text:
+        await _persist(_mk_log('skipped', skip_reason='postback_unsupported'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'postback_unsupported',
+                'event_kind': event_kind}
+    if event_kind == 'message_attachment':
+        await _persist(_mk_log('skipped', skip_reason='attachment_unsupported'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'attachment_unsupported',
+                'event_kind': event_kind}
+    if event_kind == 'unknown' and not text:
+        await _persist(_mk_log('skipped', skip_reason='non_message_event'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'non_message_event',
+                'event_kind': event_kind}
+
+    # Real text messages from this point on.
+    if is_echo or event_kind == 'message_echo':
         await _persist(_mk_log('skipped', skip_reason='echo'))
-        return {'processed': False, 'status': 'skipped', 'reason': 'echo'}
+        return {'processed': False, 'status': 'skipped', 'reason': 'echo',
+                'event_kind': event_kind}
     if sender_id and sender_id == ig_account_id:
         await _persist(_mk_log('skipped', skip_reason='self_message'))
-        return {'processed': False, 'status': 'skipped', 'reason': 'self_message'}
+        return {'processed': False, 'status': 'skipped', 'reason': 'self_message',
+                'event_kind': event_kind}
     if not sender_id:
         await _persist(_mk_log('skipped', skip_reason='missing_sender'))
-        return {'processed': False, 'status': 'skipped', 'reason': 'missing_sender'}
+        return {'processed': False, 'status': 'skipped', 'reason': 'missing_sender',
+                'event_kind': event_kind}
     if not text:
         await _persist(_mk_log('skipped', skip_reason='missing_text'))
-        return {'processed': False, 'status': 'skipped', 'reason': 'missing_text'}
+        return {'processed': False, 'status': 'skipped', 'reason': 'missing_text',
+                'event_kind': event_kind}
 
     logger.info('dm_sender_extracted sender=%s', sender_id)
     logger.info('dm_text_extracted len=%s preview=%r', len(text), text[:80])
@@ -1637,11 +1787,21 @@ async def _process_webhook(payload: dict):
             user_id = user_doc['id']
 
             for event in entry.get('messaging', []):
+                # ALWAYS feed the DM automation handler first, with the raw
+                # messaging item, so every event (read/delivery/reaction/
+                # postback/text/echo) produces an explicit dm_logs row.
+                try:
+                    await _handle_new_dm_message(user_doc, event, source='webhook')
+                except Exception:
+                    logger.exception('DM automation handler error')
+
                 sender_id = event.get('sender', {}).get('id')
                 if sender_id == ig_account_id:
-                    continue  # skip own messages
+                    continue  # skip own messages for legacy conv/flow path
                 msg_obj = event.get('message', {})
                 msg_text = msg_obj.get('text', '')
+                if not msg_text:
+                    continue  # legacy conv/flow path is text-only
 
                 # Save incoming message to conversation
                 import uuid as _uuid
@@ -1684,19 +1844,8 @@ async def _process_webhook(payload: dict):
                     elif trigger == 'new follower' and event.get('follow'):
                         asyncio.create_task(execute_flow(user_doc, auto, sender_id, msg_text))
 
-                # New independent DM Automation: process via dedicated handler.
-                # This is fully separate from comment automation and from the
-                # legacy flow-builder above. It uses db.dm_rules / db.dm_logs.
-                try:
-                    await _handle_new_dm_message(user_doc, {
-                        'sender_id': sender_id,
-                        'message_id': msg_obj.get('mid') or msg_obj.get('id'),
-                        'text': msg_text,
-                        'timestamp': event.get('timestamp'),
-                        'is_echo': bool(msg_obj.get('is_echo')),
-                    }, source='webhook')
-                except Exception:
-                    logger.exception('DM automation handler error')
+                # DM Automation handler was already called at the top of the
+                # loop with the raw messaging item.
 
             for change in entry.get('changes', []):
                 field = change.get('field')
@@ -2425,6 +2574,7 @@ async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_
             'senderId': d.get('sender_id'),
             'messageId': d.get('message_id'),
             'dedupKey': d.get('dedup_key'),
+            'eventKind': d.get('event_kind'),
             'incomingText': d.get('incoming_text'),
             'matchedRuleId': d.get('matched_rule_id'),
             'matchedRuleName': d.get('matched_rule_name'),
@@ -2587,22 +2737,33 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
                     continue
                 if ms:
                     for ev in ms:
-                        msg_obj = ev.get('message') or {}
-                        msg_text = msg_obj.get('text') or ''
-                        sender_id = (ev.get('sender') or {}).get('id')
-                        recipient_id = (ev.get('recipient') or {}).get('id')
+                        cls = _classify_messaging_event(ev)
+                        msg_text = cls['text'] or ''
                         recent_events.append({
                             'createdAt': received.isoformat()
                                          if isinstance(received, datetime) else received,
                             'object': obj_kind,
                             'fields': fields,
                             'hasMessagingArray': True,
-                            'senderIdPresent': bool(sender_id),
-                            'senderIdRedacted': _redact_id(sender_id),
-                            'recipientIdPresent': bool(recipient_id),
-                            'messageIdPresent': bool(msg_obj.get('mid') or msg_obj.get('id')),
+                            'messagingItemShape': cls['item_keys'],
+                            'messagingItemKeys': cls['item_keys'],
+                            'messageKeys': cls['message_keys'],
+                            'senderPresent': bool(cls['sender_id']),
+                            'senderIdPresent': bool(cls['sender_id']),
+                            'senderIdRedacted': _redact_id(cls['sender_id']),
+                            'recipientPresent': bool(cls['recipient_id']),
+                            'recipientIdPresent': bool(cls['recipient_id']),
+                            'hasMessage': cls['has_message'],
+                            'messageIdPresent': bool(cls['message_id']),
                             'messageTextPresent': bool(msg_text),
-                            'isEcho': bool(msg_obj.get('is_echo')),
+                            'hasRead': cls['has_read'],
+                            'hasDelivery': cls['has_delivery'],
+                            'hasPostback': cls['has_postback'],
+                            'hasReaction': cls['has_reaction'],
+                            'hasReferral': cls['has_referral'],
+                            'hasAttachments': cls['has_attachments'],
+                            'isEcho': cls['is_echo'],
+                            'eventKind': cls['kind'],
                             'textPreview': (msg_text[:40] if msg_text else ''),
                         })
                 else:
@@ -2612,11 +2773,24 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
                         'object': obj_kind,
                         'fields': fields,
                         'hasMessagingArray': False,
+                        'messagingItemShape': [],
+                        'messagingItemKeys': [],
+                        'messageKeys': [],
+                        'senderPresent': False,
                         'senderIdPresent': False,
+                        'recipientPresent': False,
                         'recipientIdPresent': False,
+                        'hasMessage': False,
                         'messageIdPresent': False,
                         'messageTextPresent': False,
+                        'hasRead': False,
+                        'hasDelivery': False,
+                        'hasPostback': False,
+                        'hasReaction': False,
+                        'hasReferral': False,
+                        'hasAttachments': False,
                         'isEcho': False,
+                        'eventKind': 'unknown',
                         'textPreview': '',
                     })
         except Exception:
@@ -2632,7 +2806,8 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
             'senderId': _redact_id(d.get('sender_id')),
             'messageId': d.get('message_id'),
             'dedupKey': d.get('dedup_key'),
-            'incomingText': (d.get('incoming_text') or '')[:120],
+            'eventKind': d.get('event_kind'),
+            'incomingText': (d.get('incoming_text') or '')[:120] if d.get('incoming_text') else None,
             'matchedRuleId': d.get('matched_rule_id'),
             'matchedRuleName': d.get('matched_rule_name'),
             'status': d.get('status'),
@@ -2642,10 +2817,15 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
 
     # Build lastDecision from the most-recent messaging webhook event + most-recent log
     last_msg_event = next((e for e in recent_events if e.get('hasMessagingArray')), None)
+    last_text_event = next(
+        (e for e in recent_events
+         if e.get('hasMessagingArray') and e.get('eventKind') == 'message_text'),
+        None,
+    )
     last_log = recent_logs[0] if recent_logs else None
     webhook_received = bool(last_msg_event)
-    message_parsed = bool(last_msg_event and last_msg_event.get('senderIdPresent')
-                          and last_msg_event.get('messageTextPresent'))
+    message_parsed = bool(last_text_event and last_text_event.get('senderIdPresent')
+                          and last_text_event.get('messageTextPresent'))
     rule_matched = bool(last_log and last_log.get('matchedRuleId'))
     send_attempted = bool(last_log and last_log.get('status') in ('replied', 'failed'))
     reply_sent = bool(last_log and last_log.get('status') == 'replied')
@@ -2665,9 +2845,19 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
     elif not webhook_received:
         blocker = 'no_messaging_webhook_received'
         fix = 'Send a test DM from a different IG account. If still nothing arrives, the IG account is not subscribed for messages — call resubscribe.'
+    elif not last_text_event:
+        kinds = sorted({e.get('eventKind') for e in recent_events
+                        if e.get('hasMessagingArray') and e.get('eventKind')})
+        blocker = 'no_message_text_event'
+        fix = ('Meta delivered messaging events but none were message_text. '
+               f'Observed kinds: {kinds}. '
+               'If you only see read/delivery/reaction, send a brand-new text DM '
+               'from another IG account that has not previously messaged you. '
+               'If you only see message_echo, the test DM was sent FROM the '
+               'connected business account itself.')
     elif not message_parsed:
         blocker = 'webhook_payload_shape_mismatch'
-        fix = 'Meta delivered a messaging event but sender/message fields were missing. Inspect recentWebhookEvents for which field is null.'
+        fix = 'A message_text event arrived but sender/text fields were missing. Inspect recentWebhookEvents.messagingItemKeys / messageKeys.'
     elif last_log and last_log.get('skipReason') == 'no_rule_match':
         blocker = 'rule_did_not_match_text'
         fix = f'Incoming text did not satisfy any active rule. Check keyword + matchMode against text="{(last_log.get("incomingText") or "")[:40]}".'
