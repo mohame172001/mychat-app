@@ -25,6 +25,10 @@ const Settings = () => {
   const [tab, setTab] = useState('profile');
   const [notif, setNotif] = useState({ email: true, push: true, weekly: false });
   const [igConnecting, setIgConnecting] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [pollResult, setPollResult] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [diag, setDiag] = useState(null);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -124,8 +128,114 @@ const Settings = () => {
                         {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                         Refresh Token
                       </Button>
+                      <Button onClick={async () => {
+                        setPolling(true);
+                        setPollResult(null);
+                        try {
+                          const { data } = await api.post('/instagram/comments/poll-now');
+                          setPollResult(data);
+                          toast.success(`Polled: ${data.commentsSeen} seen, ${data.newComments} new, ${data.matched} matched`);
+                        } catch (e) {
+                          toast.error(e?.response?.data?.detail || 'Poll failed');
+                        } finally {
+                          setPolling(false);
+                        }
+                      }} variant="outline" className="rounded-xl" disabled={polling}>
+                        {polling ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                        Poll Instagram comments now
+                      </Button>
+                      <Button onClick={async () => {
+                        setDiagLoading(true);
+                        setDiag(null);
+                        try {
+                          const { data } = await api.get('/instagram/diagnostics/full');
+                          setDiag(data);
+                          if (data.status?.commentsAutomationReady) toast.success('Diagnostics: comments automation is ready');
+                          else toast.error(`Blocker: ${data.status?.blockerReason || 'unknown'}`);
+                        } catch (e) {
+                          toast.error(e?.response?.data?.detail || 'Diagnostics failed');
+                        } finally {
+                          setDiagLoading(false);
+                        }
+                      }} variant="outline" className="rounded-xl" disabled={diagLoading}>
+                        {diagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                        Run full diagnostics
+                      </Button>
                     </div>
                   </div>
+                  {diag && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
+                      <div className="font-semibold">Diagnostics</div>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ['Connected', diag.status?.instagramConnected],
+                          ['Active comment rule', diag.status?.hasActiveCommentRule],
+                          ['Valid mediaId', diag.status?.validMediaId],
+                          ['Webhook subscribed (comments)', diag.status?.commentsWebhookSubscribed],
+                          ['Comments readable', diag.status?.commentsReadable],
+                          ['Automation ready', diag.status?.commentsAutomationReady],
+                        ].map(([k,v]) => (
+                          <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{v ? '✓' : '✗'} {k}</Badge>
+                        ))}
+                      </div>
+                      {diag.status?.blockerReason && (
+                        <div className="p-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900">
+                          <b>Blocker:</b> {diag.status.blockerReason}
+                        </div>
+                      )}
+                      <div className="grid md:grid-cols-2 gap-2 text-slate-700">
+                        <div>App ID configured: <b>{String(diag.runtime?.appIdConfigured)}</b></div>
+                        <div>Token app_id: <b>{diag.account?.tokenAppId || '—'}</b></div>
+                        <div>IG user id: <b>{diag.account?.igUserId || '—'}</b></div>
+                        <div>Account type: <b>{diag.account?.accountType || '—'}</b></div>
+                        <div>Subscribed fields: <b>{(diag.subscriptions?.subscribedFields || []).join(', ') || '—'}</b></div>
+                        <div>Active comment rules: <b>{diag.rules?.activeCommentRules}</b></div>
+                        <div>Resolved mediaIds: <b>{(diag.rules?.mediaIds || []).join(', ') || '—'}</b></div>
+                        <div>Polling: <b>{diag.polling?.enabled ? `every ${diag.polling.intervalSeconds}s` : 'off'}</b></div>
+                      </div>
+                      {diag.commentsReadability?.length > 0 && (
+                        <div>
+                          <div className="font-semibold mt-2">Per-media comment readability</div>
+                          <table className="w-full text-xs mt-1">
+                            <thead><tr className="text-left text-slate-500"><th>Media</th><th>Count</th><th>Returned</th><th>Status</th></tr></thead>
+                            <tbody>
+                              {diag.commentsReadability.map(r => (
+                                <tr key={r.mediaId}>
+                                  <td className="font-mono">{r.mediaId}</td>
+                                  <td>{r.commentsCount ?? '—'}</td>
+                                  <td>{r.commentsReturned}</td>
+                                  <td className={r.mismatch ? 'text-rose-700' : (r.readable ? 'text-emerald-700' : 'text-slate-500')}>
+                                    {r.mismatch ? 'gated' : (r.readable ? 'ok' : 'error')}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      {diag.recentErrors?.length > 0 && (
+                        <pre className="text-xs overflow-auto max-h-40 bg-white p-2 rounded border">{JSON.stringify(diag.recentErrors, null, 2)}</pre>
+                      )}
+                    </div>
+                  )}
+                  {pollResult && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm">
+                      <div className="font-semibold mb-2">Last poll result</div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-slate-700">
+                        <div>Media checked: <b>{pollResult.mediaChecked}</b></div>
+                        <div>Comments seen: <b>{pollResult.commentsSeen}</b></div>
+                        <div>New comments: <b>{pollResult.newComments}</b></div>
+                        <div>Matched: <b>{pollResult.matched}</b></div>
+                        <div>Actions ok: <b>{pollResult.actionsSucceeded}</b></div>
+                        <div>Actions failed: <b>{pollResult.actionsFailed}</b></div>
+                      </div>
+                      {pollResult.errors?.length > 0 && (
+                        <pre className="mt-2 text-xs overflow-auto max-h-40 bg-white p-2 rounded border">
+                          {JSON.stringify(pollResult.errors, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
                 <>

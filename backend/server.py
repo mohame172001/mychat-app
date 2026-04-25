@@ -1254,55 +1254,54 @@ async def instagram_webhook_log(request: Request, limit: int = 20, token: Option
 
 
 async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 'webhook'):
-    """Process one incoming Instagram comment.
-    Deduplicates by ig_comment_id, saves to db.comments, pushes to WS,
-    and runs matching automations. Works for BOTH webhook events and polling.
+    """Process one incoming Instagram comment (shared by webhook + polling).
 
-    comment_data keys:
-      ig_comment_id, media_id, commenter_id, commenter_username, text
+    Returns a dict with keys:
+      processed (bool) — True if a new comment doc was inserted
+      matched (bool)   — True if any automation rule fired
+      action_status    — 'pending'|'success'|'failed'|'skipped'
+      rule_id          — id of the matched automation, when matched
+      already_processed (bool) — True if dedup hit
     """
     import uuid as _uuid
     user_id = user_doc['id']
     ig_account_id = user_doc.get('ig_user_id') or ''
     ig_comment_id = comment_data.get('ig_comment_id')
     commenter_id = comment_data.get('commenter_id')
-    if not ig_comment_id or not commenter_id:
-        return False
-    if commenter_id == ig_account_id:
-        return False  # skip self-comments
+    media_id = comment_data.get('media_id')
+    comment_text = comment_data.get('text') or ''
 
-    # Dedupe: if this ig_comment_id already exists for this user, skip.
+    # log: comment_seen (every comment we observe, before dedup)
+    logger.info('comment_seen ig_comment_id=%s media=%s source=%s text=%r',
+                ig_comment_id, media_id, source, comment_text[:80])
+
+    if not ig_comment_id or not commenter_id:
+        return {'processed': False, 'matched': False, 'action_status': 'skipped',
+                'reason': 'missing_id'}
+    if commenter_id == ig_account_id:
+        return {'processed': False, 'matched': False, 'action_status': 'skipped',
+                'reason': 'self_comment'}
+
+    # Dedupe
     existing = await db.comments.find_one({
         'user_id': user_id, 'ig_comment_id': ig_comment_id
     })
     if existing:
-        return False
+        logger.info('comment_already_processed ig_comment_id=%s user=%s',
+                    ig_comment_id, user_doc.get('email'))
+        return {'processed': False, 'already_processed': True, 'matched': False,
+                'action_status': 'skipped', 'reason': 'duplicate'}
 
-    comment_text = comment_data.get('text') or ''
-    media_id = comment_data.get('media_id')
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
+    ts_raw = comment_data.get('timestamp')
+    now = datetime.utcnow()
 
-    doc = {
-        'id': str(_uuid.uuid4()),
-        'user_id': user_id,
-        'ig_comment_id': ig_comment_id,
-        'media_id': media_id,
-        'commenter_id': commenter_id,
-        'commenter_username': commenter_username,
-        'text': comment_text,
-        'replied': False,
-        'source': source,  # 'webhook' or 'polling'
-        'created': datetime.utcnow(),
-    }
-    await db.comments.insert_one(doc)
-    await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
-
-    # Run matching automations
+    # Match automations to determine rule_id BEFORE insert
     automations = await db.automations.find(
         {'user_id': user_id, 'status': 'active'}
     ).to_list(100)
-    latest_media_id = None  # resolved lazily
-    fired_any = False
+    latest_media_id = None
+    matched_rule = None
     for auto in automations:
         raw_trigger = auto.get('trigger') or ''
         trigger = raw_trigger.lower()
@@ -1333,14 +1332,90 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 else:
                     fire = True
         if fire:
-            fired_any = True
-            asyncio.create_task(execute_flow(
-                user_doc, auto, commenter_id, comment_text,
-                comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': doc['id']}
+            matched_rule = auto
+            break
+
+    rule_id = matched_rule.get('id') if matched_rule else None
+    matched = bool(matched_rule)
+    if matched:
+        logger.info('rule_matched ig_comment_id=%s rule_id=%s user=%s',
+                    ig_comment_id, rule_id, user_doc.get('email'))
+    else:
+        logger.info('rule_not_matched ig_comment_id=%s user=%s',
+                    ig_comment_id, user_doc.get('email'))
+
+    doc = {
+        'id': str(_uuid.uuid4()),
+        'user_id': user_id,
+        'ig_comment_id': ig_comment_id,
+        'media_id': media_id,
+        'commenter_id': commenter_id,
+        'commenter_username': commenter_username,
+        'text': comment_text,
+        'replied': False,
+        'source': source,                # 'webhook' or 'polling'
+        'rule_id': rule_id,
+        'matched': matched,
+        'action_status': 'pending' if matched else 'skipped',
+        'error': None,
+        'timestamp': ts_raw,
+        'processed_at': now,
+        'created': now,
+    }
+    try:
+        await db.comments.insert_one(doc)
+    except Exception as e:
+        # Race against unique index — another worker inserted first.
+        logger.info('comment_insert_race ig_comment_id=%s err=%s', ig_comment_id, e)
+        return {'processed': False, 'already_processed': True, 'matched': False,
+                'action_status': 'skipped', 'reason': 'race'}
+
+    await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
+
+    action_status = 'skipped'
+    if matched:
+        try:
+            logger.info('action_execution_started ig_comment_id=%s rule_id=%s',
+                        ig_comment_id, rule_id)
+            asyncio.create_task(_run_and_record_action(
+                user_doc, matched_rule, commenter_id, comment_text,
+                comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
             ))
-    logger.info('Comment %s (source=%s) on media=%s by @%s: "%s" — fired=%s',
-                ig_comment_id, source, media_id, commenter_username, comment_text[:60], fired_any)
-    return True
+            action_status = 'pending'
+        except Exception as e:
+            logger.exception('action_execution_failed ig_comment_id=%s err=%s',
+                             ig_comment_id, e)
+            await db.comments.update_one(
+                {'id': doc['id']},
+                {'$set': {'action_status': 'failed', 'error': str(e)[:500]}}
+            )
+            action_status = 'failed'
+
+    return {'processed': True, 'matched': matched, 'action_status': action_status,
+            'rule_id': rule_id, 'comment_doc_id': doc['id']}
+
+
+async def _run_and_record_action(user_doc, automation, commenter_id, comment_text,
+                                 comment_doc_id: str, ig_comment_id: str):
+    """Wrap execute_flow so we record success/failure on the comment doc."""
+    try:
+        await execute_flow(
+            user_doc, automation, commenter_id, comment_text,
+            comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': comment_doc_id}
+        )
+        await db.comments.update_one(
+            {'id': comment_doc_id},
+            {'$set': {'action_status': 'success'}}
+        )
+        logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
+                    ig_comment_id, automation.get('id'))
+    except Exception as e:
+        await db.comments.update_one(
+            {'id': comment_doc_id},
+            {'$set': {'action_status': 'failed', 'error': str(e)[:500]}}
+        )
+        logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
+                         ig_comment_id, automation.get('id'), e)
 
 
 async def _process_webhook(payload: dict):
@@ -1443,7 +1518,7 @@ async def _process_webhook(payload: dict):
 # Until App Review completes, we poll GET /{media_id}/comments directly.
 # Source: https://developers.facebook.com/docs/instagram-platform/webhooks/ —
 # "Advanced Access is required to receive comments and live_comments webhook notifications."
-IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '30'))
+IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 _poll_task: Optional[asyncio.Task] = None
 
@@ -1476,11 +1551,21 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
 
 
 async def _poll_user_comments(user_doc: dict) -> dict:
-    """Poll comments for one user's automations. Returns per-media stats."""
+    """Poll comments for one user's automations. Returns aggregated stats."""
     user_id = user_doc['id']
     token = user_doc.get('meta_access_token', '')
     ig_id = user_doc.get('ig_user_id', '')
-    stats: dict = {'user_id': user_id, 'media': {}, 'errors': []}
+    stats: dict = {
+        'user_id': user_id,
+        'mediaChecked': 0,
+        'commentsSeen': 0,
+        'newComments': 0,
+        'matched': 0,
+        'actionsSucceeded': 0,
+        'actionsFailed': 0,
+        'media': {},
+        'errors': [],
+    }
 
     if not token or not ig_id:
         stats['errors'].append('missing_token_or_ig_id')
@@ -1498,6 +1583,9 @@ async def _poll_user_comments(user_doc: dict) -> dict:
 
     async with httpx.AsyncClient(timeout=20) as c:
         for mid in media_ids[:10]:  # cap per-user per-tick
+            stats['mediaChecked'] += 1
+            logger.info('media_comments_fetch_started user=%s media_id=%s',
+                        user_doc.get('email'), mid)
             try:
                 r = await c.get(
                     f'https://graph.instagram.com/v21.0/{mid}/comments',
@@ -1508,10 +1596,19 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     },
                 )
                 if r.status_code != 200:
+                    logger.warning('media_comments_fetch_failed user=%s media_id=%s http=%s body=%s',
+                                   user_doc.get('email'), mid, r.status_code, r.text[:200])
                     stats['media'][mid] = {'http': r.status_code, 'error': r.text[:200]}
+                    stats['errors'].append({'media_id': mid, 'http': r.status_code, 'error': r.text[:200]})
                     continue
                 data = (r.json() or {}).get('data') or []
+                logger.info('media_comments_fetch_success user=%s media_id=%s count=%s',
+                            user_doc.get('email'), mid, len(data))
+                stats['commentsSeen'] += len(data)
                 new_count = 0
+                matched_count = 0
+                succeeded = 0
+                failed = 0
                 for cm in data:
                     ig_comment_id = cm.get('id')
                     from_obj = cm.get('from') or {}
@@ -1520,23 +1617,36 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         from_obj.get('username') or cm.get('username') or
                         (f'ig_{commenter_id[:8]}' if commenter_id else None)
                     )
-                    # username-only comments (no "from.id") happen when the
-                    # commenter is not on the business role; synthesize a stable id.
                     if not commenter_id and commenter_username:
                         commenter_id = f'u:{commenter_username}'
-                    ok = await _handle_new_comment(user_doc, {
+                    res = await _handle_new_comment(user_doc, {
                         'ig_comment_id': ig_comment_id,
                         'media_id': mid,
                         'commenter_id': commenter_id,
                         'commenter_username': commenter_username,
                         'text': cm.get('text') or '',
-                    }, source='polling')
-                    if ok:
+                        'timestamp': cm.get('timestamp'),
+                    }, source='polling') or {}
+                    if res.get('processed'):
                         new_count += 1
-                stats['media'][mid] = {'total': len(data), 'new': new_count}
+                    if res.get('matched'):
+                        matched_count += 1
+                    st = res.get('action_status')
+                    if st == 'success':
+                        succeeded += 1
+                    elif st == 'failed':
+                        failed += 1
+                stats['newComments'] += new_count
+                stats['matched'] += matched_count
+                stats['actionsSucceeded'] += succeeded
+                stats['actionsFailed'] += failed
+                stats['media'][mid] = {'total': len(data), 'new': new_count,
+                                       'matched': matched_count}
             except Exception as e:
+                logger.exception('media_comments_fetch_failed user=%s media_id=%s exc=%s',
+                                 user_doc.get('email'), mid, e)
                 stats['media'][mid] = {'error': f'exc:{e}'}
-                stats['errors'].append(f'{mid}:{e}')
+                stats['errors'].append({'media_id': mid, 'error': f'exc:{e}'})
     return stats
 
 
@@ -1548,14 +1658,14 @@ async def _comment_poller_loop():
         try:
             cursor = db.users.find({'instagramConnected': True})
             users = await cursor.to_list(500)
+            logger.info('polling_started accounts=%s', len(users))
             for u in users:
                 try:
                     s = await _poll_user_comments(u)
-                    if s.get('media'):
-                        any_new = sum((v.get('new') or 0) for v in s['media'].values() if isinstance(v, dict))
-                        if any_new:
-                            logger.info('Poller user=%s new_comments=%s media=%s',
-                                        u.get('email'), any_new, list(s['media'].keys()))
+                    if s.get('newComments'):
+                        logger.info('polling_user_summary user=%s new=%s matched=%s ok=%s fail=%s',
+                                    u.get('email'), s['newComments'], s['matched'],
+                                    s['actionsSucceeded'], s['actionsFailed'])
                 except Exception:
                     logger.exception('Poller per-user error for %s', u.get('id'))
         except Exception:
@@ -1574,6 +1684,359 @@ async def instagram_poll_now(email: str, key: str):
         raise HTTPException(404, 'user not found')
     stats = await _poll_user_comments(u)
     return stats
+
+
+@api.post('/instagram/comments/poll-now')
+async def instagram_comments_poll_now(user_id: str = Depends(get_current_user_id)):
+    """Authenticated trigger: poll comments for the calling user right now.
+    Returns a summary in the documented shape."""
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    if not u.get('instagramConnected'):
+        return {
+            'ok': False, 'accountsChecked': 0, 'mediaChecked': 0,
+            'commentsSeen': 0, 'newComments': 0, 'matched': 0,
+            'actionsSucceeded': 0, 'actionsFailed': 0,
+            'errors': [{'error': 'instagram_not_connected'}],
+        }
+    s = await _poll_user_comments(u)
+    return {
+        'ok': True,
+        'accountsChecked': 1,
+        'mediaChecked': s.get('mediaChecked', 0),
+        'commentsSeen': s.get('commentsSeen', 0),
+        'newComments': s.get('newComments', 0),
+        'matched': s.get('matched', 0),
+        'actionsSucceeded': s.get('actionsSucceeded', 0),
+        'actionsFailed': s.get('actionsFailed', 0),
+        'errors': s.get('errors', []),
+    }
+
+
+@api.get('/instagram/comments/processed')
+async def instagram_comments_processed(
+    limit: int = 50,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Diagnostic: list recently processed comments for the calling user."""
+    limit = max(1, min(limit, 200))
+    cur = db.comments.find({'user_id': user_id}).sort('created', -1).limit(limit)
+    items = await cur.to_list(limit)
+    out = []
+    for d in items:
+        d.pop('_id', None)
+        for k in ('created', 'processed_at'):
+            if isinstance(d.get(k), datetime):
+                d[k] = d[k].isoformat()
+        out.append({
+            'id': d.get('id'),
+            'igCommentId': d.get('ig_comment_id'),
+            'mediaId': d.get('media_id'),
+            'commenterUsername': d.get('commenter_username'),
+            'text': d.get('text'),
+            'source': d.get('source'),
+            'ruleId': d.get('rule_id'),
+            'matched': bool(d.get('matched')),
+            'actionStatus': d.get('action_status'),
+            'error': d.get('error'),
+            'timestamp': d.get('timestamp'),
+            'processedAt': d.get('processed_at'),
+            'created': d.get('created'),
+        })
+    return {'count': len(out), 'items': out}
+
+
+@api.get('/instagram/diagnostics/full')
+async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)):
+    """Comprehensive end-to-end diagnostic.
+    Hits Graph API directly with the stored token and reports every layer.
+    Token values are never returned."""
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+
+    token = u.get('meta_access_token') or ''
+    ig_user_id = u.get('ig_user_id') or ''
+    redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
+    webhook_url = f"{BACKEND_PUBLIC_URL}/api/meta/webhook"
+
+    runtime = {
+        'appIdConfigured': bool(IG_APP_ID),
+        'appSecretConfigured': bool(IG_APP_SECRET),
+        'verifyTokenConfigured': bool(META_VERIFY_TOKEN),
+        'graphApiVersion': 'v21.0',
+        'graphHost': 'graph.instagram.com',
+        'redirectUri': redirect_uri,
+        'webhookUrl': webhook_url,
+        'frontendUrl': FRONTEND_URL,
+        'pollingEnabled': IG_POLL_ENABLED,
+        'pollingIntervalSeconds': IG_POLL_INTERVAL_SECONDS,
+    }
+
+    account = {
+        'connected': bool(u.get('instagramConnected')),
+        'igUserId': ig_user_id,
+        'username': u.get('instagramHandle'),
+        'followers': u.get('instagramFollowers', 0),
+        'tokenExists': bool(token),
+        'tokenExpired': None,
+        'tokenAppId': None,
+        'scopes': [],
+        'accountType': None,
+        'authKind': u.get('ig_auth_kind'),
+        'lastSubscribeStatus': u.get('ig_subscribe_status'),
+    }
+
+    # --- Active comment rules ---
+    automations = await db.automations.find(
+        {'user_id': user_id, 'status': 'active'}
+    ).to_list(200)
+    media_ids = await _collect_target_media_ids(u, automations) if (token and ig_user_id) else []
+    rules = {
+        'activeCount': len(automations),
+        'activeCommentRules': sum(
+            1 for a in automations
+            if (a.get('trigger') or '').lower().startswith('comment:')
+        ),
+        'mediaIds': media_ids,
+        'rulesPreview': [
+            {
+                'id': a.get('id'),
+                'name': a.get('name'),
+                'trigger': a.get('trigger'),
+                'mediaId': a.get('trigger_media_id') or a.get('media_id'),
+                'keyword': a.get('keyword'),
+                'match': a.get('match'),
+            } for a in automations[:10]
+        ],
+    }
+
+    subscriptions = {'subscribedFields': [], 'raw': None, 'error': None}
+    media_list = []
+    comments_readability = []
+    recent_errors = []
+
+    if token and ig_user_id:
+        async with httpx.AsyncClient(timeout=20) as c:
+            # 1) debug_token
+            try:
+                r = await c.get(
+                    'https://graph.facebook.com/debug_token',
+                    params={'input_token': token,
+                            'access_token': f'{IG_APP_ID}|{IG_APP_SECRET}'},
+                )
+                if r.status_code == 200:
+                    d = (r.json() or {}).get('data') or {}
+                    account['tokenAppId'] = d.get('app_id')
+                    account['scopes'] = d.get('scopes') or d.get('granular_scopes') and \
+                        [s.get('scope') for s in d.get('granular_scopes', [])] or d.get('scopes', [])
+                    if isinstance(d.get('scopes'), list):
+                        account['scopes'] = d['scopes']
+                    expires_at = d.get('expires_at') or d.get('data_access_expires_at')
+                    if expires_at:
+                        account['tokenExpired'] = (expires_at != 0 and expires_at < int(datetime.utcnow().timestamp()))
+                    account['tokenIsValid'] = bool(d.get('is_valid'))
+                else:
+                    recent_errors.append({'step': 'debug_token', 'http': r.status_code, 'body': r.text[:300]})
+            except Exception as e:
+                recent_errors.append({'step': 'debug_token', 'error': str(e)[:200]})
+
+            # 2) /me
+            try:
+                r = await c.get(
+                    'https://graph.instagram.com/v21.0/me',
+                    params={'access_token': token,
+                            'fields': 'user_id,username,account_type'},
+                )
+                if r.status_code == 200:
+                    d = r.json() or {}
+                    account['username'] = '@' + d.get('username') if d.get('username') else account['username']
+                    account['accountType'] = d.get('account_type')
+                else:
+                    recent_errors.append({'step': 'me', 'http': r.status_code, 'body': r.text[:300]})
+            except Exception as e:
+                recent_errors.append({'step': 'me', 'error': str(e)[:200]})
+
+            # 3) /{ig_user_id}/media
+            try:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{ig_user_id}/media',
+                    params={'access_token': token,
+                            'fields': 'id,caption,comments_count,media_type,permalink,timestamp',
+                            'limit': 25},
+                )
+                if r.status_code == 200:
+                    media_list = (r.json() or {}).get('data') or []
+                else:
+                    recent_errors.append({'step': 'media', 'http': r.status_code, 'body': r.text[:300]})
+            except Exception as e:
+                recent_errors.append({'step': 'media', 'error': str(e)[:200]})
+
+            # 4) /{media_id}/comments for each active rule's media (or fall back to first 5 media)
+            check_media = list(media_ids) if media_ids else [m.get('id') for m in media_list[:5] if m.get('id')]
+            count_lookup = {m.get('id'): m.get('comments_count', 0) for m in media_list}
+            for mid in check_media[:10]:
+                row = {'mediaId': mid, 'commentsCount': count_lookup.get(mid),
+                       'commentsReturned': 0, 'readable': False,
+                       'mismatch': False, 'likelyCause': None, 'http': None}
+                try:
+                    r = await c.get(
+                        f'https://graph.instagram.com/v21.0/{mid}/comments',
+                        params={'access_token': token,
+                                'fields': 'id,text,username,timestamp,from',
+                                'limit': 25},
+                    )
+                    row['http'] = r.status_code
+                    if r.status_code == 200:
+                        items = (r.json() or {}).get('data') or []
+                        row['commentsReturned'] = len(items)
+                        row['readable'] = True
+                        # If counter is missing, try fetching it now
+                        if row['commentsCount'] is None:
+                            try:
+                                rm = await c.get(
+                                    f'https://graph.instagram.com/v21.0/{mid}',
+                                    params={'access_token': token,
+                                            'fields': 'comments_count'},
+                                )
+                                if rm.status_code == 200:
+                                    row['commentsCount'] = (rm.json() or {}).get('comments_count')
+                            except Exception:
+                                pass
+                        cc = row['commentsCount'] or 0
+                        if cc > 0 and len(items) == 0:
+                            row['mismatch'] = True
+                            row['likelyCause'] = (
+                                'comments_count > 0 but /comments returned []. '
+                                'Most likely Meta access-tier filter — '
+                                'instagram_business_manage_comments needs Advanced Access '
+                                '(App Review) to read comments from non-tester accounts.'
+                            )
+                    else:
+                        row['error'] = r.text[:300]
+                        row['likelyCause'] = f'Graph API returned {r.status_code}.'
+                except Exception as e:
+                    row['error'] = str(e)[:200]
+                comments_readability.append(row)
+
+            # 5) /{ig_user_id}/subscribed_apps
+            try:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    params={'access_token': token},
+                )
+                if r.status_code == 200:
+                    body = r.json() or {}
+                    fields = []
+                    for app in body.get('data') or []:
+                        for f in app.get('subscribed_fields') or []:
+                            if f not in fields:
+                                fields.append(f)
+                    subscriptions['subscribedFields'] = fields
+                    subscriptions['raw'] = body
+                else:
+                    subscriptions['error'] = f'http {r.status_code}: {r.text[:300]}'
+            except Exception as e:
+                subscriptions['error'] = str(e)[:200]
+
+    # Recent processed comments
+    recent_cur = db.comments.find({'user_id': user_id}).sort('created', -1).limit(20)
+    recent_items = await recent_cur.to_list(20)
+    recent_processed = []
+    for d in recent_items:
+        d.pop('_id', None)
+        for k in ('created', 'processed_at'):
+            if isinstance(d.get(k), datetime):
+                d[k] = d[k].isoformat()
+        recent_processed.append({
+            'igCommentId': d.get('ig_comment_id'),
+            'mediaId': d.get('media_id'),
+            'commenterUsername': d.get('commenter_username'),
+            'text': (d.get('text') or '')[:120],
+            'source': d.get('source'),
+            'matched': bool(d.get('matched')),
+            'actionStatus': d.get('action_status'),
+            'error': d.get('error'),
+            'created': d.get('created'),
+        })
+
+    # Recent webhook events (counts by field)
+    wh_cursor = db.webhook_log.find().sort('received', -1).limit(50)
+    wh_recent = await wh_cursor.to_list(50)
+    wh_field_counts: dict = {}
+    for w in wh_recent:
+        try:
+            for entry in (w.get('payload') or {}).get('entry', []):
+                for ch in entry.get('changes', []):
+                    f = ch.get('field') or 'unknown'
+                    wh_field_counts[f] = wh_field_counts.get(f, 0) + 1
+                if entry.get('messaging'):
+                    wh_field_counts['messaging'] = wh_field_counts.get('messaging', 0) + len(entry['messaging'])
+        except Exception:
+            pass
+
+    # ---- Status logic ----
+    instagram_connected = account['connected'] and account['tokenExists']
+    comments_readable = any(r.get('readable') and not r.get('mismatch') and (r.get('commentsReturned', 0) > 0 or (r.get('commentsCount') or 0) == 0)
+                            for r in comments_readability)
+    any_mismatch = any(r.get('mismatch') for r in comments_readability)
+    comments_webhook_subscribed = 'comments' in subscriptions['subscribedFields']
+    has_active_comment_rule = rules['activeCommentRules'] > 0
+    valid_media = bool(media_ids)
+
+    blocker_reason = None
+    if not instagram_connected:
+        blocker_reason = 'instagram_not_connected'
+    elif not has_active_comment_rule:
+        blocker_reason = 'no_active_comment_rule'
+    elif not valid_media:
+        blocker_reason = 'no_media_id_resolved_for_rule'
+    elif not comments_webhook_subscribed:
+        blocker_reason = 'webhook_not_subscribed_to_comments_field'
+    elif any_mismatch:
+        blocker_reason = 'meta_access_gate_filtering_comments'
+    elif not comments_readable and any(r.get('http') and r['http'] != 200 for r in comments_readability):
+        blocker_reason = 'graph_api_comments_endpoint_error'
+
+    comments_automation_ready = (
+        instagram_connected and has_active_comment_rule and valid_media
+        and comments_webhook_subscribed and (comments_readable or not any_mismatch)
+    )
+
+    return {
+        'runtime': runtime,
+        'account': account,
+        'rules': rules,
+        'subscriptions': subscriptions,
+        'media': [
+            {
+                'id': m.get('id'),
+                'mediaType': m.get('media_type'),
+                'commentsCount': m.get('comments_count'),
+                'permalink': m.get('permalink'),
+                'timestamp': m.get('timestamp'),
+                'caption': (m.get('caption') or '')[:80],
+            } for m in media_list[:10]
+        ],
+        'commentsReadability': comments_readability,
+        'polling': {
+            'enabled': IG_POLL_ENABLED,
+            'intervalSeconds': IG_POLL_INTERVAL_SECONDS,
+        },
+        'webhookFieldCountsRecent50': wh_field_counts,
+        'recentProcessedComments': recent_processed,
+        'recentErrors': recent_errors,
+        'status': {
+            'instagramConnected': instagram_connected,
+            'commentsReadable': comments_readable,
+            'commentsWebhookSubscribed': comments_webhook_subscribed,
+            'hasActiveCommentRule': has_active_comment_rule,
+            'validMediaId': valid_media,
+            'commentsAutomationReady': comments_automation_ready,
+            'blockerReason': blocker_reason,
+        },
+    }
 
 
 # ---------------- root ----------------
