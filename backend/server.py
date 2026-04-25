@@ -45,6 +45,25 @@ api = APIRouter(prefix='/api')
 logger = logging.getLogger('mychat')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
+# Silence libraries that log full request URLs at INFO. httpx/httpcore otherwise
+# emit lines like "HTTP Request: GET .../comments?access_token=IGAA..." which
+# leaks the user's IG long-lived token into Railway log retention.
+for _noisy in ('httpx', 'httpcore', 'httpcore.http11', 'httpcore.connection'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+def _redact_secrets(value):
+    """Recursively redact obvious credential keys from dicts/strings before
+    they hit the log stream or HTTP response bodies."""
+    SECRET_KEYS = {'access_token', 'meta_access_token', 'client_secret',
+                   'app_secret', 'refresh_token', 'token', 'authorization'}
+    if isinstance(value, dict):
+        return {k: ('***REDACTED***' if k.lower() in SECRET_KEYS else _redact_secrets(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
+
 
 # ---------------- WebSocket manager ----------------
 class ConnectionManager:
@@ -749,8 +768,9 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
             token = data.get('access_token')
             ig_user_id_from_oauth = str(data.get('user_id') or '')
             if not token:
-                logger.error('IG token exchange failed: %s', data)
-                raise HTTPException(400, f'Token exchange failed: {data}')
+                safe = _redact_secrets(data)
+                logger.error('IG token exchange failed: %s', safe)
+                raise HTTPException(400, f'Token exchange failed: {safe}')
             # 2) Exchange short-lived for long-lived IG user token (60 days)
             ll = await c.get(
                 'https://graph.instagram.com/access_token',
