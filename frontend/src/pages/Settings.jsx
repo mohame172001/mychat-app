@@ -204,13 +204,52 @@ const Settings = () => {
                                   <td className="font-mono">{r.mediaId}</td>
                                   <td>{r.commentsCount ?? '—'}</td>
                                   <td>{r.commentsReturned}</td>
-                                  <td className={r.mismatch ? 'text-rose-700' : (r.readable ? 'text-emerald-700' : 'text-slate-500')}>
-                                    {r.mismatch ? 'gated' : (r.readable ? 'ok' : 'error')}
+                                  <td className={r.gated ? 'text-rose-700' : (r.readable ? 'text-emerald-700' : 'text-slate-500')}>
+                                    {r.gated ? 'gated' : (r.readable ? 'ok' : 'error')}
                                   </td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
+                          {diag.commentsReadability.some(r => r.gated) && (
+                            <div className="mt-2 p-3 rounded-md bg-rose-50 border border-rose-200 text-rose-900 text-xs">
+                              <b>Meta can see comment count, but this app cannot read comment contents.</b>
+                              {' '}This indicates Meta access gate / Advanced Access requirement for{' '}
+                              <code>instagram_business_manage_comments</code>.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {diag.classification && (
+                        <div className="mt-3 p-3 rounded-md bg-white border border-slate-200">
+                          <div className="font-semibold mb-2">Final classification</div>
+                          <table className="w-full text-xs">
+                            <tbody>
+                              {[
+                                ['App connection', diag.classification.appConnection],
+                                ['Media mapping', diag.classification.mediaMapping],
+                                ['Comment webhook subscription', diag.classification.commentWebhookSubscription],
+                                ['Graph comments readability', diag.classification.graphCommentsReadability],
+                              ].map(([k, v]) => (
+                                <tr key={k}>
+                                  <td className="py-0.5">{k}</td>
+                                  <td className={
+                                    v === 'OK' ? 'text-emerald-700 font-semibold' :
+                                    v === 'BLOCKED' ? 'text-rose-700 font-semibold' :
+                                    'text-amber-700 font-semibold'
+                                  }>{v}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {diag.classification.requiredNextStep && (
+                            <div className="mt-2 text-xs">
+                              <b>Required next step:</b> {diag.classification.requiredNextStep}
+                            </div>
+                          )}
+                          {diag.classification.note && (
+                            <div className="mt-1 text-xs text-slate-600">{diag.classification.note}</div>
+                          )}
                         </div>
                       )}
                       {diag.recentErrors?.length > 0 && (

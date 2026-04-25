@@ -1839,28 +1839,51 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
 
     if token and ig_user_id:
         async with httpx.AsyncClient(timeout=20) as c:
-            # 1) debug_token
-            try:
-                r = await c.get(
-                    'https://graph.facebook.com/debug_token',
-                    params={'input_token': token,
-                            'access_token': f'{IG_APP_ID}|{IG_APP_SECRET}'},
-                )
-                if r.status_code == 200:
-                    d = (r.json() or {}).get('data') or {}
-                    account['tokenAppId'] = d.get('app_id')
-                    account['scopes'] = d.get('scopes') or d.get('granular_scopes') and \
-                        [s.get('scope') for s in d.get('granular_scopes', [])] or d.get('scopes', [])
-                    if isinstance(d.get('scopes'), list):
-                        account['scopes'] = d['scopes']
-                    expires_at = d.get('expires_at') or d.get('data_access_expires_at')
-                    if expires_at:
-                        account['tokenExpired'] = (expires_at != 0 and expires_at < int(datetime.utcnow().timestamp()))
-                    account['tokenIsValid'] = bool(d.get('is_valid'))
-                else:
-                    recent_errors.append({'step': 'debug_token', 'http': r.status_code, 'body': r.text[:300]})
-            except Exception as e:
-                recent_errors.append({'step': 'debug_token', 'error': str(e)[:200]})
+            # 1) debug_token — diagnostic-only, never affects blockerReason.
+            #    IG Business Login tokens are issued by graph.instagram.com; the
+            #    Facebook-graph debug_token endpoint frequently 400s for them.
+            #    Try the IG host first, then fall back to FB host. Both errors
+            #    are recorded but classified as 'diagnostic_only'.
+            app_access_token = f'{IG_APP_ID}|{IG_APP_SECRET}'
+            debug_attempts = []
+            for host in ('graph.instagram.com', 'graph.facebook.com'):
+                try:
+                    r = await c.get(
+                        f'https://{host}/debug_token',
+                        params={'input_token': token,
+                                'access_token': app_access_token},
+                    )
+                    if r.status_code == 200:
+                        d = (r.json() or {}).get('data') or {}
+                        account['tokenAppId'] = d.get('app_id')
+                        scopes = d.get('scopes')
+                        if not scopes and d.get('granular_scopes'):
+                            scopes = [s.get('scope') for s in d.get('granular_scopes', []) if s.get('scope')]
+                        account['scopes'] = scopes or []
+                        expires_at = d.get('expires_at') or d.get('data_access_expires_at')
+                        if expires_at:
+                            account['tokenExpired'] = (
+                                expires_at != 0 and expires_at < int(datetime.utcnow().timestamp())
+                            )
+                        account['tokenIsValid'] = bool(d.get('is_valid'))
+                        account['debugTokenHost'] = host
+                        debug_attempts = []  # success — drop earlier failures
+                        break
+                    else:
+                        # Sanitize the error body before recording — Meta's
+                        # error responses don't normally include the token,
+                        # but redact defensively.
+                        try:
+                            body = _redact_secrets(r.json())
+                        except Exception:
+                            body = r.text[:300]
+                        debug_attempts.append({'host': host, 'http': r.status_code, 'body': body})
+                except Exception as e:
+                    debug_attempts.append({'host': host, 'error': str(e)[:200]})
+            for a in debug_attempts:
+                # Mark diagnostic-only so UI/log readers don't treat it as a blocker.
+                a['classification'] = 'diagnostic_only'
+                recent_errors.append({'step': 'debug_token', **a})
 
             # 2) /me
             try:
@@ -1927,11 +1950,12 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
                         cc = row['commentsCount'] or 0
                         if cc > 0 and len(items) == 0:
                             row['mismatch'] = True
+                            row['gated'] = True
                             row['likelyCause'] = (
-                                'comments_count > 0 but /comments returned []. '
-                                'Most likely Meta access-tier filter — '
-                                'instagram_business_manage_comments needs Advanced Access '
-                                '(App Review) to read comments from non-tester accounts.'
+                                'Meta can see comment count, but this app cannot read '
+                                'comment contents. This indicates Meta access gate / '
+                                'Advanced Access requirement for '
+                                'instagram_business_manage_comments.'
                             )
                     else:
                         row['error'] = r.text[:300]
@@ -2024,11 +2048,40 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
         and comments_webhook_subscribed and (comments_readable or not any_mismatch)
     )
 
+    # ---- Final classification panel (high-level, human-readable) ----
+    def _verdict(ok, blocked=False):
+        return 'BLOCKED' if blocked else ('OK' if ok else 'NOT_READY')
+    classification = {
+        'appConnection': _verdict(instagram_connected),
+        'mediaMapping': _verdict(valid_media),
+        'commentWebhookSubscription': _verdict(comments_webhook_subscribed),
+        'graphCommentsReadability': _verdict(comments_readable, blocked=any_mismatch),
+        'requiredNextStep': (
+            'App Review / Advanced Access for instagram_business_manage_comments'
+            if any_mismatch else (
+                None if comments_automation_ready else
+                ('Connect Instagram' if not instagram_connected else
+                 'Add an active comment automation rule' if not has_active_comment_rule else
+                 'Resolve a valid mediaId for the rule' if not valid_media else
+                 'Subscribe webhook to comments field' if not comments_webhook_subscribed else
+                 'Investigate Graph API errors')
+            )
+        ),
+        'note': (
+            'Token, code, media mapping, webhook subscription and polling are all OK. '
+            'Comment contents are filtered at the Meta access-tier gate.'
+            if any_mismatch and instagram_connected and has_active_comment_rule
+               and valid_media and comments_webhook_subscribed
+            else None
+        ),
+    }
+
     return {
         'runtime': runtime,
         'account': account,
         'rules': rules,
         'subscriptions': subscriptions,
+        'classification': classification,
         'media': [
             {
                 'id': m.get('id'),
