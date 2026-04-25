@@ -132,6 +132,26 @@ class MessageModel(BaseModel):
     model_config = {'populate_by_name': True}
 
 
+class DmRuleIn(BaseModel):
+    name: str
+    keyword: str
+    matchMode: str = 'contains'  # exact | contains | starts_with
+    replyText: str
+    isActive: bool = True
+
+
+class DmRulePatch(BaseModel):
+    name: Optional[str] = None
+    keyword: Optional[str] = None
+    matchMode: Optional[str] = None
+    replyText: Optional[str] = None
+    isActive: Optional[bool] = None
+
+
+class DmTestIn(BaseModel):
+    text: str
+
+
 class Conversation(BaseModel):
     id: str = Field(default_factory=_id)
     user_id: str

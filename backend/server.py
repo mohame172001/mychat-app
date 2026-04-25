@@ -18,6 +18,7 @@ from models import (
     ContactIn, ContactPatch, Contact,
     BroadcastIn, BroadcastPatch, Broadcast,
     MessageIn, Conversation,
+    DmRuleIn, DmRulePatch, DmTestIn,
 )
 from auth_utils import hash_password, verify_password, create_token, get_current_user_id, decode_token
 
@@ -1438,6 +1439,146 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                          ig_comment_id, automation.get('id'), e)
 
 
+# ---------------- DM Automation (independent from Comments) ----------------
+def _dm_match(text: str, keyword: str, mode: str) -> bool:
+    """Match incoming DM text against a rule keyword. Case-insensitive."""
+    if not text or not keyword:
+        return False
+    t = text.strip().lower()
+    k = keyword.strip().lower()
+    if not t or not k:
+        return False
+    if mode == 'exact':
+        return t == k
+    if mode == 'starts_with':
+        return t.startswith(k)
+    # default: contains
+    return k in t
+
+
+async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'webhook'):
+    """Process one incoming Instagram DM event for DM automation.
+
+    event keys (from Meta Messenger payload):
+      sender_id, message_id, text, timestamp, is_echo
+    Returns dict: {processed, matched, status, rule_id, log_id}
+    Status values: received | matched | replied | failed | skipped
+    """
+    import uuid as _uuid
+    user_id = user_doc['id']
+    ig_account_id = user_doc.get('ig_user_id') or ''
+    sender_id = event.get('sender_id')
+    message_id = event.get('message_id')
+    text = event.get('text') or ''
+    is_echo = bool(event.get('is_echo'))
+    ts = event.get('timestamp')
+
+    logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s',
+                ig_account_id, sender_id, message_id, is_echo)
+
+    # Filter: echoes (messages we sent) and self-sends
+    if is_echo or (sender_id and sender_id == ig_account_id):
+        return {'processed': False, 'status': 'skipped', 'reason': 'echo_or_self'}
+    if not sender_id or not message_id:
+        return {'processed': False, 'status': 'skipped', 'reason': 'missing_id'}
+
+    logger.info('dm_sender_extracted sender=%s', sender_id)
+    logger.info('dm_text_extracted len=%s preview=%r', len(text), text[:80])
+
+    # Dedup: if this message_id was already processed for this user, skip.
+    existing = await db.dm_logs.find_one({'user_id': user_id, 'message_id': message_id})
+    if existing:
+        logger.info('dm_message_duplicate_skipped msg_id=%s', message_id)
+        return {'processed': False, 'status': 'skipped', 'reason': 'duplicate',
+                'log_id': existing.get('id')}
+
+    # Load active DM rules for this user
+    rules = await db.dm_rules.find(
+        {'user_id': user_id, 'is_active': True}
+    ).to_list(200)
+    logger.info('dm_rule_loaded count=%s user=%s', len(rules), user_doc.get('email'))
+
+    matched_rule = None
+    for r in rules:
+        if _dm_match(text, r.get('keyword') or '', (r.get('match_mode') or 'contains').lower()):
+            matched_rule = r
+            break
+
+    rule_id = matched_rule.get('id') if matched_rule else None
+    if matched_rule:
+        logger.info('dm_rule_matched rule_id=%s msg_id=%s', rule_id, message_id)
+    else:
+        logger.info('dm_rule_not_matched msg_id=%s', message_id)
+
+    now = datetime.utcnow()
+    log_doc = {
+        'id': str(_uuid.uuid4()),
+        'user_id': user_id,
+        'ig_user_id': ig_account_id,
+        'sender_id': sender_id,
+        'message_id': message_id,
+        'incoming_text': text,
+        'matched_rule_id': rule_id,
+        'reply_text': matched_rule.get('reply_text') if matched_rule else None,
+        'status': 'matched' if matched_rule else 'skipped',
+        'error': None,
+        'source': source,
+        'timestamp': ts,
+        'created': now,
+    }
+    try:
+        await db.dm_logs.insert_one(log_doc)
+    except Exception as e:
+        # Race against unique index — another worker inserted first.
+        logger.info('dm_log_insert_race msg_id=%s err=%s', message_id, e)
+        return {'processed': False, 'status': 'skipped', 'reason': 'race'}
+
+    if not matched_rule:
+        return {'processed': True, 'matched': False, 'status': 'skipped',
+                'log_id': log_doc['id']}
+
+    # Send the reply via Meta Messaging API (real call, no fake success)
+    reply_text = (matched_rule.get('reply_text') or '').strip()
+    if not reply_text:
+        await db.dm_logs.update_one(
+            {'id': log_doc['id']},
+            {'$set': {'status': 'failed', 'error': 'rule_has_empty_reply_text'}}
+        )
+        return {'processed': True, 'matched': True, 'status': 'failed',
+                'rule_id': rule_id, 'log_id': log_doc['id']}
+
+    logger.info('dm_reply_started rule_id=%s msg_id=%s', rule_id, message_id)
+    ok = False
+    err = None
+    try:
+        ok = await send_ig_dm(
+            user_doc.get('meta_access_token', ''),
+            ig_account_id,
+            sender_id,
+            reply_text,
+        )
+    except Exception as e:
+        err = str(e)[:500]
+
+    if ok:
+        await db.dm_logs.update_one(
+            {'id': log_doc['id']},
+            {'$set': {'status': 'replied'}}
+        )
+        logger.info('dm_reply_success rule_id=%s msg_id=%s', rule_id, message_id)
+        return {'processed': True, 'matched': True, 'status': 'replied',
+                'rule_id': rule_id, 'log_id': log_doc['id']}
+    else:
+        await db.dm_logs.update_one(
+            {'id': log_doc['id']},
+            {'$set': {'status': 'failed', 'error': err or 'meta_send_returned_false'}}
+        )
+        logger.warning('dm_reply_failed rule_id=%s msg_id=%s err=%s',
+                       rule_id, message_id, err)
+        return {'processed': True, 'matched': True, 'status': 'failed',
+                'rule_id': rule_id, 'log_id': log_doc['id'], 'error': err}
+
+
 async def _process_webhook(payload: dict):
     """Process Instagram webhook events asynchronously."""
     try:
@@ -1492,7 +1633,7 @@ async def _process_webhook(payload: dict):
                 # Push to live WS if user is connected
                 await ws_manager.send(user_id, {'type': 'incoming', 'conv_id': conv_id, 'message': incoming})
 
-                # Match automations by keyword trigger
+                # Match automations by keyword trigger (legacy flow builder)
                 automations = await db.automations.find(
                     {'user_id': user_id, 'status': 'active'}
                 ).to_list(100)
@@ -1504,6 +1645,20 @@ async def _process_webhook(payload: dict):
                             asyncio.create_task(execute_flow(user_doc, auto, sender_id, msg_text))
                     elif trigger == 'new follower' and event.get('follow'):
                         asyncio.create_task(execute_flow(user_doc, auto, sender_id, msg_text))
+
+                # New independent DM Automation: process via dedicated handler.
+                # This is fully separate from comment automation and from the
+                # legacy flow-builder above. It uses db.dm_rules / db.dm_logs.
+                try:
+                    await _handle_new_dm_message(user_doc, {
+                        'sender_id': sender_id,
+                        'message_id': msg_obj.get('mid'),
+                        'text': msg_text,
+                        'timestamp': event.get('timestamp'),
+                        'is_echo': bool(msg_obj.get('is_echo')),
+                    }, source='webhook')
+                except Exception:
+                    logger.exception('DM automation handler error')
 
             for change in entry.get('changes', []):
                 field = change.get('field')
@@ -2112,6 +2267,209 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
     }
 
 
+# ---------------- DM Automation API ----------------
+_DM_VALID_MODES = {'exact', 'contains', 'starts_with'}
+
+
+def _dm_rule_out(d: dict) -> dict:
+    if not d:
+        return d
+    return {
+        'id': d.get('id'),
+        'name': d.get('name'),
+        'keyword': d.get('keyword'),
+        'matchMode': d.get('match_mode'),
+        'replyText': d.get('reply_text'),
+        'isActive': bool(d.get('is_active')),
+        'createdAt': d.get('created_at').isoformat() if isinstance(d.get('created_at'), datetime) else d.get('created_at'),
+        'updatedAt': d.get('updated_at').isoformat() if isinstance(d.get('updated_at'), datetime) else d.get('updated_at'),
+    }
+
+
+@api.get('/instagram/dm/rules')
+async def list_dm_rules(user_id: str = Depends(get_current_user_id)):
+    rows = await db.dm_rules.find({'user_id': user_id}).sort('created_at', -1).to_list(500)
+    return {'items': [_dm_rule_out(r) for r in rows], 'count': len(rows)}
+
+
+@api.post('/instagram/dm/rules')
+async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_user_id)):
+    import uuid as _uuid
+    mode = (data.matchMode or 'contains').lower()
+    if mode not in _DM_VALID_MODES:
+        raise HTTPException(400, f'matchMode must be one of {sorted(_DM_VALID_MODES)}')
+    if not data.name.strip() or not data.keyword.strip() or not data.replyText.strip():
+        raise HTTPException(400, 'name, keyword and replyText are required')
+    u = await db.users.find_one({'id': user_id})
+    now = datetime.utcnow()
+    doc = {
+        'id': str(_uuid.uuid4()),
+        'user_id': user_id,
+        'ig_user_id': u.get('ig_user_id') if u else None,
+        'name': data.name.strip(),
+        'keyword': data.keyword.strip(),
+        'match_mode': mode,
+        'reply_text': data.replyText,
+        'is_active': bool(data.isActive),
+        'created_at': now,
+        'updated_at': now,
+    }
+    await db.dm_rules.insert_one(doc)
+    return _dm_rule_out(doc)
+
+
+@api.patch('/instagram/dm/rules/{rid}')
+async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_current_user_id)):
+    update: dict = {'updated_at': datetime.utcnow()}
+    if data.name is not None:
+        update['name'] = data.name.strip()
+    if data.keyword is not None:
+        update['keyword'] = data.keyword.strip()
+    if data.matchMode is not None:
+        mode = data.matchMode.lower()
+        if mode not in _DM_VALID_MODES:
+            raise HTTPException(400, f'matchMode must be one of {sorted(_DM_VALID_MODES)}')
+        update['match_mode'] = mode
+    if data.replyText is not None:
+        update['reply_text'] = data.replyText
+    if data.isActive is not None:
+        update['is_active'] = bool(data.isActive)
+    res = await db.dm_rules.update_one({'id': rid, 'user_id': user_id}, {'$set': update})
+    if res.matched_count == 0:
+        raise HTTPException(404, 'rule not found')
+    doc = await db.dm_rules.find_one({'id': rid, 'user_id': user_id})
+    return _dm_rule_out(doc)
+
+
+@api.delete('/instagram/dm/rules/{rid}')
+async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.dm_rules.delete_one({'id': rid, 'user_id': user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, 'rule not found')
+    return {'ok': True}
+
+
+@api.post('/instagram/dm/test-rule')
+async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_user_id)):
+    """Match `text` against the user's active rules without sending anything."""
+    rules = await db.dm_rules.find(
+        {'user_id': user_id, 'is_active': True}
+    ).to_list(200)
+    matches = []
+    for r in rules:
+        if _dm_match(data.text, r.get('keyword') or '',
+                     (r.get('match_mode') or 'contains').lower()):
+            matches.append({
+                'ruleId': r.get('id'),
+                'name': r.get('name'),
+                'keyword': r.get('keyword'),
+                'matchMode': r.get('match_mode'),
+                'replyText': r.get('reply_text'),
+            })
+    return {
+        'inputText': data.text,
+        'matchCount': len(matches),
+        'firstMatch': matches[0] if matches else None,
+        'allMatches': matches,
+    }
+
+
+@api.get('/instagram/dm/logs')
+async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_id)):
+    limit = max(1, min(limit, 200))
+    rows = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(limit).to_list(limit)
+    out = []
+    for d in rows:
+        d.pop('_id', None)
+        created = d.get('created')
+        out.append({
+            'id': d.get('id'),
+            'senderId': d.get('sender_id'),
+            'messageId': d.get('message_id'),
+            'incomingText': d.get('incoming_text'),
+            'matchedRuleId': d.get('matched_rule_id'),
+            'replyText': d.get('reply_text'),
+            'status': d.get('status'),
+            'error': d.get('error'),
+            'source': d.get('source'),
+            'created': created.isoformat() if isinstance(created, datetime) else created,
+        })
+    return {'items': out, 'count': len(out)}
+
+
+@api.get('/instagram/dm/diagnostics')
+async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    ig_user_id = u.get('ig_user_id') or ''
+    token = u.get('meta_access_token') or ''
+    connected = bool(u.get('instagramConnected') and token and ig_user_id)
+
+    # messaging webhook subscription state — read live from Graph
+    messaging_subscribed = False
+    subscription_error = None
+    if connected:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    params={'access_token': token},
+                )
+                if r.status_code == 200:
+                    body = r.json() or {}
+                    fields: list = []
+                    for app in body.get('data') or []:
+                        for f in app.get('subscribed_fields') or []:
+                            fields.append(f)
+                    messaging_subscribed = 'messages' in fields
+                else:
+                    subscription_error = f'http {r.status_code}'
+        except Exception as e:
+            subscription_error = str(e)[:200]
+
+    active_rules = await db.dm_rules.count_documents({'user_id': user_id, 'is_active': True})
+
+    # Recent messaging events (count from last 50 webhook log rows)
+    wh = await db.webhook_log.find().sort('received', -1).limit(50).to_list(50)
+    msg_events = 0
+    last_msg_at = None
+    for w in wh:
+        try:
+            for entry in (w.get('payload') or {}).get('entry', []):
+                ms = entry.get('messaging') or []
+                if ms:
+                    msg_events += len(ms)
+                    rec = w.get('received')
+                    if isinstance(rec, datetime) and (last_msg_at is None or rec > last_msg_at):
+                        last_msg_at = rec
+        except Exception:
+            pass
+
+    last_log = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(1).to_list(1)
+    last_reply_status = last_log[0].get('status') if last_log else 'none'
+
+    blocker_reason = None
+    if not connected:
+        blocker_reason = 'instagram_not_connected'
+    elif not messaging_subscribed:
+        blocker_reason = 'webhook_not_subscribed_to_messages_field'
+    elif active_rules == 0:
+        blocker_reason = 'no_active_dm_rule'
+
+    return {
+        'connected': connected,
+        'igUserId': ig_user_id,
+        'messagingWebhookSubscribed': messaging_subscribed,
+        'subscriptionError': subscription_error,
+        'activeDmRules': active_rules,
+        'recentMessagingEvents': msg_events,
+        'lastMessageAt': last_msg_at.isoformat() if last_msg_at else None,
+        'lastReplyStatus': last_reply_status,
+        'blockerReason': blocker_reason,
+    }
+
+
 # ---------------- root ----------------
 @api.get('/')
 async def root():
@@ -2193,6 +2551,20 @@ async def _startup():
         )
     except Exception as e:
         logger.warning('comments index create: %s', e)
+    # DM automation: dedup index on (user_id, message_id) so the same incoming
+    # DM is never replied to twice even if the webhook is replayed.
+    try:
+        await db.dm_logs.create_index(
+            [('user_id', 1), ('message_id', 1)],
+            unique=True, sparse=True, name='uniq_user_dm_message',
+        )
+    except Exception as e:
+        logger.warning('dm_logs index create: %s', e)
+    try:
+        await db.dm_rules.create_index([('user_id', 1), ('is_active', 1)],
+                                       name='dm_rules_user_active')
+    except Exception as e:
+        logger.warning('dm_rules index create: %s', e)
     if IG_POLL_ENABLED:
         _poll_task = asyncio.create_task(_comment_poller_loop())
     else:

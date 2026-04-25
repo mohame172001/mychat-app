@@ -14,6 +14,7 @@ import FlowBuilder from './pages/FlowBuilder';
 import Broadcasting from './pages/Broadcasting';
 import Comments from './pages/Comments';
 import Settings from './pages/Settings';
+import DmAutomation from './pages/DmAutomation';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import Terms from './pages/Terms';
 
@@ -42,6 +43,7 @@ function App() {
               <Route path="automations/:id" element={<FlowBuilder />} />
               <Route path="broadcasting" element={<Broadcasting />} />
               <Route path="comments" element={<Comments />} />
+              <Route path="dm-automation" element={<DmAutomation />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>
