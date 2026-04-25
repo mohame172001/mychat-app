@@ -64,6 +64,11 @@ const Login = () => {
             <p className="mt-6 text-sm text-center text-slate-600">
               Don’t have an account? <Link to="/signup" className="font-semibold text-slate-900 hover:underline">Sign up free</Link>
             </p>
+            <p className="mt-4 text-xs text-center text-slate-500">
+              <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>
+              <span className="mx-2">·</span>
+              <Link to="/terms" className="hover:text-slate-900 underline">Terms of Service</Link>
+            </p>
           </div>
         </div>
       </div>

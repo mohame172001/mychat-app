@@ -64,6 +64,12 @@ const Signup = () => {
             <p className="mt-6 text-sm text-center text-slate-600">
               Already have one? <Link to="/login" className="font-semibold text-slate-900 hover:underline">Log in</Link>
             </p>
+            <p className="mt-4 text-xs text-center text-slate-500">
+              By signing up you agree to our{' '}
+              <Link to="/terms" className="hover:text-slate-900 underline">Terms</Link>
+              {' '}and{' '}
+              <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>.
+            </p>
           </div>
         </div>
       </div>

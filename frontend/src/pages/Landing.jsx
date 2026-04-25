@@ -28,7 +28,8 @@ const Landing = () => {
             <a href="#features" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Features</a>
             <a href="#how" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">How it works</a>
             <a href="#pricing" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Pricing</a>
-            <a href="#testimonials" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Customers</a>
+            <Link to="/privacy" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Privacy</Link>
+            <Link to="/terms" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Terms</Link>
           </div>
           <div className="hidden md:flex items-center gap-3">
             <Link to="/login"><Button variant="ghost" className="text-slate-700">Log in</Button></Link>
@@ -47,6 +48,8 @@ const Landing = () => {
             <div className="px-6 py-4 flex flex-col gap-4">
               <a href="#features" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Features</a>
               <a href="#pricing" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Pricing</a>
+              <Link to="/privacy" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Privacy</Link>
+              <Link to="/terms" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Terms</Link>
               <Link to="/login"><Button variant="outline" className="w-full">Log in</Button></Link>
               <Link to="/signup"><Button className="w-full bg-slate-900 text-white">Get Started</Button></Link>
             </div>
