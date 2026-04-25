@@ -5,7 +5,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
-import { Inbox, Loader2, Trash2, RefreshCcw, Play } from 'lucide-react';
+import { Inbox, Loader2, Trash2, RefreshCcw, Play, Bug, Wifi } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
 
@@ -37,6 +37,9 @@ const DmAutomation = () => {
   const [saving, setSaving] = useState(false);
   const [testText, setTestText] = useState('');
   const [testResult, setTestResult] = useState(null);
+  const [debug, setDebug] = useState(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [resubLoading, setResubLoading] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -105,6 +108,35 @@ const DmAutomation = () => {
     }
   };
 
+  const runDebug = async () => {
+    setDebugLoading(true);
+    try {
+      const { data } = await api.get('/instagram/dm/debug-latest');
+      setDebug(data);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Debug failed');
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
+  const resubscribe = async () => {
+    setResubLoading(true);
+    try {
+      const { data } = await api.post('/instagram/dm/resubscribe');
+      if (data.messagesSubscribed) {
+        toast.success('Resubscribed: messages field is active');
+      } else {
+        toast.error('Resubscribe call returned, but messages still not in subscribed_fields');
+      }
+      await runDebug();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Resubscribe failed');
+    } finally {
+      setResubLoading(false);
+    }
+  };
+
   const runTest = async () => {
     if (!testText.trim()) { toast.error('Enter sample text'); return; }
     try {
@@ -163,6 +195,136 @@ const DmAutomation = () => {
           )}
         </Card>
       )}
+
+      {/* DM debug panel */}
+      <Card className="mt-6 p-6 rounded-2xl border-slate-100">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h3 className="font-display font-bold text-lg flex items-center gap-2">
+              <Bug className="w-5 h-5" /> DM debug
+            </h3>
+            <p className="text-sm text-slate-500">Reads live production data: webhook_log, dm_logs, dm_rules, and the IG account's subscribed_fields. No tokens or raw payloads exposed.</p>
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={resubscribe} disabled={resubLoading} variant="outline" className="rounded-xl">
+              {resubLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
+              Resubscribe messaging webhook
+            </Button>
+            <Button onClick={runDebug} disabled={debugLoading} className="rounded-xl bg-slate-900 text-white">
+              {debugLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Bug className="w-4 h-4 mr-2" />}
+              Run DM debug
+            </Button>
+          </div>
+        </div>
+
+        {debug && (
+          <div className="mt-4 space-y-4">
+            {/* Decision pills */}
+            <div className="flex flex-wrap gap-2">
+              {[
+                ['Messaging webhook received', debug.lastDecision?.webhookReceived],
+                ['Message text extracted', debug.lastDecision?.messageParsed],
+                ['Active rule matched', debug.lastDecision?.ruleMatched],
+                ['Reply attempted', debug.lastDecision?.sendAttempted],
+                ['Reply sent', debug.lastDecision?.replySent],
+              ].map(([k, v]) => (
+                <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                  {v ? '✓' : '✗'} {k}: {v ? 'yes' : 'no'}
+                </Badge>
+              ))}
+            </div>
+
+            {/* Blocker / fix */}
+            {debug.lastDecision?.blocker ? (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-sm">
+                <div className="font-semibold text-rose-900">Blocker: {debug.lastDecision.blocker}</div>
+                {debug.lastDecision.fix && (
+                  <div className="mt-1 text-rose-800">Fix: {debug.lastDecision.fix}</div>
+                )}
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-900">
+                No blocker detected. {debug.lastDecision?.fix || ''}
+              </div>
+            )}
+
+            {/* Subscribed fields */}
+            <div className="text-xs text-slate-600">
+              Subscribed fields:{' '}
+              {(debug.subscribedFields || []).length === 0
+                ? <span className="text-rose-700">none</span>
+                : (debug.subscribedFields || []).map(f => (
+                  <Badge key={f} className="rounded-full mr-1 border-0 bg-slate-100 text-slate-700">{f}</Badge>
+                ))}
+              {debug.subscriptionError && (
+                <span className="ml-2 text-rose-700">err: {debug.subscriptionError}</span>
+              )}
+            </div>
+
+            {/* Recent webhook events */}
+            <div>
+              <div className="text-sm font-semibold mb-1">Recent messaging webhook events ({debug.recentWebhookEvents?.length || 0})</div>
+              {(!debug.recentWebhookEvents || debug.recentWebhookEvents.length === 0) ? (
+                <div className="text-xs text-slate-500">No webhook events recorded for this IG account in the last 50 deliveries.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-left text-slate-500 border-b border-slate-100">
+                      <th className="py-1">Time</th><th>Object</th><th>Fields</th><th>Msg array</th>
+                      <th>Sender</th><th>Msg id</th><th>Text</th><th>Echo</th><th>Preview</th>
+                    </tr></thead>
+                    <tbody>
+                      {debug.recentWebhookEvents.map((e, i) => (
+                        <tr key={i} className="border-b border-slate-50">
+                          <td className="py-1 whitespace-nowrap">{fmtTime(e.createdAt)}</td>
+                          <td>{e.object}</td>
+                          <td>{(e.fields || []).join(',')}</td>
+                          <td>{e.hasMessagingArray ? '✓' : '—'}</td>
+                          <td>{e.senderIdPresent ? (e.senderIdRedacted || '✓') : '✗'}</td>
+                          <td>{e.messageIdPresent ? '✓' : '✗'}</td>
+                          <td>{e.messageTextPresent ? '✓' : '✗'}</td>
+                          <td>{e.isEcho ? '✓' : '—'}</td>
+                          <td className="font-mono">{e.textPreview}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Recent dm logs */}
+            <div>
+              <div className="text-sm font-semibold mb-1">Recent DM processor logs ({debug.recentDmLogs?.length || 0})</div>
+              {(!debug.recentDmLogs || debug.recentDmLogs.length === 0) ? (
+                <div className="text-xs text-slate-500">No dm_logs rows yet. If messaging events are arriving, the processor is not running for this user.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-left text-slate-500 border-b border-slate-100">
+                      <th className="py-1">Time</th><th>Sender</th><th>Text</th><th>Rule</th>
+                      <th>Status</th><th>Skip reason</th><th>Error</th>
+                    </tr></thead>
+                    <tbody>
+                      {debug.recentDmLogs.map((l, i) => (
+                        <tr key={i} className="border-b border-slate-50 align-top">
+                          <td className="py-1 whitespace-nowrap">{fmtTime(l.createdAt)}</td>
+                          <td className="font-mono">{l.senderId}</td>
+                          <td className="max-w-xs truncate">{l.incomingText}</td>
+                          <td>{l.matchedRuleName || '—'}</td>
+                          <td><Badge className={`rounded-full border-0 ${STATUS_COLORS[l.status] || 'bg-slate-100 text-slate-700'}`}>{l.status}</Badge></td>
+                          <td>{l.skipReason || ''}</td>
+                          <td className="text-rose-700 max-w-xs truncate">{l.error || ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </Card>
 
       {/* Create rule form */}
       <Card className="mt-6 p-6 rounded-2xl border-slate-100">

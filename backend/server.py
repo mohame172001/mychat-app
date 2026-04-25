@@ -1463,8 +1463,11 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
       sender_id, message_id, text, timestamp, is_echo
     Returns dict: {processed, matched, status, rule_id, log_id}
     Status values: received | matched | replied | failed | skipped
+    skip_reason values: duplicate | echo | self_message | missing_sender |
+                       missing_text | no_active_rules | no_rule_match | send_failed
     """
     import uuid as _uuid
+    import hashlib as _hashlib
     user_id = user_doc['id']
     ig_account_id = user_doc.get('ig_user_id') or ''
     sender_id = event.get('sender_id')
@@ -1472,25 +1475,73 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     text = event.get('text') or ''
     is_echo = bool(event.get('is_echo'))
     ts = event.get('timestamp')
+    now = datetime.utcnow()
 
     logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s',
                 ig_account_id, sender_id, message_id, is_echo)
 
-    # Filter: echoes (messages we sent) and self-sends
-    if is_echo or (sender_id and sender_id == ig_account_id):
-        return {'processed': False, 'status': 'skipped', 'reason': 'echo_or_self'}
-    if not sender_id or not message_id:
-        return {'processed': False, 'status': 'skipped', 'reason': 'missing_id'}
+    # Compute a dedup key that NEVER collides on null. Prefer Meta's mid/id;
+    # fall back to a content-derived hash so a missing id cannot poison dedup.
+    if message_id:
+        dedup_key = f'mid:{message_id}'
+    else:
+        h = _hashlib.sha256(
+            f'{ig_account_id}|{sender_id or ""}|{ts or ""}|{text or ""}'.encode('utf-8')
+        ).hexdigest()
+        dedup_key = f'sha:{h}'
+
+    def _mk_log(status: str, skip_reason=None, matched_rule=None, error=None):
+        return {
+            'id': str(_uuid.uuid4()),
+            'user_id': user_id,
+            'ig_user_id': ig_account_id,
+            'sender_id': sender_id,
+            'message_id': message_id,
+            'dedup_key': dedup_key,
+            'incoming_text': text,
+            'matched_rule_id': matched_rule.get('id') if matched_rule else None,
+            'matched_rule_name': matched_rule.get('name') if matched_rule else None,
+            'reply_text': matched_rule.get('reply_text') if matched_rule else None,
+            'status': status,
+            'skip_reason': skip_reason,
+            'error': error,
+            'source': source,
+            'is_echo': is_echo,
+            'timestamp': ts,
+            'created': now,
+        }
+
+    async def _persist(doc):
+        try:
+            await db.dm_logs.insert_one(doc)
+            return True
+        except Exception as e:
+            logger.info('dm_log_insert_race dedup_key=%s err=%s', dedup_key, e)
+            return False
+
+    # Dedup FIRST so replays never double-reply.
+    existing = await db.dm_logs.find_one({'user_id': user_id, 'dedup_key': dedup_key})
+    if existing:
+        logger.info('dm_message_duplicate_skipped dedup_key=%s', dedup_key)
+        return {'processed': False, 'status': 'skipped', 'reason': 'duplicate',
+                'log_id': existing.get('id')}
+
+    # Filter: echoes (messages the business sent) and self-sends.
+    if is_echo:
+        await _persist(_mk_log('skipped', skip_reason='echo'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'echo'}
+    if sender_id and sender_id == ig_account_id:
+        await _persist(_mk_log('skipped', skip_reason='self_message'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'self_message'}
+    if not sender_id:
+        await _persist(_mk_log('skipped', skip_reason='missing_sender'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'missing_sender'}
+    if not text:
+        await _persist(_mk_log('skipped', skip_reason='missing_text'))
+        return {'processed': False, 'status': 'skipped', 'reason': 'missing_text'}
 
     logger.info('dm_sender_extracted sender=%s', sender_id)
     logger.info('dm_text_extracted len=%s preview=%r', len(text), text[:80])
-
-    # Dedup: if this message_id was already processed for this user, skip.
-    existing = await db.dm_logs.find_one({'user_id': user_id, 'message_id': message_id})
-    if existing:
-        logger.info('dm_message_duplicate_skipped msg_id=%s', message_id)
-        return {'processed': False, 'status': 'skipped', 'reason': 'duplicate',
-                'log_id': existing.get('id')}
 
     # Load active DM rules for this user
     rules = await db.dm_rules.find(
@@ -1498,56 +1549,42 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     ).to_list(200)
     logger.info('dm_rule_loaded count=%s user=%s', len(rules), user_doc.get('email'))
 
+    if not rules:
+        log_doc = _mk_log('skipped', skip_reason='no_active_rules')
+        await _persist(log_doc)
+        return {'processed': True, 'matched': False, 'status': 'skipped',
+                'reason': 'no_active_rules', 'log_id': log_doc['id']}
+
     matched_rule = None
     for r in rules:
         if _dm_match(text, r.get('keyword') or '', (r.get('match_mode') or 'contains').lower()):
             matched_rule = r
             break
 
-    rule_id = matched_rule.get('id') if matched_rule else None
-    if matched_rule:
-        logger.info('dm_rule_matched rule_id=%s msg_id=%s', rule_id, message_id)
-    else:
-        logger.info('dm_rule_not_matched msg_id=%s', message_id)
+    if not matched_rule:
+        log_doc = _mk_log('skipped', skip_reason='no_rule_match')
+        await _persist(log_doc)
+        logger.info('dm_rule_not_matched dedup_key=%s', dedup_key)
+        return {'processed': True, 'matched': False, 'status': 'skipped',
+                'reason': 'no_rule_match', 'log_id': log_doc['id']}
 
-    now = datetime.utcnow()
-    log_doc = {
-        'id': str(_uuid.uuid4()),
-        'user_id': user_id,
-        'ig_user_id': ig_account_id,
-        'sender_id': sender_id,
-        'message_id': message_id,
-        'incoming_text': text,
-        'matched_rule_id': rule_id,
-        'reply_text': matched_rule.get('reply_text') if matched_rule else None,
-        'status': 'matched' if matched_rule else 'skipped',
-        'error': None,
-        'source': source,
-        'timestamp': ts,
-        'created': now,
-    }
-    try:
-        await db.dm_logs.insert_one(log_doc)
-    except Exception as e:
-        # Race against unique index — another worker inserted first.
-        logger.info('dm_log_insert_race msg_id=%s err=%s', message_id, e)
+    rule_id = matched_rule.get('id')
+    logger.info('dm_rule_matched rule_id=%s dedup_key=%s', rule_id, dedup_key)
+    log_doc = _mk_log('matched', matched_rule=matched_rule)
+    if not await _persist(log_doc):
         return {'processed': False, 'status': 'skipped', 'reason': 'race'}
 
-    if not matched_rule:
-        return {'processed': True, 'matched': False, 'status': 'skipped',
-                'log_id': log_doc['id']}
-
-    # Send the reply via Meta Messaging API (real call, no fake success)
     reply_text = (matched_rule.get('reply_text') or '').strip()
     if not reply_text:
         await db.dm_logs.update_one(
             {'id': log_doc['id']},
-            {'$set': {'status': 'failed', 'error': 'rule_has_empty_reply_text'}}
+            {'$set': {'status': 'failed', 'skip_reason': 'send_failed',
+                      'error': 'rule_has_empty_reply_text'}}
         )
         return {'processed': True, 'matched': True, 'status': 'failed',
                 'rule_id': rule_id, 'log_id': log_doc['id']}
 
-    logger.info('dm_reply_started rule_id=%s msg_id=%s', rule_id, message_id)
+    logger.info('dm_reply_started rule_id=%s dedup_key=%s', rule_id, dedup_key)
     ok = False
     err = None
     try:
@@ -1565,16 +1602,17 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             {'id': log_doc['id']},
             {'$set': {'status': 'replied'}}
         )
-        logger.info('dm_reply_success rule_id=%s msg_id=%s', rule_id, message_id)
+        logger.info('dm_reply_success rule_id=%s dedup_key=%s', rule_id, dedup_key)
         return {'processed': True, 'matched': True, 'status': 'replied',
                 'rule_id': rule_id, 'log_id': log_doc['id']}
     else:
         await db.dm_logs.update_one(
             {'id': log_doc['id']},
-            {'$set': {'status': 'failed', 'error': err or 'meta_send_returned_false'}}
+            {'$set': {'status': 'failed', 'skip_reason': 'send_failed',
+                      'error': err or 'meta_send_returned_false'}}
         )
-        logger.warning('dm_reply_failed rule_id=%s msg_id=%s err=%s',
-                       rule_id, message_id, err)
+        logger.warning('dm_reply_failed rule_id=%s dedup_key=%s err=%s',
+                       rule_id, dedup_key, err)
         return {'processed': True, 'matched': True, 'status': 'failed',
                 'rule_id': rule_id, 'log_id': log_doc['id'], 'error': err}
 
@@ -1652,7 +1690,7 @@ async def _process_webhook(payload: dict):
                 try:
                     await _handle_new_dm_message(user_doc, {
                         'sender_id': sender_id,
-                        'message_id': msg_obj.get('mid'),
+                        'message_id': msg_obj.get('mid') or msg_obj.get('id'),
                         'text': msg_text,
                         'timestamp': event.get('timestamp'),
                         'is_echo': bool(msg_obj.get('is_echo')),
@@ -2386,12 +2424,16 @@ async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_
             'id': d.get('id'),
             'senderId': d.get('sender_id'),
             'messageId': d.get('message_id'),
+            'dedupKey': d.get('dedup_key'),
             'incomingText': d.get('incoming_text'),
             'matchedRuleId': d.get('matched_rule_id'),
+            'matchedRuleName': d.get('matched_rule_name'),
             'replyText': d.get('reply_text'),
             'status': d.get('status'),
+            'skipReason': d.get('skip_reason'),
             'error': d.get('error'),
             'source': d.get('source'),
+            'isEcho': d.get('is_echo'),
             'created': created.isoformat() if isinstance(created, datetime) else created,
         })
     return {'items': out, 'count': len(out)}
@@ -2467,6 +2509,256 @@ async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
         'lastMessageAt': last_msg_at.isoformat() if last_msg_at else None,
         'lastReplyStatus': last_reply_status,
         'blockerReason': blocker_reason,
+    }
+
+
+def _redact_id(s):
+    if not s or not isinstance(s, str):
+        return s
+    if len(s) <= 6:
+        return s[:2] + '***'
+    return s[:4] + '***' + s[-2:]
+
+
+@api.get('/instagram/dm/debug-latest')
+async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
+    """Self-diagnostic: reads live DB collections + Graph subscription state.
+    Never exposes tokens or full webhook payloads. Sender IDs are partially
+    redacted. Used by the DM Automation page "Run DM debug" button.
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    ig_user_id = u.get('ig_user_id') or ''
+    token = u.get('meta_access_token') or ''
+    connected = bool(u.get('instagramConnected') and token and ig_user_id)
+
+    messaging_subscribed = False
+    subscribed_fields_list: list = []
+    sub_error = None
+    if connected:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    params={'access_token': token},
+                )
+                if r.status_code == 200:
+                    body = r.json() or {}
+                    for app in body.get('data') or []:
+                        for f in app.get('subscribed_fields') or []:
+                            subscribed_fields_list.append(f)
+                    messaging_subscribed = 'messages' in subscribed_fields_list
+                else:
+                    sub_error = f'http {r.status_code}'
+        except Exception as e:
+            sub_error = str(e)[:200]
+
+    rules_rows = await db.dm_rules.find(
+        {'user_id': user_id, 'is_active': True}
+    ).sort('created_at', -1).to_list(50)
+    active_rules = [{
+        'id': r.get('id'),
+        'name': r.get('name'),
+        'keyword': r.get('keyword'),
+        'matchMode': r.get('match_mode'),
+        'isActive': r.get('is_active'),
+        'createdAt': r.get('created_at').isoformat()
+                     if isinstance(r.get('created_at'), datetime) else r.get('created_at'),
+    } for r in rules_rows]
+
+    # Recent webhook events: scan last 50 webhook_log rows, surface only the
+    # messaging events that belong to this IG account, with safe summaries.
+    wh_rows = await db.webhook_log.find().sort('received', -1).limit(50).to_list(50)
+    recent_events = []
+    for w in wh_rows:
+        try:
+            payload = w.get('payload') or {}
+            obj_kind = payload.get('object')
+            received = w.get('received')
+            for entry in payload.get('entry', []):
+                entry_id = entry.get('id')
+                if entry_id and entry_id != ig_user_id and entry_id != u.get('fb_page_id'):
+                    continue
+                changes = entry.get('changes') or []
+                fields = sorted({c.get('field') for c in changes if c.get('field')})
+                ms = entry.get('messaging') or []
+                if not ms and not fields:
+                    continue
+                if ms:
+                    for ev in ms:
+                        msg_obj = ev.get('message') or {}
+                        msg_text = msg_obj.get('text') or ''
+                        sender_id = (ev.get('sender') or {}).get('id')
+                        recipient_id = (ev.get('recipient') or {}).get('id')
+                        recent_events.append({
+                            'createdAt': received.isoformat()
+                                         if isinstance(received, datetime) else received,
+                            'object': obj_kind,
+                            'fields': fields,
+                            'hasMessagingArray': True,
+                            'senderIdPresent': bool(sender_id),
+                            'senderIdRedacted': _redact_id(sender_id),
+                            'recipientIdPresent': bool(recipient_id),
+                            'messageIdPresent': bool(msg_obj.get('mid') or msg_obj.get('id')),
+                            'messageTextPresent': bool(msg_text),
+                            'isEcho': bool(msg_obj.get('is_echo')),
+                            'textPreview': (msg_text[:40] if msg_text else ''),
+                        })
+                else:
+                    recent_events.append({
+                        'createdAt': received.isoformat()
+                                     if isinstance(received, datetime) else received,
+                        'object': obj_kind,
+                        'fields': fields,
+                        'hasMessagingArray': False,
+                        'senderIdPresent': False,
+                        'recipientIdPresent': False,
+                        'messageIdPresent': False,
+                        'messageTextPresent': False,
+                        'isEcho': False,
+                        'textPreview': '',
+                    })
+        except Exception:
+            continue
+    recent_events = recent_events[:20]
+
+    log_rows = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(20).to_list(20)
+    recent_logs = []
+    for d in log_rows:
+        created = d.get('created')
+        recent_logs.append({
+            'createdAt': created.isoformat() if isinstance(created, datetime) else created,
+            'senderId': _redact_id(d.get('sender_id')),
+            'messageId': d.get('message_id'),
+            'dedupKey': d.get('dedup_key'),
+            'incomingText': (d.get('incoming_text') or '')[:120],
+            'matchedRuleId': d.get('matched_rule_id'),
+            'matchedRuleName': d.get('matched_rule_name'),
+            'status': d.get('status'),
+            'skipReason': d.get('skip_reason'),
+            'error': d.get('error'),
+        })
+
+    # Build lastDecision from the most-recent messaging webhook event + most-recent log
+    last_msg_event = next((e for e in recent_events if e.get('hasMessagingArray')), None)
+    last_log = recent_logs[0] if recent_logs else None
+    webhook_received = bool(last_msg_event)
+    message_parsed = bool(last_msg_event and last_msg_event.get('senderIdPresent')
+                          and last_msg_event.get('messageTextPresent'))
+    rule_matched = bool(last_log and last_log.get('matchedRuleId'))
+    send_attempted = bool(last_log and last_log.get('status') in ('replied', 'failed'))
+    reply_sent = bool(last_log and last_log.get('status') == 'replied')
+
+    # Classification
+    blocker = None
+    fix = None
+    if not connected:
+        blocker = 'instagram_not_connected'
+        fix = 'Reconnect Instagram from Settings.'
+    elif not messaging_subscribed:
+        blocker = 'webhook_not_subscribed_to_messages_field'
+        fix = 'POST /api/instagram/dm/resubscribe to subscribe the messages field on this IG account.'
+    elif not active_rules:
+        blocker = 'no_active_dm_rule'
+        fix = 'Create or activate a rule on the DM Automation page.'
+    elif not webhook_received:
+        blocker = 'no_messaging_webhook_received'
+        fix = 'Send a test DM from a different IG account. If still nothing arrives, the IG account is not subscribed for messages — call resubscribe.'
+    elif not message_parsed:
+        blocker = 'webhook_payload_shape_mismatch'
+        fix = 'Meta delivered a messaging event but sender/message fields were missing. Inspect recentWebhookEvents for which field is null.'
+    elif last_log and last_log.get('skipReason') == 'no_rule_match':
+        blocker = 'rule_did_not_match_text'
+        fix = f'Incoming text did not satisfy any active rule. Check keyword + matchMode against text="{(last_log.get("incomingText") or "")[:40]}".'
+    elif last_log and last_log.get('skipReason') == 'duplicate':
+        blocker = 'duplicate_event'
+        fix = 'This was a webhook replay. Send a fresh DM.'
+    elif last_log and last_log.get('skipReason') in ('echo', 'self_message'):
+        blocker = 'echo_or_self_message'
+        fix = 'The DM came from the connected business account itself or was an echo. Send from a different IG account.'
+    elif last_log and last_log.get('skipReason') in ('missing_sender', 'missing_text'):
+        blocker = f'webhook_{last_log.get("skipReason")}'
+        fix = 'Meta delivered an event without required fields. See recentWebhookEvents.'
+    elif last_log and last_log.get('status') == 'failed':
+        blocker = 'graph_send_error'
+        fix = f'Graph send failed: {last_log.get("error") or "unknown"}. Common causes: 24h messaging window closed, instagram_business_manage_messages permission missing, or invalid recipient.'
+    elif rule_matched and reply_sent:
+        blocker = None
+        fix = 'Working — last DM was replied to.'
+
+    return {
+        'connected': connected,
+        'igUserId': ig_user_id,
+        'messagingWebhookSubscribed': messaging_subscribed,
+        'subscribedFields': subscribed_fields_list,
+        'subscriptionError': sub_error,
+        'activeRules': active_rules,
+        'recentWebhookEvents': recent_events,
+        'recentDmLogs': recent_logs,
+        'lastDecision': {
+            'webhookReceived': webhook_received,
+            'messageParsed': message_parsed,
+            'ruleMatched': rule_matched,
+            'sendAttempted': send_attempted,
+            'replySent': reply_sent,
+            'blocker': blocker,
+            'fix': fix,
+        },
+    }
+
+
+@api.post('/instagram/dm/resubscribe')
+async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
+    """Re-subscribe the connected IG account to the messaging webhook fields.
+    Calls POST /{ig_user_id}/subscribed_apps with the messaging field set,
+    then GETs the current state and returns it.
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    ig_user_id = u.get('ig_user_id') or ''
+    token = u.get('meta_access_token') or ''
+    if not (ig_user_id and token):
+        raise HTTPException(400, 'instagram not connected')
+
+    fields = 'messages,messaging_postbacks,messaging_seen,message_reactions'
+    post_status = None
+    post_body = None
+    get_status = None
+    subscribed_fields_list: list = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            pr = await c.post(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'subscribed_fields': fields, 'access_token': token},
+            )
+            post_status = pr.status_code
+            try:
+                post_body = pr.json()
+            except Exception:
+                post_body = {'raw': pr.text[:300]}
+            gr = await c.get(
+                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                params={'access_token': token},
+            )
+            get_status = gr.status_code
+            if gr.status_code == 200:
+                body = gr.json() or {}
+                for app in body.get('data') or []:
+                    for f in app.get('subscribed_fields') or []:
+                        subscribed_fields_list.append(f)
+    except Exception as e:
+        raise HTTPException(502, f'graph error: {str(e)[:200]}')
+
+    return {
+        'igUserId': ig_user_id,
+        'requestedFields': fields.split(','),
+        'postStatus': post_status,
+        'postResponse': _redact_secrets(post_body) if isinstance(post_body, (dict, list)) else post_body,
+        'getStatus': get_status,
+        'subscribedFields': subscribed_fields_list,
+        'messagesSubscribed': 'messages' in subscribed_fields_list,
     }
 
 
@@ -2553,13 +2845,20 @@ async def _startup():
         logger.warning('comments index create: %s', e)
     # DM automation: dedup index on (user_id, message_id) so the same incoming
     # DM is never replied to twice even if the webhook is replayed.
+    # Drop legacy non-unique-safe index on (user_id, message_id) which collided
+    # on null mid and silently deduped real messages. Replaced with a unique
+    # index on (user_id, dedup_key) where dedup_key is mid|id|content-hash.
+    try:
+        await db.dm_logs.drop_index('uniq_user_dm_message')
+    except Exception:
+        pass
     try:
         await db.dm_logs.create_index(
-            [('user_id', 1), ('message_id', 1)],
-            unique=True, sparse=True, name='uniq_user_dm_message',
+            [('user_id', 1), ('dedup_key', 1)],
+            unique=True, sparse=True, name='uniq_user_dm_dedup_key',
         )
     except Exception as e:
-        logger.warning('dm_logs index create: %s', e)
+        logger.warning('dm_logs dedup_key index create: %s', e)
     try:
         await db.dm_rules.create_index([('user_id', 1), ('is_active', 1)],
                                        name='dm_rules_user_active')
