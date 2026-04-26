@@ -1,5 +1,7 @@
 import os
 import asyncio
+import hashlib
+import hmac
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -61,11 +63,14 @@ if not META_VERIFY_TOKEN:
     META_VERIFY_TOKEN_SOURCE = 'default'
 
 # Webhook X-Hub-Signature-256 secret. If META_WEBHOOK_APP_SECRET is set we use
-# it; otherwise we fall back to META_APP_SECRET. Validation is currently OFF
-# (no signature check happens) but the resolved secret + its source are
-# surfaced by the credentials diagnostics so misconfiguration is visible.
+# it; otherwise we fall back to META_APP_SECRET.
 META_WEBHOOK_APP_SECRET, META_WEBHOOK_APP_SECRET_SOURCE = _resolve_env(
     'META_WEBHOOK_APP_SECRET', 'META_APP_SECRET')
+# When enforce=True (META_WEBHOOK_HMAC_ENFORCE=1 env), webhooks with bad or
+# missing signatures are rejected with 403. Default is warn-only mode so
+# existing setups aren't disrupted until the operator confirms the correct
+# secret is configured.
+META_WEBHOOK_HMAC_ENFORCE = os.environ.get('META_WEBHOOK_HMAC_ENFORCE', '0') == '1'
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
 
@@ -1971,9 +1976,67 @@ async def instagram_webhook_verify(request: Request):
     raise HTTPException(403, 'Verification failed')
 
 
+def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dict:
+    """Verify the X-Hub-Signature-256 header from Meta.
+    Returns {valid, reason, signature_present, computed_prefix, received_prefix}.
+    """
+    out = {
+        'valid': False,
+        'reason': None,
+        'signature_present': bool(signature_header),
+        'secret_configured': bool(META_WEBHOOK_APP_SECRET),
+        'computed_prefix': None,
+        'received_prefix': None,
+    }
+    if not META_WEBHOOK_APP_SECRET:
+        out['reason'] = 'no_secret_configured'
+        return out
+    if not signature_header:
+        out['reason'] = 'no_signature_header'
+        return out
+    # Header format: "sha256=<hex>"
+    if not signature_header.startswith('sha256='):
+        out['reason'] = 'bad_signature_format'
+        out['received_prefix'] = signature_header[:20]
+        return out
+    received_sig = signature_header[7:]  # strip "sha256="
+    computed_sig = hmac.new(
+        META_WEBHOOK_APP_SECRET.encode('utf-8'),
+        request_body,
+        hashlib.sha256,
+    ).hexdigest()
+    out['computed_prefix'] = computed_sig[:8]
+    out['received_prefix'] = received_sig[:8]
+    if hmac.compare_digest(computed_sig, received_sig):
+        out['valid'] = True
+        out['reason'] = 'signature_valid'
+    else:
+        out['reason'] = 'signature_mismatch'
+    return out
+
+
 @api.post('/instagram/webhook')
 async def instagram_webhook(request: Request):
-    payload = await request.json()
+    raw_body = await request.body()
+    sig_header = request.headers.get('x-hub-signature-256') or ''
+    sig_result = _verify_webhook_signature(raw_body, sig_header)
+    if not sig_result['valid']:
+        logger.warning('webhook_signature_check reason=%s received_prefix=%s '
+                       'computed_prefix=%s enforce=%s',
+                       sig_result['reason'],
+                       sig_result.get('received_prefix'),
+                       sig_result.get('computed_prefix'),
+                       META_WEBHOOK_HMAC_ENFORCE)
+        if META_WEBHOOK_HMAC_ENFORCE and sig_result['secret_configured']:
+            return JSONResponse(
+                status_code=403,
+                content={'error': 'invalid_signature',
+                         'reason': sig_result['reason']},
+            )
+    else:
+        logger.info('webhook_signature_valid prefix=%s', sig_result['computed_prefix'])
+    import json as _json
+    payload = _json.loads(raw_body)
     logger.info('IG webhook: %s', payload)
     # Store raw payload for debugging — keep only most recent 50
     try:
@@ -1981,6 +2044,8 @@ async def instagram_webhook(request: Request):
             'received': datetime.utcnow(),
             'payload': payload,
             'object': payload.get('object'),
+            'signature_valid': sig_result['valid'],
+            'signature_reason': sig_result['reason'],
         })
         count = await db.webhook_log.count_documents({})
         if count > 50:
@@ -2554,7 +2619,7 @@ async def _process_webhook(payload: dict):
             # one user has an IG account connected, attribute the event to it.
             if not user_doc:
                 connected_users = await db.users.find(
-                    {'instagramConnected': True, 'ig_user_id': {'$ne': None, '$ne': ''}}
+                    {'instagramConnected': True, 'ig_user_id': {'$nin': [None, '']}}
                 ).limit(2).to_list(2)
                 if len(connected_users) == 1:
                     user_doc = connected_users[0]
@@ -3546,7 +3611,8 @@ async def instagram_credentials_diagnostics(user_id: str = Depends(get_current_u
             'verifyTokenConfigured': bool(META_VERIFY_TOKEN),
             'verifyTokenSource': META_VERIFY_TOKEN_SOURCE,
             'signatureSecretSource': META_WEBHOOK_APP_SECRET_SOURCE,
-            'signatureValidationEnabled': False,
+            'signatureValidationEnabled': bool(META_WEBHOOK_APP_SECRET),
+            'signatureEnforceMode': META_WEBHOOK_HMAC_ENFORCE,
             'metaAppIdConfigured': bool(META_APP_ID),
             'metaAppSecretConfigured': bool(META_APP_SECRET),
             'callbackUrl': f'{BACKEND_PUBLIC_URL}/api/instagram/webhook',
@@ -3872,7 +3938,8 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
         'verifyTokenConfigured': bool(META_VERIFY_TOKEN),
         'appIdConfigured': bool(IG_APP_ID),
         'appSecretConfigured': bool(IG_APP_SECRET),
-        'signatureValidationEnabled': False,  # not currently implemented
+        'signatureValidationEnabled': bool(META_WEBHOOK_APP_SECRET),
+        'signatureEnforceMode': META_WEBHOOK_HMAC_ENFORCE,
         'graphApiVersion': 'v21.0',
         'graphHost': 'graph.instagram.com',
         'callbackUrlUsedByRuntime': f'{BACKEND_PUBLIC_URL}/api/instagram/webhook',
