@@ -29,11 +29,42 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ.get('DB_NAME', 'mychat')
 META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
-# Instagram API with Business Login uses a separate App ID/Secret from the Facebook App.
-# Fall back to META_* for backward compatibility if IG_* are not set.
-IG_APP_ID = os.environ.get('IG_APP_ID', '') or META_APP_ID
-IG_APP_SECRET = os.environ.get('IG_APP_SECRET', '') or META_APP_SECRET
-META_VERIFY_TOKEN = os.environ.get('META_VERIFY_TOKEN', 'mychat_verify_123')
+# Instagram API with Business Login uses a SEPARATE App ID/Secret from the
+# Facebook App. Resolution priority for the Instagram credential pair:
+#   INSTAGRAM_APP_ID > IG_APP_ID > META_APP_ID
+#   INSTAGRAM_APP_SECRET > IG_APP_SECRET > META_APP_SECRET
+# We track which env name actually supplied each value so the credentials
+# diagnostic endpoint can show what was used (without exposing the value).
+def _resolve_env(*names):
+    for n in names:
+        v = os.environ.get(n, '')
+        if v:
+            return v, n
+    return '', None
+
+
+INSTAGRAM_APP_ID, INSTAGRAM_APP_ID_SOURCE = _resolve_env(
+    'INSTAGRAM_APP_ID', 'IG_APP_ID', 'META_APP_ID')
+INSTAGRAM_APP_SECRET, INSTAGRAM_APP_SECRET_SOURCE = _resolve_env(
+    'INSTAGRAM_APP_SECRET', 'IG_APP_SECRET', 'META_APP_SECRET')
+
+# Backward-compat aliases used by the rest of the codebase.
+IG_APP_ID = INSTAGRAM_APP_ID
+IG_APP_SECRET = INSTAGRAM_APP_SECRET
+
+# Webhook GET verification token.
+META_VERIFY_TOKEN, META_VERIFY_TOKEN_SOURCE = _resolve_env(
+    'META_WEBHOOK_VERIFY_TOKEN', 'META_VERIFY_TOKEN')
+if not META_VERIFY_TOKEN:
+    META_VERIFY_TOKEN = 'mychat_verify_123'
+    META_VERIFY_TOKEN_SOURCE = 'default'
+
+# Webhook X-Hub-Signature-256 secret. If META_WEBHOOK_APP_SECRET is set we use
+# it; otherwise we fall back to META_APP_SECRET. Validation is currently OFF
+# (no signature check happens) but the resolved secret + its source are
+# surfaced by the credentials diagnostics so misconfiguration is visible.
+META_WEBHOOK_APP_SECRET, META_WEBHOOK_APP_SECRET_SOURCE = _resolve_env(
+    'META_WEBHOOK_APP_SECRET', 'META_APP_SECRET')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
 
@@ -2707,6 +2738,124 @@ def _redact_id(s):
     if len(s) <= 6:
         return s[:2] + '***'
     return s[:4] + '***' + s[-2:]
+
+
+@api.get('/instagram/credentials/diagnostics')
+async def instagram_credentials_diagnostics(user_id: str = Depends(get_current_user_id)):
+    """Audit which credential set is wired into each integration step.
+    Never returns the secret values themselves — only presence flags and the
+    env-var name that supplied each one.
+    """
+    u = await db.users.find_one({'id': user_id})
+    token = (u or {}).get('meta_access_token') or ''
+
+    # Run debug_token using the Instagram App credential pair (which is the
+    # pair that issues IG Business Login user tokens).
+    token_app_id = None
+    debug_token_works = False
+    debug_token_error = None
+    debug_token_host = None
+    if token and INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET:
+        app_access_token = f'{INSTAGRAM_APP_ID}|{INSTAGRAM_APP_SECRET}'
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                for host in ('graph.instagram.com', 'graph.facebook.com'):
+                    try:
+                        r = await c.get(
+                            f'https://{host}/debug_token',
+                            params={'input_token': token,
+                                    'access_token': app_access_token},
+                        )
+                        if r.status_code == 200:
+                            d = (r.json() or {}).get('data') or {}
+                            token_app_id = str(d.get('app_id') or '') or None
+                            debug_token_works = bool(d.get('is_valid'))
+                            debug_token_host = host
+                            break
+                        else:
+                            debug_token_error = f'{host} http {r.status_code}'
+                    except Exception as e:
+                        debug_token_error = f'{host} {str(e)[:120]}'
+        except Exception as e:
+            debug_token_error = str(e)[:200]
+
+    warnings: list = []
+    # OAuth integrity: warn loudly if the Instagram credential pair fell back
+    # to the Meta App pair — that means INSTAGRAM_APP_ID/IG_APP_ID is unset and
+    # we're driving Instagram OAuth with Facebook App credentials, which only
+    # works if the user explicitly configured the same id+secret to be used
+    # for both products on the Meta dashboard.
+    if INSTAGRAM_APP_ID_SOURCE == 'META_APP_ID' or INSTAGRAM_APP_SECRET_SOURCE == 'META_APP_SECRET':
+        warnings.append(
+            'instagram_credentials_falling_back_to_meta_app: '
+            f'INSTAGRAM_APP_ID resolved from {INSTAGRAM_APP_ID_SOURCE}, '
+            f'INSTAGRAM_APP_SECRET resolved from {INSTAGRAM_APP_SECRET_SOURCE}. '
+            'If the Instagram product on the Meta dashboard uses a different '
+            'App ID/Secret pair than the Facebook product, set INSTAGRAM_APP_ID '
+            'and INSTAGRAM_APP_SECRET (or IG_APP_ID/IG_APP_SECRET) explicitly.'
+        )
+    if not INSTAGRAM_APP_ID or not INSTAGRAM_APP_SECRET:
+        warnings.append('instagram_app_credentials_missing')
+    if not META_VERIFY_TOKEN:
+        warnings.append('meta_webhook_verify_token_missing')
+    if not META_WEBHOOK_APP_SECRET:
+        warnings.append('meta_webhook_app_secret_missing')
+    # debug_token cross-check
+    matches_instagram = bool(token_app_id and INSTAGRAM_APP_ID
+                             and token_app_id == INSTAGRAM_APP_ID)
+    matches_meta = bool(token_app_id and META_APP_ID
+                        and token_app_id == META_APP_ID)
+    if token and token_app_id and not matches_instagram:
+        if matches_meta:
+            warnings.append(
+                'token_was_issued_by_meta_app_id_not_instagram_app_id: '
+                'the stored Instagram user token reports a Meta/Facebook App ID '
+                'in debug_token, not the Instagram App ID. OAuth was likely '
+                'driven by Facebook Login instead of Instagram Business Login.'
+            )
+        else:
+            warnings.append(
+                f'token_app_id_unknown_app: tokenAppId={token_app_id} matches '
+                'neither INSTAGRAM_APP_ID nor META_APP_ID. Reconnect Instagram.'
+            )
+
+    return {
+        'oauth': {
+            'usesInstagramAppId': bool(INSTAGRAM_APP_ID),
+            'instagramAppIdConfigured': bool(INSTAGRAM_APP_ID),
+            'instagramAppSecretConfigured': bool(INSTAGRAM_APP_SECRET),
+            'authorizeUrlClientIdSource': INSTAGRAM_APP_ID_SOURCE,
+            'tokenExchangeSecretSource': INSTAGRAM_APP_SECRET_SOURCE,
+            'authorizeHost': 'api.instagram.com',
+            'tokenExchangeHost': 'api.instagram.com / graph.instagram.com',
+        },
+        'webhook': {
+            'verifyTokenConfigured': bool(META_VERIFY_TOKEN),
+            'verifyTokenSource': META_VERIFY_TOKEN_SOURCE,
+            'signatureSecretSource': META_WEBHOOK_APP_SECRET_SOURCE,
+            'signatureValidationEnabled': False,
+            'metaAppIdConfigured': bool(META_APP_ID),
+            'metaAppSecretConfigured': bool(META_APP_SECRET),
+            'callbackUrl': f'{BACKEND_PUBLIC_URL}/api/instagram/webhook',
+        },
+        'graph': {
+            'host': 'graph.instagram.com',
+            'version': 'v21.0',
+            'tokenSource': 'users.meta_access_token (per-user)',
+        },
+        'debugToken': {
+            'appAccessTokenSource': f'{INSTAGRAM_APP_ID_SOURCE}|{INSTAGRAM_APP_SECRET_SOURCE}',
+            'debugTokenWorks': debug_token_works,
+            'debugTokenHost': debug_token_host,
+            'debugTokenError': debug_token_error,
+            'tokenAppId': token_app_id,
+            'matchesInstagramAppId': matches_instagram,
+            'matchesMetaAppId': matches_meta,
+            'instagramAppIdSnapshot': INSTAGRAM_APP_ID[-4:] if INSTAGRAM_APP_ID else None,
+            'metaAppIdSnapshot': META_APP_ID[-4:] if META_APP_ID else None,
+        },
+        'warnings': warnings,
+    }
 
 
 @api.get('/instagram/dm/debug-latest')

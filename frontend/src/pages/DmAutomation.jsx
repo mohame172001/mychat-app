@@ -40,6 +40,8 @@ const DmAutomation = () => {
   const [debug, setDebug] = useState(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [resubLoading, setResubLoading] = useState(false);
+  const [creds, setCreds] = useState(null);
+  const [credsLoading, setCredsLoading] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -117,6 +119,18 @@ const DmAutomation = () => {
       toast.error(e?.response?.data?.detail || 'Debug failed');
     } finally {
       setDebugLoading(false);
+    }
+  };
+
+  const runCreds = async () => {
+    setCredsLoading(true);
+    try {
+      const { data } = await api.get('/instagram/credentials/diagnostics');
+      setCreds(data);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Credentials check failed');
+    } finally {
+      setCredsLoading(false);
     }
   };
 
@@ -205,7 +219,11 @@ const DmAutomation = () => {
             </h3>
             <p className="text-sm text-slate-500">Reads live production data: webhook_log, dm_logs, dm_rules, and the IG account's subscribed_fields. No tokens or raw payloads exposed.</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            <Button onClick={runCreds} disabled={credsLoading} variant="outline" className="rounded-xl">
+              {credsLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Bug className="w-4 h-4 mr-2" />}
+              Credentials check
+            </Button>
             <Button onClick={resubscribe} disabled={resubLoading} variant="outline" className="rounded-xl">
               {resubLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
               Resubscribe messaging webhook
@@ -216,6 +234,33 @@ const DmAutomation = () => {
             </Button>
           </div>
         </div>
+
+        {creds && (
+          <div className="mt-4 p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
+            <div className="font-semibold mb-1 text-sm">Credentials wiring</div>
+            <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+              <div>OAuth client_id source: <span className="font-mono">{creds.oauth?.authorizeUrlClientIdSource || '—'}</span></div>
+              <div>OAuth client_secret source: <span className="font-mono">{creds.oauth?.tokenExchangeSecretSource || '—'}</span></div>
+              <div>Instagram App ID configured: {creds.oauth?.instagramAppIdConfigured ? '✓' : '✗'}</div>
+              <div>Instagram App Secret configured: {creds.oauth?.instagramAppSecretConfigured ? '✓' : '✗'}</div>
+              <div>Webhook verify token source: <span className="font-mono">{creds.webhook?.verifyTokenSource || '—'}</span></div>
+              <div>Webhook signature secret source: <span className="font-mono">{creds.webhook?.signatureSecretSource || '—'}</span></div>
+              <div>Signature validation: {creds.webhook?.signatureValidationEnabled ? 'on' : 'off'}</div>
+              <div>Meta App ID configured: {creds.webhook?.metaAppIdConfigured ? '✓' : '✗'}</div>
+              <div>Meta App Secret configured: {creds.webhook?.metaAppSecretConfigured ? '✓' : '✗'}</div>
+              <div>debug_token works: {creds.debugToken?.debugTokenWorks ? '✓' : '✗'} {creds.debugToken?.debugTokenHost ? <span className="text-slate-500">({creds.debugToken.debugTokenHost})</span> : null}</div>
+              <div>Token app_id: <span className="font-mono">{creds.debugToken?.tokenAppId || '—'}</span></div>
+              <div>Matches Instagram App ID: {creds.debugToken?.matchesInstagramAppId ? '✓' : '✗'} | Matches Meta App ID: {creds.debugToken?.matchesMetaAppId ? '✓' : '✗'}</div>
+            </div>
+            {creds.warnings?.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {creds.warnings.map((w, i) => (
+                  <li key={i} className="text-rose-700">⚠ {w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         {debug && (
           <div className="mt-4 space-y-4">
