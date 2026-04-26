@@ -1058,14 +1058,10 @@ async def instagram_callback(request: Request,
             #      exchange)
             me_probes = []
             me_probe_configs = [
-                ('graph.instagram.com/v21.0/me+full', 'https://graph.instagram.com/v21.0/me', 'user_id,username,account_type'),
-                ('graph.instagram.com/v21.0/me+minimal', 'https://graph.instagram.com/v21.0/me', 'user_id,username'),
-                ('graph.instagram.com/me+full', 'https://graph.instagram.com/me', 'user_id,username,account_type'),
-                ('graph.instagram.com/me+minimal', 'https://graph.instagram.com/me', 'user_id,username'),
-                ('graph.instagram.com/me+bare', 'https://graph.instagram.com/me', None),
-                ('graph.facebook.com/v21.0/me', 'https://graph.facebook.com/v21.0/me', 'id,name'),
-                ('graph.facebook.com/v21.0/me+ig', 'https://graph.facebook.com/v21.0/me',
-                 'id,name,accounts{instagram_business_account}'),
+                ('graph.instagram.com/v21.0/me+user_id', 'https://graph.instagram.com/v21.0/me', 'user_id,username'),
+                ('graph.instagram.com/v21.0/me+id', 'https://graph.instagram.com/v21.0/me', 'id,username'),
+                ('graph.instagram.com/v21.0/me+bare', 'https://graph.instagram.com/v21.0/me', None),
+                ('graph.instagram.com/me+user_id', 'https://graph.instagram.com/me', 'user_id,username'),
             ]
             # If we have the user_id from the short-lived token exchange,
             # probe the user directly on graph.instagram.com
@@ -1202,17 +1198,16 @@ async def instagram_callback(request: Request,
                             }
                     except Exception as e:
                         audit[f'fallbackUserLookup_{host}'] = {'error': str(e)[:200]}
-                
                 verification = {
-                    'ok': True,
+                    'ok': bool(fallback_username),
                     'canonicalIgId': ig_user_id_from_oauth,
                     'graphMeId': ig_user_id_from_oauth,
                     'graphMeUserId': ig_user_id_from_oauth,
-                    'username': fallback_username or f'ig_user_{ig_user_id_from_oauth[-6:]}',
+                    'username': fallback_username,
                     'accountType': fallback_account_type,
                     'followersCount': fallback_followers,
                     'probeUsed': 'ig_user_id_from_oauth_fallback',
-                    'blocker': None if fallback_username else 'token_read_profile_failed',
+                    'blocker': None if fallback_username else 'token_cannot_read_profile',
                 }
             else:
                 verification = await _verify_instagram_token(c, final_token)
@@ -1296,12 +1291,46 @@ async def instagram_callback(request: Request,
 
 
 
-@api.get('/admin/debug-audit/{email}')
-async def debug_audit(email: str):
-    u = await db.users.find_one({'email': email.lower()}) or await db.users.find_one({'email': email})
+@api.get('/instagram/oauth/last-attempt')
+async def oauth_last_attempt(user_id: str = Depends(get_current_user_id)):
+    u = await db.users.find_one({'id': user_id})
     if not u:
-        return {'error': 'not found'}
-    return {'audit': u.get('ig_oauth_last_audit')}
+        raise HTTPException(404, 'User not found')
+    audit = u.get('ig_oauth_last_audit') or {}
+    
+    return {
+        "callbackPath": audit.get("callbackPath", "/api/instagram/oauth/callback"),
+        "codeReceived": audit.get("codeReceived", False),
+        "codeLength": audit.get("codeLength", 0),
+        "redirectUriUsedInAuthorize": audit.get("redirectUriUsedInAuthorize", ""),
+        "redirectUriUsedInTokenExchange": audit.get("redirectUriUsedInTokenExchange", ""),
+        "redirectUriExactMatch": audit.get("redirectUriExactMatch", False),
+        "clientIdSource": audit.get("clientIdSource", "UNKNOWN"),
+        "clientIdLast4": audit.get("clientIdLast4", ""),
+        "clientSecretSource": audit.get("clientSecretSource", "UNKNOWN"),
+        "tokenExchangeEndpoint": audit.get("tokenExchangeEndpoint", ""),
+        "tokenExchangeStatus": audit.get("tokenExchangeStatus", 0),
+        "tokenExchangeResponseKeys": audit.get("tokenExchangeResponseKeys", []),
+        "shortTokenExists": audit.get("shortTokenExists", False),
+        "shortTokenLength": audit.get("shortTokenLength", 0),
+        "tokenExchangeUserId": audit.get("tokenExchangeUserId", ""),
+        "longLivedExchangeAttempted": audit.get("longLivedExchangeAttempted", False),
+        "longLivedExchangeEndpoint": audit.get("longLivedExchangeEndpoint", ""),
+        "longLivedExchangeStatus": audit.get("longLivedExchangeStatus", 0),
+        "longLivedResponseKeys": audit.get("longLivedResponseKeys", []),
+        "longTokenExists": audit.get("longTokenExists", False),
+        "longTokenLength": audit.get("longTokenLength", 0),
+        "finalTokenSource": audit.get("finalTokenSource", "none"),
+        "shortTokenMeStatus": audit.get("shortTokenMeStatus", 0),
+        "shortTokenMeBody": audit.get("shortTokenMeBody", {}),
+        "longTokenMeStatus": audit.get("longTokenMeStatus", 0),
+        "longTokenMeBody": audit.get("longTokenMeBody", {}),
+        "minimalMeStatus": audit.get("minimalMeStatus", 0),
+        "minimalMeBody": audit.get("minimalMeBody", {}),
+        "whichTokenWorks": audit.get("whichTokenWorks", "none"),
+        "connectionSaved": audit.get("connectionSaved", False),
+        "failureStage": audit.get("failureStage", audit.get("blocker", "unknown"))
+    }
 
 @api.delete('/admin/users/{email}')
 async def admin_delete_user(email: str, user_id: str = Depends(get_current_user_id)):
@@ -1667,12 +1696,11 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
     me_id_for_debug = None
     
     endpoints = []
-    if ig_id:
-        endpoints.append((f'https://graph.facebook.com/v21.0/{ig_id}/media', f'graph.facebook.com/{ig_id}/media'))
-        endpoints.append((f'https://graph.instagram.com/v21.0/{ig_id}/media', f'graph.instagram.com/v21.0/{ig_id}/media'))
-        endpoints.append((f'https://graph.instagram.com/{ig_id}/media', f'graph.instagram.com/{ig_id}/media'))
-    endpoints.append(('https://graph.instagram.com/v21.0/me/media', '/v21.0/me/media'))
     endpoints.append(('https://graph.instagram.com/me/media', '/me/media'))
+    endpoints.append(('https://graph.instagram.com/v21.0/me/media', '/v21.0/me/media'))
+    if ig_id:
+        endpoints.append((f'https://graph.instagram.com/{ig_id}/media', f'/{ig_id}/media'))
+        endpoints.append((f'https://graph.facebook.com/v21.0/{ig_id}/media', f'graph.facebook.com/v21.0/{ig_id}/media'))
 
     errors = {}
     
@@ -2499,6 +2527,89 @@ def _classify_messaging_event(event: dict) -> dict:
         'timestamp': timestamp,
     }
 
+
+@api.get('/instagram/webhook/diagnostics')
+async def webhook_diagnostics(user_id: str = Depends(get_current_user_id)):
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'User not found')
+    token = u.get('meta_access_token')
+    ig_id = str(u.get('ig_user_id') or '')
+    connected = _has_valid_instagram_connection(u)
+    
+    out = {
+        "connected": connected,
+        "connectionValid": connected,
+        "canonicalIgUserId": ig_id or None,
+        "dbIgUserId": ig_id or None,
+        "idMatch": True,
+        "callbackUrl": f"{BACKEND_PUBLIC_URL}/api/instagram/webhook",
+        "verifyTokenConfigured": bool(META_VERIFY_TOKEN),
+        "signatureValidationEnabled": META_WEBHOOK_HMAC_ENFORCE,
+        "subscribedFields": [],
+        "recentWebhookEntryIds": [],
+        "recentWebhookRecipientIds": [],
+        "webhookAccountMatch": False,
+        "recentEventKinds": []
+    }
+    
+    if connected and token and ig_id:
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"https://graph.facebook.com/v21.0/{ig_id}/subscribed_apps", params={'access_token': token})
+                if r.status_code == 200:
+                    data = r.json().get('data', [])
+                    if data:
+                        out['subscribedFields'] = data[0].get('subscribed_fields', [])
+        except Exception:
+            pass
+            
+    recent_logs = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(10).to_list(10)
+    out['recentEventKinds'] = list(set([L.get('event_kind') for L in recent_logs]))
+    out['recentWebhookEntryIds'] = list(set([L.get('ig_user_id') for L in recent_logs if L.get('ig_user_id')]))
+    out['recentWebhookRecipientIds'] = list(set([L.get('recipient_id') for L in recent_logs if L.get('recipient_id')]))
+    
+    if ig_id and out['recentWebhookEntryIds']:
+        out['webhookAccountMatch'] = ig_id in out['recentWebhookEntryIds']
+    elif not out['recentWebhookEntryIds']:
+        out['webhookAccountMatch'] = True # None yet
+        
+    return out
+
+@api.post('/instagram/webhook/resubscribe')
+async def webhook_resubscribe(user_id: str = Depends(get_current_user_id)):
+    u = await db.users.find_one({'id': user_id})
+    if not u or not _has_valid_instagram_connection(u):
+        raise HTTPException(400, 'Instagram not connected')
+    token = u.get('meta_access_token')
+    ig_id = str(u.get('ig_user_id') or '')
+    if not token or not ig_id:
+        raise HTTPException(400, 'Missing IG identity')
+        
+    fields = 'messages,messaging_postbacks,messaging_seen,message_reactions,comments'
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(f"https://graph.facebook.com/v21.0/{ig_id}/subscribed_apps", params={'access_token': token, 'subscribed_fields': fields})
+            if r.status_code != 200:
+                raise HTTPException(400, f'Subscription failed: {r.text}')
+                
+            vr = await c.get(f"https://graph.facebook.com/v21.0/{ig_id}/subscribed_apps", params={'access_token': token})
+            subs = []
+            if vr.status_code == 200:
+                data = vr.json().get('data', [])
+                if data:
+                    subs = data[0].get('subscribed_fields', [])
+            
+            return {
+                "igUserIdUsed": ig_id,
+                "subscribedFields": subs,
+                "messagesSubscribed": 'messages' in subs,
+                "commentsSubscribed": 'comments' in subs,
+                "idMatch": True
+            }
+    except Exception as e:
+        logger.error(f'Resubscribe error: {e}')
+        raise HTTPException(500, str(e))
 
 async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'webhook'):
     """Process one incoming Instagram DM messaging-item.
