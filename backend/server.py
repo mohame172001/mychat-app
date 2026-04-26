@@ -948,15 +948,16 @@ async def _verify_instagram_token(
 async def _run_instagram_me_probes(c: httpx.AsyncClient, token: str) -> Dict[str, Any]:
     """Run the exact /me probe order used to validate OAuth tokens."""
     variants = [
+        ('/v25.0/me?fields=user_id,username', 'https://graph.instagram.com/v25.0/me',
+         {'fields': 'user_id,username'}),
+        ('/v25.0/me?fields=id,username', 'https://graph.instagram.com/v25.0/me',
+         {'fields': 'id,username'}),
+        ('/v25.0/me', 'https://graph.instagram.com/v25.0/me', {}),
         ('/me?fields=user_id,username', 'https://graph.instagram.com/me',
          {'fields': 'user_id,username'}),
         ('/me?fields=id,username', 'https://graph.instagram.com/me',
          {'fields': 'id,username'}),
         ('/me', 'https://graph.instagram.com/me', {}),
-        ('/v21.0/me?fields=user_id,username', 'https://graph.instagram.com/v21.0/me',
-         {'fields': 'user_id,username'}),
-        ('/v21.0/me?fields=id,username', 'https://graph.instagram.com/v21.0/me',
-         {'fields': 'id,username'}),
     ]
     results = []
     for label, url, extra_params in variants:
@@ -1128,6 +1129,7 @@ async def instagram_callback(request: Request,
 
             # OAuth validation path: verify the short token first, then try to
             # upgrade to long-lived without making that upgrade a blocker.
+            audit['apiVersionsTested'] = ['v25.0', 'unversioned']
             short_me = await _run_instagram_me_probes(c, token)
             audit['shortTokenLength'] = len(token)
             audit['shortTokenMeResults'] = short_me['results']
@@ -1148,6 +1150,7 @@ async def instagram_callback(request: Request,
 
             audit['debugToken'] = await _debug_token_with_ig_app(token)
             audit['longLivedExchangeAttempted'] = True
+            audit['longLivedExchangeMethodUsed'] = 'GET'
             audit['longLivedExchangeEndpoint'] = 'GET https://graph.instagram.com/access_token'
             ll = await c.get(
                 'https://graph.instagram.com/access_token',
@@ -1171,6 +1174,7 @@ async def instagram_callback(request: Request,
             final_me = short_me
             long_token = ll_data.get('access_token') if ll.status_code == 200 and isinstance(ll_data, dict) else None
             audit['longTokenExists'] = bool(long_token)
+            audit['longTokenMeResults'] = None
             if long_token:
                 long_me = await _run_instagram_me_probes(c, long_token)
                 audit['longTokenMeResults'] = long_me['results']
