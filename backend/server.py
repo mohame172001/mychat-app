@@ -1048,16 +1048,31 @@ async def instagram_callback(request: Request,
             audit['finalTokenStoredSource'] = 'long_lived' if long_token else 'short_lived'
             audit['finalTokenLength'] = len(final_token)
             audit['finalTokenPrefix'] = _token_prefix(final_token)
-            # 3) Verify /me before saving — try multiple probe variants so
-            #    tokens with limited scopes still work.
+            # 3) Verify /me before saving — try multiple probe variants.
+            #    Instagram Business Login tokens do NOT support GET /me on
+            #    graph.instagram.com (returns "Unsupported request - method
+            #    type: get", code 100). We must also try:
+            #    - graph.facebook.com/v21.0/me (Facebook Graph API)
+            #    - graph.instagram.com/{user_id} (direct IG user lookup,
+            #      using the user_id returned from the short-lived token
+            #      exchange)
             me_probes = []
             me_probe_configs = [
                 ('graph.instagram.com/me+full', 'https://graph.instagram.com/me', 'user_id,username,account_type'),
                 ('graph.instagram.com/me+minimal', 'https://graph.instagram.com/me', 'user_id,username'),
-                ('graph.instagram.com/me+id_only', 'https://graph.instagram.com/me', 'id,username'),
                 ('graph.instagram.com/me+bare', 'https://graph.instagram.com/me', None),
-                ('graph.instagram.com/v21.0/me', 'https://graph.instagram.com/v21.0/me', 'user_id,username'),
+                ('graph.facebook.com/v21.0/me', 'https://graph.facebook.com/v21.0/me', 'id,name'),
+                ('graph.facebook.com/v21.0/me+ig', 'https://graph.facebook.com/v21.0/me',
+                 'id,name,accounts{instagram_business_account}'),
             ]
+            # If we have the user_id from the short-lived token exchange,
+            # probe the user directly on graph.instagram.com
+            if ig_user_id_from_oauth:
+                me_probe_configs.append(
+                    (f'graph.instagram.com/{ig_user_id_from_oauth}',
+                     f'https://graph.instagram.com/{ig_user_id_from_oauth}',
+                     'username,name,account_type,followers_count'),
+                )
             working_probe = None
             for probe_label, probe_url, probe_fields in me_probe_configs:
                 params = {'access_token': final_token}
@@ -1076,9 +1091,24 @@ async def instagram_callback(request: Request,
                     if pr.status_code == 200 and isinstance(pb, dict):
                         probe_result['id'] = str(pb.get('id') or '')
                         probe_result['user_id'] = str(pb.get('user_id') or '')
-                        probe_result['username'] = pb.get('username') or ''
+                        probe_result['username'] = pb.get('username') or pb.get('name') or ''
                         probe_result['account_type'] = pb.get('account_type') or ''
-                        canonical = str(pb.get('user_id') or pb.get('id') or '')
+                        # For direct /{user_id} probe, the user_id is the URL
+                        if ig_user_id_from_oauth and not probe_result['user_id']:
+                            if probe_label.startswith(f'graph.instagram.com/{ig_user_id_from_oauth}'):
+                                probe_result['user_id'] = ig_user_id_from_oauth
+                        # For Facebook /me probe, check for instagram_business_account
+                        if 'accounts' in pb and isinstance(pb.get('accounts'), dict):
+                            pages = pb['accounts'].get('data') or []
+                            for page in pages:
+                                iba = page.get('instagram_business_account', {})
+                                if iba.get('id'):
+                                    probe_result['ig_business_account_id'] = str(iba['id'])
+                                    if not probe_result['user_id']:
+                                        probe_result['user_id'] = str(iba['id'])
+                                    break
+                        canonical = str(pb.get('user_id') or pb.get('id') or
+                                       probe_result.get('ig_business_account_id') or '')
                         if canonical and not working_probe:
                             working_probe = probe_result
                     me_probes.append(probe_result)
@@ -1118,7 +1148,9 @@ async def instagram_callback(request: Request,
 
             # Build verification from working probe or fall back
             if working_probe:
-                canonical_id = working_probe.get('user_id') or working_probe.get('id') or ''
+                canonical_id = (working_probe.get('user_id') or
+                               working_probe.get('ig_business_account_id') or
+                               working_probe.get('id') or '')
                 verification = {
                     'ok': True,
                     'canonicalIgId': canonical_id,
@@ -1128,13 +1160,60 @@ async def instagram_callback(request: Request,
                     'accountType': working_probe.get('account_type') or 'unknown',
                     'probeUsed': working_probe.get('label'),
                 }
+            elif ig_user_id_from_oauth:
+                # FALLBACK: All /me probes failed, but the token exchange
+                # returned a valid user_id. This is normal for Instagram
+                # Business Login tokens which don't support GET /me on
+                # graph.instagram.com. Use the user_id from the token
+                # exchange and try to fetch the username directly.
+                logger.info('All /me probes failed; using ig_user_id=%s from token exchange',
+                            ig_user_id_from_oauth)
+                audit['fallbackUsed'] = 'ig_user_id_from_oauth'
+                fallback_username = ''
+                fallback_account_type = 'unknown'
+                fallback_followers = 0
+                try:
+                    fbr = await c.get(
+                        f'https://graph.instagram.com/{ig_user_id_from_oauth}',
+                        params={'access_token': final_token,
+                                'fields': 'username,name,account_type,followers_count'},
+                    )
+                    if fbr.status_code == 200:
+                        fbd = fbr.json() or {}
+                        fallback_username = fbd.get('username') or fbd.get('name') or ''
+                        fallback_account_type = fbd.get('account_type') or 'unknown'
+                        fallback_followers = fbd.get('followers_count') or 0
+                        audit['fallbackUserLookup'] = {
+                            'status': 200,
+                            'username': fallback_username,
+                            'accountType': fallback_account_type,
+                            'followersCount': fallback_followers,
+                        }
+                    else:
+                        fbd = fbr.json() if 'json' in fbr.headers.get('content-type','') else {}
+                        audit['fallbackUserLookup'] = {
+                            'status': fbr.status_code,
+                            'error': _safe_graph_error(fbd),
+                        }
+                except Exception as e:
+                    audit['fallbackUserLookup'] = {'error': str(e)[:200]}
+                verification = {
+                    'ok': True,
+                    'canonicalIgId': ig_user_id_from_oauth,
+                    'graphMeId': ig_user_id_from_oauth,
+                    'graphMeUserId': ig_user_id_from_oauth,
+                    'username': fallback_username or f'ig_user_{ig_user_id_from_oauth[-6:]}',
+                    'accountType': fallback_account_type,
+                    'followersCount': fallback_followers,
+                    'probeUsed': 'ig_user_id_from_oauth_fallback',
+                }
             else:
                 verification = await _verify_instagram_token(c, final_token)
             audit['verification'] = verification
             if not verification.get('ok'):
                 graph_error = verification.get('error') or {}
                 audit['failureStage'] = 'me_verification'
-                logger.error('IG /me verification failed (all probes): %s',
+                logger.error('IG /me verification failed (all probes + fallback): %s',
                              _redact_secrets(graph_error))
                 await _store_oauth_failure(
                     user_id,
