@@ -993,7 +993,7 @@ async def instagram_callback(request: Request,
         'userIdReturnedFromTokenExchange': None,
         'permissionsReturned': [],
         'longLivedExchangeAttempted': False,
-        'longLivedExchangeEndpoint': 'https://graph.instagram.com/access_token',
+        'longLivedExchangeEndpoint': 'POST https://graph.instagram.com/access_token',
         'longLivedExchangeStatus': None,
         'longLivedExchangeResponseKeys': [],
         'longLivedExchangeError': None,
@@ -1070,9 +1070,9 @@ async def instagram_callback(request: Request,
             # 2) Exchange short-lived for long-lived IG user token (60 days)
             audit['debugToken'] = await _debug_token_with_ig_app(token)
             audit['longLivedExchangeAttempted'] = True
-            ll = await c.get(
+            ll = await c.post(
                 'https://graph.instagram.com/access_token',
-                params={
+                data={
                     'grant_type': 'ig_exchange_token',
                     'client_secret': IG_APP_SECRET,
                     'access_token': token,
