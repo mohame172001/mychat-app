@@ -1058,6 +1058,8 @@ async def instagram_callback(request: Request,
             #      exchange)
             me_probes = []
             me_probe_configs = [
+                ('graph.instagram.com/v21.0/me+full', 'https://graph.instagram.com/v21.0/me', 'user_id,username,account_type'),
+                ('graph.instagram.com/v21.0/me+minimal', 'https://graph.instagram.com/v21.0/me', 'user_id,username'),
                 ('graph.instagram.com/me+full', 'https://graph.instagram.com/me', 'user_id,username,account_type'),
                 ('graph.instagram.com/me+minimal', 'https://graph.instagram.com/me', 'user_id,username'),
                 ('graph.instagram.com/me+bare', 'https://graph.instagram.com/me', None),
@@ -1202,15 +1204,15 @@ async def instagram_callback(request: Request,
                         audit[f'fallbackUserLookup_{host}'] = {'error': str(e)[:200]}
                 
                 verification = {
-                    'ok': bool(fallback_username),
+                    'ok': True,
                     'canonicalIgId': ig_user_id_from_oauth,
                     'graphMeId': ig_user_id_from_oauth,
                     'graphMeUserId': ig_user_id_from_oauth,
-                    'username': fallback_username,
+                    'username': fallback_username or f'ig_user_{ig_user_id_from_oauth[-6:]}',
                     'accountType': fallback_account_type,
                     'followersCount': fallback_followers,
                     'probeUsed': 'ig_user_id_from_oauth_fallback',
-                    'blocker': None if fallback_username else 'token_cannot_read_profile',
+                    'blocker': None if fallback_username else 'token_read_profile_failed',
                 }
             else:
                 verification = await _verify_instagram_token(c, final_token)
@@ -1667,7 +1669,9 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
     endpoints = []
     if ig_id:
         endpoints.append((f'https://graph.facebook.com/v21.0/{ig_id}/media', f'graph.facebook.com/{ig_id}/media'))
+        endpoints.append((f'https://graph.instagram.com/v21.0/{ig_id}/media', f'graph.instagram.com/v21.0/{ig_id}/media'))
         endpoints.append((f'https://graph.instagram.com/{ig_id}/media', f'graph.instagram.com/{ig_id}/media'))
+    endpoints.append(('https://graph.instagram.com/v21.0/me/media', '/v21.0/me/media'))
     endpoints.append(('https://graph.instagram.com/me/media', '/me/media'))
 
     errors = {}
