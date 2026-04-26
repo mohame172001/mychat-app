@@ -945,6 +945,64 @@ async def _verify_instagram_token(
     }
 
 
+async def _run_instagram_me_probes(c: httpx.AsyncClient, token: str) -> Dict[str, Any]:
+    """Run the exact /me probe order used to validate OAuth tokens."""
+    variants = [
+        ('/me?fields=user_id,username', 'https://graph.instagram.com/me',
+         {'fields': 'user_id,username'}),
+        ('/me?fields=id,username', 'https://graph.instagram.com/me',
+         {'fields': 'id,username'}),
+        ('/me', 'https://graph.instagram.com/me', {}),
+        ('/v21.0/me?fields=user_id,username', 'https://graph.instagram.com/v21.0/me',
+         {'fields': 'user_id,username'}),
+        ('/v21.0/me?fields=id,username', 'https://graph.instagram.com/v21.0/me',
+         {'fields': 'id,username'}),
+    ]
+    results = []
+    for label, url, extra_params in variants:
+        params = {**extra_params, 'access_token': token}
+        try:
+            r = await c.get(url, params=params)
+            try:
+                body = r.json()
+            except Exception:
+                body = {'raw': r.text[:300]}
+            canonical_id = ''
+            username = ''
+            if r.status_code == 200 and isinstance(body, dict):
+                canonical_id = str(body.get('user_id') or body.get('id') or '')
+                username = body.get('username') or ''
+            item = {
+                'variant': label,
+                'status': r.status_code,
+                'bodyKeys': sorted(body.keys()) if isinstance(body, dict) else [],
+                'canonicalIgUserIdExists': bool(canonical_id),
+                'usernameExists': bool(username),
+            }
+            err = _safe_graph_error(body)
+            if err:
+                item['error'] = err
+            results.append(item)
+            if r.status_code == 200 and canonical_id:
+                return {
+                    'ok': True,
+                    'results': results,
+                    'whichMeVariantWorks': label,
+                    'canonicalIgUserId': canonical_id,
+                    'username': username,
+                    'bodyKeys': item['bodyKeys'],
+                }
+        except Exception as e:
+            results.append({'variant': label, 'status': 0, 'error': str(e)[:200]})
+    return {
+        'ok': False,
+        'results': results,
+        'whichMeVariantWorks': None,
+        'canonicalIgUserId': None,
+        'username': None,
+    }
+
+
 @api.get('/instagram/auth-url')
 async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
     if not IG_APP_ID or not IG_APP_SECRET:
@@ -993,7 +1051,7 @@ async def instagram_callback(request: Request,
         'userIdReturnedFromTokenExchange': None,
         'permissionsReturned': [],
         'longLivedExchangeAttempted': False,
-        'longLivedExchangeEndpoint': 'POST https://graph.instagram.com/access_token',
+        'longLivedExchangeEndpoint': 'GET https://graph.instagram.com/access_token',
         'longLivedExchangeStatus': None,
         'longLivedExchangeResponseKeys': [],
         'longLivedExchangeError': None,
@@ -1067,12 +1125,103 @@ async def instagram_callback(request: Request,
                 logger.error('IG token exchange failed: %s', safe)
                 await _store_oauth_failure(user_id, 'token_exchange_failed', safe)
                 return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=token_exchange_failed")
+
+            # OAuth validation path: verify the short token first, then try to
+            # upgrade to long-lived without making that upgrade a blocker.
+            short_me = await _run_instagram_me_probes(c, token)
+            audit['shortTokenLength'] = len(token)
+            audit['shortTokenMeResults'] = short_me['results']
+            if not short_me.get('ok'):
+                audit['failureStage'] = 'short_token_me_verification'
+                audit['whichTokenWorks'] = 'none'
+                audit['whichMeVariantWorks'] = None
+                audit['finalTokenStoredSource'] = None
+                audit['connectionSaved'] = False
+                await _store_oauth_failure(
+                    user_id,
+                    'token_exchange_returns_unusable_instagram_token',
+                    {'shortTokenMeResults': short_me['results']},
+                )
+                return RedirectResponse(
+                    f"{FRONTEND_URL}/app/settings?ig=error&reason=token_cannot_call_graph_me"
+                )
+
+            audit['debugToken'] = await _debug_token_with_ig_app(token)
+            audit['longLivedExchangeAttempted'] = True
+            audit['longLivedExchangeEndpoint'] = 'GET https://graph.instagram.com/access_token'
+            ll = await c.get(
+                'https://graph.instagram.com/access_token',
+                params={
+                    'grant_type': 'ig_exchange_token',
+                    'client_secret': IG_APP_SECRET,
+                    'access_token': token,
+                },
+            )
+            try:
+                ll_data = ll.json()
+            except Exception:
+                ll_data = {'raw': ll.text[:300]}
+            audit['longLivedExchangeStatus'] = ll.status_code
+            audit['longLivedExchangeResponseKeys'] = sorted(ll_data.keys()) if isinstance(ll_data, dict) else []
+            if ll.status_code != 200:
+                audit['longLivedExchangeError'] = _safe_graph_error(ll_data) or ll_data
+
+            final_token = token
+            final_token_source = 'short_lived'
+            final_me = short_me
+            long_token = ll_data.get('access_token') if ll.status_code == 200 and isinstance(ll_data, dict) else None
+            audit['longTokenExists'] = bool(long_token)
+            if long_token:
+                long_me = await _run_instagram_me_probes(c, long_token)
+                audit['longTokenMeResults'] = long_me['results']
+                if long_me.get('ok'):
+                    final_token = long_token
+                    final_token_source = 'long_lived'
+                    final_me = long_me
+                else:
+                    audit['warning'] = 'long_token_me_failed'
+            else:
+                audit['warning'] = 'long_lived_exchange_failed'
+
+            audit['whichTokenWorks'] = final_token_source
+            audit['whichMeVariantWorks'] = final_me.get('whichMeVariantWorks')
+            audit['finalTokenStoredSource'] = final_token_source
+            audit['finalTokenLength'] = len(final_token)
+            audit['finalTokenPrefix'] = _token_prefix(final_token)
+            audit['finalIgUserIdStoredSource'] = 'me_user_id_or_id'
+            audit['verification'] = {
+                'ok': True,
+                'canonicalIgId': final_me['canonicalIgUserId'],
+                'username': final_me.get('username') or '',
+                'probeUsed': final_me.get('whichMeVariantWorks'),
+            }
+            audit['connectionSaved'] = True
+
+            await db.users.update_one(
+                {'id': user_id},
+                {'$set': {
+                    'instagramConnected': True,
+                    'instagram_connection_valid': True,
+                    'instagramConnectionValid': True,
+                    'instagram_connection_blocker': None,
+                    'instagramHandle': final_me.get('username') or '',
+                    'ig_user_id': final_me['canonicalIgUserId'],
+                    'meta_access_token': final_token,
+                    'ig_auth_kind': 'instagram_business_login',
+                    'instagramTokenSource': final_token_source,
+                    'instagram_token_source': final_token_source,
+                    'ig_oauth_last_audit': _redact_secrets(audit),
+                }},
+            )
+            logger.info('IG connected (Business Login) for user %s via %s',
+                        user_id, audit['whichMeVariantWorks'])
+            return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
             # 2) Exchange short-lived for long-lived IG user token (60 days)
             audit['debugToken'] = await _debug_token_with_ig_app(token)
             audit['longLivedExchangeAttempted'] = True
-            ll = await c.post(
+            ll = await c.get(
                 'https://graph.instagram.com/access_token',
-                data={
+                params={
                     'grant_type': 'ig_exchange_token',
                     'client_secret': IG_APP_SECRET,
                     'access_token': token,
