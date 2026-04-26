@@ -501,7 +501,6 @@ const Settings = () => {
                       Connect Instagram
                     </Button>
                   </div>
-                  </div>
                   <div className="mt-4 flex justify-end">
                     <Button onClick={async () => {
                       setOauthLoading(true);
