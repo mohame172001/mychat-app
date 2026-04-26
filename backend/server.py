@@ -1242,10 +1242,11 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
                 ig_sub_body = ig_sub.text
             except Exception as e:
                 ig_sub_body = str(e)
-        # Persist the fresh page id + page token on the user
+        # Persist legacy Page credentials separately. Do not overwrite
+        # meta_access_token, which must remain the verified IG user token.
         await db.users.update_one(
             {'id': user_id},
-            {'$set': {'fb_page_id': page_id, 'meta_access_token': page_token}},
+            {'$set': {'fb_page_id': page_id, 'fb_page_access_token': page_token}},
         )
         return {'ok': ok, 'status': sub.status_code, 'body': body,
                 'page_id': page_id, 'ig_user_id': ig_user_id,
