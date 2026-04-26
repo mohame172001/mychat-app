@@ -849,24 +849,53 @@ async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
     return out
 
 
-async def _verify_instagram_token(c: httpx.AsyncClient, token: str) -> Dict[str, Any]:
+async def _verify_instagram_token(
+    c: httpx.AsyncClient,
+    token: str,
+    oauth_user_id: str = '',
+) -> Dict[str, Any]:
     fields = 'id,user_id,username,account_type'
-    r = await c.get(
-        'https://graph.instagram.com/me',
-        params={'fields': fields, 'access_token': token},
-    )
-    try:
-        body = r.json()
-    except Exception:
-        body = {'raw': r.text[:300]}
-    if r.status_code != 200:
+    probes = [
+        ('graph.instagram.com/me', 'https://graph.instagram.com/me'),
+        ('graph.instagram.com/v21.0/me', 'https://graph.instagram.com/v21.0/me'),
+    ]
+    if oauth_user_id:
+        probes.extend([
+            ('graph.instagram.com/{oauth_user_id}', f'https://graph.instagram.com/{oauth_user_id}'),
+            ('graph.instagram.com/v21.0/{oauth_user_id}', f'https://graph.instagram.com/v21.0/{oauth_user_id}'),
+        ])
+
+    probe_results: Dict[str, Any] = {}
+    body: Dict[str, Any] = {}
+    chosen_probe = None
+    for label, url in probes:
+        r = await c.get(url, params={'fields': fields, 'access_token': token})
+        try:
+            probe_body = r.json()
+        except Exception:
+            probe_body = {'raw': r.text[:300]}
+        entry: Dict[str, Any] = {
+            'status': r.status_code,
+            'bodyKeys': sorted(probe_body.keys()) if isinstance(probe_body, dict) else [],
+        }
+        err = _safe_graph_error(probe_body)
+        if err:
+            entry['error'] = err
+        probe_results[label] = entry
+        if r.status_code == 200 and isinstance(probe_body, dict):
+            body = probe_body
+            chosen_probe = label
+            break
+
+    if not chosen_probe:
+        first = next(iter(probe_results.values()), {})
         return {
             'ok': False,
-            'status': r.status_code,
-            'bodyKeys': sorted(body.keys()) if isinstance(body, dict) else [],
-            'error': _safe_graph_error(body) or {'message': 'graph_me_failed'},
+            'status': first.get('status'),
+            'probes': probe_results,
+            'error': first.get('error') or {'message': 'profile_probe_failed'},
             'blocker': 'token_cannot_call_graph_me',
-            'fix': 'Disconnect and reconnect Instagram, then verify /me before saving the token.',
+            'fix': 'Disconnect and reconnect Instagram, then verify a profile probe before saving the token.',
         }
 
     canonical_id = str(body.get('user_id') or body.get('id') or '')
@@ -875,7 +904,9 @@ async def _verify_instagram_token(c: httpx.AsyncClient, token: str) -> Dict[str,
     if not canonical_id:
         return {
             'ok': False,
-            'status': r.status_code,
+            'status': 200,
+            'probeUsed': chosen_probe,
+            'probes': probe_results,
             'bodyKeys': sorted(body.keys()),
             'error': {'message': 'Graph /me did not return id or user_id'},
             'blocker': 'graph_me_missing_canonical_id',
@@ -883,22 +914,28 @@ async def _verify_instagram_token(c: httpx.AsyncClient, token: str) -> Dict[str,
     if not username:
         return {
             'ok': False,
-            'status': r.status_code,
+            'status': 200,
+            'probeUsed': chosen_probe,
+            'probes': probe_results,
             'bodyKeys': sorted(body.keys()),
-            'error': {'message': 'Graph /me did not return username'},
-            'blocker': 'graph_me_missing_username',
+            'error': {'message': 'Profile probe did not return username'},
+            'blocker': 'token_cannot_read_profile',
         }
     if account_type not in VALID_IG_ACCOUNT_TYPES:
         return {
             'ok': False,
-            'status': r.status_code,
+            'status': 200,
+            'probeUsed': chosen_probe,
+            'probes': probe_results,
             'bodyKeys': sorted(body.keys()),
             'error': {'message': f'Unsupported account_type: {account_type or "missing"}'},
             'blocker': 'instagram_account_type_not_supported',
         }
     return {
         'ok': True,
-        'status': r.status_code,
+        'status': 200,
+        'probeUsed': chosen_probe,
+        'probes': probe_results,
         'bodyKeys': sorted(body.keys()),
         'canonicalIgId': canonical_id,
         'graphMeId': str(body.get('id') or ''),
@@ -959,6 +996,7 @@ async def instagram_callback(request: Request,
         'longLivedExchangeEndpoint': 'https://graph.instagram.com/access_token',
         'longLivedExchangeStatus': None,
         'longLivedExchangeResponseKeys': [],
+        'longLivedExchangeError': None,
         'finalTokenStoredSource': None,
         'finalTokenLength': None,
         'finalTokenPrefix': None,
@@ -1040,9 +1078,14 @@ async def instagram_callback(request: Request,
                     'access_token': token,
                 },
             )
-            ll_data = ll.json() if ll.status_code == 200 else {}
+            try:
+                ll_data = ll.json()
+            except Exception:
+                ll_data = {'raw': ll.text[:300]}
             audit['longLivedExchangeStatus'] = ll.status_code
             audit['longLivedExchangeResponseKeys'] = sorted(ll_data.keys()) if isinstance(ll_data, dict) else []
+            if ll.status_code != 200:
+                audit['longLivedExchangeError'] = _safe_graph_error(ll_data) or ll_data
             long_token = ll_data.get('access_token') or None
             final_token = long_token or token
             audit['finalTokenStoredSource'] = 'long_lived' if long_token else 'short_lived'
@@ -1210,7 +1253,7 @@ async def instagram_callback(request: Request,
                     'blocker': None if fallback_username else 'token_cannot_read_profile',
                 }
             else:
-                verification = await _verify_instagram_token(c, final_token)
+                verification = await _verify_instagram_token(c, final_token, ig_user_id_from_oauth)
             audit['verification'] = verification
             if not verification.get('ok'):
                 graph_error = verification.get('error') or {}
