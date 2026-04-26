@@ -186,12 +186,29 @@ const Settings = () => {
                         setMatrixLoading(true);
                         setMatrix(null);
                         try {
-                          const { data } = await api.get('/instagram/identity-matrix');
-                          setMatrix(data);
-                          if (data?.chosenEndpoint) toast.success(`Working endpoint: ${data.chosenEndpoint}`);
-                          else toast.error('No working media endpoint found');
+                          const r = await api.get('/instagram/identity-matrix', { validateStatus: () => true });
+                          const d = r.data || {};
+                          setMatrix({ ...d, _httpStatus: r.status });
+                          if (d.ok === false) {
+                            toast.error(`Matrix failed at stage: ${d.stage || 'unknown'}`);
+                          } else if (d?.chosenEndpoint) {
+                            toast.success(`Working endpoint: ${d.chosenEndpoint}`);
+                          } else {
+                            toast.error('No working media endpoint found');
+                          }
                         } catch (e) {
-                          toast.error(e?.response?.data?.detail || 'Identity matrix failed');
+                          setMatrix({
+                            ok: false,
+                            stage: 'network_or_client',
+                            error: {
+                              type: e?.name || 'Error',
+                              message: e?.message || 'request failed',
+                              safeDetail: e?.response?.data?.detail || null,
+                              status: e?.response?.status || 0,
+                            },
+                            partial: null,
+                          });
+                          toast.error(e?.response?.data?.detail || e?.message || 'Identity matrix failed');
                         } finally {
                           setMatrixLoading(false);
                         }
@@ -199,9 +216,31 @@ const Settings = () => {
                         {matrixLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                         Run identity matrix
                       </Button>
+                      <span className="hidden">{/* matrix render below */}</span>
                     </div>
                   </div>
-                  {matrix && (
+                  {matrix && matrix.ok === false && (
+                    <div className="mt-4 p-4 rounded-xl bg-rose-50 border border-rose-200 text-sm space-y-2">
+                      <div className="font-semibold text-rose-900">Identity matrix failed</div>
+                      <div className="grid md:grid-cols-2 gap-1 text-rose-900">
+                        <div>HTTP status: <b>{matrix._httpStatus ?? matrix.error?.status ?? '—'}</b></div>
+                        <div>Stage: <b>{matrix.stage || '—'}</b></div>
+                        <div>Error type: <b>{matrix.error?.type || '—'}</b></div>
+                        <div>Endpoint: <b className="font-mono">/api/instagram/identity-matrix</b></div>
+                      </div>
+                      <div className="text-rose-900"><b>Message:</b> <span className="font-mono break-all">{matrix.error?.message || '—'}</span></div>
+                      {matrix.error?.safeDetail && (
+                        <div className="text-rose-900"><b>Detail:</b> <span className="font-mono break-all">{matrix.error.safeDetail}</span></div>
+                      )}
+                      {matrix.partial && (
+                        <div className="mt-2">
+                          <div className="font-semibold text-rose-900 mb-1">Partial state captured before failure</div>
+                          <pre className="text-xs bg-white p-2 rounded border border-rose-200 overflow-auto">{JSON.stringify(matrix.partial, null, 2)}</pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {matrix && matrix.ok !== false && (
                     <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
                       <div className="font-semibold">Identity + media matrix</div>
                       <div className="grid md:grid-cols-2 gap-2 text-slate-700">

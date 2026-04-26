@@ -3,7 +3,7 @@ import asyncio
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -1462,18 +1462,53 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
 async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id)):
     """Full token + identity + media endpoint matrix.
 
-    Runs every plausible /me variant and every plausible /media variant
-    against the stored token, redacting the token in all responses.
-    The frontend uses this to decide which endpoint actually works
-    for THIS particular OAuth flow before changing storage or code paths.
+    Always returns 200 with a structured JSON envelope so the frontend
+    can render the failure stage instead of a bare toast. Tokens are
+    never echoed; only the env source names are reported.
     """
-    u = await db.users.find_one({'id': user_id})
+    logger.info('identity_matrix_started user=%s', user_id)
+    partial: Dict[str, Any] = {
+        'connected': False,
+        'tokenExists': False,
+        'dbIgUserId': None,
+        'authKind': None,
+        'igAppIdSource': INSTAGRAM_APP_ID_SOURCE,
+    }
+
+    def _fail(stage: str, exc: Optional[BaseException] = None,
+              status: int = 500, message: Optional[str] = None) -> Dict[str, Any]:
+        logger.exception('identity_matrix_failed stage=%s', stage)
+        return {
+            'ok': False,
+            'stage': stage,
+            'error': {
+                'type': type(exc).__name__ if exc else 'Error',
+                'message': message or (str(exc) if exc else 'unknown'),
+                'safeDetail': (str(exc)[:300] if exc else None),
+                'status': status,
+            },
+            'partial': partial,
+        }
+
+    try:
+        u = await db.users.find_one({'id': user_id})
+    except Exception as e:
+        return _fail('db_lookup', e)
     if not u:
-        raise HTTPException(404, 'user not found')
+        return _fail('user_lookup', None, 404, 'user not found')
+    logger.info('identity_matrix_user_loaded user=%s', user_id)
+
     token = u.get('meta_access_token', '') or ''
     db_ig_id = str(u.get('ig_user_id') or '')
+    partial.update({
+        'connected': bool(u.get('instagramConnected')),
+        'tokenExists': bool(token),
+        'dbIgUserId': db_ig_id or None,
+        'authKind': u.get('ig_auth_kind'),
+    })
     if not token:
-        raise HTTPException(400, 'No stored access token')
+        return _fail('token_missing', None, 400, 'No stored access token')
+    logger.info('identity_matrix_token_present user=%s len=%d', user_id, len(token))
 
     fields_me = 'id,user_id,username,account_type'
     fields_media = (
@@ -1491,6 +1526,7 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
                 entry['body'] = r.text[:600]
             return entry
         except Exception as e:
+            logger.warning('identity_matrix_me_probe_failed url=%s err=%s', url, e)
             return {'status': 0, 'body': {'exception': str(e)}}
 
     me_unver: Dict[str, Any] = {}
@@ -1502,8 +1538,10 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
     username: Optional[str] = None
     account_type: Optional[str] = None
 
-    async with httpx.AsyncClient(timeout=20) as c:
+    try:
+      async with httpx.AsyncClient(timeout=20) as c:
         # ---- /me probes ----
+        logger.info('identity_matrix_me_probe_started user=%s', user_id)
         me_unver = await _probe(c, 'https://graph.instagram.com/me',
                                 {'access_token': token, 'fields': fields_me})
         me_ver = await _probe(c, 'https://graph.instagram.com/v21.0/me',
@@ -1532,6 +1570,7 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
                 mismatch_reason = f'canonical_{canonical}_!=_db_{db_ig_id}'
 
         # ---- /media probes ----
+        logger.info('identity_matrix_media_probe_started user=%s', user_id)
         async def add_media_probe(label: str, url: str):
             r = await _probe(c, url, {'access_token': token, 'fields': fields_media, 'limit': 5})
             count = 0
@@ -1570,6 +1609,14 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
         if canonical and canonical not in (db_ig_id,):
             await add_media_probe(f'GET graph.facebook.com/v21.0/{{canonical}}/media',
                                   f'https://graph.facebook.com/v21.0/{canonical}/media')
+    except Exception as e:
+        # Probe loop crashed mid-way. Return whatever we collected with a
+        # structured failure envelope so the wizard can render it.
+        partial.update({
+            'meUnverStatus': me_unver.get('status') if me_unver else None,
+            'matrixSoFar': matrix,
+        })
+        return _fail('me_probe' if not matrix else 'media_matrix', e)
 
     working = [m for m in matrix if m['works']]
     chosen = working[0]['endpoint'] if working else None
@@ -1583,7 +1630,9 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
         'instagramAppSecretConfigured': bool(INSTAGRAM_APP_SECRET),
     }
 
+    logger.info('identity_matrix_success user=%s chosen=%s', user_id, chosen)
     return {
+        'ok': True,
         'tokenLength': len(token),
         'authKind': u.get('ig_auth_kind'),
         'credentials': cred_info,
