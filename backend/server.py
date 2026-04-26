@@ -3623,6 +3623,11 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
     if not connected:
         blocker = 'instagram_not_connected'
         fix = 'Reconnect Instagram from Settings.'
+    elif graph_me_error:
+        blocker = 'instagram_token_invalid_or_expired'
+        fix = ('Graph /me could not validate the stored Instagram token. '
+               'Disconnect and reconnect Instagram from Settings so the app '
+               'stores a fresh token, ig_user_id, and webhook subscription.')
     elif mismatch_reason == 'graph_me_id_does_not_match_db_ig_user_id':
         blocker = 'id_mismatch'
         fix = ('The access_token in DB returns a different IG user id from '
@@ -3753,26 +3758,51 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
     # Cross-check: ask /me with the same token and confirm the IG account id
     # we just subscribed actually matches the token's IG identity.
     graph_me_id = None
+    graph_me_error = None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             mr = await c.get('https://graph.instagram.com/me',
                              params={'fields': 'id', 'access_token': token})
             if mr.status_code == 200:
                 graph_me_id = (mr.json() or {}).get('id')
-    except Exception:
+            else:
+                graph_me_error = f'http {mr.status_code}'
+    except Exception as e:
         graph_me_id = None
+        graph_me_error = str(e)[:200]
+
+    id_match = bool(graph_me_id and graph_me_id == ig_user_id)
+    messages_subscribed = 'messages' in subscribed_fields_list
+    blocker = None
+    fix = None
+    if graph_me_error:
+        blocker = 'instagram_token_invalid_or_expired'
+        fix = ('Graph /me could not validate the stored Instagram token. '
+               'Disconnect and reconnect Instagram from Settings, then run '
+               'resubscribe again.')
+    elif graph_me_id and not id_match:
+        blocker = 'id_mismatch'
+        fix = ('The stored Instagram token resolves to a different IG user id. '
+               'Disconnect and reconnect Instagram from Settings.')
+    elif not messages_subscribed:
+        blocker = 'webhook_not_subscribed_to_messages_field'
+        fix = 'Graph did not confirm the messages field. Check postStatus/getStatus and retry after reconnecting if needed.'
 
     return {
         'igUserIdUsed': ig_user_id,
         'igUserId': ig_user_id,
         'graphMeId': graph_me_id,
-        'idMatch': bool(graph_me_id and graph_me_id == ig_user_id),
+        'graphMeError': graph_me_error,
+        'idMatch': id_match,
         'requestedFields': fields.split(','),
         'postStatus': post_status,
         'postResponse': _redact_secrets(post_body) if isinstance(post_body, (dict, list)) else post_body,
         'getStatus': get_status,
         'subscribedFields': subscribed_fields_list,
-        'messagesSubscribed': 'messages' in subscribed_fields_list,
+        'messagesSubscribed': messages_subscribed,
+        'ok': bool(id_match and messages_subscribed and not graph_me_error),
+        'blocker': blocker,
+        'fix': fix,
     }
 
 
