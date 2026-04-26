@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -250,11 +251,14 @@ def _strip_mongo(doc):
 
 
 def _public_user(u: dict) -> UserPublic:
+    instagram_valid = bool(u.get('instagramConnected') and u.get('instagram_connection_valid'))
     return UserPublic(
         id=u['id'], username=u['username'], name=u['name'], email=u['email'],
         avatar=u.get('avatar') or f"https://i.pravatar.cc/150?u={u['username']}",
-        instagramConnected=bool(u.get('instagramConnected', False)),
+        instagramConnected=instagram_valid,
         instagramHandle=u.get('instagramHandle'),
+        instagramConnectionValid=instagram_valid,
+        instagramAccountType=u.get('instagram_account_type'),
     )
 
 
@@ -755,6 +759,129 @@ IG_SCOPES = (
     'instagram_business_manage_comments,'
     'instagram_business_content_publish'
 )
+VALID_IG_ACCOUNT_TYPES = {'BUSINESS', 'CREATOR', 'MEDIA_CREATOR'}
+
+
+def _token_prefix(token: str) -> Optional[str]:
+    return token[:6] if token else None
+
+
+def _safe_graph_error(body: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(body, dict):
+        return None
+    err = body.get('error')
+    if not isinstance(err, dict):
+        return None
+    return {
+        'message': err.get('message'),
+        'type': err.get('type'),
+        'code': err.get('code'),
+        'error_subcode': err.get('error_subcode'),
+        'fbtrace_id': err.get('fbtrace_id'),
+    }
+
+
+async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        'debugTokenWorks': False,
+        'tokenAppId': None,
+        'matchesIgAppId': False,
+        'scopes': [],
+        'isValid': False,
+        'expiresAt': None,
+        'error': None,
+    }
+    if not token:
+        out['error'] = 'token_missing'
+        return out
+    if not IG_APP_ID or not IG_APP_SECRET:
+        out['error'] = 'ig_app_credentials_missing'
+        return out
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                'https://graph.instagram.com/debug_token',
+                params={
+                    'input_token': token,
+                    'access_token': f'{IG_APP_ID}|{IG_APP_SECRET}',
+                },
+            )
+            body = r.json() if r.headers.get('content-type', '').startswith('application/json') else {}
+            if r.status_code == 200:
+                d = body.get('data') or {}
+                token_app_id = str(d.get('app_id') or '') or None
+                out.update({
+                    'debugTokenWorks': True,
+                    'tokenAppId': token_app_id,
+                    'matchesIgAppId': bool(token_app_id and token_app_id == IG_APP_ID),
+                    'scopes': d.get('scopes') or d.get('granular_scopes') or [],
+                    'isValid': bool(d.get('is_valid')),
+                    'expiresAt': d.get('expires_at'),
+                })
+            else:
+                out['error'] = _safe_graph_error(body) or {'status': r.status_code}
+    except Exception as e:
+        out['error'] = str(e)[:200]
+    return out
+
+
+async def _verify_instagram_token(c: httpx.AsyncClient, token: str) -> Dict[str, Any]:
+    fields = 'id,user_id,username,account_type'
+    r = await c.get(
+        'https://graph.instagram.com/me',
+        params={'fields': fields, 'access_token': token},
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {'raw': r.text[:300]}
+    if r.status_code != 200:
+        return {
+            'ok': False,
+            'status': r.status_code,
+            'bodyKeys': sorted(body.keys()) if isinstance(body, dict) else [],
+            'error': _safe_graph_error(body) or {'message': 'graph_me_failed'},
+            'blocker': 'token_cannot_call_graph_me',
+            'fix': 'Disconnect and reconnect Instagram, then verify /me before saving the token.',
+        }
+
+    canonical_id = str(body.get('user_id') or body.get('id') or '')
+    username = body.get('username') or ''
+    account_type = body.get('account_type') or ''
+    if not canonical_id:
+        return {
+            'ok': False,
+            'status': r.status_code,
+            'bodyKeys': sorted(body.keys()),
+            'error': {'message': 'Graph /me did not return id or user_id'},
+            'blocker': 'graph_me_missing_canonical_id',
+        }
+    if not username:
+        return {
+            'ok': False,
+            'status': r.status_code,
+            'bodyKeys': sorted(body.keys()),
+            'error': {'message': 'Graph /me did not return username'},
+            'blocker': 'graph_me_missing_username',
+        }
+    if account_type not in VALID_IG_ACCOUNT_TYPES:
+        return {
+            'ok': False,
+            'status': r.status_code,
+            'bodyKeys': sorted(body.keys()),
+            'error': {'message': f'Unsupported account_type: {account_type or "missing"}'},
+            'blocker': 'instagram_account_type_not_supported',
+        }
+    return {
+        'ok': True,
+        'status': r.status_code,
+        'bodyKeys': sorted(body.keys()),
+        'canonicalIgId': canonical_id,
+        'graphMeId': str(body.get('id') or ''),
+        'graphMeUserId': str(body.get('user_id') or ''),
+        'username': username,
+        'accountType': account_type,
+    }
 
 
 @api.get('/instagram/auth-url')
@@ -762,27 +889,95 @@ async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
     if not IG_APP_ID or not IG_APP_SECRET:
         raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
-    url = (
-        f"https://www.instagram.com/oauth/authorize?"
-        f"enable_fb_login=0&force_authentication=1"
-        f"&client_id={IG_APP_ID}"
-        f"&redirect_uri={redirect_uri}"
-        f"&response_type=code"
-        f"&scope={IG_SCOPES}"
-        f"&state={user_id}"
-    )
-    return {'url': url, 'configured': True, 'redirect_uri': redirect_uri}
+    params = {
+        'enable_fb_login': '0',
+        'force_authentication': '1',
+        'client_id': IG_APP_ID,
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'scope': IG_SCOPES,
+        'state': user_id,
+    }
+    url = f"https://www.instagram.com/oauth/authorize?{urlencode(params)}"
+    return {
+        'url': url,
+        'configured': True,
+        'redirect_uri': redirect_uri,
+        'authorizeUrlDebug': {
+            'host': 'www.instagram.com',
+            'clientIdLast4': IG_APP_ID[-4:] if IG_APP_ID else None,
+            'redirect_uri': redirect_uri,
+            'scope': IG_SCOPES,
+            'response_type': 'code',
+        },
+    }
 
 
 @api.get('/instagram/callback')
-async def instagram_callback(code: str = Query(...), state: str = Query(...),
+async def instagram_callback(request: Request,
+                             code: Optional[str] = Query(None),
+                             state: Optional[str] = Query(None),
                               error: str = Query(None), error_description: str = Query(None)):
+    from fastapi.responses import RedirectResponse
+    audit: Dict[str, Any] = {
+        'callbackPath': '/api/instagram/callback',
+        'requestQueryParamsReceived': sorted(request.query_params.keys()),
+        'codeExists': bool(code),
+        'redirectUriUsed': f"{BACKEND_PUBLIC_URL}/api/instagram/callback",
+        'clientIdSource': INSTAGRAM_APP_ID_SOURCE,
+        'clientSecretSource': INSTAGRAM_APP_SECRET_SOURCE,
+        'tokenExchangeEndpoint': 'https://api.instagram.com/oauth/access_token',
+        'tokenExchangeResponseKeys': [],
+        'shortLivedAccessTokenExists': False,
+        'userIdReturnedFromTokenExchange': None,
+        'permissionsReturned': [],
+        'longLivedExchangeAttempted': False,
+        'longLivedExchangeEndpoint': 'https://graph.instagram.com/access_token',
+        'longLivedExchangeStatus': None,
+        'longLivedExchangeResponseKeys': [],
+        'finalTokenStoredSource': None,
+        'finalTokenLength': None,
+        'finalTokenPrefix': None,
+        'finalIgUserIdStoredSource': None,
+        'verification': None,
+        'debugToken': None,
+        'createdAt': datetime.utcnow(),
+    }
+
+    async def _store_oauth_failure(uid: Optional[str], blocker: str, detail: Any = None):
+        if not uid:
+            return
+        await db.users.update_one(
+            {'id': uid},
+            {
+                '$set': {
+                    'instagramConnected': False,
+                    'instagram_connection_valid': False,
+                    'instagram_connection_blocker': blocker,
+                    'ig_oauth_last_audit': _redact_secrets({**audit, 'failureDetail': detail}),
+                    'updated': datetime.utcnow(),
+                },
+                '$unset': {
+                    'meta_access_token': '',
+                    'ig_user_id': '',
+                    'instagramHandle': '',
+                    'instagram_account_type': '',
+                    'instagram_graph_me_id': '',
+                    'instagram_graph_me_user_id': '',
+                },
+            },
+        )
+
     if error:
-        from fastapi.responses import RedirectResponse
         logger.warning('IG OAuth denied: %s — %s', error, error_description)
         return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason={error}")
+    if not state:
+        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=missing_state")
+    if not code:
+        await _store_oauth_failure(state, 'oauth_code_missing')
+        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=missing_code")
     user_id = state
-    redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
+    redirect_uri = audit['redirectUriUsed']
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             # 1) Exchange code for short-lived IG user token (form-encoded POST)
@@ -797,13 +992,21 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                 },
             )
             data = r.json() if r.status_code == 200 else {'raw': r.text, 'status': r.status_code}
+            audit['tokenExchangeStatus'] = r.status_code
+            audit['tokenExchangeResponseKeys'] = sorted(data.keys()) if isinstance(data, dict) else []
             token = data.get('access_token')
             ig_user_id_from_oauth = str(data.get('user_id') or '')
+            audit['shortLivedAccessTokenExists'] = bool(token)
+            audit['userIdReturnedFromTokenExchange'] = ig_user_id_from_oauth or None
+            audit['permissionsReturned'] = data.get('permissions') or data.get('scope') or []
             if not token:
                 safe = _redact_secrets(data)
                 logger.error('IG token exchange failed: %s', safe)
-                raise HTTPException(400, f'Token exchange failed: {safe}')
+                await _store_oauth_failure(user_id, 'token_exchange_failed', safe)
+                return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=token_exchange_failed")
             # 2) Exchange short-lived for long-lived IG user token (60 days)
+            audit['debugToken'] = await _debug_token_with_ig_app(token)
+            audit['longLivedExchangeAttempted'] = True
             ll = await c.get(
                 'https://graph.instagram.com/access_token',
                 params={
@@ -813,19 +1016,34 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                 },
             )
             ll_data = ll.json() if ll.status_code == 200 else {}
-            long_token = ll_data.get('access_token', token)
-            # 3) Get IG user info via the Instagram Graph
-            me = await c.get(
-                'https://graph.instagram.com/me',
-                params={
-                    'access_token': long_token,
-                    'fields': 'user_id,username,name,followers_count,account_type',
-                },
+            audit['longLivedExchangeStatus'] = ll.status_code
+            audit['longLivedExchangeResponseKeys'] = sorted(ll_data.keys()) if isinstance(ll_data, dict) else []
+            long_token = ll_data.get('access_token') or None
+            final_token = long_token or token
+            audit['finalTokenStoredSource'] = 'long_lived' if long_token else 'short_lived'
+            audit['finalTokenLength'] = len(final_token)
+            audit['finalTokenPrefix'] = _token_prefix(final_token)
+            # 3) Verify /me before saving the token or connected state.
+            verification = await _verify_instagram_token(c, final_token)
+            audit['verification'] = verification
+            if not verification.get('ok'):
+                graph_error = verification.get('error') or {}
+                logger.error('IG /me verification failed before save: %s',
+                             _redact_secrets(graph_error))
+                await _store_oauth_failure(
+                    user_id,
+                    verification.get('blocker') or 'token_cannot_call_graph_me',
+                    graph_error,
+                )
+                return RedirectResponse(
+                    f"{FRONTEND_URL}/app/settings?ig=error&reason=token_cannot_call_graph_me"
+                )
+            ig_user_id = verification['canonicalIgId']
+            handle = '@' + verification['username']
+            followers = 0
+            audit['finalIgUserIdStoredSource'] = (
+                'graph_me_user_id' if verification.get('graphMeUserId') else 'graph_me_id'
             )
-            me_data = me.json() if me.status_code == 200 else {}
-            ig_user_id = str(me_data.get('user_id') or me_data.get('id') or ig_user_id_from_oauth)
-            handle = '@' + me_data.get('username', 'instagram') if me_data.get('username') else '@instagram'
-            followers = me_data.get('followers_count', 0) or 0
             # 4) Subscribe the IG user to webhook fields — this is THE key call
             #    that the Facebook-Login flow couldn't perform. With an IG user
             #    token it's accepted.
@@ -836,7 +1054,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                     ig_sub = await c.post(
                         f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                         params={
-                            'access_token': long_token,
+                            'access_token': final_token,
                             'subscribed_fields': (
                                 'comments,messages,messaging_postbacks,'
                                 'messaging_seen,message_reactions,live_comments'
@@ -853,13 +1071,19 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
                 {'id': user_id},
                 {'$set': {
                     'instagramConnected': True,
+                    'instagram_connection_valid': True,
+                    'instagram_connection_blocker': None,
                     'instagramHandle': handle,
                     'instagramFollowers': followers,
                     'ig_user_id': ig_user_id,
-                    'meta_access_token': long_token,
+                    'meta_access_token': final_token,
                     'ig_auth_kind': 'instagram_business_login',
+                    'instagram_account_type': verification.get('accountType'),
+                    'instagram_graph_me_id': verification.get('graphMeId'),
+                    'instagram_graph_me_user_id': verification.get('graphMeUserId'),
                     'ig_subscribe_status': ig_sub_status,
                     'ig_subscribe_body': (ig_sub_body or '')[:500],
+                    'ig_oauth_last_audit': _redact_secrets(audit),
                 }},
             )
             logger.info('IG connected (Business Login) for user %s: %s (ig_id=%s)',
@@ -869,6 +1093,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
     except Exception as e:
         logger.exception('IG callback failed')
         from fastapi.responses import RedirectResponse
+        await _store_oauth_failure(user_id, 'server_error', str(e)[:200])
         return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=server_error")
     from fastapi.responses import RedirectResponse
     return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
@@ -879,11 +1104,15 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
+    connected = bool(u.get('instagramConnected') and u.get('instagram_connection_valid'))
     return {
-        'connected': bool(u.get('instagramConnected')),
+        'connected': connected,
         'handle': u.get('instagramHandle'),
         'followers': u.get('instagramFollowers', 0),
         'ig_user_id': u.get('ig_user_id'),
+        'connectionValid': bool(u.get('instagram_connection_valid')),
+        'connectionBlocker': u.get('instagram_connection_blocker'),
+        'accountType': u.get('instagram_account_type'),
         'meta_configured': bool(META_APP_ID and META_APP_SECRET),
     }
 
@@ -1558,19 +1787,18 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
                 username = username or b.get('username')
                 account_type = account_type or b.get('account_type')
 
-        canonical = ig_me_user_id or ig_me_id or db_ig_id or None
+        canonical = ig_me_user_id or ig_me_id or None
         id_match = bool(canonical and db_ig_id and canonical == db_ig_id)
         mismatch_reason = None
         if not id_match:
             if not canonical:
-                mismatch_reason = 'graph_me_did_not_return_id'
+                mismatch_reason = 'graph_me_failed_or_did_not_return_id'
             elif not db_ig_id:
                 mismatch_reason = 'db_ig_user_id_empty'
             else:
                 mismatch_reason = f'canonical_{canonical}_!=_db_{db_ig_id}'
 
         # ---- /media probes ----
-        logger.info('identity_matrix_media_probe_started user=%s', user_id)
         async def add_media_probe(label: str, url: str):
             r = await _probe(c, url, {'access_token': token, 'fields': fields_media, 'limit': 5})
             count = 0
@@ -1593,22 +1821,28 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
                 'works': works,
             })
 
-        await add_media_probe('GET graph.instagram.com/me/media',
-                              'https://graph.instagram.com/me/media')
-        await add_media_probe('GET graph.instagram.com/v21.0/me/media',
-                              'https://graph.instagram.com/v21.0/me/media')
-        if ig_me_id:
-            await add_media_probe(f'GET graph.instagram.com/{{ig_me_id}}/media',
-                                  f'https://graph.instagram.com/{ig_me_id}/media')
-        if ig_me_user_id and ig_me_user_id != ig_me_id:
-            await add_media_probe(f'GET graph.instagram.com/{{ig_me_user_id}}/media',
-                                  f'https://graph.instagram.com/{ig_me_user_id}/media')
-        if db_ig_id and db_ig_id not in (ig_me_id, ig_me_user_id):
-            await add_media_probe(f'GET graph.facebook.com/v21.0/{{db_ig_user_id}}/media',
-                                  f'https://graph.facebook.com/v21.0/{db_ig_id}/media')
-        if canonical and canonical not in (db_ig_id,):
-            await add_media_probe(f'GET graph.facebook.com/v21.0/{{canonical}}/media',
-                                  f'https://graph.facebook.com/v21.0/{canonical}/media')
+        if canonical:
+            logger.info('identity_matrix_media_probe_started user=%s', user_id)
+            await add_media_probe('GET graph.instagram.com/me/media',
+                                  'https://graph.instagram.com/me/media')
+            await add_media_probe('GET graph.instagram.com/v21.0/me/media',
+                                  'https://graph.instagram.com/v21.0/me/media')
+            if ig_me_id:
+                await add_media_probe(f'GET graph.instagram.com/{{ig_me_id}}/media',
+                                      f'https://graph.instagram.com/{ig_me_id}/media')
+            if ig_me_user_id and ig_me_user_id != ig_me_id:
+                await add_media_probe(f'GET graph.instagram.com/{{ig_me_user_id}}/media',
+                                      f'https://graph.instagram.com/{ig_me_user_id}/media')
+        else:
+            await db.users.update_one(
+                {'id': user_id},
+                {'$set': {
+                    'instagramConnected': False,
+                    'instagram_connection_valid': False,
+                    'instagram_connection_blocker': 'token_cannot_call_graph_me',
+                    'updated': datetime.utcnow(),
+                }},
+            )
     except Exception as e:
         # Probe loop crashed mid-way. Return whatever we collected with a
         # structured failure envelope so the wizard can render it.
@@ -1629,13 +1863,19 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
         'instagramAppIdConfigured': bool(INSTAGRAM_APP_ID),
         'instagramAppSecretConfigured': bool(INSTAGRAM_APP_SECRET),
     }
+    blocker = 'token_cannot_call_graph_me' if not canonical else None
+    reconnect_recommended = bool(blocker or (canonical and db_ig_id and canonical != db_ig_id))
+    debug_token = await _debug_token_with_ig_app(token)
 
     logger.info('identity_matrix_success user=%s chosen=%s', user_id, chosen)
     return {
         'ok': True,
+        'blocker': blocker,
         'tokenLength': len(token),
         'authKind': u.get('ig_auth_kind'),
         'credentials': cred_info,
+        'debugToken': debug_token,
+        'oauthLastAudit': _redact_secrets(u.get('ig_oauth_last_audit')) if u.get('ig_oauth_last_audit') else None,
         'meProbes': {
             'graphInstagramMeUnversioned': me_unver,
             'graphInstagramMeVersioned': me_ver,
@@ -1654,7 +1894,7 @@ async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id))
         },
         'mediaMatrix': matrix,
         'chosenEndpoint': chosen,
-        'reconnectRecommended': not id_match and bool(canonical) and bool(db_ig_id) and canonical != db_ig_id,
+        'reconnectRecommended': reconnect_recommended,
     }
 
 
@@ -1679,7 +1919,21 @@ async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional
 async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
     await db.users.update_one(
         {'id': user_id},
-        {'$set': {'instagramConnected': False, 'instagramHandle': None}, '$unset': {'meta_access_token': ''}}
+        {
+            '$set': {
+                'instagramConnected': False,
+                'instagram_connection_valid': False,
+                'instagram_connection_blocker': 'disconnected_by_user',
+                'instagramHandle': None,
+            },
+            '$unset': {
+                'meta_access_token': '',
+                'ig_user_id': '',
+                'instagram_account_type': '',
+                'instagram_graph_me_id': '',
+                'instagram_graph_me_user_id': '',
+            },
+        }
     )
     return {'ok': True}
 

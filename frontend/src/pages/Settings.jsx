@@ -19,6 +19,15 @@ const tabs = [
   { id: 'security', label: 'Security', icon: Shield }
 ];
 
+const instagramErrorMessage = (reason) => {
+  if (reason === 'token_cannot_call_graph_me') {
+    return 'Instagram connected failed: token cannot call /me';
+  }
+  if (reason === 'missing_code') return 'Instagram connection failed: OAuth code was missing';
+  if (reason === 'token_exchange_failed') return 'Instagram connection failed: token exchange failed';
+  return `Instagram connection failed: ${reason || 'unknown'}`;
+};
+
 const Settings = () => {
   const { user, refreshUser } = useAuth();
   const location = useLocation();
@@ -44,7 +53,7 @@ const Settings = () => {
     } else if (igStatus === 'error') {
       setTab('instagram');
       const reason = params.get('reason') || 'unknown';
-      toast.error(`Instagram connection failed: ${reason}`);
+      toast.error(instagramErrorMessage(reason));
       window.history.replaceState({}, '', location.pathname);
     }
   }, [location.search]); // eslint-disable-line
@@ -91,7 +100,7 @@ const Settings = () => {
               <h3 className="font-display font-bold text-lg">Instagram Account</h3>
               <p className="text-sm text-slate-500">Connect your Instagram Business account to enable automations.</p>
 
-              {user?.instagramConnected ? (
+              {user?.instagramConnected && user?.instagramConnectionValid ? (
                 <>
                   <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-pink-50 via-purple-50 to-orange-50 border border-pink-100">
                     <div className="flex items-center gap-4">
@@ -261,6 +270,13 @@ const Settings = () => {
                         )}
                         <div>Chosen endpoint: <b className="text-emerald-700">{matrix.chosenEndpoint || 'none'}</b></div>
                         <div>Reconnect recommended: <b className={matrix.reconnectRecommended ? 'text-rose-700' : 'text-emerald-700'}>{String(matrix.reconnectRecommended)}</b></div>
+                        {matrix.blocker && (
+                          <div className="md:col-span-2">Blocker: <b className="text-rose-700">{matrix.blocker}</b></div>
+                        )}
+                        <div>debug_token works: <b>{String(matrix.debugToken?.debugTokenWorks ?? false)}</b></div>
+                        <div>Token app id: <b className="font-mono">{matrix.debugToken?.tokenAppId || '—'}</b></div>
+                        <div>Matches IG App ID: <b>{String(matrix.debugToken?.matchesIgAppId ?? false)}</b></div>
+                        <div>Token valid: <b>{String(matrix.debugToken?.isValid ?? false)}</b></div>
                       </div>
                       <div>
                         <div className="font-semibold mb-1">/me probe results</div>
@@ -461,7 +477,9 @@ const Settings = () => {
                       </div>
                       <div className="flex-1">
                         <div className="font-semibold text-slate-500">No account connected</div>
-                        <div className="text-sm text-slate-400">Connect an Instagram Business or Creator account</div>
+                        <div className="text-sm text-slate-400">
+                          {user?.instagramConnectionValid === false ? 'Reconnect Instagram to verify the access token' : 'Connect an Instagram Business or Creator account'}
+                        </div>
                       </div>
                       <Badge className="bg-slate-100 text-slate-500 border-0 rounded-full">
                         <AlertCircle className="w-3 h-3 mr-1" /> Not connected
@@ -469,14 +487,13 @@ const Settings = () => {
                     </div>
                   </div>
                   <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-700">
-                    <strong>Requirements:</strong> You need an Instagram Business or Creator account linked to a Facebook Page.
-                    Set <code className="bg-amber-100 px-1 rounded">META_APP_ID</code> and <code className="bg-amber-100 px-1 rounded">META_APP_SECRET</code> in your backend <code className="bg-amber-100 px-1 rounded">.env</code> file first.
+                    <strong>Requirements:</strong> You need an Instagram Business or Creator account. The app verifies Graph <code className="bg-amber-100 px-1 rounded">/me</code> before showing the account as connected.
                   </div>
                   <div className="mt-6 flex justify-end">
                     <Button onClick={async () => {
                       setIgConnecting(true);
                       try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
-                      catch (e) { toast.error(e?.response?.data?.detail || 'Failed — check META_APP_ID/SECRET in .env'); setIgConnecting(false); }
+                      catch (e) { toast.error(e?.response?.data?.detail || 'Failed - check IG_APP_ID/IG_APP_SECRET in .env'); setIgConnecting(false); }
                     }} className="bg-slate-900 text-white rounded-xl" disabled={igConnecting}>
                       {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}
                       Connect Instagram

@@ -20,6 +20,8 @@ class UserPublic(BaseModel):
     avatar: str
     instagramConnected: bool = False
     instagramHandle: Optional[str] = None
+    instagramConnectionValid: bool = False
+    instagramAccountType: Optional[str] = None
 
 
 class SignupIn(BaseModel):
