@@ -129,7 +129,7 @@ async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, t
     if not access_token or not ig_user_id:
         logger.warning('send_ig_dm: missing access_token or ig_user_id')
         return False
-    url = f'https://graph.instagram.com/v21.0/{ig_user_id}/messages'
+    url = f'https://graph.instagram.com/{ig_user_id}/messages'
     payload = {
         'recipient': {'id': recipient_ig_id},
         'message': {'text': text},
@@ -151,7 +151,7 @@ async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) 
     """Reply to an Instagram comment via Graph API."""
     if not access_token or not ig_comment_id:
         return False
-    url = f'https://graph.instagram.com/v21.0/{ig_comment_id}/replies'
+    url = f'https://graph.instagram.com/{ig_comment_id}/replies'
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
@@ -680,7 +680,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     text = (data.text or '').strip()
     if not text:
         raise HTTPException(400, 'Empty reply')
-    url = f'https://graph.instagram.com/v21.0/{ig_comment_id}/replies'
+    url = f'https://graph.instagram.com/{ig_comment_id}/replies'
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
@@ -816,7 +816,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
             long_token = ll_data.get('access_token', token)
             # 3) Get IG user info via the Instagram Graph
             me = await c.get(
-                'https://graph.instagram.com/v21.0/me',
+                'https://graph.instagram.com/me',
                 params={
                     'access_token': long_token,
                     'fields': 'user_id,username,name,followers_count,account_type',
@@ -834,7 +834,7 @@ async def instagram_callback(code: str = Query(...), state: str = Query(...),
             if ig_user_id:
                 try:
                     ig_sub = await c.post(
-                        f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                        f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                         params={
                             'access_token': long_token,
                             'subscribed_fields': (
@@ -903,7 +903,7 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
     async with httpx.AsyncClient(timeout=20) as c:
         try:
             ig_sub = await c.post(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={
                     'access_token': token,
                     'subscribed_fields': (
@@ -913,7 +913,7 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
                 },
             )
             verify = await c.get(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'access_token': token},
             )
             return {
@@ -1046,7 +1046,7 @@ async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
     async with httpx.AsyncClient(timeout=30) as c:
         try:
             d = await c.delete(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'access_token': token},
             )
             out['delete'] = {'status': d.status_code, 'body': d.text[:500]}
@@ -1054,7 +1054,7 @@ async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
             out['delete'] = {'error': str(e)}
         try:
             p = await c.post(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'access_token': token, 'subscribed_fields': want_fields},
             )
             out['post'] = {'status': p.status_code, 'body': p.text[:500]}
@@ -1062,7 +1062,7 @@ async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
             out['post'] = {'error': str(e)}
         try:
             g = await c.get(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'access_token': token},
             )
             out['verify'] = {'status': g.status_code,
@@ -1111,7 +1111,7 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
     }
     async with httpx.AsyncClient(timeout=20) as c:
         try:
-            me = await c.get('https://graph.instagram.com/v21.0/me',
+            me = await c.get('https://graph.instagram.com/me',
                              params={'access_token': token,
                                      'fields': 'user_id,username,name,account_type,followers_count'})
             out['graph_me'] = {'status': me.status_code,
@@ -1120,7 +1120,7 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
             out['graph_me'] = {'error': str(e)}
         if ig_user_id:
             try:
-                igs = await c.get(f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                igs = await c.get(f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                                   params={'access_token': token})
                 out['ig_subscribed_apps'] = {
                     'status': igs.status_code,
@@ -1130,7 +1130,7 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
                 out['ig_subscribed_apps'] = {'error': str(e)}
             try:
                 igp = await c.post(
-                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                     params={'access_token': token,
                             'subscribed_fields': 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'},
                 )
@@ -1165,7 +1165,7 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
                 try:
                     # Fetch comments on the media
                     cr = await c.get(
-                        f'https://graph.instagram.com/v21.0/{mid}/comments',
+                        f'https://graph.instagram.com/{mid}/comments',
                         params={'access_token': token,
                                 'fields': 'id,text,username,timestamp,from',
                                 'limit': 25},
@@ -1173,7 +1173,7 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
                     body = cr.json() if cr.status_code == 200 else cr.text[:500]
                     # Also fetch basic media info
                     mr = await c.get(
-                        f'https://graph.instagram.com/v21.0/{mid}',
+                        f'https://graph.instagram.com/{mid}',
                         params={'access_token': token,
                                 'fields': 'id,caption,comments_count,like_count,timestamp,permalink,media_type'},
                     )
@@ -1207,11 +1207,11 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
     # form depending on auth flow.
     last_err = None
     candidates = [
-        ('https://graph.instagram.com/v21.0/me/media', '/me/media'),
+        ('https://graph.instagram.com/me/media', '/me/media'),
     ]
     if ig_id:
         candidates.append(
-            (f'https://graph.instagram.com/v21.0/{ig_id}/media', '/{ig_user_id}/media')
+            (f'https://graph.instagram.com/{ig_id}/media', '/{ig_user_id}/media')
         )
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -1280,7 +1280,7 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
         # 1) /me
         try:
             r = await c.get(
-                'https://graph.instagram.com/v21.0/me',
+                'https://graph.instagram.com/me',
                 params={
                     'access_token': token,
                     'fields': 'user_id,id,username,account_type',
@@ -1301,7 +1301,7 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
         # 2) /me/media
         try:
             r = await c.get(
-                'https://graph.instagram.com/v21.0/me/media',
+                'https://graph.instagram.com/me/media',
                 params={
                     'access_token': token,
                     'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
@@ -1331,7 +1331,7 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
         if db_ig_id:
             try:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{db_ig_id}/media',
+                    f'https://graph.instagram.com/{db_ig_id}/media',
                     params={
                         'access_token': token,
                         'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
@@ -1385,7 +1385,7 @@ async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/media',
+                f'https://graph.instagram.com/{ig_user_id}/media',
                 params={'access_token': access_token, 'fields': 'id,timestamp', 'limit': 1},
             )
             if r.status_code != 200:
@@ -2178,7 +2178,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         user_doc.get('email'), mid)
             try:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{mid}/comments',
+                    f'https://graph.instagram.com/{mid}/comments',
                     params={
                         'access_token': token,
                         'fields': 'id,text,username,timestamp,from',
@@ -2458,7 +2458,7 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
             # 2) /me
             try:
                 r = await c.get(
-                    'https://graph.instagram.com/v21.0/me',
+                    'https://graph.instagram.com/me',
                     params={'access_token': token,
                             'fields': 'user_id,username,account_type'},
                 )
@@ -2474,7 +2474,7 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
             # 3) /{ig_user_id}/media
             try:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{ig_user_id}/media',
+                    f'https://graph.instagram.com/{ig_user_id}/media',
                     params={'access_token': token,
                             'fields': 'id,caption,comments_count,media_type,permalink,timestamp',
                             'limit': 25},
@@ -2495,7 +2495,7 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
                        'mismatch': False, 'likelyCause': None, 'http': None}
                 try:
                     r = await c.get(
-                        f'https://graph.instagram.com/v21.0/{mid}/comments',
+                        f'https://graph.instagram.com/{mid}/comments',
                         params={'access_token': token,
                                 'fields': 'id,text,username,timestamp,from',
                                 'limit': 25},
@@ -2509,7 +2509,7 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
                         if row['commentsCount'] is None:
                             try:
                                 rm = await c.get(
-                                    f'https://graph.instagram.com/v21.0/{mid}',
+                                    f'https://graph.instagram.com/{mid}',
                                     params={'access_token': token,
                                             'fields': 'comments_count'},
                                 )
@@ -2537,7 +2537,7 @@ async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)
             # 5) /{ig_user_id}/subscribed_apps
             try:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                     params={'access_token': token},
                 )
                 if r.status_code == 200:
@@ -2833,7 +2833,7 @@ async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                     params={'access_token': token},
                 )
                 if r.status_code == 200:
@@ -3036,7 +3036,7 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.get(
-                    f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                     params={'access_token': token},
                 )
                 if r.status_code == 200:
@@ -3232,7 +3232,7 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 me = await c.get(
-                    'https://graph.instagram.com/v21.0/me',
+                    'https://graph.instagram.com/me',
                     params={'fields': 'id,username,account_type',
                             'access_token': token},
                 )
@@ -3450,7 +3450,7 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             pr = await c.post(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'subscribed_fields': fields, 'access_token': token},
             )
             post_status = pr.status_code
@@ -3459,7 +3459,7 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
             except Exception:
                 post_body = {'raw': pr.text[:300]}
             gr = await c.get(
-                f'https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps',
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
                 params={'access_token': token},
             )
             get_status = gr.status_code
@@ -3476,7 +3476,7 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
     graph_me_id = None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            mr = await c.get('https://graph.instagram.com/v21.0/me',
+            mr = await c.get('https://graph.instagram.com/me',
                              params={'fields': 'id', 'access_token': token})
             if mr.status_code == 200:
                 graph_me_id = (mr.json() or {}).get('id')
