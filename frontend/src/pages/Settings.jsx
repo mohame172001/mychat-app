@@ -31,6 +31,8 @@ const Settings = () => {
   const [diag, setDiag] = useState(null);
   const [mediaDiagLoading, setMediaDiagLoading] = useState(false);
   const [mediaDiag, setMediaDiag] = useState(null);
+  const [matrixLoading, setMatrixLoading] = useState(false);
+  const [matrix, setMatrix] = useState(null);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -180,8 +182,85 @@ const Settings = () => {
                         {mediaDiagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                         Fetch Instagram posts now
                       </Button>
+                      <Button onClick={async () => {
+                        setMatrixLoading(true);
+                        setMatrix(null);
+                        try {
+                          const { data } = await api.get('/instagram/identity-matrix');
+                          setMatrix(data);
+                          if (data?.chosenEndpoint) toast.success(`Working endpoint: ${data.chosenEndpoint}`);
+                          else toast.error('No working media endpoint found');
+                        } catch (e) {
+                          toast.error(e?.response?.data?.detail || 'Identity matrix failed');
+                        } finally {
+                          setMatrixLoading(false);
+                        }
+                      }} variant="outline" className="rounded-xl" disabled={matrixLoading}>
+                        {matrixLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                        Run identity matrix
+                      </Button>
                     </div>
                   </div>
+                  {matrix && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
+                      <div className="font-semibold">Identity + media matrix</div>
+                      <div className="grid md:grid-cols-2 gap-2 text-slate-700">
+                        <div>Auth kind: <b>{matrix.authKind || '—'}</b></div>
+                        <div>Token length: <b>{matrix.tokenLength}</b></div>
+                        <div>IG App ID source: <b>{matrix.credentials?.instagramAppIdSource || '—'}</b></div>
+                        <div>IG App Secret source: <b>{matrix.credentials?.instagramAppSecretSource || '—'}</b></div>
+                        <div>DB ig_user_id: <b className="font-mono">{matrix.identity?.dbIgUserId || '—'}</b></div>
+                        <div>Best canonical IG id: <b className="font-mono">{matrix.identity?.bestCanonicalIgId || '—'}</b></div>
+                        <div>/me .id: <b className="font-mono">{matrix.identity?.instagramMeId || '—'}</b></div>
+                        <div>/me .user_id: <b className="font-mono">{matrix.identity?.instagramMeUserId || '—'}</b></div>
+                        <div>Username: <b>{matrix.identity?.username || '—'}</b></div>
+                        <div>Account type: <b>{matrix.identity?.accountType || '—'}</b></div>
+                        <div>Source field: <b>{matrix.identity?.sourceField || '—'}</b></div>
+                        <div>idMatch: <b className={matrix.identity?.idMatch ? 'text-emerald-700' : 'text-rose-700'}>{String(matrix.identity?.idMatch)}</b></div>
+                        {matrix.identity?.mismatchReason && (
+                          <div className="md:col-span-2">Mismatch reason: <b className="text-rose-700">{matrix.identity.mismatchReason}</b></div>
+                        )}
+                        <div>Chosen endpoint: <b className="text-emerald-700">{matrix.chosenEndpoint || 'none'}</b></div>
+                        <div>Reconnect recommended: <b className={matrix.reconnectRecommended ? 'text-rose-700' : 'text-emerald-700'}>{String(matrix.reconnectRecommended)}</b></div>
+                      </div>
+                      <div>
+                        <div className="font-semibold mb-1">/me probe results</div>
+                        <table className="w-full text-xs">
+                          <thead><tr className="text-left text-slate-500"><th>Probe</th><th>Status</th><th>Body preview</th></tr></thead>
+                          <tbody>
+                            {[
+                              ['graph.instagram.com/me', matrix.meProbes?.graphInstagramMeUnversioned],
+                              ['graph.instagram.com/v21.0/me', matrix.meProbes?.graphInstagramMeVersioned],
+                              ['graph.facebook.com/v21.0/me', matrix.meProbes?.graphFacebookMeVersioned],
+                            ].map(([k, v]) => (
+                              <tr key={k} className="align-top">
+                                <td className="py-0.5 font-mono pr-2">{k}</td>
+                                <td className={(v?.status >= 200 && v?.status < 300) ? 'text-emerald-700' : 'text-rose-700'}>{v?.status ?? '—'}</td>
+                                <td className="font-mono break-all">{typeof v?.body === 'string' ? v.body.slice(0, 200) : JSON.stringify(v?.body || {}).slice(0, 200)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div>
+                        <div className="font-semibold mb-1">Media endpoint matrix</div>
+                        <table className="w-full text-xs">
+                          <thead><tr className="text-left text-slate-500"><th>Endpoint</th><th>Status</th><th>Count</th><th>Error code</th><th>Error</th></tr></thead>
+                          <tbody>
+                            {(matrix.mediaMatrix || []).map((m, i) => (
+                              <tr key={i} className={m.works ? 'text-emerald-700' : ''}>
+                                <td className="py-0.5 font-mono pr-2">{m.endpoint}</td>
+                                <td>{m.status}</td>
+                                <td>{m.count}</td>
+                                <td>{m.errorCode || '—'}</td>
+                                <td className="break-all">{m.errorMessage || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                   {mediaDiag && (
                     <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
                       <div className="font-semibold">Media diagnostics</div>

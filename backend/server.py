@@ -1458,6 +1458,157 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
     return out
 
 
+@api.get('/instagram/identity-matrix')
+async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id)):
+    """Full token + identity + media endpoint matrix.
+
+    Runs every plausible /me variant and every plausible /media variant
+    against the stored token, redacting the token in all responses.
+    The frontend uses this to decide which endpoint actually works
+    for THIS particular OAuth flow before changing storage or code paths.
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    token = u.get('meta_access_token', '') or ''
+    db_ig_id = str(u.get('ig_user_id') or '')
+    if not token:
+        raise HTTPException(400, 'No stored access token')
+
+    fields_me = 'id,user_id,username,account_type'
+    fields_media = (
+        'id,caption,media_type,media_url,thumbnail_url,'
+        'permalink,timestamp,comments_count'
+    )
+
+    async def _probe(c: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            r = await c.get(url, params=params)
+            entry: Dict[str, Any] = {'status': r.status_code}
+            try:
+                entry['body'] = r.json()
+            except Exception:
+                entry['body'] = r.text[:600]
+            return entry
+        except Exception as e:
+            return {'status': 0, 'body': {'exception': str(e)}}
+
+    me_unver: Dict[str, Any] = {}
+    me_ver: Dict[str, Any] = {}
+    me_fb: Dict[str, Any] = {}
+    matrix: List[Dict[str, Any]] = []
+    ig_me_id: Optional[str] = None
+    ig_me_user_id: Optional[str] = None
+    username: Optional[str] = None
+    account_type: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=20) as c:
+        # ---- /me probes ----
+        me_unver = await _probe(c, 'https://graph.instagram.com/me',
+                                {'access_token': token, 'fields': fields_me})
+        me_ver = await _probe(c, 'https://graph.instagram.com/v21.0/me',
+                              {'access_token': token, 'fields': fields_me})
+        me_fb = await _probe(c, 'https://graph.facebook.com/v21.0/me',
+                             {'access_token': token, 'fields': 'id,name'})
+
+        # Pick whichever IG /me worked
+        for src in (me_unver, me_ver):
+            if src.get('status') == 200 and isinstance(src.get('body'), dict):
+                b = src['body']
+                ig_me_id = ig_me_id or (str(b.get('id')) if b.get('id') is not None else None)
+                ig_me_user_id = ig_me_user_id or (str(b.get('user_id')) if b.get('user_id') is not None else None)
+                username = username or b.get('username')
+                account_type = account_type or b.get('account_type')
+
+        canonical = ig_me_user_id or ig_me_id or db_ig_id or None
+        id_match = bool(canonical and db_ig_id and canonical == db_ig_id)
+        mismatch_reason = None
+        if not id_match:
+            if not canonical:
+                mismatch_reason = 'graph_me_did_not_return_id'
+            elif not db_ig_id:
+                mismatch_reason = 'db_ig_user_id_empty'
+            else:
+                mismatch_reason = f'canonical_{canonical}_!=_db_{db_ig_id}'
+
+        # ---- /media probes ----
+        async def add_media_probe(label: str, url: str):
+            r = await _probe(c, url, {'access_token': token, 'fields': fields_media, 'limit': 5})
+            count = 0
+            err_code = None
+            err_msg = None
+            works = False
+            body = r.get('body')
+            if r.get('status') == 200 and isinstance(body, dict):
+                count = len(body.get('data') or [])
+                works = True
+            elif isinstance(body, dict) and isinstance(body.get('error'), dict):
+                err_code = body['error'].get('code')
+                err_msg = body['error'].get('message')
+            matrix.append({
+                'endpoint': label,
+                'status': r.get('status'),
+                'count': count,
+                'errorCode': err_code,
+                'errorMessage': err_msg,
+                'works': works,
+            })
+
+        await add_media_probe('GET graph.instagram.com/me/media',
+                              'https://graph.instagram.com/me/media')
+        await add_media_probe('GET graph.instagram.com/v21.0/me/media',
+                              'https://graph.instagram.com/v21.0/me/media')
+        if ig_me_id:
+            await add_media_probe(f'GET graph.instagram.com/{{ig_me_id}}/media',
+                                  f'https://graph.instagram.com/{ig_me_id}/media')
+        if ig_me_user_id and ig_me_user_id != ig_me_id:
+            await add_media_probe(f'GET graph.instagram.com/{{ig_me_user_id}}/media',
+                                  f'https://graph.instagram.com/{ig_me_user_id}/media')
+        if db_ig_id and db_ig_id not in (ig_me_id, ig_me_user_id):
+            await add_media_probe(f'GET graph.facebook.com/v21.0/{{db_ig_user_id}}/media',
+                                  f'https://graph.facebook.com/v21.0/{db_ig_id}/media')
+        if canonical and canonical not in (db_ig_id,):
+            await add_media_probe(f'GET graph.facebook.com/v21.0/{{canonical}}/media',
+                                  f'https://graph.facebook.com/v21.0/{canonical}/media')
+
+    working = [m for m in matrix if m['works']]
+    chosen = working[0]['endpoint'] if working else None
+
+    # Surface OAuth credentials info (already redacted helpers exist but we
+    # only echo source names + booleans, never values).
+    cred_info = {
+        'instagramAppIdSource': INSTAGRAM_APP_ID_SOURCE,
+        'instagramAppSecretSource': INSTAGRAM_APP_SECRET_SOURCE,
+        'instagramAppIdConfigured': bool(INSTAGRAM_APP_ID),
+        'instagramAppSecretConfigured': bool(INSTAGRAM_APP_SECRET),
+    }
+
+    return {
+        'tokenLength': len(token),
+        'authKind': u.get('ig_auth_kind'),
+        'credentials': cred_info,
+        'meProbes': {
+            'graphInstagramMeUnversioned': me_unver,
+            'graphInstagramMeVersioned': me_ver,
+            'graphFacebookMeVersioned': me_fb,
+        },
+        'identity': {
+            'dbIgUserId': db_ig_id or None,
+            'instagramMeId': ig_me_id,
+            'instagramMeUserId': ig_me_user_id,
+            'bestCanonicalIgId': canonical,
+            'username': username,
+            'accountType': account_type,
+            'idMatch': id_match,
+            'mismatchReason': mismatch_reason,
+            'sourceField': 'user_id' if ig_me_user_id else ('id' if ig_me_id else None),
+        },
+        'mediaMatrix': matrix,
+        'chosenEndpoint': chosen,
+        'reconnectRecommended': not id_match and bool(canonical) and bool(db_ig_id) and canonical != db_ig_id,
+    }
+
+
 async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional[str]:
     if not access_token or not ig_user_id:
         return None
