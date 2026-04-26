@@ -1192,42 +1192,121 @@ async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
 
 @api.get('/instagram/media')
 async def instagram_media(user_id: str = Depends(get_current_user_id), limit: int = 25):
-    """List the user's recent Instagram posts via Graph API."""
+    """List the user's recent Instagram posts via Graph API.
+
+    Always uses /me/media as the primary endpoint (Instagram Business Login).
+    If /me/media fails, optionally tries /{ig_user_id}/media — but the
+    response is always shaped consistently:
+
+      ok=true   when /me/media returned 200 (count may still be 0)
+      ok=false  when /me/media failed; error details + optional fallback info
+
+    The wizard never sees the /{ig_user_id}/media error if /me/media succeeded.
+    """
     u = await db.users.find_one({'id': user_id})
     if not u or not u.get('instagramConnected'):
         raise HTTPException(400, 'Instagram not connected')
     token = u.get('meta_access_token', '')
-    ig_id = u.get('ig_user_id', '')
+    ig_id = str(u.get('ig_user_id') or '')
     if not token:
         raise HTTPException(400, 'Missing access token')
-    fields = 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp'
+    fields = 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count'
     lim = max(1, min(limit, 50))
-    # Try /me/media first (documented for Instagram Business Login). If that
-    # fails, fall back to /{ig_user_id}/media. Some accounts only accept one
-    # form depending on auth flow.
-    last_err = None
-    candidates = [
-        ('https://graph.instagram.com/me/media', '/me/media'),
-    ]
-    if ig_id:
-        candidates.append(
-            (f'https://graph.instagram.com/{ig_id}/media', '/{ig_user_id}/media')
-        )
+    primary_url = 'https://graph.instagram.com/me/media'
+    primary_label = '/me/media'
+
+    me_id_for_debug: Optional[str] = None
+    primary_error: Optional[Dict[str, Any]] = None
+    fallback_error: Optional[Dict[str, Any]] = None
+
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            for url, label in candidates:
-                r = await c.get(url, params={
-                    'access_token': token, 'fields': fields, 'limit': lim,
-                })
-                if r.status_code == 200:
-                    body = r.json()
-                    return {'items': body.get('data', []), 'endpoint': label}
-                last_err = {'endpoint': label, 'status': r.status_code, 'body': r.text[:500]}
-                logger.error('IG media fetch error via %s: %s %s', label, r.status_code, r.text[:300])
+            # Best-effort /me lookup for diagnostics shown in the wizard.
+            try:
+                mer = await c.get(
+                    'https://graph.instagram.com/me',
+                    params={'access_token': token, 'fields': 'user_id,id,username'},
+                )
+                if mer.status_code == 200:
+                    md = mer.json() or {}
+                    me_id_for_debug = str(md.get('user_id') or md.get('id') or '') or None
+            except Exception:
+                pass
+
+            r = await c.get(primary_url, params={
+                'access_token': token, 'fields': fields, 'limit': lim,
+            })
+            if r.status_code == 200:
+                items = (r.json() or {}).get('data') or []
+                return {
+                    'ok': True,
+                    'endpointUsed': primary_label,
+                    'media': items,
+                    'items': items,  # backwards-compat
+                    'count': len(items),
+                    'warning': None if items else 'No Instagram media returned from /me/media',
+                    'fallbackError': None,
+                    'graphMeId': me_id_for_debug,
+                    'dbIgUserId': ig_id or None,
+                    'idMatch': (bool(me_id_for_debug) and me_id_for_debug == ig_id) if ig_id else None,
+                }
+
+            primary_error = {'status': r.status_code, 'body': r.text[:500]}
+            logger.error('IG /me/media failed %s: %s', r.status_code, r.text[:300])
+
+            # Optional fallback — only attempted, never surfaced as the
+            # primary error if /me/media is the documented path.
+            if ig_id:
+                try:
+                    fr = await c.get(
+                        f'https://graph.instagram.com/{ig_id}/media',
+                        params={'access_token': token, 'fields': fields, 'limit': lim},
+                    )
+                    if fr.status_code == 200:
+                        items = (fr.json() or {}).get('data') or []
+                        return {
+                            'ok': True,
+                            'endpointUsed': '/{ig_user_id}/media (fallback)',
+                            'media': items,
+                            'items': items,
+                            'count': len(items),
+                            'warning': '/me/media failed; succeeded via /{ig_user_id}/media fallback',
+                            'fallbackError': None,
+                            'primaryError': primary_error,
+                            'graphMeId': me_id_for_debug,
+                            'dbIgUserId': ig_id or None,
+                            'idMatch': (bool(me_id_for_debug) and me_id_for_debug == ig_id),
+                        }
+                    fallback_error = {'status': fr.status_code, 'body': fr.text[:500]}
+                except Exception as e:
+                    fallback_error = {'exception': str(e)}
     except Exception as e:
         logger.exception('IG media fetch failed')
-        raise HTTPException(500, str(e))
-    raise HTTPException(502, f'Graph API error: {last_err}')
+        return {
+            'ok': False,
+            'endpointUsed': primary_label,
+            'media': [],
+            'items': [],
+            'count': 0,
+            'error': {'status': 0, 'body': str(e)},
+            'fallbackError': fallback_error,
+            'graphMeId': me_id_for_debug,
+            'dbIgUserId': ig_id or None,
+            'idMatch': None,
+        }
+
+    return {
+        'ok': False,
+        'endpointUsed': primary_label,
+        'media': [],
+        'items': [],
+        'count': 0,
+        'error': primary_error or {'status': 0, 'body': 'unknown'},
+        'fallbackError': fallback_error,
+        'graphMeId': me_id_for_debug,
+        'dbIgUserId': ig_id or None,
+        'idMatch': (bool(me_id_for_debug) and me_id_for_debug == ig_id) if ig_id else None,
+    }
 
 
 @api.get('/instagram/media/diagnostics')
