@@ -341,11 +341,17 @@ async def list_automations(user_id: str = Depends(get_current_user_id)):
 @api.post('/automations')
 async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_user_id)):
     automation_data = data.model_dump()
+    now = datetime.utcnow()
     # Handle None values for nodes and edges
     if automation_data.get('nodes') is None:
         automation_data['nodes'] = []
     if automation_data.get('edges') is None:
         automation_data['edges'] = []
+    automation_data['createdAt'] = now
+    automation_data['updatedAt'] = now
+    automation_data['processExistingComments'] = bool(automation_data.get('processExistingComments', False))
+    if _is_comment_automation_rule(automation_data):
+        automation_data['activationStartedAt'] = now
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
     return a.model_dump()
@@ -362,7 +368,25 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
 @api.patch('/automations/{aid}')
 async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
-    update['updated'] = datetime.utcnow()
+    existing = await db.automations.find_one({'id': aid, 'user_id': user_id})
+    if not existing:
+        raise HTTPException(404, 'Not found')
+    now = datetime.utcnow()
+    update['updated'] = now
+    update['updatedAt'] = now
+    prospective = {**existing, **update}
+    reset_fields = {
+        'trigger', 'nodes', 'edges', 'match', 'keyword', 'media_id', 'latest',
+        'mode', 'comment_reply', 'dm_text', 'media_preview',
+    }
+    status_reenabled = (
+        update.get('status') == 'active' and existing.get('status') != 'active'
+    )
+    rule_shape_changed = any(field in update for field in reset_fields)
+    if _is_comment_automation_rule(prospective) and (status_reenabled or rule_shape_changed):
+        update['activationStartedAt'] = now
+        logger.info('comment_rule_activation_reset rule_id=%s user_id=%s reason=%s',
+                    aid, user_id, 'status_reenabled' if status_reenabled else 'rule_changed')
     res = await db.automations.update_one({'id': aid, 'user_id': user_id}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
@@ -390,8 +414,14 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
     copy['status'] = 'draft'
     copy['sent'] = 0
     copy['clicks'] = 0
-    copy['created'] = datetime.utcnow()
-    copy['updated'] = datetime.utcnow()
+    now = datetime.utcnow()
+    copy['created'] = now
+    copy['updated'] = now
+    copy['createdAt'] = now
+    copy['updatedAt'] = now
+    copy['processExistingComments'] = False
+    if _is_comment_automation_rule(copy):
+        copy['activationStartedAt'] = now
     await db.automations.insert_one(copy)
     return _strip_mongo(copy)
 
@@ -433,6 +463,7 @@ async def create_quick_comment_rule(
 
     comment_reply = (data.get('comment_reply') or '').strip()
     dm_text = (data.get('dm_text') or '').strip() if mode == 'reply_and_dm' else ''
+    process_existing_comments = bool(data.get('processExistingComments', False))
     if not comment_reply:
         raise HTTPException(400, 'comment_reply is required')
     if mode == 'reply_and_dm' and not dm_text:
@@ -460,6 +491,7 @@ async def create_quick_comment_rule(
         nodes.append({'id': 'n_dm', 'type': 'message', 'data': {'text': dm_text}})
         edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
 
+    now = datetime.utcnow()
     doc = {
         'id': str(uuid.uuid4()),
         'user_id': user_id,
@@ -478,8 +510,12 @@ async def create_quick_comment_rule(
         'edges': edges,
         'sent': 0,
         'clicks': 0,
-        'created': datetime.utcnow(),
-        'updated': datetime.utcnow(),
+        'processExistingComments': process_existing_comments,
+        'activationStartedAt': now,
+        'createdAt': now,
+        'updatedAt': now,
+        'created': now,
+        'updated': now,
     }
     await db.automations.insert_one(doc)
     return _strip_mongo({**doc})
@@ -802,6 +838,45 @@ def _safe_graph_error(body: Any) -> Optional[Dict[str, Any]]:
         'error_subcode': err.get('error_subcode'),
         'fbtrace_id': err.get('fbtrace_id'),
     }
+
+
+def _parse_graph_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+        except Exception:
+            return None
+    return None
+
+
+def _comment_rule_trigger_value(rule: dict) -> str:
+    trigger = rule.get('trigger') or ''
+    if trigger:
+        return str(trigger)
+    for node in rule.get('nodes') or []:
+        if node.get('type') == 'trigger':
+            data = node.get('data') or {}
+            node_trigger = data.get('trigger') or ''
+            if node_trigger:
+                return str(node_trigger)
+    return ''
+
+
+def _is_comment_automation_rule(rule: dict) -> bool:
+    return _comment_rule_trigger_value(rule).lower().startswith('comment:')
 
 
 async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
@@ -2514,6 +2589,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
     ts_raw = comment_data.get('timestamp')
+    comment_ts = _parse_graph_datetime(ts_raw)
     now = datetime.utcnow()
 
     # Match automations to determine rule_id BEFORE insert
@@ -2522,11 +2598,38 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     ).to_list(100)
     latest_media_id = None
     matched_rule = None
+    cutoff_rule = None
+    cutoff_skip_reason = None
     for auto in automations:
         raw_trigger = auto.get('trigger') or ''
         trigger = raw_trigger.lower()
         fire = False
+
+        def apply_activation_cutoff() -> Optional[str]:
+            if auto.get('processExistingComments') is True:
+                return None
+            activation = _parse_graph_datetime(
+                auto.get('activationStartedAt') or auto.get('createdAt') or auto.get('created')
+            ) or now
+            logger.info('rule_activation_cutoff_applied rule_id=%s comment=%s activation=%s process_existing=%s',
+                        auto.get('id'), ig_comment_id, activation, bool(auto.get('processExistingComments')))
+            if not comment_ts:
+                logger.info('comment_skipped_missing_timestamp ig_comment_id=%s rule_id=%s source=%s',
+                            ig_comment_id, auto.get('id'), source)
+                return 'missing_comment_timestamp'
+            if activation and comment_ts <= activation:
+                logger.info('comment_skipped_historical ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
+                            ig_comment_id, auto.get('id'), comment_ts, activation, source)
+                return 'historical_before_rule_activation'
+            logger.info('comment_processed_after_activation ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
+                        ig_comment_id, auto.get('id'), comment_ts, activation, source)
+            return None
+
         if trigger.startswith('keyword:'):
+            cutoff_skip_reason = apply_activation_cutoff()
+            if cutoff_skip_reason:
+                cutoff_rule = auto
+                break
             keyword = trigger.split(':', 1)[1].strip()
             if keyword and keyword.lower() in comment_text.lower():
                 fire = True
@@ -2544,6 +2647,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             elif target and media_id and target == media_id:
                 media_hit = True
             if media_hit:
+                cutoff_skip_reason = apply_activation_cutoff()
+                if cutoff_skip_reason:
+                    cutoff_rule = auto
+                    break
                 match_mode = (auto.get('match') or 'any').lower()
                 kw = (auto.get('keyword') or '').strip()
                 if match_mode == 'keyword' and kw:
@@ -2555,30 +2662,51 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             matched_rule = auto
             break
 
-    rule_id = matched_rule.get('id') if matched_rule else None
+    rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
     matched = bool(matched_rule)
     if matched:
         logger.info('rule_matched ig_comment_id=%s rule_id=%s user=%s',
                     ig_comment_id, rule_id, user_doc.get('email'))
+    elif cutoff_skip_reason:
+        logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
+                    ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
     else:
         logger.info('rule_not_matched ig_comment_id=%s user=%s',
                     ig_comment_id, user_doc.get('email'))
 
+    rule_activation_started_at = (
+        cutoff_rule.get('activationStartedAt') if cutoff_rule else
+        (matched_rule.get('activationStartedAt') if matched_rule else None)
+    )
+    process_existing_comments = (
+        bool(cutoff_rule.get('processExistingComments')) if cutoff_rule else
+        (bool(matched_rule.get('processExistingComments')) if matched_rule else False)
+    )
+    action_status = 'pending' if matched else 'skipped'
     doc = {
         'id': str(_uuid.uuid4()),
         'user_id': user_id,
         'ig_comment_id': ig_comment_id,
+        'igCommentId': ig_comment_id,
         'media_id': media_id,
+        'mediaId': media_id,
         'commenter_id': commenter_id,
         'commenter_username': commenter_username,
         'text': comment_text,
         'replied': False,
         'source': source,                # 'webhook' or 'polling'
         'rule_id': rule_id,
+        'ruleId': rule_id,
         'matched': matched,
-        'action_status': 'pending' if matched else 'skipped',
+        'action_status': action_status,
+        'actionStatus': action_status,
+        'skip_reason': cutoff_skip_reason,
+        'skipReason': cutoff_skip_reason,
         'error': None,
         'timestamp': ts_raw,
+        'commentTimestamp': comment_ts or ts_raw,
+        'ruleActivationStartedAt': rule_activation_started_at,
+        'processExistingComments': process_existing_comments,
         'processed_at': now,
         'created': now,
     }
@@ -2592,22 +2720,22 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
-    action_status = 'skipped'
     if matched:
         try:
             logger.info('action_execution_started ig_comment_id=%s rule_id=%s',
                         ig_comment_id, rule_id)
-            asyncio.create_task(_run_and_record_action(
+            ok = await _run_and_record_action(
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
-            ))
-            action_status = 'pending'
+            )
+            action_status = 'success' if ok else 'failed'
         except Exception as e:
             logger.exception('action_execution_failed ig_comment_id=%s err=%s',
                              ig_comment_id, e)
             await db.comments.update_one(
                 {'id': doc['id']},
-                {'$set': {'action_status': 'failed', 'error': str(e)[:500]}}
+                {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
+                          'error': str(e)[:500]}}
             )
             action_status = 'failed'
 
@@ -2625,17 +2753,20 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
         )
         await db.comments.update_one(
             {'id': comment_doc_id},
-            {'$set': {'action_status': 'success'}}
+            {'$set': {'action_status': 'success', 'actionStatus': 'success'}}
         )
         logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
                     ig_comment_id, automation.get('id'))
+        return True
     except Exception as e:
         await db.comments.update_one(
             {'id': comment_doc_id},
-            {'$set': {'action_status': 'failed', 'error': str(e)[:500]}}
+            {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
+                      'error': str(e)[:500]}}
         )
         logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
                          ig_comment_id, automation.get('id'), e)
+        return False
 
 
 # ---------------- DM Automation (independent from Comments) ----------------
@@ -3182,6 +3313,10 @@ async def _process_webhook(payload: dict):
                         'commenter_id': commenter.get('id'),
                         'commenter_username': commenter.get('username') or commenter.get('name'),
                         'text': value.get('text') or value.get('message', ''),
+                        'timestamp': (
+                            value.get('timestamp') or value.get('created_time') or
+                            value.get('created_at') or value.get('time')
+                        ),
                     }, source='webhook')
                 elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
@@ -3408,19 +3543,23 @@ async def instagram_comments_processed(
     out = []
     for d in items:
         d.pop('_id', None)
-        for k in ('created', 'processed_at'):
+        for k in ('created', 'processed_at', 'commentTimestamp', 'ruleActivationStartedAt'):
             if isinstance(d.get(k), datetime):
                 d[k] = d[k].isoformat()
         out.append({
             'id': d.get('id'),
             'igCommentId': d.get('ig_comment_id'),
             'mediaId': d.get('media_id'),
+            'ruleId': d.get('rule_id'),
+            'commentTimestamp': d.get('commentTimestamp') or d.get('timestamp'),
+            'ruleActivationStartedAt': d.get('ruleActivationStartedAt'),
+            'processExistingComments': bool(d.get('processExistingComments')),
             'commenterUsername': d.get('commenter_username'),
             'text': d.get('text'),
             'source': d.get('source'),
-            'ruleId': d.get('rule_id'),
             'matched': bool(d.get('matched')),
             'actionStatus': d.get('action_status'),
+            'skipReason': d.get('skipReason') or d.get('skip_reason'),
             'error': d.get('error'),
             'timestamp': d.get('timestamp'),
             'processedAt': d.get('processed_at'),
@@ -4723,6 +4862,32 @@ async def _startup():
                                        name='dm_rules_user_active')
     except Exception as e:
         logger.warning('dm_rules index create: %s', e)
+    try:
+        now = datetime.utcnow()
+        comment_rules = {
+            '$or': [
+                {'trigger': {'$regex': '^comment:', '$options': 'i'}},
+                {'nodes.data.trigger': {'$regex': '^comment:', '$options': 'i'}},
+            ],
+        }
+        await db.automations.update_many(
+            {**comment_rules, 'activationStartedAt': {'$exists': False}},
+            {'$set': {'activationStartedAt': now}}
+        )
+        await db.automations.update_many(
+            {**comment_rules, 'processExistingComments': {'$exists': False}},
+            {'$set': {'processExistingComments': False}}
+        )
+        await db.automations.update_many(
+            {**comment_rules, 'createdAt': {'$exists': False}},
+            {'$set': {'createdAt': now}}
+        )
+        await db.automations.update_many(
+            {**comment_rules, 'updatedAt': {'$exists': False}},
+            {'$set': {'updatedAt': now}}
+        )
+    except Exception as e:
+        logger.warning('comment rule activation migration: %s', e)
     if IG_POLL_ENABLED:
         _poll_task = asyncio.create_task(_comment_poller_loop())
     else:

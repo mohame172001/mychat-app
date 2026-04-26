@@ -46,6 +46,15 @@ class AutomationIn(BaseModel):
     status: str = 'draft'
     nodes: Optional[List[Dict[str, Any]]] = None
     edges: Optional[List[Dict[str, Any]]] = None
+    match: Optional[str] = None
+    keyword: Optional[str] = None
+    mode: Optional[str] = None
+    comment_reply: Optional[str] = None
+    dm_text: Optional[str] = None
+    media_id: Optional[str] = None
+    latest: Optional[bool] = None
+    media_preview: Optional[Dict[str, Any]] = None
+    processExistingComments: bool = False
 
 
 class AutomationPatch(BaseModel):
@@ -54,6 +63,15 @@ class AutomationPatch(BaseModel):
     status: Optional[str] = None
     nodes: Optional[List[Dict[str, Any]]] = None
     edges: Optional[List[Dict[str, Any]]] = None
+    match: Optional[str] = None
+    keyword: Optional[str] = None
+    mode: Optional[str] = None
+    comment_reply: Optional[str] = None
+    dm_text: Optional[str] = None
+    media_id: Optional[str] = None
+    latest: Optional[bool] = None
+    media_preview: Optional[Dict[str, Any]] = None
+    processExistingComments: Optional[bool] = None
 
 
 class Automation(BaseModel):
@@ -66,6 +84,18 @@ class Automation(BaseModel):
     clicks: int = 0
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
+    match: Optional[str] = None
+    keyword: Optional[str] = None
+    mode: Optional[str] = None
+    comment_reply: Optional[str] = None
+    dm_text: Optional[str] = None
+    media_id: Optional[str] = None
+    latest: Optional[bool] = None
+    media_preview: Optional[Dict[str, Any]] = None
+    processExistingComments: bool = False
+    activationStartedAt: Optional[datetime] = None
+    createdAt: datetime = Field(default_factory=_now)
+    updatedAt: datetime = Field(default_factory=_now)
     updated: datetime = Field(default_factory=_now)
     created: datetime = Field(default_factory=_now)
 

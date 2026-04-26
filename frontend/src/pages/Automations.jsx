@@ -4,6 +4,7 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Input } from '../components/ui/input';
 import { Switch } from '../components/ui/switch';
+import { Checkbox } from '../components/ui/checkbox';
 import {
   Plus, Search, Zap, Trash2, X, Instagram, Loader2, ArrowLeft, ArrowRight,
   MessageCircle, Send as SendIcon, Filter, Hash,
@@ -33,6 +34,7 @@ const Automations = () => {
   const [keyword, setKeyword] = useState('');
   const [commentReply, setCommentReply] = useState('شكرا على تعليقك!');
   const [dmText, setDmText] = useState('شكرا');
+  const [processExistingComments, setProcessExistingComments] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const refresh = async () => {
@@ -72,10 +74,10 @@ const Automations = () => {
     setMode('reply_and_dm');
     setMatch('any');
     setKeyword('');
+    setProcessExistingComments(false);
     setCommentReply('شكرا على تعليقك!');
     setDmText('شكرا');
   };
-
   const openWizard = async () => {
     resetWizard();
     setWizardOpen(true);
@@ -134,6 +136,7 @@ const Automations = () => {
         keyword: match === 'keyword' ? keyword.trim() : '',
         comment_reply: commentReply.trim(),
         dm_text: mode === 'reply_and_dm' ? dmText.trim() : '',
+        processExistingComments,
       };
       if (selectedMedia?.latest) body.latest = true;
       else {
@@ -328,6 +331,27 @@ const Automations = () => {
                              className="h-11 rounded-xl" placeholder="شكرا" />
                     </div>
                   )}
+
+                  <div className="rounded-xl border border-slate-200 p-4">
+                    <label className="flex items-start gap-3">
+                      <Checkbox
+                        checked={processExistingComments}
+                        onCheckedChange={v => setProcessExistingComments(Boolean(v))}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold">Also process existing comments</span>
+                        <span className="block text-xs text-slate-500 mt-1">
+                          Leave unchecked to only respond to comments created after this rule is active.
+                        </span>
+                      </span>
+                    </label>
+                    {processExistingComments && (
+                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        This will send replies/DMs to comments that already exist on this post.
+                      </div>
+                    )}
+                  </div>
 
                   {/* Summary */}
                   <div className="mt-6 p-4 rounded-xl bg-slate-50 border border-slate-100 text-sm space-y-1.5">
