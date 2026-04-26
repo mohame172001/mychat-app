@@ -251,7 +251,7 @@ def _strip_mongo(doc):
 
 
 def _public_user(u: dict) -> UserPublic:
-    instagram_valid = bool(u.get('instagramConnected') and u.get('instagram_connection_valid'))
+    instagram_valid = _has_valid_instagram_connection(u)
     return UserPublic(
         id=u['id'], username=u['username'], name=u['name'], email=u['email'],
         avatar=u.get('avatar') or f"https://i.pravatar.cc/150?u={u['username']}",
@@ -260,6 +260,25 @@ def _public_user(u: dict) -> UserPublic:
         instagramConnectionValid=instagram_valid,
         instagramAccountType=u.get('instagram_account_type'),
     )
+
+
+def _has_valid_instagram_connection(u: Optional[dict]) -> bool:
+    return bool(
+        u
+        and u.get('instagramConnected')
+        and u.get('instagram_connection_valid')
+        and u.get('meta_access_token')
+        and u.get('ig_user_id')
+    )
+
+
+def _instagram_connection_error(u: Optional[dict]) -> str:
+    if not u:
+        return 'Instagram not connected'
+    blocker = u.get('instagram_connection_blocker') or 'token_cannot_call_graph_me'
+    if u.get('instagramConnected') and not u.get('instagram_connection_valid'):
+        return f'Instagram reconnect required: {blocker}'
+    return 'Instagram not connected'
 
 
 async def _seed_user(user_id: str):
@@ -970,6 +989,7 @@ async def instagram_callback(request: Request,
 
     if error:
         logger.warning('IG OAuth denied: %s — %s', error, error_description)
+        await _store_oauth_failure(state, 'oauth_denied', {'error': error})
         return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason={error}")
     if not state:
         return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=missing_state")
@@ -1123,8 +1143,8 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
     Instagram API (graph.instagram.com). Requires an IG user access token
     obtained through Instagram Business Login."""
     u = await db.users.find_one({'id': user_id})
-    if not u or not u.get('instagramConnected'):
-        raise HTTPException(400, 'Instagram not connected')
+    if not _has_valid_instagram_connection(u):
+        raise HTTPException(400, _instagram_connection_error(u))
     token = u.get('meta_access_token', '')
     ig_user_id = u.get('ig_user_id', '')
     if not ig_user_id:
@@ -1161,8 +1181,8 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
 async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_user_id)):
     """Legacy Page-based subscribe (kept for old Facebook-Login-flow users)."""
     u = await db.users.find_one({'id': user_id})
-    if not u or not u.get('instagramConnected'):
-        raise HTTPException(400, 'Instagram not connected')
+    if not _has_valid_instagram_connection(u):
+        raise HTTPException(400, _instagram_connection_error(u))
     token = u.get('meta_access_token', '')
     # Look up page id fresh. The stored token is usually a PAGE access token
     # (set during OAuth callback) so /me/accounts may return nothing — fall
@@ -1434,8 +1454,8 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
     The wizard never sees the /{ig_user_id}/media error if /me/media succeeded.
     """
     u = await db.users.find_one({'id': user_id})
-    if not u or not u.get('instagramConnected'):
-        raise HTTPException(400, 'Instagram not connected')
+    if not _has_valid_instagram_connection(u):
+        raise HTTPException(400, _instagram_connection_error(u))
     token = u.get('meta_access_token', '')
     ig_id = str(u.get('ig_user_id') or '')
     if not token:
@@ -1571,7 +1591,7 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
     if not u:
         out['blocker'] = 'user_not_found'
         return out
-    out['connected'] = bool(u.get('instagramConnected'))
+    out['connected'] = _has_valid_instagram_connection(u)
     db_ig_id = str(u.get('ig_user_id') or '')
     token = u.get('meta_access_token', '') or ''
     out['dbIgUserId'] = db_ig_id or None
@@ -1579,7 +1599,8 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
     out['tokenLength'] = len(token)
     out['authKind'] = u.get('ig_auth_kind')
     if not out['connected']:
-        out['blocker'] = 'instagram_not_connected'
+        out['blocker'] = u.get('instagram_connection_blocker') or 'token_cannot_call_graph_me'
+        out['errors']['connection'] = _instagram_connection_error(u)
         return out
     if not token:
         out['blocker'] = 'token_missing'
