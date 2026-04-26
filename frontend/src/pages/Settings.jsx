@@ -29,6 +29,8 @@ const Settings = () => {
   const [pollResult, setPollResult] = useState(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [diag, setDiag] = useState(null);
+  const [mediaDiagLoading, setMediaDiagLoading] = useState(false);
+  const [mediaDiag, setMediaDiag] = useState(null);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -161,8 +163,64 @@ const Settings = () => {
                         {diagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                         Run full diagnostics
                       </Button>
+                      <Button onClick={async () => {
+                        setMediaDiagLoading(true);
+                        setMediaDiag(null);
+                        try {
+                          const { data } = await api.get('/instagram/media/diagnostics');
+                          setMediaDiag(data);
+                          if (data.blocker) toast.error(`Media blocker: ${data.blocker}`);
+                          else toast.success(`Found ${data.mediaCount} post(s)`);
+                        } catch (e) {
+                          toast.error(e?.response?.data?.detail || 'Media diagnostics failed');
+                        } finally {
+                          setMediaDiagLoading(false);
+                        }
+                      }} variant="outline" className="rounded-xl" disabled={mediaDiagLoading}>
+                        {mediaDiagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                        Fetch Instagram posts now
+                      </Button>
                     </div>
                   </div>
+                  {mediaDiag && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
+                      <div className="font-semibold">Media diagnostics</div>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ['Connected', mediaDiag.connected],
+                          ['Token valid', mediaDiag.tokenValid],
+                          ['ID match (db ↔ /me)', mediaDiag.idMatch],
+                          [`Media count: ${mediaDiag.mediaCount}`, mediaDiag.mediaCount > 0],
+                        ].map(([k, v]) => (
+                          <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{v ? '✓' : '✗'} {k}</Badge>
+                        ))}
+                      </div>
+                      {mediaDiag.blocker && (
+                        <div className="p-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900">
+                          <b>Blocker:</b> {mediaDiag.blocker}
+                        </div>
+                      )}
+                      <div className="grid md:grid-cols-2 gap-2 text-slate-700">
+                        <div>DB ig_user_id: <b>{mediaDiag.dbIgUserId || '—'}</b></div>
+                        <div>Graph /me id: <b>{mediaDiag.graphMeId || '—'}</b></div>
+                        <div>Username: <b>{mediaDiag.username || '—'}</b></div>
+                        <div>Account type: <b>{mediaDiag.accountType || '—'}</b></div>
+                        <div>/me/media count: <b>{mediaDiag.meMediaCount ?? '—'}</b></div>
+                        <div>/{'{ig_user_id}'}/media count: <b>{mediaDiag.igUserMediaCount ?? '—'}</b></div>
+                        <div>Auth kind: <b>{mediaDiag.authKind || '—'}</b></div>
+                        <div>Endpoint used: <b>{mediaDiag.mediaEndpointUsed || '—'}</b></div>
+                      </div>
+                      {mediaDiag.firstMediaPreview && (
+                        <div className="p-2 rounded-md bg-white border border-slate-200">
+                          <div className="font-semibold text-xs mb-1">First media</div>
+                          <pre className="text-xs overflow-auto">{JSON.stringify(mediaDiag.firstMediaPreview, null, 2)}</pre>
+                        </div>
+                      )}
+                      {mediaDiag.errors && Object.keys(mediaDiag.errors).length > 0 && (
+                        <pre className="text-xs overflow-auto max-h-40 bg-white p-2 rounded border">{JSON.stringify(mediaDiag.errors, null, 2)}</pre>
+                      )}
+                    </div>
+                  )}
                   {diag && (
                     <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
                       <div className="font-semibold">Diagnostics</div>

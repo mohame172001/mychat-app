@@ -1198,27 +1198,185 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
         raise HTTPException(400, 'Instagram not connected')
     token = u.get('meta_access_token', '')
     ig_id = u.get('ig_user_id', '')
-    if not ig_id:
-        raise HTTPException(400, 'Missing ig_user_id')
-    url = f'https://graph.instagram.com/v21.0/{ig_id}/media'
-    params = {
-        'access_token': token,
-        'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
-        'limit': max(1, min(limit, 50)),
-    }
+    if not token:
+        raise HTTPException(400, 'Missing access token')
+    fields = 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp'
+    lim = max(1, min(limit, 50))
+    # Try /me/media first (documented for Instagram Business Login). If that
+    # fails, fall back to /{ig_user_id}/media. Some accounts only accept one
+    # form depending on auth flow.
+    last_err = None
+    candidates = [
+        ('https://graph.instagram.com/v21.0/me/media', '/me/media'),
+    ]
+    if ig_id:
+        candidates.append(
+            (f'https://graph.instagram.com/v21.0/{ig_id}/media', '/{ig_user_id}/media')
+        )
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(url, params=params)
-            if r.status_code != 200:
-                logger.error('IG media fetch error %s: %s', r.status_code, r.text)
-                raise HTTPException(r.status_code, f'Graph API error: {r.text}')
-            body = r.json()
-    except HTTPException:
-        raise
+            for url, label in candidates:
+                r = await c.get(url, params={
+                    'access_token': token, 'fields': fields, 'limit': lim,
+                })
+                if r.status_code == 200:
+                    body = r.json()
+                    return {'items': body.get('data', []), 'endpoint': label}
+                last_err = {'endpoint': label, 'status': r.status_code, 'body': r.text[:500]}
+                logger.error('IG media fetch error via %s: %s %s', label, r.status_code, r.text[:300])
     except Exception as e:
         logger.exception('IG media fetch failed')
         raise HTTPException(500, str(e))
-    return {'items': body.get('data', [])}
+    raise HTTPException(502, f'Graph API error: {last_err}')
+
+
+@api.get('/instagram/media/diagnostics')
+async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id)):
+    """Self-diagnose why /instagram/media may be returning empty.
+
+    Hits /me, /me/media, and /{ig_user_id}/media against graph.instagram.com
+    using the stored long-lived IG user token. Compares the Graph /me id
+    with the value persisted in users.ig_user_id and returns a structured
+    blocker classification. Never returns the raw token.
+    """
+    u = await db.users.find_one({'id': user_id})
+    out: Dict[str, Any] = {
+        'connected': False,
+        'dbIgUserId': None,
+        'graphMeId': None,
+        'idMatch': None,
+        'username': None,
+        'accountType': None,
+        'tokenExists': False,
+        'tokenValid': None,
+        'tokenLength': 0,
+        'authKind': None,
+        'mediaEndpointUsed': None,
+        'meMediaCount': None,
+        'igUserMediaCount': None,
+        'mediaCount': 0,
+        'firstMediaPreview': None,
+        'errors': {},
+        'blocker': None,
+    }
+    if not u:
+        out['blocker'] = 'user_not_found'
+        return out
+    out['connected'] = bool(u.get('instagramConnected'))
+    db_ig_id = str(u.get('ig_user_id') or '')
+    token = u.get('meta_access_token', '') or ''
+    out['dbIgUserId'] = db_ig_id or None
+    out['tokenExists'] = bool(token)
+    out['tokenLength'] = len(token)
+    out['authKind'] = u.get('ig_auth_kind')
+    if not out['connected']:
+        out['blocker'] = 'instagram_not_connected'
+        return out
+    if not token:
+        out['blocker'] = 'token_missing'
+        return out
+
+    async with httpx.AsyncClient(timeout=20) as c:
+        # 1) /me
+        try:
+            r = await c.get(
+                'https://graph.instagram.com/v21.0/me',
+                params={
+                    'access_token': token,
+                    'fields': 'user_id,id,username,account_type',
+                },
+            )
+            if r.status_code == 200:
+                me = r.json() or {}
+                out['graphMeId'] = str(me.get('user_id') or me.get('id') or '') or None
+                out['username'] = me.get('username')
+                out['accountType'] = me.get('account_type')
+                out['tokenValid'] = True
+            else:
+                out['tokenValid'] = False
+                out['errors']['me'] = {'status': r.status_code, 'body': r.text[:400]}
+        except Exception as e:
+            out['errors']['me'] = {'exception': str(e)}
+
+        # 2) /me/media
+        try:
+            r = await c.get(
+                'https://graph.instagram.com/v21.0/me/media',
+                params={
+                    'access_token': token,
+                    'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
+                    'limit': 5,
+                },
+            )
+            if r.status_code == 200:
+                items = (r.json() or {}).get('data') or []
+                out['meMediaCount'] = len(items)
+                if items and not out['firstMediaPreview']:
+                    p = items[0]
+                    out['firstMediaPreview'] = {
+                        'id': p.get('id'),
+                        'media_type': p.get('media_type'),
+                        'permalink': p.get('permalink'),
+                        'timestamp': p.get('timestamp'),
+                        'caption': (p.get('caption') or '')[:120],
+                        'has_thumbnail': bool(p.get('thumbnail_url') or p.get('media_url')),
+                    }
+                    out['mediaEndpointUsed'] = '/me/media'
+            else:
+                out['errors']['me_media'] = {'status': r.status_code, 'body': r.text[:400]}
+        except Exception as e:
+            out['errors']['me_media'] = {'exception': str(e)}
+
+        # 3) /{ig_user_id}/media using the DB id
+        if db_ig_id:
+            try:
+                r = await c.get(
+                    f'https://graph.instagram.com/v21.0/{db_ig_id}/media',
+                    params={
+                        'access_token': token,
+                        'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp',
+                        'limit': 5,
+                    },
+                )
+                if r.status_code == 200:
+                    items = (r.json() or {}).get('data') or []
+                    out['igUserMediaCount'] = len(items)
+                    if items and not out['firstMediaPreview']:
+                        p = items[0]
+                        out['firstMediaPreview'] = {
+                            'id': p.get('id'),
+                            'media_type': p.get('media_type'),
+                            'permalink': p.get('permalink'),
+                            'timestamp': p.get('timestamp'),
+                            'caption': (p.get('caption') or '')[:120],
+                            'has_thumbnail': bool(p.get('thumbnail_url') or p.get('media_url')),
+                        }
+                        out['mediaEndpointUsed'] = f'/{{ig_user_id}}/media'
+                else:
+                    out['errors']['ig_user_media'] = {'status': r.status_code, 'body': r.text[:400]}
+            except Exception as e:
+                out['errors']['ig_user_media'] = {'exception': str(e)}
+
+    if out['graphMeId'] and db_ig_id:
+        out['idMatch'] = (out['graphMeId'] == db_ig_id)
+
+    me_n = out['meMediaCount']
+    ig_n = out['igUserMediaCount']
+    out['mediaCount'] = max(me_n or 0, ig_n or 0)
+
+    # Blocker classification
+    if out['tokenValid'] is False:
+        out['blocker'] = 'token_invalid_or_expired'
+    elif out['idMatch'] is False:
+        out['blocker'] = 'db_ig_user_id_mismatch_with_graph_me'
+    elif (me_n is None) and (ig_n is None):
+        out['blocker'] = 'graph_media_call_failed'
+    elif (me_n == 0) and (ig_n in (0, None)):
+        out['blocker'] = 'graph_returned_zero_media_check_account_type_or_posts_visibility'
+    else:
+        out['blocker'] = None
+
+    return out
 
 
 async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional[str]:
