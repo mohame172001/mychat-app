@@ -42,6 +42,8 @@ const Settings = () => {
   const [mediaDiag, setMediaDiag] = useState(null);
   const [matrixLoading, setMatrixLoading] = useState(false);
   const [matrix, setMatrix] = useState(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
+  const [oauthAttempt, setOauthAttempt] = useState(null);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -499,6 +501,106 @@ const Settings = () => {
                       Connect Instagram
                     </Button>
                   </div>
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <Button onClick={async () => {
+                      setOauthLoading(true);
+                      setOauthAttempt(null);
+                      try {
+                        const { data } = await api.get('/instagram/oauth/last-attempt');
+                        setOauthAttempt(data);
+                        if (!data.available) toast.info('No OAuth attempt recorded yet.');
+                        else if (data.connectionSaved) toast.success('Last OAuth attempt succeeded');
+                        else toast.error(`Last OAuth failed at: ${data.failureStage || 'unknown'}`);
+                      } catch (e) {
+                        toast.error(e?.response?.data?.detail || 'Could not load OAuth attempt');
+                      } finally {
+                        setOauthLoading(false);
+                      }
+                    }} variant="outline" className="rounded-xl" disabled={oauthLoading}>
+                      {oauthLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Key className="w-4 h-4 mr-2" />}
+                      Show last OAuth attempt
+                    </Button>
+                  </div>
+                  {oauthAttempt && oauthAttempt.available && (
+                    <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-sm space-y-3">
+                      <div className="font-semibold">Last OAuth Attempt</div>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ['Code received', oauthAttempt.codeReceived],
+                          ['Redirect URI match', oauthAttempt.redirectUriExactMatch],
+                          ['Short token exists', oauthAttempt.shortTokenExists],
+                          ['Long token exists', oauthAttempt.longTokenExists],
+                          ['Verification OK', oauthAttempt.verificationOk],
+                          ['Connection saved', oauthAttempt.connectionSaved],
+                        ].map(([k, v]) => (
+                          <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{v ? '✓' : '✗'} {k}</Badge>
+                        ))}
+                      </div>
+                      {oauthAttempt.failureStage && (
+                        <div className="p-2 rounded-md bg-rose-50 border border-rose-200 text-rose-900">
+                          <b>Failure stage:</b> {oauthAttempt.failureStage}
+                        </div>
+                      )}
+                      <div className="grid md:grid-cols-2 gap-2 text-slate-700">
+                        <div>Client ID source: <b>{oauthAttempt.clientIdSource || '—'}</b></div>
+                        <div>Client ID last 4: <b className="font-mono">{oauthAttempt.clientIdLast4 || '—'}</b></div>
+                        <div>Client secret source: <b>{oauthAttempt.clientSecretSource || '—'}</b></div>
+                        <div>Redirect URI: <b className="font-mono text-xs break-all">{oauthAttempt.redirectUriUsedInTokenExchange || '—'}</b></div>
+                        <div>Token exchange endpoint: <b className="font-mono text-xs">{oauthAttempt.tokenExchangeEndpoint || '—'}</b></div>
+                        <div>Token exchange status: <b className={oauthAttempt.tokenExchangeStatus === 200 ? 'text-emerald-700' : 'text-rose-700'}>{oauthAttempt.tokenExchangeStatus ?? '—'}</b></div>
+                        <div>Token exchange keys: <b className="font-mono text-xs">{(oauthAttempt.tokenExchangeResponseKeys || []).join(', ') || '—'}</b></div>
+                        <div>Long-lived exchange status: <b className={oauthAttempt.longLivedExchangeStatus === 200 ? 'text-emerald-700' : 'text-rose-700'}>{oauthAttempt.longLivedExchangeStatus ?? '—'}</b></div>
+                        <div>Long-lived exchange keys: <b className="font-mono text-xs">{(oauthAttempt.longLivedResponseKeys || []).join(', ') || '—'}</b></div>
+                        <div>Short token /me status: <b className={oauthAttempt.shortTokenMeStatus === 200 ? 'text-emerald-700' : 'text-rose-700'}>{oauthAttempt.shortTokenMeStatus ?? '—'}</b></div>
+                        <div>Long token /me status: <b className={oauthAttempt.longTokenMeStatus === 200 ? 'text-emerald-700' : 'text-rose-700'}>{oauthAttempt.longTokenMeStatus ?? '—'}</b></div>
+                        <div>Final token source: <b>{oauthAttempt.finalTokenSource || '—'}</b></div>
+                        <div>Which token works: <b className={oauthAttempt.whichTokenWorks !== 'none' ? 'text-emerald-700' : 'text-rose-700'}>{oauthAttempt.whichTokenWorks || '—'}</b></div>
+                        <div>Working probe: <b className="text-emerald-700">{oauthAttempt.workingProbe || '—'}</b></div>
+                        {oauthAttempt.tokenSwitch && (
+                          <div className="md:col-span-2"><b className="text-amber-700">Token switch:</b> {oauthAttempt.tokenSwitch}</div>
+                        )}
+                      </div>
+                      {oauthAttempt.verificationError && (
+                        <div className="p-2 rounded-md bg-rose-50 border border-rose-200 text-rose-900 text-xs">
+                          <b>Graph error:</b> <span className="font-mono break-all">{JSON.stringify(oauthAttempt.verificationError)}</span>
+                        </div>
+                      )}
+                      {oauthAttempt.shortTokenMeBody && Object.keys(oauthAttempt.shortTokenMeBody).length > 0 && (
+                        <div className="p-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-xs">
+                          <b>Short token /me body:</b> <span className="font-mono break-all">{JSON.stringify(oauthAttempt.shortTokenMeBody)}</span>
+                        </div>
+                      )}
+                      {oauthAttempt.longTokenMeBody && Object.keys(oauthAttempt.longTokenMeBody).length > 0 && (
+                        <div className="p-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-xs">
+                          <b>Long token /me body:</b> <span className="font-mono break-all">{JSON.stringify(oauthAttempt.longTokenMeBody)}</span>
+                        </div>
+                      )}
+                      {oauthAttempt.meProbes && oauthAttempt.meProbes.length > 0 && (
+                        <div>
+                          <div className="font-semibold mb-1">/me probe results</div>
+                          <table className="w-full text-xs">
+                            <thead><tr className="text-left text-slate-500"><th>Probe</th><th>Status</th><th>Username</th><th>hasId</th><th>hasUserId</th><th>Error</th></tr></thead>
+                            <tbody>
+                              {oauthAttempt.meProbes.map((p, i) => (
+                                <tr key={i} className={p.status === 200 ? 'text-emerald-700' : 'text-rose-700'}>
+                                  <td className="py-0.5 font-mono pr-2">{p.label}</td>
+                                  <td>{p.status}</td>
+                                  <td>{p.username || '—'}</td>
+                                  <td>{p.hasId ? '✓' : '—'}</td>
+                                  <td>{p.hasUserId ? '✓' : '—'}</td>
+                                  <td className="font-mono break-all">{p.error ? JSON.stringify(p.error).slice(0, 120) : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      {oauthAttempt.createdAt && (
+                        <div className="text-xs text-slate-400">Recorded at: {oauthAttempt.createdAt}</div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </Card>

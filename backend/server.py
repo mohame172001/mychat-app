@@ -1048,12 +1048,93 @@ async def instagram_callback(request: Request,
             audit['finalTokenStoredSource'] = 'long_lived' if long_token else 'short_lived'
             audit['finalTokenLength'] = len(final_token)
             audit['finalTokenPrefix'] = _token_prefix(final_token)
-            # 3) Verify /me before saving the token or connected state.
-            verification = await _verify_instagram_token(c, final_token)
+            # 3) Verify /me before saving — try multiple probe variants so
+            #    tokens with limited scopes still work.
+            me_probes = []
+            me_probe_configs = [
+                ('graph.instagram.com/me+full', 'https://graph.instagram.com/me', 'user_id,username,account_type'),
+                ('graph.instagram.com/me+minimal', 'https://graph.instagram.com/me', 'user_id,username'),
+                ('graph.instagram.com/me+id_only', 'https://graph.instagram.com/me', 'id,username'),
+                ('graph.instagram.com/me+bare', 'https://graph.instagram.com/me', None),
+                ('graph.instagram.com/v21.0/me', 'https://graph.instagram.com/v21.0/me', 'user_id,username'),
+            ]
+            working_probe = None
+            for probe_label, probe_url, probe_fields in me_probe_configs:
+                params = {'access_token': final_token}
+                if probe_fields:
+                    params['fields'] = probe_fields
+                try:
+                    pr = await c.get(probe_url, params=params)
+                    ct = pr.headers.get('content-type', '')
+                    pb = pr.json() if 'json' in ct else {}
+                    probe_result = {
+                        'label': probe_label,
+                        'status': pr.status_code,
+                        'bodyKeys': sorted(pb.keys()) if isinstance(pb, dict) else [],
+                        'error': _safe_graph_error(pb) if pr.status_code != 200 else None,
+                    }
+                    if pr.status_code == 200 and isinstance(pb, dict):
+                        probe_result['id'] = str(pb.get('id') or '')
+                        probe_result['user_id'] = str(pb.get('user_id') or '')
+                        probe_result['username'] = pb.get('username') or ''
+                        probe_result['account_type'] = pb.get('account_type') or ''
+                        canonical = str(pb.get('user_id') or pb.get('id') or '')
+                        if canonical and not working_probe:
+                            working_probe = probe_result
+                    me_probes.append(probe_result)
+                except Exception as e:
+                    me_probes.append({'label': probe_label, 'status': 0, 'error': str(e)[:200]})
+            audit['meProbes'] = me_probes
+            audit['workingProbe'] = working_probe.get('label') if working_probe else None
+
+            # Probe short vs long token separately if both exist
+            if long_token and token != long_token:
+                try:
+                    sr = await c.get('https://graph.instagram.com/me',
+                                     params={'access_token': token, 'fields': 'id,username'})
+                    audit['shortTokenMeStatus'] = sr.status_code
+                    audit['shortTokenMeBody'] = _redact_secrets(sr.json()) if sr.status_code != 200 else {'keys': sorted((sr.json() or {}).keys())}
+                except Exception as e:
+                    audit['shortTokenMeStatus'] = 0
+                    audit['shortTokenMeBody'] = {'error': str(e)[:200]}
+                try:
+                    lr = await c.get('https://graph.instagram.com/me',
+                                     params={'access_token': long_token, 'fields': 'id,username'})
+                    audit['longTokenMeStatus'] = lr.status_code
+                    audit['longTokenMeBody'] = _redact_secrets(lr.json()) if lr.status_code != 200 else {'keys': sorted((lr.json() or {}).keys())}
+                except Exception as e:
+                    audit['longTokenMeStatus'] = 0
+                    audit['longTokenMeBody'] = {'error': str(e)[:200]}
+                # If long token fails but short works, fall back to short
+                short_ok = audit.get('shortTokenMeStatus') == 200
+                long_ok = audit.get('longTokenMeStatus') == 200
+                if not long_ok and short_ok:
+                    audit['tokenSwitch'] = 'short_token_used_because_long_failed'
+                    final_token = token
+                    audit['finalTokenStoredSource'] = 'short_lived_fallback'
+
+            # Determine which token works
+            audit['whichTokenWorks'] = audit.get('finalTokenStoredSource', 'unknown') if working_probe else 'none'
+
+            # Build verification from working probe or fall back
+            if working_probe:
+                canonical_id = working_probe.get('user_id') or working_probe.get('id') or ''
+                verification = {
+                    'ok': True,
+                    'canonicalIgId': canonical_id,
+                    'graphMeId': working_probe.get('id'),
+                    'graphMeUserId': working_probe.get('user_id'),
+                    'username': working_probe.get('username') or '',
+                    'accountType': working_probe.get('account_type') or 'unknown',
+                    'probeUsed': working_probe.get('label'),
+                }
+            else:
+                verification = await _verify_instagram_token(c, final_token)
             audit['verification'] = verification
             if not verification.get('ok'):
                 graph_error = verification.get('error') or {}
-                logger.error('IG /me verification failed before save: %s',
+                audit['failureStage'] = 'me_verification'
+                logger.error('IG /me verification failed (all probes): %s',
                              _redact_secrets(graph_error))
                 await _store_oauth_failure(
                     user_id,
@@ -1122,6 +1203,125 @@ async def instagram_callback(request: Request,
         return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=server_error")
     from fastapi.responses import RedirectResponse
     return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
+
+
+@api.get('/instagram/oauth/last-attempt')
+async def instagram_oauth_last_attempt(user_id: str = Depends(get_current_user_id)):
+    """Return the redacted audit from the most recent Instagram OAuth callback.
+    Never returns: full access tokens, OAuth codes, app secrets, JWT,
+    authorization headers, or raw request headers."""
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    audit = u.get('ig_oauth_last_audit') or {}
+    if not audit:
+        return {'available': False, 'message': 'No OAuth attempt recorded for this user.'}
+
+    # Extract safely-redacted fields for the response
+    verification = audit.get('verification') or {}
+    me_probes = audit.get('meProbes') or []
+
+    # Build a structured, redacted response
+    code_received = audit.get('codeExists', False)
+    redirect_uri_authorize = audit.get('redirectUriUsed', '')
+    redirect_uri_exchange = audit.get('redirectUriUsed', '')
+    client_id_source = audit.get('clientIdSource', '')
+    client_secret_source = audit.get('clientSecretSource', '')
+    te_endpoint = audit.get('tokenExchangeEndpoint', '')
+    te_status = audit.get('tokenExchangeStatus')
+    te_keys = audit.get('tokenExchangeResponseKeys', [])
+    short_exists = audit.get('shortLivedAccessTokenExists', False)
+    ll_attempted = audit.get('longLivedExchangeAttempted', False)
+    ll_endpoint = audit.get('longLivedExchangeEndpoint', '')
+    ll_status = audit.get('longLivedExchangeStatus')
+    ll_keys = audit.get('longLivedExchangeResponseKeys', [])
+    final_source = audit.get('finalTokenStoredSource', 'none')
+    final_length = audit.get('finalTokenLength', 0)
+    connection_saved = bool(u.get('instagramConnected'))
+    failure_stage = audit.get('failureStage')
+    which_token_works = audit.get('whichTokenWorks', 'unknown')
+
+    # Per-probe /me results for diagnostic visibility
+    probe_results = []
+    for p in me_probes:
+        probe_results.append({
+            'label': p.get('label'),
+            'status': p.get('status'),
+            'bodyKeys': p.get('bodyKeys', []),
+            'error': p.get('error'),
+            'username': p.get('username', ''),
+            'accountType': p.get('account_type') or p.get('accountType', ''),
+            'hasId': bool(p.get('id')),
+            'hasUserId': bool(p.get('user_id')),
+        })
+
+    return {
+        'available': True,
+        'callbackPath': audit.get('callbackPath', '/api/instagram/callback'),
+        'codeReceived': code_received,
+        'redirectUriUsedInAuthorize': redirect_uri_authorize,
+        'redirectUriUsedInTokenExchange': redirect_uri_exchange,
+        'redirectUriExactMatch': redirect_uri_authorize == redirect_uri_exchange,
+        'clientIdSource': client_id_source,
+        'clientIdLast4': (INSTAGRAM_APP_ID or '')[-4:] or None,
+        'clientSecretSource': client_secret_source,
+        'tokenExchangeEndpoint': te_endpoint,
+        'tokenExchangeStatus': te_status,
+        'tokenExchangeResponseKeys': te_keys,
+        'shortTokenExists': short_exists,
+        'shortTokenLength': audit.get('shortTokenLength', 0),
+        'tokenExchangeUserId': audit.get('userIdReturnedFromTokenExchange'),
+        'longLivedExchangeAttempted': ll_attempted,
+        'longLivedExchangeEndpoint': ll_endpoint,
+        'longLivedExchangeStatus': ll_status,
+        'longLivedResponseKeys': ll_keys,
+        'longTokenExists': bool(ll_status == 200),
+        'longTokenLength': audit.get('longTokenLength', 0),
+        'finalTokenSource': final_source,
+        'shortTokenMeStatus': audit.get('shortTokenMeStatus'),
+        'shortTokenMeBody': audit.get('shortTokenMeBody', {}),
+        'longTokenMeStatus': audit.get('longTokenMeStatus'),
+        'longTokenMeBody': audit.get('longTokenMeBody', {}),
+        'whichTokenWorks': which_token_works,
+        'connectionSaved': connection_saved,
+        'failureStage': failure_stage,
+        'meProbes': probe_results,
+        'workingProbe': audit.get('workingProbe'),
+        'tokenSwitch': audit.get('tokenSwitch'),
+        'verificationOk': verification.get('ok', False),
+        'verificationProbeUsed': verification.get('probeUsed'),
+        'verificationError': _redact_secrets(verification.get('error')) if verification.get('error') else None,
+        'createdAt': audit.get('createdAt').isoformat() if isinstance(audit.get('createdAt'), datetime) else audit.get('createdAt'),
+    }
+
+
+@api.delete('/admin/users/{email}')
+async def admin_delete_user(email: str, user_id: str = Depends(get_current_user_id)):
+    """Delete a user by email. Only allows self-deletion or deletion of test
+    accounts (those with @test.com or @example.com emails). Never deletes the
+    primary production user."""
+    requester = await db.users.find_one({'id': user_id})
+    if not requester:
+        raise HTTPException(404, 'requester not found')
+    target = await db.users.find_one({'email': email.lower()})
+    if not target:
+        target = await db.users.find_one({'email': email})
+    if not target:
+        raise HTTPException(404, f'user {email} not found')
+    target_email = (target.get('email') or '').lower()
+    is_self = target['id'] == user_id
+    is_test = target_email.endswith('@test.com') or target_email.endswith('@example.com')
+    if not is_self and not is_test:
+        raise HTTPException(403, 'Cannot delete another production user')
+    target_id = target['id']
+    # Clean up associated data
+    await db.dm_rules.delete_many({'user_id': target_id})
+    await db.dm_logs.delete_many({'user_id': target_id})
+    await db.automations.delete_many({'user_id': target_id})
+    await db.conversations.delete_many({'user_id': target_id})
+    await db.users.delete_one({'id': target_id})
+    logger.info('admin_delete_user email=%s by=%s', email, user_id)
+    return {'ok': True, 'deleted': email}
 
 
 @api.get('/instagram/status')
@@ -1282,11 +1482,9 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
 @api.get('/instagram/force-resubscribe')
 async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
     """Admin tool: DELETE then POST the user's webhook subscription to force
-    Meta to re-establish delivery. Accepts optional `fields` override; by
-    default subscribes to `comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments`.
-    Protected by META_APP_SECRET as admin key."""
-    if not META_APP_SECRET or key != META_APP_SECRET:
-        raise HTTPException(403, 'bad key')
+    Meta to re-establish delivery. DISABLED in production — use the
+    authenticated /api/instagram/dm/resubscribe endpoint instead."""
+    raise HTTPException(403, 'Disabled in production. Use /api/instagram/dm/resubscribe with JWT auth.')
     u = await db.users.find_one({'email': email.lower()})
     if not u:
         u = await db.users.find_one({'email': email})
@@ -1328,23 +1526,14 @@ async def instagram_force_resubscribe(email: str, key: str, fields: str = ''):
 
 
 @api.get('/instagram/debug-dump')
-async def instagram_debug_dump(email: str, key: str, media_id: str = ''):
-    """FULL diagnostic dump — returns everything about a user's IG link and
-    live Meta subscription state. Protected by META_APP_SECRET as admin key.
-
-    If `media_id` is provided, also fetches that post's comments via Graph API
-    to verify whether IG actually recorded a comment (and thus whether the
-    missing webhook is an IG-side spam filter or a subscription-wiring issue)."""
-    if not META_APP_SECRET or key != META_APP_SECRET:
-        raise HTTPException(403, 'bad key')
-    u = await db.users.find_one({'email': email.lower()})
-    if not u:
-        u = await db.users.find_one({'email': email})
-    if not u:
-        all_users = await db.users.find({}, {'email': 1, 'username': 1, 'instagramConnected': 1}).to_list(50)
-        for x in all_users:
-            x.pop('_id', None)
-        return {'error': 'user not found', 'email': email, 'available_users': all_users}
+async def instagram_debug_dump(email: str = '', key: str = '', media_id: str = ''):
+    """FULL diagnostic dump — DISABLED in production.
+    Use the authenticated diagnostic endpoints instead:
+      GET /api/instagram/credentials/diagnostics
+      GET /api/instagram/dm/debug-latest
+      GET /api/instagram/oauth/last-attempt
+    """
+    raise HTTPException(403, 'Disabled in production. Use authenticated diagnostic endpoints with JWT auth.')
     token = u.get('meta_access_token', '')
     ig_user_id = u.get('ig_user_id', '')
     page_id = u.get('fb_page_id', '')
@@ -2884,11 +3073,10 @@ async def _comment_poller_loop():
 
 
 @api.get('/instagram/poll-now')
-async def instagram_poll_now(email: str, key: str):
-    """Manually trigger a single poll for one user (debug endpoint).
-    Protected by META_APP_SECRET like the other debug endpoints."""
-    if not META_APP_SECRET or key != META_APP_SECRET:
-        raise HTTPException(403, 'bad key')
+async def instagram_poll_now(email: str = '', key: str = ''):
+    """Manually trigger a single poll for one user — DISABLED in production.
+    Use the authenticated POST /api/instagram/comments/poll-now instead."""
+    raise HTTPException(403, 'Disabled in production. Use POST /api/instagram/comments/poll-now with JWT auth.')
     u = await db.users.find_one({'email': email})
     if not u:
         raise HTTPException(404, 'user not found')

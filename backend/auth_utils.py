@@ -5,7 +5,9 @@ from passlib.context import CryptContext
 from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-JWT_SECRET = os.environ.get('JWT_SECRET', 'mychat-super-secret-change-in-prod-8xk2n')
+JWT_SECRET = os.environ.get('JWT_SECRET', '')
+if not JWT_SECRET:
+    raise RuntimeError('JWT_SECRET environment variable is required')
 JWT_ALGO = 'HS256'
 JWT_TTL_DAYS = 30
 
