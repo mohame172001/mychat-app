@@ -1205,6 +1205,117 @@ async def instagram_callback(request: Request,
     return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
 
 
+@api.get('/instagram/oauth/latest-audit-summary')
+async def instagram_oauth_latest_audit_summary():
+    """TEMPORARY diagnostic endpoint — returns the redacted /me probe results
+    and failure stage from the most recently-attempted Instagram OAuth callback,
+    across ALL users. Never exposes tokens, secrets, or PII.
+    
+    This endpoint is intentionally unauthenticated for debugging purposes.
+    REMOVE after the OAuth issue is resolved."""
+    # Find the most recent user with ig_oauth_last_audit
+    users_with_audit = await db.users.find(
+        {'ig_oauth_last_audit': {'$exists': True, '$ne': None}},
+        {
+            'ig_oauth_last_audit.meProbes': 1,
+            'ig_oauth_last_audit.workingProbe': 1,
+            'ig_oauth_last_audit.verification': 1,
+            'ig_oauth_last_audit.failureStage': 1,
+            'ig_oauth_last_audit.tokenExchangeStatus': 1,
+            'ig_oauth_last_audit.tokenExchangeResponseKeys': 1,
+            'ig_oauth_last_audit.longLivedExchangeStatus': 1,
+            'ig_oauth_last_audit.longLivedExchangeResponseKeys': 1,
+            'ig_oauth_last_audit.shortLivedAccessTokenExists': 1,
+            'ig_oauth_last_audit.finalTokenStoredSource': 1,
+            'ig_oauth_last_audit.finalTokenLength': 1,
+            'ig_oauth_last_audit.whichTokenWorks': 1,
+            'ig_oauth_last_audit.tokenSwitch': 1,
+            'ig_oauth_last_audit.shortTokenMeStatus': 1,
+            'ig_oauth_last_audit.longTokenMeStatus': 1,
+            'ig_oauth_last_audit.shortTokenMeBody': 1,
+            'ig_oauth_last_audit.longTokenMeBody': 1,
+            'ig_oauth_last_audit.debugToken': 1,
+            'ig_oauth_last_audit.createdAt': 1,
+            'ig_oauth_last_audit.callbackPath': 1,
+            'ig_oauth_last_audit.codeExists': 1,
+            'ig_oauth_last_audit.clientIdSource': 1,
+            'ig_oauth_last_audit.clientSecretSource': 1,
+            'ig_oauth_last_audit.redirectUriUsed': 1,
+            'ig_oauth_last_audit.tokenExchangeEndpoint': 1,
+            'ig_oauth_last_audit.longLivedExchangeEndpoint': 1,
+            'ig_oauth_last_audit.permissionsReturned': 1,
+            'ig_oauth_last_audit.userIdReturnedFromTokenExchange': 1,
+            'email': 1,
+            'instagramConnected': 1,
+        }
+    ).sort('ig_oauth_last_audit.createdAt', -1).limit(1).to_list(1)
+    if not users_with_audit:
+        return {'available': False, 'message': 'No OAuth audit found for any user'}
+    u = users_with_audit[0]
+    audit = u.get('ig_oauth_last_audit', {})
+    me_probes = audit.get('meProbes') or []
+    verification = audit.get('verification') or {}
+    debug_token = audit.get('debugToken') or {}
+    
+    # Build safe probe summary
+    probe_results = []
+    for p in me_probes:
+        probe_results.append({
+            'label': p.get('label'),
+            'status': p.get('status'),
+            'bodyKeys': p.get('bodyKeys', []),
+            'error': _redact_secrets(p.get('error')) if p.get('error') else None,
+            'username': p.get('username', ''),
+            'accountType': p.get('account_type') or p.get('accountType', ''),
+            'hasId': bool(p.get('id')),
+            'hasUserId': bool(p.get('user_id')),
+        })
+    
+    return {
+        'available': True,
+        'temporary': True,
+        'note': 'REMOVE this endpoint after debugging',
+        'userEmail': (u.get('email') or '')[:3] + '***',
+        'instagramConnected': u.get('instagramConnected', False),
+        'callbackPath': audit.get('callbackPath'),
+        'codeReceived': audit.get('codeExists', False),
+        'clientIdSource': audit.get('clientIdSource'),
+        'clientSecretSource': audit.get('clientSecretSource'),
+        'redirectUri': audit.get('redirectUriUsed'),
+        'tokenExchangeEndpoint': audit.get('tokenExchangeEndpoint'),
+        'tokenExchangeStatus': audit.get('tokenExchangeStatus'),
+        'tokenExchangeResponseKeys': audit.get('tokenExchangeResponseKeys', []),
+        'userIdFromTokenExchange': audit.get('userIdReturnedFromTokenExchange'),
+        'permissionsReturned': audit.get('permissionsReturned', []),
+        'shortTokenExists': audit.get('shortLivedAccessTokenExists', False),
+        'longLivedExchangeEndpoint': audit.get('longLivedExchangeEndpoint'),
+        'longLivedExchangeStatus': audit.get('longLivedExchangeStatus'),
+        'longLivedExchangeResponseKeys': audit.get('longLivedExchangeResponseKeys', []),
+        'finalTokenSource': audit.get('finalTokenStoredSource'),
+        'finalTokenLength': audit.get('finalTokenLength'),
+        'whichTokenWorks': audit.get('whichTokenWorks'),
+        'tokenSwitch': audit.get('tokenSwitch'),
+        'shortTokenMeStatus': audit.get('shortTokenMeStatus'),
+        'longTokenMeStatus': audit.get('longTokenMeStatus'),
+        'shortTokenMeBody': _redact_secrets(audit.get('shortTokenMeBody')),
+        'longTokenMeBody': _redact_secrets(audit.get('longTokenMeBody')),
+        'meProbes': probe_results,
+        'workingProbe': audit.get('workingProbe'),
+        'failureStage': audit.get('failureStage'),
+        'verificationOk': verification.get('ok', False),
+        'verificationError': _redact_secrets(verification.get('error')) if verification.get('error') else None,
+        'debugToken': {
+            'debugTokenWorks': debug_token.get('debugTokenWorks', False),
+            'tokenAppId': debug_token.get('tokenAppId'),
+            'matchesIgAppId': debug_token.get('matchesIgAppId', False),
+            'scopes': debug_token.get('scopes', []),
+            'isValid': debug_token.get('isValid', False),
+            'error': _redact_secrets(debug_token.get('error')) if debug_token.get('error') else None,
+        },
+        'createdAt': audit.get('createdAt').isoformat() if isinstance(audit.get('createdAt'), datetime) else str(audit.get('createdAt', '')),
+    }
+
+
 @api.get('/instagram/oauth/last-attempt')
 async def instagram_oauth_last_attempt(user_id: str = Depends(get_current_user_id)):
     """Return the redacted audit from the most recent Instagram OAuth callback.
