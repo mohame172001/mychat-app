@@ -780,8 +780,7 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
 IG_SCOPES = (
     'instagram_business_basic,'
     'instagram_business_manage_messages,'
-    'instagram_business_manage_comments,'
-    'instagram_business_content_publish'
+    'instagram_business_manage_comments'
 )
 VALID_IG_ACCOUNT_TYPES = {'BUSINESS', 'CREATOR', 'MEDIA_CREATOR'}
 
