@@ -948,16 +948,16 @@ async def _verify_instagram_token(
 async def _run_instagram_me_probes(c: httpx.AsyncClient, token: str) -> Dict[str, Any]:
     """Run the exact /me probe order used to validate OAuth tokens."""
     variants = [
-        ('/v25.0/me?fields=user_id,username', 'https://graph.instagram.com/v25.0/me',
-         {'fields': 'user_id,username'}),
-        ('/v25.0/me?fields=id,username', 'https://graph.instagram.com/v25.0/me',
-         {'fields': 'id,username'}),
-        ('/v25.0/me', 'https://graph.instagram.com/v25.0/me', {}),
         ('/me?fields=user_id,username', 'https://graph.instagram.com/me',
          {'fields': 'user_id,username'}),
         ('/me?fields=id,username', 'https://graph.instagram.com/me',
          {'fields': 'id,username'}),
         ('/me', 'https://graph.instagram.com/me', {}),
+        ('/v25.0/me?fields=user_id,username', 'https://graph.instagram.com/v25.0/me',
+         {'fields': 'user_id,username'}),
+        ('/v25.0/me?fields=id,username', 'https://graph.instagram.com/v25.0/me',
+         {'fields': 'id,username'}),
+        ('/v25.0/me', 'https://graph.instagram.com/v25.0/me', {}),
     ]
     results = []
     for label, url, extra_params in variants:
@@ -1129,14 +1129,16 @@ async def instagram_callback(request: Request,
 
             # OAuth validation path: verify the short token first, then try to
             # upgrade to long-lived without making that upgrade a blocker.
-            audit['apiVersionsTested'] = ['v25.0', 'unversioned']
+            audit['apiVersionsTested'] = ['unversioned', 'v25.0']
             short_me = await _run_instagram_me_probes(c, token)
             audit['shortTokenLength'] = len(token)
             audit['shortTokenMeResults'] = short_me['results']
             if not short_me.get('ok'):
-                audit['failureStage'] = 'short_token_me_verification'
+                audit['failureStage'] = 'me_verification'
+                audit['blocker'] = 'token_exchange_returns_unusable_instagram_token'
                 audit['whichTokenWorks'] = 'none'
                 audit['whichMeVariantWorks'] = None
+                audit['finalTokenSource'] = None
                 audit['finalTokenStoredSource'] = None
                 audit['connectionSaved'] = False
                 await _store_oauth_failure(
@@ -1189,6 +1191,7 @@ async def instagram_callback(request: Request,
 
             audit['whichTokenWorks'] = final_token_source
             audit['whichMeVariantWorks'] = final_me.get('whichMeVariantWorks')
+            audit['finalTokenSource'] = final_token_source
             audit['finalTokenStoredSource'] = final_token_source
             audit['finalTokenLength'] = len(final_token)
             audit['finalTokenPrefix'] = _token_prefix(final_token)
