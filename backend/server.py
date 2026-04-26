@@ -1294,6 +1294,13 @@ async def instagram_callback(request: Request,
 
 
 
+@api.get('/admin/debug-audit/{email}')
+async def debug_audit(email: str):
+    u = await db.users.find_one({'email': email.lower()}) or await db.users.find_one({'email': email})
+    if not u:
+        return {'error': 'not found'}
+    return {'audit': u.get('ig_oauth_last_audit')}
+
 @api.delete('/admin/users/{email}')
 async def admin_delete_user(email: str, user_id: str = Depends(get_current_user_id)):
     """Delete a user by email. Only allows self-deletion or deletion of test
