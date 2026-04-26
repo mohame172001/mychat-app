@@ -1573,6 +1573,11 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         message_keys = []
         item_keys = sorted(list(event.keys())) if isinstance(event, dict) else []
 
+    logger.info('dm_processor_invoked user_id=%s ig_account=%s source=%s',
+                user_id, ig_account_id, source)
+    logger.info('dm_event_kind_classified kind=%s sender=%s msg_id=%s echo=%s '
+                'item_keys=%s message_keys=%s',
+                event_kind, sender_id, message_id, is_echo, item_keys, message_keys)
     logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s kind=%s',
                 ig_account_id, sender_id, message_id, is_echo, event_kind)
 
@@ -1627,11 +1632,16 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         }
 
     async def _persist(doc):
+        logger.info('dm_log_insert_started dedup_key=%s kind=%s status=%s',
+                    dedup_key, event_kind, doc.get('status'))
         try:
             await db.dm_logs.insert_one(doc)
+            logger.info('dm_log_insert_success dedup_key=%s id=%s', dedup_key, doc.get('id'))
             return True
         except Exception as e:
-            logger.info('dm_log_insert_race dedup_key=%s err=%s', dedup_key, e)
+            # DuplicateKeyError on unique (user_id, dedup_key) — that is fine,
+            # someone else inserted first. Anything else is a real failure.
+            logger.warning('dm_log_insert_failed dedup_key=%s err=%s', dedup_key, str(e)[:200])
             return False
 
     # Dedup FIRST so replays never double-reply.
@@ -1772,6 +1782,7 @@ async def _process_webhook(payload: dict):
     try:
         for entry in payload.get('entry', []):
             ig_account_id = entry.get('id')
+            logger.info('dm_user_mapping_started entry_id=%s', ig_account_id)
             # Find which user owns this IG account — entry.id can be either the
             # Instagram Business account id OR the Facebook Page id depending on
             # how the subscription was created, so try both.
@@ -1779,12 +1790,40 @@ async def _process_webhook(payload: dict):
                 {'ig_user_id': ig_account_id},
                 {'fb_page_id': ig_account_id},
             ]})
+            mapping_via = 'entry.id' if user_doc else None
+            # Fallback: if entry.id doesn't match any user, try the recipient.id
+            # of any messaging-item in this entry. Read/delivery events from a
+            # business account use sender=business, recipient=user — but for
+            # incoming text DMs, recipient.id == business IG account.
             if not user_doc:
-                logger.warning('No user found for webhook entry id %s', ig_account_id)
+                for ev in entry.get('messaging', []) or []:
+                    rid = (ev.get('recipient') or {}).get('id')
+                    if rid:
+                        user_doc = await db.users.find_one({'$or': [
+                            {'ig_user_id': rid}, {'fb_page_id': rid},
+                        ]})
+                        if user_doc:
+                            mapping_via = 'recipient.id'
+                            ig_account_id = rid
+                            break
+            # Last-resort fallback for single-tenant deployments: if exactly
+            # one user has an IG account connected, attribute the event to it.
+            if not user_doc:
+                connected_users = await db.users.find(
+                    {'instagramConnected': True, 'ig_user_id': {'$ne': None, '$ne': ''}}
+                ).limit(2).to_list(2)
+                if len(connected_users) == 1:
+                    user_doc = connected_users[0]
+                    mapping_via = 'single_tenant_fallback'
+                    ig_account_id = user_doc.get('ig_user_id') or ig_account_id
+            if not user_doc:
+                logger.warning('dm_user_mapping_failed entry_id=%s', entry.get('id'))
                 continue
             # Normalize so downstream code uses the real IG account id
             ig_account_id = user_doc.get('ig_user_id') or ig_account_id
             user_id = user_doc['id']
+            logger.info('dm_user_mapping_success entry_id=%s user_id=%s via=%s',
+                        entry.get('id'), user_id, mapping_via)
 
             for event in entry.get('messaging', []):
                 # ALWAYS feed the DM automation handler first, with the raw
@@ -2877,12 +2916,196 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
         blocker = None
         fix = 'Working — last DM was replied to.'
 
+    # ---------------- Identity panel ----------------
+    graph_me_id = None
+    graph_username = None
+    graph_account_type = None
+    graph_me_error = None
+    if connected:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                me = await c.get(
+                    'https://graph.instagram.com/v21.0/me',
+                    params={'fields': 'id,username,account_type',
+                            'access_token': token},
+                )
+                if me.status_code == 200:
+                    mb = me.json() or {}
+                    graph_me_id = mb.get('id')
+                    graph_username = mb.get('username')
+                    graph_account_type = mb.get('account_type')
+                else:
+                    graph_me_error = f'http {me.status_code}'
+        except Exception as e:
+            graph_me_error = str(e)[:200]
+
+    # Scan webhook_log GLOBALLY (not filtered to this user) to find what IG
+    # account ids Meta is actually addressing in `entry.id` / `recipient.id`.
+    wh_all = await db.webhook_log.find().sort('received', -1).limit(50).to_list(50)
+    entry_ids: list = []
+    recipient_ids: list = []
+    sender_ids: list = []
+    unmapped_count = 0
+    messaging_event_count = 0
+    for w in wh_all:
+        try:
+            for entry in (w.get('payload') or {}).get('entry', []):
+                eid = entry.get('id')
+                if eid:
+                    entry_ids.append(eid)
+                ms = entry.get('messaging') or []
+                for ev in ms:
+                    messaging_event_count += 1
+                    rid = (ev.get('recipient') or {}).get('id')
+                    sid = (ev.get('sender') or {}).get('id')
+                    if rid:
+                        recipient_ids.append(rid)
+                    if sid:
+                        sender_ids.append(sid)
+                # Unmapped: entry.id doesn't match this user's ig_user_id/fb_page_id
+                # and no recipient.id in messaging items matches either.
+                matched = (eid == ig_user_id) or (eid == u.get('fb_page_id'))
+                if not matched:
+                    rids = {(ev.get('recipient') or {}).get('id') for ev in ms}
+                    if not (ig_user_id in rids or u.get('fb_page_id') in rids):
+                        unmapped_count += len(ms) or 1
+        except Exception:
+            continue
+
+    entry_ids_unique = sorted(set(entry_ids))
+    recipient_ids_unique = sorted(set(recipient_ids))
+    sender_ids_unique = sorted(set(sender_ids))
+
+    id_match = bool(graph_me_id and ig_user_id and graph_me_id == ig_user_id)
+    mismatch_reason = None
+    if not graph_me_id:
+        mismatch_reason = graph_me_error or 'graph_me_unavailable'
+    elif graph_me_id != ig_user_id:
+        mismatch_reason = 'graph_me_id_does_not_match_db_ig_user_id'
+    elif entry_ids_unique and ig_user_id not in entry_ids_unique \
+            and ig_user_id not in recipient_ids_unique \
+            and (not u.get('fb_page_id') or u['fb_page_id'] not in entry_ids_unique):
+        mismatch_reason = 'webhook_entry_id_does_not_match_connected_ig_user_id'
+
+    identity = {
+        'dbIgUserId': ig_user_id,
+        'dbIgUserIdRedacted': _redact_id(ig_user_id),
+        'graphMeId': graph_me_id,
+        'graphMeIdRedacted': _redact_id(graph_me_id),
+        'graphUsername': graph_username,
+        'graphAccountType': graph_account_type,
+        'graphMeError': graph_me_error,
+        'subscribedAppsCheckedForIgUserId': ig_user_id,
+        'subscribedAppsCheckedForIgUserIdRedacted': _redact_id(ig_user_id),
+        'latestWebhookEntryIds': [_redact_id(x) for x in entry_ids_unique[:10]],
+        'latestWebhookRecipientIds': [_redact_id(x) for x in recipient_ids_unique[:10]],
+        'latestWebhookSenderIds': [_redact_id(x) for x in sender_ids_unique[:10]],
+        'idMatch': id_match,
+        'mismatchReason': mismatch_reason,
+    }
+
+    # ---------------- Webhook config panel ----------------
+    webhook_config = {
+        'expectedWebhookPath': '/api/instagram/webhook',
+        'verifyTokenConfigured': bool(META_VERIFY_TOKEN),
+        'appIdConfigured': bool(IG_APP_ID),
+        'appSecretConfigured': bool(IG_APP_SECRET),
+        'signatureValidationEnabled': False,  # not currently implemented
+        'graphApiVersion': 'v21.0',
+        'graphHost': 'graph.instagram.com',
+        'callbackUrlUsedByRuntime': f'{BACKEND_PUBLIC_URL}/api/instagram/webhook',
+        'oauthRedirectUri': f'{BACKEND_PUBLIC_URL}/api/instagram/callback',
+        'backendPublicUrl': BACKEND_PUBLIC_URL,
+        'webhookEventsStored': len(wh_all),
+    }
+
+    # ---------------- Processor panel ----------------
+    dm_logs_for_user = await db.dm_logs.count_documents({'user_id': user_id})
+    dm_logs_global = await db.dm_logs.count_documents({})
+    skip_reasons_recent = sorted({l.get('skipReason') for l in recent_logs if l.get('skipReason')})
+    processor = {
+        'webhookEventsCount': messaging_event_count,
+        'dmLogsForCurrentUser': dm_logs_for_user,
+        'dmLogsGlobalRecent': dm_logs_global,
+        'unmappedMessagingEvents': unmapped_count,
+        'recentSkipReasons': list(skip_reasons_recent),
+    }
+
+    # ---------------- lastDecision (smarter blocker order) ----------------
+    blocker = None
+    fix = None
+    if not connected:
+        blocker = 'instagram_not_connected'
+        fix = 'Reconnect Instagram from Settings.'
+    elif mismatch_reason == 'graph_me_id_does_not_match_db_ig_user_id':
+        blocker = 'id_mismatch'
+        fix = ('The access_token in DB returns a different IG user id from '
+               'the stored ig_user_id. Disconnect and reconnect Instagram so '
+               'the token, ig_user_id, and webhook subscription all reference '
+               'the same account.')
+    elif mismatch_reason == 'webhook_entry_id_does_not_match_connected_ig_user_id':
+        blocker = 'webhook_account_mismatch'
+        fix = ('Webhook events are arriving for a different IG account id than '
+               'the one stored in users.ig_user_id. Confirm the same Meta App '
+               'is used for OAuth and webhook subscription, and that the same '
+               'IG account id was passed to subscribed_apps.')
+    elif not messaging_subscribed:
+        blocker = 'webhook_not_subscribed_to_messages_field'
+        fix = 'POST /api/instagram/dm/resubscribe to subscribe the messages field on this IG account.'
+    elif not active_rules:
+        blocker = 'no_active_dm_rule'
+        fix = 'Create or activate a rule on the DM Automation page.'
+    elif not webhook_received:
+        blocker = 'no_messaging_webhook_received'
+        fix = 'Send a test DM from a different IG account. If still nothing arrives, the IG account is not subscribed for messages — call resubscribe.'
+    elif messaging_event_count > 0 and dm_logs_for_user == 0:
+        blocker = 'processor_not_logging_events'
+        fix = ('Webhook messaging events exist but the processor wrote zero '
+               'dm_logs rows for this user. Likely user mapping failure '
+               '(entry.id and recipient.id never matched users.ig_user_id) '
+               'or the events were stored before the logging change deployed. '
+               f'unmappedMessagingEvents={unmapped_count}. Send a fresh DM '
+               'and re-run debug.')
+    elif not last_text_event:
+        kinds = sorted({e.get('eventKind') for e in recent_events
+                        if e.get('hasMessagingArray') and e.get('eventKind')})
+        blocker = 'no_message_text_event'
+        fix = ('Meta delivered messaging events but none were message_text. '
+               f'Observed kinds: {kinds}. Verify ID mapping and webhook payload '
+               'shape first. In Development mode, app roles may affect some tests, '
+               'but do not assume this is the cause until ID mapping and '
+               'payload handling are proven correct.')
+    elif not message_parsed:
+        blocker = 'webhook_payload_shape_mismatch'
+        fix = 'A message_text event arrived but sender/text fields were missing. Inspect recentWebhookEvents.messagingItemKeys / messageKeys.'
+    elif last_log and last_log.get('skipReason') == 'no_rule_match':
+        blocker = 'message_text_received_but_no_rule_match'
+        fix = f'Incoming text did not satisfy any active rule. Check keyword + matchMode against text="{(last_log.get("incomingText") or "")[:40]}".'
+    elif last_log and last_log.get('skipReason') == 'duplicate':
+        blocker = 'duplicate_event'
+        fix = 'This was a webhook replay. Send a fresh DM.'
+    elif last_log and last_log.get('skipReason') in ('echo', 'self_message'):
+        blocker = 'echo_or_self_message'
+        fix = 'The DM came from the connected business account itself or was an echo. Send from a different IG account.'
+    elif last_log and last_log.get('skipReason') in ('missing_sender', 'missing_text'):
+        blocker = f'webhook_{last_log.get("skipReason")}'
+        fix = 'Meta delivered an event without required fields. See recentWebhookEvents.'
+    elif last_log and last_log.get('status') == 'failed':
+        blocker = 'send_api_failed'
+        fix = f'Graph send failed: {last_log.get("error") or "unknown"}.'
+    elif rule_matched and reply_sent:
+        blocker = None
+        fix = 'replied_successfully — last DM was replied to.'
+
     return {
         'connected': connected,
         'igUserId': ig_user_id,
         'messagingWebhookSubscribed': messaging_subscribed,
         'subscribedFields': subscribed_fields_list,
         'subscriptionError': sub_error,
+        'identity': identity,
+        'webhookConfig': webhook_config,
+        'processor': processor,
         'activeRules': active_rules,
         'recentWebhookEvents': recent_events,
         'recentDmLogs': recent_logs,
@@ -2941,8 +3164,23 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
     except Exception as e:
         raise HTTPException(502, f'graph error: {str(e)[:200]}')
 
+    # Cross-check: ask /me with the same token and confirm the IG account id
+    # we just subscribed actually matches the token's IG identity.
+    graph_me_id = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            mr = await c.get('https://graph.instagram.com/v21.0/me',
+                             params={'fields': 'id', 'access_token': token})
+            if mr.status_code == 200:
+                graph_me_id = (mr.json() or {}).get('id')
+    except Exception:
+        graph_me_id = None
+
     return {
+        'igUserIdUsed': ig_user_id,
         'igUserId': ig_user_id,
+        'graphMeId': graph_me_id,
+        'idMatch': bool(graph_me_id and graph_me_id == ig_user_id),
         'requestedFields': fields.split(','),
         'postStatus': post_status,
         'postResponse': _redact_secrets(post_body) if isinstance(post_body, (dict, list)) else post_body,

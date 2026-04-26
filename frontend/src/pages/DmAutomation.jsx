@@ -219,6 +219,58 @@ const DmAutomation = () => {
 
         {debug && (
           <div className="mt-4 space-y-4">
+            {/* Identity panel */}
+            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
+              <div className="font-semibold mb-1 text-sm">Identity</div>
+              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+                <div>DB ig_user_id: <span className="font-mono">{debug.identity?.dbIgUserIdRedacted || '—'}</span></div>
+                <div>Graph /me id: <span className="font-mono">{debug.identity?.graphMeIdRedacted || '—'}</span></div>
+                <div>Username: {debug.identity?.graphUsername || '—'}</div>
+                <div>Account type: {debug.identity?.graphAccountType || '—'}</div>
+                <div>Subscribed_apps for: <span className="font-mono">{debug.identity?.subscribedAppsCheckedForIgUserIdRedacted || '—'}</span></div>
+                <div>ID match: <span className={debug.identity?.idMatch ? 'text-emerald-700' : 'text-rose-700'}>{debug.identity?.idMatch ? 'yes' : 'no'}</span></div>
+              </div>
+              <div className="mt-1">Recent webhook entry IDs: <span className="font-mono">{(debug.identity?.latestWebhookEntryIds || []).join(', ') || '—'}</span></div>
+              <div>Recent recipient IDs: <span className="font-mono">{(debug.identity?.latestWebhookRecipientIds || []).join(', ') || '—'}</span></div>
+              <div>Recent sender IDs: <span className="font-mono">{(debug.identity?.latestWebhookSenderIds || []).join(', ') || '—'}</span></div>
+              {debug.identity?.mismatchReason && (
+                <div className="mt-1 text-rose-700">Mismatch: {debug.identity.mismatchReason}</div>
+              )}
+            </div>
+
+            {/* Webhook config panel */}
+            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
+              <div className="font-semibold mb-1 text-sm">Webhook config</div>
+              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+                <div>Callback URL: <span className="font-mono break-all">{debug.webhookConfig?.callbackUrlUsedByRuntime}</span></div>
+                <div>Path: <span className="font-mono">{debug.webhookConfig?.expectedWebhookPath}</span></div>
+                <div>Verify token configured: {debug.webhookConfig?.verifyTokenConfigured ? '✓' : '✗'}</div>
+                <div>App ID configured: {debug.webhookConfig?.appIdConfigured ? '✓' : '✗'}</div>
+                <div>App secret configured: {debug.webhookConfig?.appSecretConfigured ? '✓' : '✗'}</div>
+                <div>Signature validation: {debug.webhookConfig?.signatureValidationEnabled ? 'on' : 'off'}</div>
+                <div>Graph API: {debug.webhookConfig?.graphApiVersion} @ {debug.webhookConfig?.graphHost}</div>
+                <div>Webhook events stored: {debug.webhookConfig?.webhookEventsStored}</div>
+              </div>
+            </div>
+
+            {/* Processor panel */}
+            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
+              <div className="font-semibold mb-1 text-sm">Processor</div>
+              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+                <div>Webhook messaging events seen: {debug.processor?.webhookEventsCount}</div>
+                <div>dm_logs for current user: {debug.processor?.dmLogsForCurrentUser}</div>
+                <div>dm_logs global recent: {debug.processor?.dmLogsGlobalRecent}</div>
+                <div>Unmapped messaging events: {debug.processor?.unmappedMessagingEvents}</div>
+              </div>
+              {debug.processor?.recentSkipReasons?.length > 0 && (
+                <div className="mt-1">Recent skip reasons: {debug.processor.recentSkipReasons.join(', ')}</div>
+              )}
+            </div>
+
+            <div className="text-[11px] text-slate-500">
+              Note: First verify ID mapping and webhook payload shape. In Development mode, app roles may affect some tests, but do not assume this is the cause until ID mapping and payload handling are proven correct.
+            </div>
+
             {/* Decision pills */}
             <div className="flex flex-wrap gap-2">
               {[
