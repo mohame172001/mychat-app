@@ -35,18 +35,18 @@ const OptionRow = ({ active, title, children, onClick }) => (
         onClick();
       }
     }}
-    className={`w-full rounded-lg px-4 py-3 text-left transition ${
+    className={`w-full rounded-lg px-3 py-2.5 text-left transition ${
       active ? 'bg-white ring-2 ring-blue-500' : 'bg-slate-100 hover:bg-slate-50'
     }`}
   >
-    <div className="flex items-start gap-3">
+    <div className="flex items-start gap-2.5">
       {active ? (
-        <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
+        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
       ) : (
-        <Circle className="mt-0.5 h-5 w-5 shrink-0 text-slate-300" />
+        <Circle className="mt-0.5 h-4 w-4 shrink-0 text-slate-300" />
       )}
       <div className="min-w-0 flex-1">
-        <div className="text-base font-medium text-slate-950">{title}</div>
+        <div className="text-sm font-semibold text-slate-950">{title}</div>
         {children}
       </div>
     </div>
@@ -54,13 +54,13 @@ const OptionRow = ({ active, title, children, onClick }) => (
 );
 
 const ToggleCard = ({ icon: Icon, title, checked, onChange, children }) => (
-  <div className="rounded-lg bg-slate-100 p-4">
-    <div className="flex items-center gap-3">
-      {Icon && <Icon className="h-5 w-5 text-slate-500" />}
-      <div className="flex-1 text-base font-medium text-slate-950">{title}</div>
+  <div className="rounded-lg bg-slate-100 p-3">
+    <div className="flex items-center gap-2.5">
+      {Icon && <Icon className="h-4 w-4 shrink-0 text-slate-500" />}
+      <div className="flex-1 text-sm font-semibold leading-snug text-slate-950">{title}</div>
       <Switch checked={checked} onCheckedChange={onChange} />
     </div>
-    {checked && children && <div className="mt-3">{children}</div>}
+    {checked && children && <div className="mt-2.5">{children}</div>}
   </div>
 );
 
@@ -97,23 +97,23 @@ const AutomationPhonePreview = ({
 
   return (
     <div className="flex h-full flex-col bg-slate-50">
-      <div className="px-4 pt-4 text-base font-medium text-slate-600 sm:px-8 sm:pt-8">Preview</div>
-      <div className="flex flex-1 items-center justify-center px-3 py-4 sm:px-8 sm:py-8">
-        <div className="w-[390px] max-w-full rounded-[3rem] bg-slate-950 p-4 shadow-2xl shadow-slate-300">
-          <div className="overflow-hidden rounded-[2.25rem] bg-[#121212] text-white">
-            <div className="flex h-12 items-center justify-between px-8 text-xs font-semibold">
+      <div className="px-4 pt-4 text-sm font-medium text-slate-600 sm:px-6 sm:pt-6">Preview</div>
+      <div className="flex flex-1 items-center justify-center px-3 py-4 sm:px-6 sm:py-6">
+        <div className="w-[340px] max-w-full rounded-[2.5rem] bg-slate-950 p-3 shadow-2xl shadow-slate-300">
+          <div className="overflow-hidden rounded-[2rem] bg-[#121212] text-white">
+            <div className="flex h-10 items-center justify-between px-7 text-[11px] font-semibold">
               <span>2:34</span>
               <span className="h-1.5 w-16 rounded-full bg-white/10" />
               <span>LTE</span>
             </div>
-            <div className="border-b border-white/5 px-5 pb-3 text-center">
-              <div className="truncate text-xs font-bold uppercase text-white/45">{handle}</div>
-              <div className="font-bold">Posts</div>
+            <div className="border-b border-white/5 px-5 pb-2 text-center">
+              <div className="truncate text-[11px] font-bold uppercase text-white/45">{handle}</div>
+              <div className="text-sm font-bold">Posts</div>
             </div>
 
             {previewTab === 'Post' && (
               <>
-                <div className="flex items-center gap-3 px-4 py-3">
+                <div className="flex items-center gap-3 px-4 py-2.5">
                   <Avatar />
                   <div className="min-w-0 flex-1 truncate text-sm font-bold">{handle}</div>
                   <div className="text-xl leading-none">...</div>
@@ -127,7 +127,7 @@ const AutomationPhonePreview = ({
                     </div>
                   )}
                 </div>
-                <div className="space-y-2 px-4 py-3">
+                <div className="space-y-1.5 px-4 py-2.5">
                   <div className="flex items-center gap-3">
                     <Heart className="h-6 w-6" />
                     <MessageCircle className="h-6 w-6" />
@@ -147,7 +147,7 @@ const AutomationPhonePreview = ({
             )}
 
             {previewTab === 'Comments' && (
-              <div className="min-h-[520px] px-4 py-5">
+              <div className="min-h-[430px] px-4 py-4">
                 <div className="mb-5 text-center font-bold">Comments</div>
                 <div className="flex gap-3">
                   <div className="h-9 w-9 rounded-full bg-slate-200" />
@@ -169,7 +169,7 @@ const AutomationPhonePreview = ({
             )}
 
             {previewTab === 'DM' && (
-              <div className="min-h-[520px] px-4 py-5">
+              <div className="min-h-[430px] px-4 py-4">
                 <div className="mb-5 text-center font-bold">DM</div>
                 <div className="ml-auto max-w-[82%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm">
                   {commentText}
@@ -203,16 +203,16 @@ const AutomationPhonePreview = ({
               </div>
             )}
 
-            <div className="flex justify-around border-t border-white/5 py-3 text-white/80">
-              <Instagram className="h-6 w-6" />
-              <Search className="h-6 w-6" />
-              <Plus className="h-6 w-6" />
-              <MessageCircle className="h-6 w-6" />
+            <div className="flex justify-around border-t border-white/5 py-2.5 text-white/80">
+              <Instagram className="h-5 w-5" />
+              <Search className="h-5 w-5" />
+              <Plus className="h-5 w-5" />
+              <MessageCircle className="h-5 w-5" />
             </div>
           </div>
         </div>
       </div>
-      <div className="pb-8 text-center">
+      <div className="pb-5 text-center">
         <div className="inline-flex rounded-full bg-slate-200 p-1">
           {['Post', 'Comments', 'DM'].map(tab => (
             <button
@@ -592,13 +592,13 @@ const Automations = () => {
 
   if (builderOpen) {
     return (
-      <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8 text-slate-950">
-        <div className="flex flex-wrap items-end justify-between gap-4">
+      <div className="mx-auto max-w-7xl p-3 text-slate-950 sm:p-4 lg:p-5">
+        <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="font-display text-3xl font-extrabold tracking-tight">
+            <h1 className="font-display text-2xl font-extrabold tracking-tight lg:text-3xl">
               {editingAutomation ? 'Edit automation' : 'Automations'}
             </h1>
-            <p className="mt-1 text-slate-600">
+            <p className="mt-0.5 text-sm text-slate-600 lg:text-base">
               {editingAutomation
                 ? 'Update this Instagram comment automation while keeping its stats.'
                 : 'Create an Instagram comment automation inside your workspace.'}
@@ -628,16 +628,16 @@ const Automations = () => {
           </div>
         )}
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-[430px_minmax(0,1fr)]">
-          <Card className="overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-6 py-5">
-              <div className="text-sm font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
-              <div className="mt-1 text-lg font-bold">Build rule</div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(440px,500px)_minmax(0,1fr)]">
+          <Card className="overflow-hidden rounded-xl border-slate-100 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-5 py-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
+              <div className="mt-0.5 text-base font-bold">Build rule</div>
             </div>
-            <div className="max-h-[calc(100vh-250px)] overflow-y-auto px-6 py-6">
+            <div className="max-h-[calc(100vh-190px)] overflow-y-auto px-5 py-5">
             <section>
-              <h2 className="text-2xl font-extrabold tracking-tight">When someone comments on</h2>
-              <div className="mt-5 space-y-3">
+              <h2 className="text-xl font-extrabold tracking-tight">When someone comments on</h2>
+              <div className="mt-4 space-y-2.5">
                 <OptionRow
                   active={postScope === 'specific'}
                   title="a specific post or reel"
@@ -672,7 +672,7 @@ const Automations = () => {
                                 setPostScope('specific');
                                 setSelectedMedia(item);
                               }}
-                              className={`h-24 w-24 shrink-0 overflow-hidden rounded-lg border-2 bg-slate-200 ${
+                              className={`h-20 w-20 shrink-0 overflow-hidden rounded-lg border-2 bg-slate-200 ${
                                 selected ? 'border-blue-600' : 'border-transparent'
                               }`}
                             >
@@ -695,7 +695,7 @@ const Automations = () => {
                           e.stopPropagation();
                           setShowAllMedia(value => !value);
                         }}
-                        className="mt-4 text-sm font-semibold text-blue-600"
+                        className="mt-3 text-sm font-semibold text-blue-600"
                       >
                         {showAllMedia ? 'Show Less' : 'Show All'}
                       </button>
@@ -708,23 +708,23 @@ const Automations = () => {
               </div>
             </section>
 
-            <section className="mt-10">
-              <h2 className="text-2xl font-extrabold tracking-tight">And this comment has</h2>
-              <div className="mt-5 space-y-3">
+            <section className="mt-7">
+              <h2 className="text-xl font-extrabold tracking-tight">And this comment has</h2>
+              <div className="mt-4 space-y-2.5">
                 <OptionRow
                   active={match === 'keyword'}
                   title="a specific word or words"
                   onClick={() => setMatch('keyword')}
                 >
-                  <div className="mt-3 space-y-3">
+                  <div className="mt-3 space-y-2.5">
                     <Input
                       value={keyword}
                       onChange={e => setKeyword(e.target.value)}
                       placeholder="Enter a word or multiple"
-                      className="h-11 rounded-lg bg-white"
+                      className="h-10 rounded-lg bg-white"
                       onClick={e => e.stopPropagation()}
                     />
-                    <div className="text-sm text-slate-500">Use commas to separate words</div>
+                    <div className="text-xs text-slate-500">Use commas to separate words</div>
                     <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
                       <span>For example:</span>
                       {exampleWords.map(word => (
@@ -759,15 +759,15 @@ const Automations = () => {
                     value={commentReply}
                     onChange={e => setCommentReply(e.target.value)}
                     placeholder="Write a public reply"
-                    className="h-11 rounded-lg bg-white"
+                    className="h-10 rounded-lg bg-white"
                   />
                 </ToggleCard>
               </div>
             </section>
 
-            <section className="mt-10">
-              <h2 className="text-2xl font-extrabold tracking-tight">They will get</h2>
-              <div className="mt-5 space-y-3">
+            <section className="mt-7">
+              <h2 className="text-xl font-extrabold tracking-tight">They will get</h2>
+              <div className="mt-4 space-y-2.5">
                 <ToggleCard
                   title="an opening DM"
                   checked={openingDmEnabled}
@@ -777,14 +777,14 @@ const Automations = () => {
                   <TextArea
                     value={openingDmText}
                     onChange={e => setOpeningDmText(e.target.value)}
-                    rows={5}
+                    rows={4}
                     placeholder="Write the first DM"
                   />
                   <Input
                     value={openingDmButtonText}
                     onChange={e => setOpeningDmButtonText(e.target.value)}
                     placeholder="Button text"
-                    className="mt-3 h-11 rounded-lg bg-white"
+                    className="mt-2.5 h-10 rounded-lg bg-white"
                   />
                 </ToggleCard>
 
@@ -808,30 +808,30 @@ const Automations = () => {
               </div>
             </section>
 
-            <section className="mt-10">
-              <h2 className="text-2xl font-extrabold tracking-tight">And then, they will get</h2>
-              <div className="mt-5 space-y-3">
-                <div className="rounded-lg bg-slate-100 p-4">
-                  <div className="mb-3 flex items-center gap-3 text-base font-medium">
-                    <LinkIcon className="h-5 w-5 text-slate-500" /> a DM with a link
+            <section className="mt-7">
+              <h2 className="text-xl font-extrabold tracking-tight">And then, they will get</h2>
+              <div className="mt-4 space-y-2.5">
+                <div className="rounded-lg bg-slate-100 p-3">
+                  <div className="mb-2.5 flex items-center gap-2.5 text-sm font-semibold">
+                    <LinkIcon className="h-4 w-4 text-slate-500" /> a DM with a link
                   </div>
                   <TextArea
                     value={linkDmText}
                     onChange={e => setLinkDmText(e.target.value)}
-                    rows={4}
+                    rows={3}
                     placeholder="Write a message"
                   />
                   <Input
                     value={linkUrl}
                     onChange={e => setLinkUrl(e.target.value)}
                     placeholder="https://example.com"
-                    className="mt-3 h-11 rounded-lg bg-white"
+                    className="mt-2.5 h-10 rounded-lg bg-white"
                   />
                   <Input
                     value={linkButtonText}
                     onChange={e => setLinkButtonText(e.target.value)}
                     placeholder="Button text"
-                    className="mt-3 h-11 rounded-lg bg-white"
+                    className="mt-2.5 h-10 rounded-lg bg-white"
                   />
                 </div>
 
@@ -849,7 +849,7 @@ const Automations = () => {
                   />
                 </ToggleCard>
 
-                <div className="rounded-lg border border-slate-200 bg-white p-4">
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <label className="flex items-start gap-3">
                     <Checkbox
                       checked={processExistingComments}
