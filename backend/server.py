@@ -445,33 +445,96 @@ async def create_quick_comment_rule(
       name?: str
     """
     import uuid
+
+    def _split_keywords(value) -> list:
+        raw = value
+        if isinstance(raw, list):
+            parts = raw
+        else:
+            parts = str(raw or '').split(',')
+        seen = set()
+        out = []
+        for item in parts:
+            kw = str(item or '').strip()
+            key = kw.lower()
+            if kw and key not in seen:
+                seen.add(key)
+                out.append(kw)
+        return out
+
     media_id = (data.get('media_id') or '').strip() or None
-    latest = bool(data.get('latest'))
-    if not media_id and not latest:
-        raise HTTPException(400, 'Provide media_id or set latest=true')
+    post_scope = (data.get('post_scope') or '').strip().lower()
+    if not post_scope:
+        post_scope = 'latest' if bool(data.get('latest')) else 'specific'
+    if post_scope not in ('specific', 'any', 'latest', 'next'):
+        raise HTTPException(400, "post_scope must be 'specific', 'any', 'latest', or 'next'")
+    latest = post_scope in ('latest', 'next') or bool(data.get('latest'))
+    if post_scope == 'specific' and not media_id:
+        raise HTTPException(400, 'Provide media_id for a specific post')
 
     mode = (data.get('mode') or 'reply_and_dm').strip()
     if mode not in ('reply_and_dm', 'reply_only'):
         raise HTTPException(400, "mode must be 'reply_and_dm' or 'reply_only'")
 
     match = (data.get('match') or 'any').strip()
-    keyword = (data.get('keyword') or '').strip()
-    if match == 'keyword' and not keyword:
+    keywords = _split_keywords(data.get('keywords') if 'keywords' in data else data.get('keyword'))
+    keyword = ', '.join(keywords)
+    if match == 'keyword' and not keywords:
         raise HTTPException(400, 'keyword is required when match=keyword')
     if match not in ('any', 'keyword'):
         raise HTTPException(400, "match must be 'any' or 'keyword'")
 
+    reply_under_post = bool(data.get('reply_under_post', True))
     comment_reply = (data.get('comment_reply') or '').strip()
-    dm_text = (data.get('dm_text') or '').strip() if mode == 'reply_and_dm' else ''
+    opening_dm_enabled = bool(data.get('opening_dm_enabled', mode == 'reply_and_dm'))
+    opening_dm_text = (data.get('opening_dm_text') or data.get('dm_text') or '').strip()
+    opening_dm_button_text = (data.get('opening_dm_button_text') or '').strip()
+    link_dm_text = (data.get('link_dm_text') or '').strip()
+    link_button_text = (data.get('link_button_text') or '').strip()
+    link_url = (data.get('link_url') or '').strip()
+    follow_request_enabled = bool(data.get('follow_request_enabled', False))
+    email_request_enabled = bool(data.get('email_request_enabled', False))
+    follow_up_enabled = bool(data.get('follow_up_enabled', False))
+    follow_up_text = (data.get('follow_up_text') or '').strip()
+    dm_parts = []
+    if opening_dm_enabled and opening_dm_text:
+        dm_parts.append(opening_dm_text)
+    if opening_dm_button_text:
+        dm_parts.append(opening_dm_button_text)
+    if link_dm_text:
+        dm_parts.append(link_dm_text)
+    if link_button_text:
+        dm_parts.append(link_button_text)
+    if link_url:
+        dm_parts.append(link_url)
+    if follow_request_enabled:
+        dm_parts.append('Please follow this account to receive future updates.')
+    if email_request_enabled:
+        dm_parts.append('Reply with your email and we will send the details.')
+    if follow_up_enabled and follow_up_text:
+        dm_parts.append(follow_up_text)
+    dm_text = '\n\n'.join(dm_parts).strip() if mode == 'reply_and_dm' else ''
     process_existing_comments = bool(data.get('processExistingComments', False))
-    if not comment_reply:
+    if reply_under_post and not comment_reply:
         raise HTTPException(400, 'comment_reply is required')
     if mode == 'reply_and_dm' and not dm_text:
         dm_text = 'شكرا'
 
-    trigger = 'comment:latest' if latest else f'comment:{media_id}'
+    if mode == 'reply_and_dm' and not dm_parts:
+        dm_text = 'Thanks for your comment.'
+    if not reply_under_post and not dm_text:
+        raise HTTPException(400, 'Enable a public reply or a DM message')
+
+    if post_scope == 'any':
+        trigger = 'comment:any'
+    elif latest:
+        trigger = 'comment:latest'
+    else:
+        trigger = f'comment:{media_id}'
     preview = data.get('media_preview') or {}
-    if latest:
+    if post_scope == 'any':
+        default_name = 'Any post - ' + (f'keywords "{keyword}"' if match == 'keyword' else 'any comment')
+    elif latest:
         default_name = 'Latest post — ' + (f'keyword "{keyword}"' if match == 'keyword' else 'any comment')
     else:
         label = (preview.get('caption') or '')[:30] or (media_id[:10] if media_id else '')
@@ -480,13 +543,14 @@ async def create_quick_comment_rule(
 
     nodes = [{'id': 'n_trigger', 'type': 'trigger',
               'data': {'label': 'Comment trigger', 'trigger': trigger,
-                       'match': match, 'keyword': keyword}}]
+                       'match': match, 'keyword': keyword, 'keywords': keywords}}]
     edges = []
     prev = 'n_trigger'
-    nodes.append({'id': 'n_reply', 'type': 'reply_comment',
-                  'data': {'text': comment_reply}})
-    edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
-    prev = 'n_reply'
+    if reply_under_post and comment_reply:
+        nodes.append({'id': 'n_reply', 'type': 'reply_comment',
+                      'data': {'text': comment_reply}})
+        edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
+        prev = 'n_reply'
     if dm_text:
         nodes.append({'id': 'n_dm', 'type': 'message', 'data': {'text': dm_text}})
         edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
@@ -500,9 +564,22 @@ async def create_quick_comment_rule(
         'trigger': trigger,
         'match': match,
         'keyword': keyword,
+        'keywords': keywords,
         'mode': mode,
+        'post_scope': post_scope,
+        'reply_under_post': reply_under_post,
         'comment_reply': comment_reply,
         'dm_text': dm_text,
+        'opening_dm_enabled': opening_dm_enabled,
+        'opening_dm_text': opening_dm_text,
+        'opening_dm_button_text': opening_dm_button_text,
+        'link_dm_text': link_dm_text,
+        'link_button_text': link_button_text,
+        'link_url': link_url,
+        'follow_request_enabled': follow_request_enabled,
+        'email_request_enabled': email_request_enabled,
+        'follow_up_enabled': follow_up_enabled,
+        'follow_up_text': follow_up_text,
         'media_id': media_id,
         'latest': latest,
         'media_preview': preview,
@@ -2407,6 +2484,30 @@ async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional
         return None
 
 
+async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int = 10) -> list:
+    if not access_token or not ig_user_id:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{ig_user_id}/media',
+                params={
+                    'access_token': access_token,
+                    'fields': 'id,timestamp',
+                    'limit': max(1, min(int(limit or 10), 25)),
+                },
+            )
+            if r.status_code != 200:
+                return []
+            return [
+                str(item.get('id'))
+                for item in ((r.json() or {}).get('data') or [])
+                if item.get('id')
+            ]
+    except Exception:
+        return []
+
+
 @api.post('/instagram/disconnect')
 async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
     await db.users.update_one(
@@ -2592,6 +2693,18 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     comment_ts = _parse_graph_datetime(ts_raw)
     now = datetime.utcnow()
 
+    def _automation_keywords(auto: dict) -> list:
+        raw = auto.get('keywords')
+        if isinstance(raw, list):
+            parts = raw
+        else:
+            parts = str(auto.get('keyword') or '').split(',')
+        return [str(item or '').strip() for item in parts if str(item or '').strip()]
+
+    def _comment_matches_keywords(auto: dict) -> bool:
+        text = comment_text.lower()
+        return any(kw.lower() in text for kw in _automation_keywords(auto))
+
     # Match automations to determine rule_id BEFORE insert
     automations = await db.automations.find(
         {'user_id': user_id, 'status': 'active'}
@@ -2636,7 +2749,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         elif trigger.startswith('comment:'):
             target = raw_trigger.split(':', 1)[1].strip()
             media_hit = False
-            if target.lower() == 'latest':
+            if target.lower() == 'any':
+                media_hit = bool(media_id)
+            elif target.lower() == 'latest':
                 if latest_media_id is None:
                     latest_media_id = await _fetch_latest_media_id(
                         user_doc.get('meta_access_token', ''),
@@ -2652,10 +2767,12 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     cutoff_rule = auto
                     break
                 match_mode = (auto.get('match') or 'any').lower()
-                kw = (auto.get('keyword') or '').strip()
-                if match_mode == 'keyword' and kw:
-                    if kw.lower() in comment_text.lower():
+                kws = _automation_keywords(auto)
+                if match_mode == 'keyword' and kws:
+                    if _comment_matches_keywords(auto):
                         fire = True
+                elif match_mode == 'keyword':
+                    fire = False
                 else:
                     fire = True
         if fire:
@@ -3345,6 +3462,7 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
     """Resolve the set of media IDs we need to poll for this user."""
     target: list = []
     needs_latest = False
+    needs_any = False
     for a in automations:
         raw_trigger = a.get('trigger') or ''
         trigger = raw_trigger.lower()
@@ -3352,6 +3470,8 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
             t = raw_trigger.split(':', 1)[1].strip()
             if t.lower() == 'latest':
                 needs_latest = True
+            elif t.lower() == 'any':
+                needs_any = True
             elif t and t not in target:
                 target.append(t)
         # Also honor explicit trigger_media_id on the automation doc
@@ -3365,6 +3485,14 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
         )
         if latest and latest not in target:
             target.append(latest)
+    if needs_any:
+        for mid in await _fetch_recent_media_ids(
+            user_doc.get('meta_access_token', ''),
+            user_doc.get('ig_user_id', ''),
+            limit=10,
+        ):
+            if mid and mid not in target:
+                target.append(mid)
     return target
 
 
