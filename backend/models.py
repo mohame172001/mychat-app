@@ -20,6 +20,7 @@ class UserPublic(BaseModel):
     avatar: str
     instagramConnected: bool = False
     instagramHandle: Optional[str] = None
+    instagramProfilePictureUrl: Optional[str] = None
     instagramConnectionValid: bool = False
     instagramAccountType: Optional[str] = None
 

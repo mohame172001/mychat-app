@@ -11,6 +11,7 @@ import {
   Trash2, UserPlus, Zap,
 } from 'lucide-react';
 import api from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 
 const exampleWords = ['Price', 'Link', 'Shop'];
@@ -73,11 +74,24 @@ const AutomationPhonePreview = ({
   linkUrl,
   previewTab,
   setPreviewTab,
+  accountName,
+  accountAvatar,
 }) => {
   const previewImage = selectedMedia?.thumbnail_url || selectedMedia?.media_url;
   const caption = selectedMedia?.caption || 'New post caption appears here';
-  const handle = 'instagram_account';
+  const handle = (accountName || 'instagram_account').replace(/^@/, '');
   const commentText = keywordText || 'Price';
+  const Avatar = ({ size = 'h-9 w-9' }) => (
+    <div className={`${size} shrink-0 overflow-hidden rounded-full bg-slate-200`}>
+      {accountAvatar ? (
+        <img src={accountAvatar} alt="" className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400">
+          <Instagram className="h-1/2 w-1/2 text-white" />
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex h-full flex-col bg-slate-50">
@@ -91,15 +105,15 @@ const AutomationPhonePreview = ({
               <span>LTE</span>
             </div>
             <div className="border-b border-white/5 px-5 pb-3 text-center">
-              <div className="text-xs font-bold uppercase text-white/45">{handle}</div>
+              <div className="truncate text-xs font-bold uppercase text-white/45">{handle}</div>
               <div className="font-bold">Posts</div>
             </div>
 
             {previewTab === 'Post' && (
               <>
                 <div className="flex items-center gap-3 px-4 py-3">
-                  <div className="h-9 w-9 rounded-full bg-slate-200" />
-                  <div className="flex-1 text-sm font-bold">{handle}</div>
+                  <Avatar />
+                  <div className="min-w-0 flex-1 truncate text-sm font-bold">{handle}</div>
                   <div className="text-xl leading-none">...</div>
                 </div>
                 <div className="aspect-square bg-slate-900">
@@ -140,8 +154,11 @@ const AutomationPhonePreview = ({
                       <span className="font-bold">follower</span> {commentText}
                     </div>
                     {commentReply && (
-                      <div className="ml-8 mt-3 rounded-2xl bg-white/10 px-3 py-2 text-sm">
-                        <span className="font-bold">{handle}</span> {commentReply}
+                      <div className="mt-3 flex gap-2">
+                        <Avatar size="h-7 w-7" />
+                        <div className="rounded-2xl bg-white/10 px-3 py-2 text-sm">
+                          <span className="font-bold">{handle}</span> {commentReply}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -204,10 +221,12 @@ const AutomationPhonePreview = ({
 };
 
 const Automations = () => {
+  const { user } = useAuth();
   const [list, setList] = useState([]);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
+  const [instagramAccount, setInstagramAccount] = useState(null);
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [media, setMedia] = useState([]);
@@ -248,10 +267,38 @@ const Automations = () => {
 
   useEffect(() => { refresh(); }, []);
 
+  useEffect(() => {
+    const loadInstagramProfile = async () => {
+      if (!user?.instagramConnected) {
+        setInstagramAccount(null);
+        return;
+      }
+      setInstagramAccount({
+        username: user.instagramHandle,
+        profilePictureUrl: user.instagramProfilePictureUrl || user.avatar,
+      });
+      try {
+        const { data } = await api.get('/instagram/profile');
+        setInstagramAccount({
+          username: data?.username || user.instagramHandle,
+          profilePictureUrl: data?.profilePictureUrl || user.instagramProfilePictureUrl || user.avatar,
+        });
+      } catch {
+        setInstagramAccount({
+          username: user.instagramHandle,
+          profilePictureUrl: user.instagramProfilePictureUrl || user.avatar,
+        });
+      }
+    };
+    loadInstagramProfile();
+  }, [user]);
+
   const keywordList = useMemo(
     () => keyword.split(',').map(item => item.trim()).filter(Boolean),
     [keyword]
   );
+  const previewAccountName = instagramAccount?.username || user?.instagramHandle || user?.username || 'instagram_account';
+  const previewAccountAvatar = instagramAccount?.profilePictureUrl || user?.instagramProfilePictureUrl || user?.avatar || '';
 
   const filtered = list.filter(a =>
     (filter === 'all' || a.status === filter) &&
@@ -672,6 +719,8 @@ const Automations = () => {
               linkUrl={linkUrl}
               previewTab={previewTab}
               setPreviewTab={setPreviewTab}
+              accountName={previewAccountName}
+              accountAvatar={previewAccountAvatar}
             />
           </Card>
         </div>

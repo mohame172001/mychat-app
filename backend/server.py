@@ -262,6 +262,7 @@ def _public_user(u: dict) -> UserPublic:
         avatar=u.get('avatar') or f"https://i.pravatar.cc/150?u={u['username']}",
         instagramConnected=instagram_valid,
         instagramHandle=u.get('instagramHandle'),
+        instagramProfilePictureUrl=u.get('instagram_profile_picture_url'),
         instagramConnectionValid=instagram_valid,
         instagramAccountType=u.get('instagram_account_type'),
     )
@@ -1720,6 +1721,7 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
     return {
         'connected': connected,
         'handle': u.get('instagramHandle'),
+        'profilePictureUrl': u.get('instagram_profile_picture_url'),
         'followers': u.get('instagramFollowers', 0),
         'ig_user_id': u.get('ig_user_id'),
         'connectionValid': bool(u.get('instagram_connection_valid')),
@@ -1727,6 +1729,66 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
         'accountType': u.get('instagram_account_type'),
         'meta_configured': bool(META_APP_ID and META_APP_SECRET),
     }
+
+
+@api.get('/instagram/profile')
+async def instagram_profile(user_id: str = Depends(get_current_user_id)):
+    """Return safe, user-scoped Instagram profile data for UI previews.
+
+    Never returns the access token. If Graph does not expose a profile picture
+    for the current token, we fall back to the stored account metadata.
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'User not found')
+
+    connected = _has_valid_instagram_connection(u)
+    out = {
+        'connected': connected,
+        'username': u.get('instagramHandle') or None,
+        'profilePictureUrl': u.get('instagram_profile_picture_url') or None,
+        'igUserId': u.get('ig_user_id') or None,
+        'accountType': u.get('instagram_account_type') or None,
+    }
+    token = u.get('meta_access_token') or ''
+    if not connected or not token:
+        return out
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.get(
+                'https://graph.instagram.com/me',
+                params={
+                    'access_token': token,
+                    'fields': 'id,user_id,username,profile_picture_url,account_type',
+                },
+            )
+            if r.status_code == 200:
+                body = r.json() or {}
+                username = body.get('username') or out['username']
+                profile_picture_url = body.get('profile_picture_url') or out['profilePictureUrl']
+                account_type = body.get('account_type') or out['accountType']
+                canonical_id = str(body.get('user_id') or body.get('id') or out['igUserId'] or '')
+                out.update({
+                    'username': username,
+                    'profilePictureUrl': profile_picture_url,
+                    'igUserId': canonical_id or out['igUserId'],
+                    'accountType': account_type,
+                })
+                await db.users.update_one(
+                    {'id': user_id},
+                    {'$set': {
+                        'instagramHandle': username,
+                        'instagram_profile_picture_url': profile_picture_url,
+                        'instagram_account_type': account_type,
+                    }},
+                )
+            else:
+                out['profilePictureUnavailable'] = True
+    except Exception as e:
+        out['profilePictureUnavailable'] = True
+        out['error'] = str(e)[:160]
+    return out
 
 
 @api.post('/instagram/subscribe-webhook')
