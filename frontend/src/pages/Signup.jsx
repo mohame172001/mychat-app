@@ -43,7 +43,7 @@ const Signup = () => {
         <div className="flex-1 flex items-center justify-center">
           <div className="w-full max-w-sm">
             <h1 className="font-display text-3xl md:text-4xl font-extrabold tracking-tight">Create your account</h1>
-            <p className="mt-2 text-slate-600">Free forever. No credit card required.</p>
+            <p className="mt-2 text-slate-600">Create a workspace and connect Instagram from Settings.</p>
             <form onSubmit={handleSubmit} className="mt-8 space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
@@ -75,9 +75,9 @@ const Signup = () => {
       </div>
       <div className="hidden md:flex relative bg-gradient-to-br from-pink-500 via-orange-400 to-amber-400 overflow-hidden items-center justify-center p-12">
         <div className="text-white max-w-md">
-          <h2 className="font-display text-4xl font-extrabold leading-tight">Your Instagram assistant that never sleeps.</h2>
+          <h2 className="font-display text-4xl font-extrabold leading-tight">Build automations from your own Instagram activity.</h2>
           <ul className="mt-8 space-y-4">
-            {['Reply to comments in seconds', 'Convert DMs into sales', 'Build audience segments automatically', 'Track every conversion'].map(t => (
+            {['Connect Instagram securely', 'Create comment rules', 'Send configured DM replies', 'Review real activity in the dashboard'].map(t => (
               <li key={t} className="flex items-center gap-3 bg-white/10 backdrop-blur-sm rounded-xl px-4 py-3 border border-white/20">
                 <div className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center"><Check className="w-4 h-4" /></div>
                 <span className="font-medium">{t}</span>

@@ -17,11 +17,14 @@ const Login = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!username || !password) { toast.error('Please fill in all fields'); return; }
+    if (!username || !password) {
+      toast.error('Please fill in all fields');
+      return;
+    }
     setLoading(true);
     try {
       await login(username, password);
-      toast.success('Welcome back!');
+      toast.success('Welcome back');
       navigate('/app');
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Login failed');
@@ -51,7 +54,7 @@ const Login = () => {
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
                 <div className="relative">
-                  <Input id="password" type={showPwd ? 'text' : 'password'} placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} className="h-12 rounded-xl pr-10" />
+                  <Input id="password" type={showPwd ? 'text' : 'password'} placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="h-12 rounded-xl pr-10" />
                   <button type="button" onClick={() => setShowPwd(!showPwd)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
                     {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -62,11 +65,11 @@ const Login = () => {
               </Button>
             </form>
             <p className="mt-6 text-sm text-center text-slate-600">
-              Don’t have an account? <Link to="/signup" className="font-semibold text-slate-900 hover:underline">Sign up free</Link>
+              Do not have an account? <Link to="/signup" className="font-semibold text-slate-900 hover:underline">Sign up</Link>
             </p>
             <p className="mt-4 text-xs text-center text-slate-500">
               <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>
-              <span className="mx-2">·</span>
+              <span className="mx-2">-</span>
               <Link to="/terms" className="hover:text-slate-900 underline">Terms of Service</Link>
             </p>
           </div>
@@ -76,14 +79,7 @@ const Login = () => {
         <div className="absolute inset-0 flex items-center justify-center p-12">
           <div className="text-white max-w-md">
             <h2 className="font-display text-4xl font-extrabold leading-tight">Automate the conversations that grow your business.</h2>
-            <p className="mt-4 text-white/90 text-lg">Join 1M+ creators & brands using mychat to scale Instagram on autopilot.</p>
-            <div className="mt-10 grid grid-cols-3 gap-4">
-              {['+248 leads', '4.9★ rated', '24/7 auto'].map((s) => (
-                <div key={s} className="rounded-xl bg-white/10 backdrop-blur-sm border border-white/20 p-4 text-center">
-                  <div className="text-sm font-bold">{s}</div>
-                </div>
-              ))}
-            </div>
+            <p className="mt-4 text-white/90 text-lg">Use mychat with your own Instagram account, contacts, comments, and messages.</p>
           </div>
         </div>
       </div>
