@@ -418,7 +418,7 @@ const Automations = () => {
           </div>
         </div>
 
-        <div className="mt-6 grid gap-6 xl:grid-cols-[470px_minmax(0,1fr)]">
+        <div className="mt-6 grid gap-6 lg:grid-cols-[430px_minmax(0,1fr)]">
           <Card className="overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
             <div className="border-b border-slate-100 px-6 py-5">
               <div className="text-sm font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
@@ -657,10 +657,10 @@ const Automations = () => {
                 </div>
               </div>
             </section>
-          </div>
+            </div>
           </Card>
 
-          <Card className="hidden min-w-0 overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm xl:block">
+          <Card className="min-w-0 overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
             <AutomationPhonePreview
               selectedMedia={selectedMedia}
               postScope={postScope}
