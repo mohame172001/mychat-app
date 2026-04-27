@@ -5,7 +5,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
-import { Inbox, Loader2, Trash2, RefreshCcw, Play, Bug, Wifi } from 'lucide-react';
+import { Inbox, Loader2, Trash2, RefreshCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
 
@@ -35,13 +35,6 @@ const DmAutomation = () => {
   const [logs, setLogs] = useState([]);
   const [form, setForm] = useState({ name: '', keyword: '', matchMode: 'contains', replyText: '', isActive: true });
   const [saving, setSaving] = useState(false);
-  const [testText, setTestText] = useState('');
-  const [testResult, setTestResult] = useState(null);
-  const [debug, setDebug] = useState(null);
-  const [debugLoading, setDebugLoading] = useState(false);
-  const [resubLoading, setResubLoading] = useState(false);
-  const [creds, setCreds] = useState(null);
-  const [credsLoading, setCredsLoading] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -110,57 +103,6 @@ const DmAutomation = () => {
     }
   };
 
-  const runDebug = async () => {
-    setDebugLoading(true);
-    try {
-      const { data } = await api.get('/instagram/dm/debug-latest');
-      setDebug(data);
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Debug failed');
-    } finally {
-      setDebugLoading(false);
-    }
-  };
-
-  const runCreds = async () => {
-    setCredsLoading(true);
-    try {
-      const { data } = await api.get('/instagram/credentials/diagnostics');
-      setCreds(data);
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Credentials check failed');
-    } finally {
-      setCredsLoading(false);
-    }
-  };
-
-  const resubscribe = async () => {
-    setResubLoading(true);
-    try {
-      const { data } = await api.post('/instagram/dm/resubscribe');
-      if (data.messagesSubscribed) {
-        toast.success('Resubscribed: messages field is active');
-      } else {
-        toast.error('Resubscribe call returned, but messages still not in subscribed_fields');
-      }
-      await runDebug();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Resubscribe failed');
-    } finally {
-      setResubLoading(false);
-    }
-  };
-
-  const runTest = async () => {
-    if (!testText.trim()) { toast.error('Enter sample text'); return; }
-    try {
-      const { data } = await api.post('/instagram/dm/test-rule', { text: testText });
-      setTestResult(data);
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Test failed');
-    }
-  };
-
   return (
     <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between">
@@ -209,227 +151,6 @@ const DmAutomation = () => {
           )}
         </Card>
       )}
-
-      {/* DM debug panel */}
-      <Card className="mt-6 p-6 rounded-2xl border-slate-100">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <h3 className="font-display font-bold text-lg flex items-center gap-2">
-              <Bug className="w-5 h-5" /> DM debug
-            </h3>
-            <p className="text-sm text-slate-500">Reads live production data: webhook_log, dm_logs, dm_rules, and the IG account's subscribed_fields. No tokens or raw payloads exposed.</p>
-          </div>
-          <div className="flex gap-2 flex-wrap">
-            <Button onClick={runCreds} disabled={credsLoading} variant="outline" className="rounded-xl">
-              {credsLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Bug className="w-4 h-4 mr-2" />}
-              Credentials check
-            </Button>
-            <Button onClick={resubscribe} disabled={resubLoading} variant="outline" className="rounded-xl">
-              {resubLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wifi className="w-4 h-4 mr-2" />}
-              Resubscribe messaging webhook
-            </Button>
-            <Button onClick={runDebug} disabled={debugLoading} className="rounded-xl bg-slate-900 text-white">
-              {debugLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Bug className="w-4 h-4 mr-2" />}
-              Run DM debug
-            </Button>
-          </div>
-        </div>
-
-        {creds && (
-          <div className="mt-4 p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
-            <div className="font-semibold mb-1 text-sm">Credentials wiring</div>
-            <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
-              <div>OAuth client_id source: <span className="font-mono">{creds.oauth?.authorizeUrlClientIdSource || '—'}</span></div>
-              <div>OAuth client_secret source: <span className="font-mono">{creds.oauth?.tokenExchangeSecretSource || '—'}</span></div>
-              <div>Instagram App ID configured: {creds.oauth?.instagramAppIdConfigured ? '✓' : '✗'}</div>
-              <div>Instagram App Secret configured: {creds.oauth?.instagramAppSecretConfigured ? '✓' : '✗'}</div>
-              <div>Webhook verify token source: <span className="font-mono">{creds.webhook?.verifyTokenSource || '—'}</span></div>
-              <div>Webhook signature secret source: <span className="font-mono">{creds.webhook?.signatureSecretSource || '—'}</span></div>
-              <div>Signature validation: {creds.webhook?.signatureValidationEnabled ? 'on' : 'off'}</div>
-              <div>Meta App ID configured: {creds.webhook?.metaAppIdConfigured ? '✓' : '✗'}</div>
-              <div>Meta App Secret configured: {creds.webhook?.metaAppSecretConfigured ? '✓' : '✗'}</div>
-              <div>debug_token works: {creds.debugToken?.debugTokenWorks ? '✓' : '✗'} {creds.debugToken?.debugTokenHost ? <span className="text-slate-500">({creds.debugToken.debugTokenHost})</span> : null}</div>
-              <div>Token app_id: <span className="font-mono">{creds.debugToken?.tokenAppId || '—'}</span></div>
-              <div>Matches Instagram App ID: {creds.debugToken?.matchesInstagramAppId ? '✓' : '✗'} | Matches Meta App ID: {creds.debugToken?.matchesMetaAppId ? '✓' : '✗'}</div>
-            </div>
-            {creds.warnings?.length > 0 && (
-              <ul className="mt-2 space-y-1">
-                {creds.warnings.map((w, i) => (
-                  <li key={i} className="text-rose-700">⚠ {w}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        {debug && (
-          <div className="mt-4 space-y-4">
-            {/* Identity panel */}
-            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
-              <div className="font-semibold mb-1 text-sm">Identity</div>
-              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
-                <div>DB ig_user_id: <span className="font-mono">{debug.identity?.dbIgUserIdRedacted || '—'}</span></div>
-                <div>Graph /me id: <span className="font-mono">{debug.identity?.graphMeIdRedacted || '—'}</span></div>
-                <div>Username: {debug.identity?.graphUsername || '—'}</div>
-                <div>Account type: {debug.identity?.graphAccountType || '—'}</div>
-                <div>Subscribed_apps for: <span className="font-mono">{debug.identity?.subscribedAppsCheckedForIgUserIdRedacted || '—'}</span></div>
-                <div>ID match: <span className={debug.identity?.idMatch ? 'text-emerald-700' : 'text-rose-700'}>{debug.identity?.idMatch ? 'yes' : 'no'}</span></div>
-              </div>
-              <div className="mt-1">Recent webhook entry IDs: <span className="font-mono">{(debug.identity?.latestWebhookEntryIds || []).join(', ') || '—'}</span></div>
-              <div>Recent recipient IDs: <span className="font-mono">{(debug.identity?.latestWebhookRecipientIds || []).join(', ') || '—'}</span></div>
-              <div>Recent sender IDs: <span className="font-mono">{(debug.identity?.latestWebhookSenderIds || []).join(', ') || '—'}</span></div>
-              {debug.identity?.mismatchReason && (
-                <div className="mt-1 text-rose-700">Mismatch: {debug.identity.mismatchReason}</div>
-              )}
-            </div>
-
-            {/* Webhook config panel */}
-            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
-              <div className="font-semibold mb-1 text-sm">Webhook config</div>
-              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
-                <div>Callback URL: <span className="font-mono break-all">{debug.webhookConfig?.callbackUrlUsedByRuntime}</span></div>
-                <div>Path: <span className="font-mono">{debug.webhookConfig?.expectedWebhookPath}</span></div>
-                <div>Verify token configured: {debug.webhookConfig?.verifyTokenConfigured ? '✓' : '✗'}</div>
-                <div>App ID configured: {debug.webhookConfig?.appIdConfigured ? '✓' : '✗'}</div>
-                <div>App secret configured: {debug.webhookConfig?.appSecretConfigured ? '✓' : '✗'}</div>
-                <div>Signature validation: {debug.webhookConfig?.signatureValidationEnabled ? 'on' : 'off'}</div>
-                <div>Graph API: {debug.webhookConfig?.graphApiVersion} @ {debug.webhookConfig?.graphHost}</div>
-                <div>Webhook events stored: {debug.webhookConfig?.webhookEventsStored}</div>
-              </div>
-            </div>
-
-            {/* Processor panel */}
-            <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs">
-              <div className="font-semibold mb-1 text-sm">Processor</div>
-              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
-                <div>Webhook messaging events seen: {debug.processor?.webhookEventsCount}</div>
-                <div>dm_logs for current user: {debug.processor?.dmLogsForCurrentUser}</div>
-                <div>dm_logs global recent: {debug.processor?.dmLogsGlobalRecent}</div>
-                <div>Unmapped messaging events: {debug.processor?.unmappedMessagingEvents}</div>
-              </div>
-              {debug.processor?.recentSkipReasons?.length > 0 && (
-                <div className="mt-1">Recent skip reasons: {debug.processor.recentSkipReasons.join(', ')}</div>
-              )}
-            </div>
-
-            <div className="text-[11px] text-slate-500">
-              Note: First verify ID mapping and webhook payload shape. In Development mode, app roles may affect some tests, but do not assume this is the cause until ID mapping and payload handling are proven correct.
-            </div>
-
-            {/* Decision pills */}
-            <div className="flex flex-wrap gap-2">
-              {[
-                ['Messaging webhook received', debug.lastDecision?.webhookReceived],
-                ['Message text extracted', debug.lastDecision?.messageParsed],
-                ['Active rule matched', debug.lastDecision?.ruleMatched],
-                ['Reply attempted', debug.lastDecision?.sendAttempted],
-                ['Reply sent', debug.lastDecision?.replySent],
-              ].map(([k, v]) => (
-                <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                  {v ? '✓' : '✗'} {k}: {v ? 'yes' : 'no'}
-                </Badge>
-              ))}
-            </div>
-
-            {/* Blocker / fix */}
-            {debug.lastDecision?.blocker ? (
-              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-sm">
-                <div className="font-semibold text-rose-900">Blocker: {debug.lastDecision.blocker}</div>
-                {debug.lastDecision.fix && (
-                  <div className="mt-1 text-rose-800">Fix: {debug.lastDecision.fix}</div>
-                )}
-              </div>
-            ) : (
-              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-900">
-                No blocker detected. {debug.lastDecision?.fix || ''}
-              </div>
-            )}
-
-            {/* Subscribed fields */}
-            <div className="text-xs text-slate-600">
-              Subscribed fields:{' '}
-              {(debug.subscribedFields || []).length === 0
-                ? <span className="text-rose-700">none</span>
-                : (debug.subscribedFields || []).map(f => (
-                  <Badge key={f} className="rounded-full mr-1 border-0 bg-slate-100 text-slate-700">{f}</Badge>
-                ))}
-              {debug.subscriptionError && (
-                <span className="ml-2 text-rose-700">err: {debug.subscriptionError}</span>
-              )}
-            </div>
-
-            {/* Recent webhook events */}
-            <div>
-              <div className="text-sm font-semibold mb-1">Recent messaging webhook events ({debug.recentWebhookEvents?.length || 0})</div>
-              {(!debug.recentWebhookEvents || debug.recentWebhookEvents.length === 0) ? (
-                <div className="text-xs text-slate-500">No webhook events recorded for this IG account in the last 50 deliveries.</div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                      <th className="py-1">Time</th><th>Kind</th><th>Item keys</th>
-                      <th>Msg keys</th><th>Sender</th><th>Recip</th>
-                      <th>Msg id</th><th>Text</th><th>Read</th><th>Deliv</th>
-                      <th>Postback</th><th>React</th><th>Echo</th><th>Preview</th>
-                    </tr></thead>
-                    <tbody>
-                      {debug.recentWebhookEvents.map((ev, i) => (
-                        <tr key={i} className="border-b border-slate-50 align-top">
-                          <td className="py-1 whitespace-nowrap">{fmtTime(ev.createdAt)}</td>
-                          <td><Badge className="rounded-full border-0 bg-slate-100 text-slate-700">{ev.eventKind}</Badge></td>
-                          <td className="font-mono text-[10px]">{(ev.messagingItemKeys || []).join(',')}</td>
-                          <td className="font-mono text-[10px]">{(ev.messageKeys || []).join(',')}</td>
-                          <td>{ev.senderPresent ? (ev.senderIdRedacted || '✓') : '✗'}</td>
-                          <td>{ev.recipientPresent ? '✓' : '✗'}</td>
-                          <td>{ev.messageIdPresent ? '✓' : '✗'}</td>
-                          <td>{ev.messageTextPresent ? '✓' : '✗'}</td>
-                          <td>{ev.hasRead ? '✓' : '—'}</td>
-                          <td>{ev.hasDelivery ? '✓' : '—'}</td>
-                          <td>{ev.hasPostback ? '✓' : '—'}</td>
-                          <td>{ev.hasReaction ? '✓' : '—'}</td>
-                          <td>{ev.isEcho ? '✓' : '—'}</td>
-                          <td className="font-mono">{ev.textPreview}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Recent dm logs */}
-            <div>
-              <div className="text-sm font-semibold mb-1">Recent DM processor logs ({debug.recentDmLogs?.length || 0})</div>
-              {(!debug.recentDmLogs || debug.recentDmLogs.length === 0) ? (
-                <div className="text-xs text-slate-500">No dm_logs rows yet. If messaging events are arriving, the processor is not running for this user.</div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                      <th className="py-1">Time</th><th>Kind</th><th>Sender</th><th>Text</th>
-                      <th>Rule</th><th>Status</th><th>Skip reason</th><th>Error</th>
-                    </tr></thead>
-                    <tbody>
-                      {debug.recentDmLogs.map((l, i) => (
-                        <tr key={i} className="border-b border-slate-50 align-top">
-                          <td className="py-1 whitespace-nowrap">{fmtTime(l.createdAt)}</td>
-                          <td><Badge className="rounded-full border-0 bg-slate-100 text-slate-700">{l.eventKind || '—'}</Badge></td>
-                          <td className="font-mono">{l.senderId}</td>
-                          <td className="max-w-xs truncate">{l.incomingText || ''}</td>
-                          <td>{l.matchedRuleName || '—'}</td>
-                          <td><Badge className={`rounded-full border-0 ${STATUS_COLORS[l.status] || 'bg-slate-100 text-slate-700'}`}>{l.status}</Badge></td>
-                          <td>{l.skipReason || ''}</td>
-                          <td className="text-rose-700 max-w-xs truncate">{l.error || ''}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </Card>
 
       {/* Create rule form */}
       <Card className="mt-6 p-6 rounded-2xl border-slate-100">
@@ -502,31 +223,6 @@ const DmAutomation = () => {
                 ))}
               </tbody>
             </table>
-          </div>
-        )}
-      </Card>
-
-      {/* Test rule box */}
-      <Card className="mt-6 p-6 rounded-2xl border-slate-100">
-        <h3 className="font-display font-bold text-lg">Test rule matching</h3>
-        <p className="text-sm text-slate-500">Check which active rule would match a given message — does not send anything.</p>
-        <div className="mt-4 flex gap-2">
-          <Input className="h-11 rounded-xl flex-1" placeholder='e.g. "hello there"'
-            value={testText} onChange={e => setTestText(e.target.value)} />
-          <Button onClick={runTest} className="rounded-xl bg-slate-900 text-white">
-            <Play className="w-4 h-4 mr-2" /> Test
-          </Button>
-        </div>
-        {testResult && (
-          <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-slate-200 text-sm">
-            <div>Input: <code className="text-xs">{testResult.inputText}</code></div>
-            <div>Matched rules: <b>{testResult.matchCount}</b></div>
-            {testResult.firstMatch && (
-              <div className="mt-2 text-xs">
-                First match: <b>{testResult.firstMatch.name}</b> ({testResult.firstMatch.matchMode}: <code>{testResult.firstMatch.keyword}</code>)
-                <div className="text-slate-600">→ would reply: "{testResult.firstMatch.replyText}"</div>
-              </div>
-            )}
           </div>
         )}
       </Card>

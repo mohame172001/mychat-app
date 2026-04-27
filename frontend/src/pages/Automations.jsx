@@ -27,7 +27,6 @@ const Automations = () => {
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaError, setMediaError] = useState(null);
   const [mediaWarning, setMediaWarning] = useState(null);
-  const [mediaDebug, setMediaDebug] = useState(null);
   const [selectedMedia, setSelectedMedia] = useState(null); // {id, thumbnail_url, caption, media_type, latest?}
   const [mode, setMode] = useState('reply_and_dm'); // reply_and_dm | reply_only
   const [match, setMatch] = useState('any'); // any | keyword
@@ -84,17 +83,9 @@ const Automations = () => {
     setMedia([]);
     setMediaError(null);
     setMediaWarning(null);
-    setMediaDebug(null);
     setMediaLoading(true);
     try {
       const { data } = await api.get('/instagram/media');
-      setMediaDebug({
-        endpointUsed: data?.endpointUsed,
-        count: data?.count ?? (data?.media || data?.items || []).length,
-        graphMeId: data?.graphMeId,
-        dbIgUserId: data?.dbIgUserId,
-        idMatch: data?.idMatch,
-      });
       const items = data?.media || data?.items || [];
       if (data?.ok === false) {
         setMedia([]);
@@ -201,17 +192,6 @@ const Automations = () => {
                 <div>
                   <h4 className="font-semibold">Choose the post</h4>
                   <p className="text-sm text-slate-500 mt-1">Pick one of your Instagram posts, or let the automation always track the newest one.</p>
-                  {mediaDebug && (
-                    <div className="mt-3 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-[11px] font-mono text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
-                      <span>endpoint: <b>{mediaDebug.endpointUsed || '—'}</b></span>
-                      <span>count: <b>{mediaDebug.count}</b></span>
-                      {mediaDebug.graphMeId && <span>/me id: <b>{mediaDebug.graphMeId}</b></span>}
-                      {mediaDebug.dbIgUserId && <span>db ig_user_id: <b>{mediaDebug.dbIgUserId}</b></span>}
-                      {mediaDebug.idMatch !== null && mediaDebug.idMatch !== undefined && (
-                        <span>idMatch: <b className={mediaDebug.idMatch ? 'text-emerald-700' : 'text-rose-700'}>{String(mediaDebug.idMatch)}</b></span>
-                      )}
-                    </div>
-                  )}
                   {mediaError && <div className="mt-3 p-3 rounded-xl bg-red-50 border border-red-100 text-sm text-red-700 break-all">Graph API error: {mediaError}</div>}
                   {!mediaError && mediaWarning && <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-800">{mediaWarning}</div>}
                   {mediaLoading ? (
