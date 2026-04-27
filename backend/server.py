@@ -617,7 +617,12 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     prospective = {**existing, **update}
     reset_fields = {
         'trigger', 'nodes', 'edges', 'match', 'keyword', 'media_id', 'latest',
-        'mode', 'comment_reply', 'dm_text', 'media_preview',
+        'mode', 'comment_reply', 'dm_text', 'media_preview', 'keywords',
+        'post_scope', 'reply_under_post', 'opening_dm_enabled',
+        'opening_dm_text', 'opening_dm_button_text', 'link_dm_text',
+        'link_button_text', 'link_url', 'follow_request_enabled',
+        'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
+        'processExistingComments',
     }
     status_reenabled = (
         update.get('status') == 'active' and existing.get('status') != 'active'

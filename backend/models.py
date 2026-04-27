@@ -72,6 +72,19 @@ class AutomationPatch(BaseModel):
     media_id: Optional[str] = None
     latest: Optional[bool] = None
     media_preview: Optional[Dict[str, Any]] = None
+    keywords: Optional[List[str]] = None
+    post_scope: Optional[str] = None
+    reply_under_post: Optional[bool] = None
+    opening_dm_enabled: Optional[bool] = None
+    opening_dm_text: Optional[str] = None
+    opening_dm_button_text: Optional[str] = None
+    link_dm_text: Optional[str] = None
+    link_button_text: Optional[str] = None
+    link_url: Optional[str] = None
+    follow_request_enabled: Optional[bool] = None
+    email_request_enabled: Optional[bool] = None
+    follow_up_enabled: Optional[bool] = None
+    follow_up_text: Optional[str] = None
     processExistingComments: Optional[bool] = None
 
 

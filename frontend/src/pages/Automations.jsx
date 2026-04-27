@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -8,7 +9,7 @@ import { Checkbox } from '../components/ui/checkbox';
 import {
   ArrowLeft, Bookmark, CheckCircle2, Circle, Filter, Hash, Heart, Instagram,
   Link as LinkIcon, Loader2, Mail, MessageCircle, Plus, Search, Send as SendIcon,
-  Trash2, UserPlus, Zap,
+  Pencil, Trash2, UserPlus, Zap,
 } from 'lucide-react';
 import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
@@ -222,6 +223,7 @@ const AutomationPhonePreview = ({
 
 const Automations = () => {
   const { user } = useAuth();
+  const [routeSearchParams, setRouteSearchParams] = useSearchParams();
   const [list, setList] = useState([]);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
@@ -229,6 +231,7 @@ const Automations = () => {
   const [instagramAccount, setInstagramAccount] = useState(null);
 
   const [builderOpen, setBuilderOpen] = useState(false);
+  const [editingAutomation, setEditingAutomation] = useState(null);
   const [media, setMedia] = useState([]);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaError, setMediaError] = useState(null);
@@ -327,9 +330,58 @@ const Automations = () => {
     setPreviewTab('Post');
   };
 
-  const openBuilder = async () => {
-    resetBuilder();
-    setBuilderOpen(true);
+  const inferPostScope = (automation) => {
+    if (automation?.post_scope) return automation.post_scope;
+    const trigger = (automation?.trigger || '').toLowerCase();
+    if (trigger === 'comment:any') return 'any';
+    if (trigger === 'comment:latest' || automation?.latest) return 'next';
+    return 'specific';
+  };
+
+  const mediaPreviewToItem = (automation) => ({
+    id: automation?.media_id || '',
+    caption: automation?.media_preview?.caption || '',
+    thumbnail_url: automation?.media_preview?.thumbnail_url || automation?.media_preview?.media_url || '',
+    media_url: automation?.media_preview?.media_url || automation?.media_preview?.thumbnail_url || '',
+    media_type: automation?.media_preview?.media_type || '',
+  });
+
+  const applyAutomationToBuilder = (automation) => {
+    const scope = inferPostScope(automation);
+    const keywords = Array.isArray(automation.keywords)
+      ? automation.keywords.join(', ')
+      : (automation.keyword || '');
+
+    setEditingAutomation(automation);
+    setPostScope(scope);
+    setMatch(automation.match || (keywords ? 'keyword' : 'any'));
+    setKeyword(keywords);
+    setReplyUnderPost(
+      typeof automation.reply_under_post === 'boolean'
+        ? automation.reply_under_post
+        : Boolean(automation.comment_reply)
+    );
+    setCommentReply(automation.comment_reply || 'Thanks. Check your DM.');
+    setOpeningDmEnabled(
+      typeof automation.opening_dm_enabled === 'boolean'
+        ? automation.opening_dm_enabled
+        : Boolean(automation.opening_dm_text || automation.dm_text || automation.mode === 'reply_and_dm')
+    );
+    setOpeningDmText(automation.opening_dm_text || automation.dm_text || "Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
+    setOpeningDmButtonText(automation.opening_dm_button_text || 'Send me the link');
+    setFollowRequestEnabled(Boolean(automation.follow_request_enabled));
+    setEmailRequestEnabled(Boolean(automation.email_request_enabled));
+    setLinkDmText(automation.link_dm_text || '');
+    setLinkButtonText(automation.link_button_text || 'Open link');
+    setLinkUrl(automation.link_url || '');
+    setFollowUpEnabled(Boolean(automation.follow_up_enabled));
+    setFollowUpText(automation.follow_up_text || '');
+    setProcessExistingComments(Boolean(automation.processExistingComments));
+    setPreviewTab('Post');
+    setSelectedMedia(scope === 'specific' ? mediaPreviewToItem(automation) : null);
+  };
+
+  const loadMediaForBuilder = async ({ preferredMediaId = '', pickFirst = true } = {}) => {
     setMedia([]);
     setMediaError(null);
     setMediaWarning(null);
@@ -343,7 +395,12 @@ const Automations = () => {
         setMediaError(typeof errBody === 'string' ? errBody : JSON.stringify(data?.error || data));
       } else {
         setMedia(items);
-        if (items.length > 0) setSelectedMedia(items[0]);
+        const preferred = preferredMediaId ? items.find(item => item.id === preferredMediaId) : null;
+        if (preferred) {
+          setSelectedMedia(preferred);
+        } else if (items.length > 0 && pickFirst) {
+          setSelectedMedia(items[0]);
+        }
         if (items.length === 0) {
           setMediaWarning(data?.warning || 'No Instagram media returned. Connect Instagram and publish a post first.');
         } else if (data?.warning) {
@@ -356,6 +413,30 @@ const Automations = () => {
     }
     setMediaLoading(false);
   };
+
+  const openBuilder = async () => {
+    resetBuilder();
+    setEditingAutomation(null);
+    setBuilderOpen(true);
+    await loadMediaForBuilder({ pickFirst: true });
+  };
+
+  const openEditBuilder = async (automation) => {
+    resetBuilder();
+    applyAutomationToBuilder(automation);
+    setBuilderOpen(true);
+    await loadMediaForBuilder({ preferredMediaId: automation.media_id || '', pickFirst: false });
+  };
+
+  useEffect(() => {
+    const editId = routeSearchParams.get('edit');
+    if (!editId || loading || builderOpen) return;
+    const automation = list.find(item => item.id === editId);
+    if (!automation) return;
+    openEditBuilder(automation);
+    setRouteSearchParams({}, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeSearchParams, loading, list, builderOpen]);
 
   const toggleStatus = async (a) => {
     const newStatus = a.status === 'active' ? 'paused' : 'active';
@@ -397,17 +478,67 @@ const Automations = () => {
         followRequestEnabled || emailRequestEnabled ||
         (followUpEnabled && followUpText.trim())
       );
+      const latest = postScope === 'next' || postScope === 'latest';
+      const trigger = postScope === 'any'
+        ? 'comment:any'
+        : latest
+          ? 'comment:latest'
+          : `comment:${selectedMedia?.id || ''}`;
+      const dmText = openingDmEnabled
+        ? openingDmText.trim()
+        : (linkDmText.trim() || linkUrl.trim());
+      const nodes = [{
+        id: 'n_trigger',
+        type: 'trigger',
+        data: {
+          label: 'Comment trigger',
+          trigger,
+          match,
+          keyword: match === 'keyword' ? keywordList.join(', ') : '',
+          keywords: match === 'keyword' ? keywordList : [],
+        },
+      }];
+      const edges = [];
+      let prev = 'n_trigger';
+      if (replyUnderPost && commentReply.trim()) {
+        nodes.push({ id: 'n_reply', type: 'reply_comment', data: { text: commentReply.trim() } });
+        edges.push({ id: 'e1', source: prev, target: 'n_reply' });
+        prev = 'n_reply';
+      }
+      if (hasDm && dmText) {
+        nodes.push({
+          id: 'n_dm',
+          type: 'message',
+          data: {
+            text: dmText,
+            opening_dm_text: openingDmEnabled ? openingDmText.trim() : '',
+            opening_dm_button_text: openingDmButtonText.trim(),
+            link_dm_text: linkDmText.trim(),
+            link_button_text: linkButtonText.trim(),
+            link_url: linkUrl.trim(),
+            follow_request_enabled: followRequestEnabled,
+            email_request_enabled: emailRequestEnabled,
+            follow_up_enabled: followUpEnabled,
+            follow_up_text: followUpText.trim(),
+          },
+        });
+        edges.push({ id: `e${edges.length + 1}`, source: prev, target: 'n_dm' });
+      }
 
       const body = {
         post_scope: postScope,
-        latest: postScope === 'next' || postScope === 'latest',
+        latest,
+        trigger,
+        nodes,
+        edges,
+        status: editingAutomation?.status || 'active',
         mode: hasDm ? 'reply_and_dm' : 'reply_only',
         match,
         keyword: match === 'keyword' ? keywordList.join(', ') : '',
         keywords: match === 'keyword' ? keywordList : [],
         reply_under_post: replyUnderPost,
         comment_reply: replyUnderPost ? commentReply.trim() : '',
-        dm_text: openingDmEnabled ? openingDmText.trim() : (linkDmText.trim() || linkUrl.trim()),
+        dm_text: dmText,
         opening_dm_enabled: openingDmEnabled,
         opening_dm_text: openingDmEnabled ? openingDmText.trim() : '',
         opening_dm_button_text: openingDmButtonText.trim(),
@@ -428,11 +559,19 @@ const Automations = () => {
           thumbnail_url: selectedMedia.thumbnail_url || selectedMedia.media_url || '',
           media_type: selectedMedia.media_type || '',
         };
+      } else {
+        body.media_id = '';
+        body.media_preview = {};
       }
 
-      const { data } = await api.post('/automations/quick-comment-rule', body);
-      setList(prev => [data, ...prev]);
-      toast.success('Automation is live');
+      const { data } = editingAutomation
+        ? await api.patch(`/automations/${editingAutomation.id}`, body)
+        : await api.post('/automations/quick-comment-rule', body);
+      setList(prev => editingAutomation
+        ? prev.map(item => item.id === data.id ? data : item)
+        : [data, ...prev]);
+      toast.success(editingAutomation ? 'Automation updated. Stats preserved.' : 'Automation is live');
+      setEditingAutomation(null);
       setBuilderOpen(false);
     } catch (e) {
       toast.error(e?.response?.data?.detail || 'Failed to create automation');
@@ -445,11 +584,21 @@ const Automations = () => {
       <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8 text-slate-950">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>
-            <p className="mt-1 text-slate-600">Create an Instagram comment automation inside your workspace.</p>
+            <h1 className="font-display text-3xl font-extrabold tracking-tight">
+              {editingAutomation ? 'Edit automation' : 'Automations'}
+            </h1>
+            <p className="mt-1 text-slate-600">
+              {editingAutomation
+                ? 'Update this Instagram comment automation while keeping its stats.'
+                : 'Create an Instagram comment automation inside your workspace.'}
+            </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" className="rounded-lg px-2" onClick={() => !saving && setBuilderOpen(false)}>
+            <Button variant="ghost" className="rounded-lg px-2" onClick={() => {
+              if (saving) return;
+              setEditingAutomation(null);
+              setBuilderOpen(false);
+            }}>
               <ArrowLeft className="mr-2 h-4 w-4" /> Back
             </Button>
             <Button
@@ -458,10 +607,15 @@ const Automations = () => {
               className="rounded-lg bg-slate-950 px-5 text-white hover:bg-slate-800"
             >
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Go Live
+              {editingAutomation ? 'Save Changes' : 'Go Live'}
             </Button>
           </div>
         </div>
+        {editingAutomation && (
+          <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            Current stats stay attached to this automation: {(editingAutomation.sent || 0).toLocaleString()} fired.
+          </div>
+        )}
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[430px_minmax(0,1fr)]">
           <Card className="overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
@@ -804,6 +958,14 @@ const Automations = () => {
                   {a.status}
                 </Badge>
                 <Switch checked={a.status === 'active'} onCheckedChange={() => toggleStatus(a)} />
+                <Button
+                  onClick={() => openEditBuilder(a)}
+                  variant="outline"
+                  size="sm"
+                  className="rounded-lg"
+                >
+                  <Pencil className="h-3.5 w-3.5" /> Edit
+                </Button>
                 <Button
                   onClick={() => handleDelete(a.id)}
                   variant="ghost"

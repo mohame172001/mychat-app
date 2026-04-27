@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
-import { ArrowLeft, Trash2, Loader2, Instagram } from 'lucide-react';
+import { ArrowLeft, Pencil, Trash2, Loader2, Instagram } from 'lucide-react';
 import api from '../lib/api';
 import { toast } from 'sonner';
 
@@ -100,6 +100,9 @@ const FlowBuilder = () => {
         </div>
 
         <div className="mt-6 flex gap-2">
+          <Button onClick={() => navigate(`/app/automations?edit=${id}`)} className="rounded-xl bg-slate-900 text-white">
+            <Pencil className="w-4 h-4 mr-1.5" /> Edit
+          </Button>
           <Button onClick={toggleStatus} variant="outline" className="rounded-xl">
             {auto.status === 'active' ? 'Pause' : 'Activate'}
           </Button>
@@ -109,7 +112,7 @@ const FlowBuilder = () => {
         </div>
 
         <p className="mt-4 text-xs text-slate-500">
-          To change this rule, delete it and create a new one from the Automations page.
+          Editing keeps this automation's existing fired count and activity history.
         </p>
       </Card>
     </div>
