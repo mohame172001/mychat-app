@@ -397,9 +397,13 @@ const Automations = () => {
 
   if (builderOpen) {
     return (
-      <div className="fixed inset-0 z-40 flex bg-white text-slate-950">
-        <div className="flex w-full min-w-0 flex-col border-r border-slate-200 lg:w-[470px]">
-          <div className="flex h-[76px] items-center justify-between border-b border-slate-200 px-6">
+      <div className="mx-auto max-w-7xl p-8 text-slate-950">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>
+            <p className="mt-1 text-slate-600">Create an Instagram comment automation inside your workspace.</p>
+          </div>
+          <div className="flex items-center gap-2">
             <Button variant="ghost" className="rounded-lg px-2" onClick={() => !saving && setBuilderOpen(false)}>
               <ArrowLeft className="mr-2 h-4 w-4" /> Back
             </Button>
@@ -412,8 +416,15 @@ const Automations = () => {
               Go Live
             </Button>
           </div>
+        </div>
 
-          <div className="flex-1 overflow-y-auto px-7 py-7">
+        <div className="mt-6 grid gap-6 xl:grid-cols-[470px_minmax(0,1fr)]">
+          <Card className="overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-6 py-5">
+              <div className="text-sm font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
+              <div className="mt-1 text-lg font-bold">Build rule</div>
+            </div>
+            <div className="max-h-[calc(100vh-250px)] overflow-y-auto px-6 py-6">
             <section>
               <h2 className="text-2xl font-extrabold tracking-tight">When someone comments on</h2>
               <div className="mt-5 space-y-3">
@@ -647,21 +658,22 @@ const Automations = () => {
               </div>
             </section>
           </div>
-        </div>
+          </Card>
 
-        <div className="hidden min-w-0 flex-1 lg:block">
-          <AutomationPhonePreview
-            selectedMedia={selectedMedia}
-            postScope={postScope}
-            keywordText={keywordList[0] || ''}
-            commentReply={replyUnderPost ? commentReply : ''}
-            openingDmText={openingDmEnabled ? openingDmText : ''}
-            openingDmButtonText={openingDmEnabled ? openingDmButtonText : ''}
-            linkDmText={linkDmText}
-            linkUrl={linkUrl}
-            previewTab={previewTab}
-            setPreviewTab={setPreviewTab}
-          />
+          <Card className="hidden min-w-0 overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm xl:block">
+            <AutomationPhonePreview
+              selectedMedia={selectedMedia}
+              postScope={postScope}
+              keywordText={keywordList[0] || ''}
+              commentReply={replyUnderPost ? commentReply : ''}
+              openingDmText={openingDmEnabled ? openingDmText : ''}
+              openingDmButtonText={openingDmEnabled ? openingDmButtonText : ''}
+              linkDmText={linkDmText}
+              linkUrl={linkUrl}
+              previewTab={previewTab}
+              setPreviewTab={setPreviewTab}
+            />
+          </Card>
         </div>
       </div>
     );
