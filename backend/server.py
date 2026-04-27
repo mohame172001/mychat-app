@@ -130,26 +130,258 @@ ws_manager = ConnectionManager()
 
 
 # ---------------- Meta messaging helper ----------------
-async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> bool:
-    """Send a DM via Instagram Graph API. Returns True on success."""
+async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: str,
+                          message: dict) -> dict:
+    """Send a raw Instagram message object. Tokens are never returned."""
     if not access_token or not ig_user_id:
-        logger.warning('send_ig_dm: missing access_token or ig_user_id')
-        return False
+        logger.warning('send_ig_message: missing access_token or ig_user_id')
+        return {'ok': False, 'status_code': None, 'error': 'missing_access_token_or_ig_user_id'}
     url = f'https://graph.instagram.com/{ig_user_id}/messages'
     payload = {
         'recipient': {'id': recipient_ig_id},
-        'message': {'text': text},
+        'message': message,
     }
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, json=payload, params={'access_token': access_token})
             if r.status_code == 200:
-                return True
-            logger.error('send_ig_dm error %s: %s', r.status_code, r.text)
-            return False
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+                return {'ok': True, 'status_code': r.status_code, 'body': _redact_secrets(body)}
+            logger.error('send_ig_message error %s: %s', r.status_code, _redact_secrets(r.text))
+            return {'ok': False, 'status_code': r.status_code, 'error': _redact_secrets(r.text[:500])}
     except Exception as e:
-        logger.exception('send_ig_dm exception: %s', e)
+        logger.exception('send_ig_message exception: %s', e)
+        return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+
+
+async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> bool:
+    """Send a text DM via Instagram Graph API. Returns True on success."""
+    result = await send_ig_message(access_token, ig_user_id, recipient_ig_id, {'text': text})
+    return bool(result.get('ok'))
+
+
+def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
+    """Instagram quick reply labels are short; keep custom labels usable."""
+    value = (title or fallback or '').strip() or fallback
+    return value[:20]
+
+
+async def send_ig_quick_reply(access_token: str, ig_user_id: str, recipient_ig_id: str,
+                              text: str, title: str, payload: str) -> dict:
+    return await send_ig_message(
+        access_token,
+        ig_user_id,
+        recipient_ig_id,
+        {
+            'text': text,
+            'quick_replies': [{
+                'content_type': 'text',
+                'title': _quick_reply_title(title),
+                'payload': payload[:1000],
+            }],
+        },
+    )
+
+
+async def send_ig_url_button(access_token: str, ig_user_id: str, recipient_ig_id: str,
+                             text: str, button_title: str, url: str) -> dict:
+    return await send_ig_message(
+        access_token,
+        ig_user_id,
+        recipient_ig_id,
+        {
+            'attachment': {
+                'type': 'template',
+                'payload': {
+                    'template_type': 'button',
+                    'text': text,
+                    'buttons': [{
+                        'type': 'web_url',
+                        'url': url,
+                        'title': (button_title or 'Open link').strip()[:20],
+                    }],
+                },
+            },
+        },
+    )
+
+
+def _comment_dm_flow_enabled(automation: dict) -> bool:
+    if (automation.get('mode') or '') != 'reply_and_dm':
         return False
+    return any([
+        automation.get('opening_dm_text'),
+        automation.get('opening_dm_button_text'),
+        automation.get('link_dm_text'),
+        automation.get('link_url'),
+        automation.get('follow_request_enabled'),
+        automation.get('email_request_enabled'),
+        automation.get('follow_up_enabled') and automation.get('follow_up_text'),
+    ])
+
+
+async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient_ig_id: str,
+                                     comment_context: Optional[dict], payload: str) -> dict:
+    import uuid as _uuid
+    now = datetime.utcnow()
+    session = {
+        'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
+        'user_id': user_doc['id'],
+        'ig_user_id': user_doc.get('ig_user_id') or '',
+        'recipient_id': recipient_ig_id,
+        'automation_id': automation.get('id'),
+        'automation_name': automation.get('name'),
+        'comment_doc_id': (comment_context or {}).get('comment_doc_id'),
+        'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
+        'payload': payload,
+        'status': 'pending',
+        'link_dm_text': (automation.get('link_dm_text') or '').strip(),
+        'link_button_text': (automation.get('link_button_text') or '').strip(),
+        'link_url': (automation.get('link_url') or '').strip(),
+        'follow_request_enabled': bool(automation.get('follow_request_enabled')),
+        'email_request_enabled': bool(automation.get('email_request_enabled')),
+        'follow_up_enabled': bool(automation.get('follow_up_enabled')),
+        'follow_up_text': (automation.get('follow_up_text') or '').strip(),
+        'created': now,
+        'updated': now,
+    }
+    await db.comment_dm_sessions.insert_one(session)
+    return session
+
+
+async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
+                                      comment_context: Optional[dict] = None) -> bool:
+    """Send the first DM only. The link step waits for the recipient response."""
+    import uuid as _uuid
+    access_token = user_doc.get('meta_access_token', '')
+    ig_user_id = user_doc.get('ig_user_id', '')
+    opening_text = (automation.get('opening_dm_text') or automation.get('dm_text') or '').strip()
+    button_text = (automation.get('opening_dm_button_text') or 'Send me the link').strip()
+    has_deferred_step = any([
+        automation.get('link_dm_text'),
+        automation.get('link_url'),
+        automation.get('follow_request_enabled'),
+        automation.get('email_request_enabled'),
+        automation.get('follow_up_enabled') and automation.get('follow_up_text'),
+    ])
+
+    if opening_text and has_deferred_step:
+        payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
+        await _create_comment_dm_session(user_doc, automation, recipient_ig_id, comment_context, payload)
+        result = await send_ig_quick_reply(
+            access_token, ig_user_id, recipient_ig_id,
+            opening_text, button_text, payload,
+        )
+        if result.get('ok'):
+            logger.info('comment_dm_opening_quick_reply_sent rule_id=%s recipient=%s',
+                        automation.get('id'), recipient_ig_id)
+            return True
+        logger.warning('comment_dm_quick_reply_failed rule_id=%s err=%s; falling back to text',
+                       automation.get('id'), result.get('error'))
+        # Keep the pending session active. If quick replies are not accepted by
+        # Meta for this account, the user can still type any response to continue.
+        return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
+
+    if opening_text:
+        return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
+
+    return await _send_comment_dm_flow_completion(
+        user_doc,
+        {
+            'user_id': user_doc['id'],
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_ig_id,
+            'automation_id': automation.get('id'),
+            'link_dm_text': (automation.get('link_dm_text') or '').strip(),
+            'link_button_text': (automation.get('link_button_text') or '').strip(),
+            'link_url': (automation.get('link_url') or '').strip(),
+            'follow_request_enabled': bool(automation.get('follow_request_enabled')),
+            'email_request_enabled': bool(automation.get('email_request_enabled')),
+            'follow_up_enabled': bool(automation.get('follow_up_enabled')),
+            'follow_up_text': (automation.get('follow_up_text') or '').strip(),
+        },
+    )
+
+
+async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> bool:
+    access_token = user_doc.get('meta_access_token', '')
+    ig_user_id = user_doc.get('ig_user_id', '')
+    recipient_id = session.get('recipient_id')
+    if not recipient_id:
+        return False
+
+    ok_all = True
+    sent_steps = []
+    link_text = (session.get('link_dm_text') or '').strip()
+    link_url = (session.get('link_url') or '').strip()
+    link_button = (session.get('link_button_text') or 'Open link').strip()
+
+    if link_url:
+        text_for_button = link_text or 'Here is the link'
+        result = await send_ig_url_button(
+            access_token, ig_user_id, recipient_id,
+            text_for_button, link_button, link_url,
+        )
+        if result.get('ok'):
+            sent_steps.append('link_button')
+        else:
+            fallback_text = f'{text_for_button}\n\n{link_url}'.strip()
+            ok = await send_ig_dm(access_token, ig_user_id, recipient_id, fallback_text)
+            ok_all = ok_all and ok
+            sent_steps.append('link_text_fallback')
+            if not ok:
+                logger.warning('comment_dm_link_fallback_failed session=%s err=%s',
+                               session.get('id'), result.get('error'))
+    elif link_text:
+        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, link_text)
+        ok_all = ok_all and ok
+        sent_steps.append('link_text')
+
+    extra_messages = []
+    if session.get('follow_request_enabled'):
+        extra_messages.append('Please follow this account to receive future updates.')
+    if session.get('email_request_enabled'):
+        extra_messages.append('Reply with your email and we will send the details.')
+    if session.get('follow_up_enabled') and session.get('follow_up_text'):
+        extra_messages.append((session.get('follow_up_text') or '').strip())
+
+    for text in [m for m in extra_messages if m]:
+        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, text)
+        ok_all = ok_all and ok
+        sent_steps.append('extra_message')
+
+    if session.get('id'):
+        await db.comment_dm_sessions.update_one(
+            {'id': session['id']},
+            {'$set': {
+                'status': 'completed' if ok_all else 'failed',
+                'completedAt': datetime.utcnow(),
+                'updated': datetime.utcnow(),
+                'sentSteps': sent_steps,
+            }},
+        )
+    logger.info('comment_dm_flow_completed session=%s ok=%s steps=%s',
+                session.get('id'), ok_all, sent_steps)
+    return ok_all
+
+
+async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
+                                           payload: Optional[str] = None) -> Optional[dict]:
+    if not sender_id:
+        return None
+    q = {
+        'user_id': user_doc['id'],
+        'recipient_id': sender_id,
+        'status': 'pending',
+    }
+    if payload and str(payload).startswith('comment_flow:'):
+        parts = str(payload).split(':')
+        if len(parts) >= 2 and parts[1]:
+            q['id'] = parts[1]
+    return await db.comment_dm_sessions.find_one(q, sort=[('created', -1)])
 
 
 # ---------------- Comment reply helper ----------------
@@ -209,8 +441,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         if ntype == 'message':
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and sender_ig_id:
-                ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
-                logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+                if _comment_dm_flow_enabled(automation):
+                    ok = await _send_comment_dm_flow_entry(
+                        user, automation, sender_ig_id, comment_context
+                    )
+                    logger.info('Flow comment DM entry to %s rule=%s ok=%s',
+                                sender_ig_id, automation.get('id'), ok)
+                else:
+                    ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
+                    logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
         elif ntype == 'reply_comment':
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
@@ -497,31 +736,31 @@ async def create_quick_comment_rule(
     email_request_enabled = bool(data.get('email_request_enabled', False))
     follow_up_enabled = bool(data.get('follow_up_enabled', False))
     follow_up_text = (data.get('follow_up_text') or '').strip()
-    dm_parts = []
-    if opening_dm_enabled and opening_dm_text:
-        dm_parts.append(opening_dm_text)
-    if opening_dm_button_text:
-        dm_parts.append(opening_dm_button_text)
-    if link_dm_text:
-        dm_parts.append(link_dm_text)
-    if link_button_text:
-        dm_parts.append(link_button_text)
-    if link_url:
-        dm_parts.append(link_url)
-    if follow_request_enabled:
-        dm_parts.append('Please follow this account to receive future updates.')
-    if email_request_enabled:
-        dm_parts.append('Reply with your email and we will send the details.')
-    if follow_up_enabled and follow_up_text:
-        dm_parts.append(follow_up_text)
-    dm_text = '\n\n'.join(dm_parts).strip() if mode == 'reply_and_dm' else ''
+    has_dm_action = any([
+        opening_dm_enabled and opening_dm_text,
+        opening_dm_button_text,
+        link_dm_text,
+        link_button_text,
+        link_url,
+        follow_request_enabled,
+        email_request_enabled,
+        follow_up_enabled and follow_up_text,
+    ])
+    dm_text = ''
+    if mode == 'reply_and_dm':
+        dm_text = (
+            opening_dm_text if opening_dm_enabled and opening_dm_text
+            else (link_dm_text or link_url or '')
+        ).strip()
+    if mode == 'reply_and_dm' and has_dm_action and not dm_text:
+        dm_text = 'Thanks for your comment.'
     process_existing_comments = bool(data.get('processExistingComments', False))
     if reply_under_post and not comment_reply:
         raise HTTPException(400, 'comment_reply is required')
     if mode == 'reply_and_dm' and not dm_text:
-        dm_text = 'شكرا'
+        dm_text = 'Thanks for your comment.'
 
-    if mode == 'reply_and_dm' and not dm_parts:
+    if mode == 'reply_and_dm' and not has_dm_action:
         dm_text = 'Thanks for your comment.'
     if not reply_under_post and not dm_text:
         raise HTTPException(400, 'Enable a public reply or a DM message')
@@ -553,7 +792,18 @@ async def create_quick_comment_rule(
         edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
         prev = 'n_reply'
     if dm_text:
-        nodes.append({'id': 'n_dm', 'type': 'message', 'data': {'text': dm_text}})
+        nodes.append({'id': 'n_dm', 'type': 'message', 'data': {
+            'text': dm_text,
+            'opening_dm_text': opening_dm_text,
+            'opening_dm_button_text': opening_dm_button_text,
+            'link_dm_text': link_dm_text,
+            'link_button_text': link_button_text,
+            'link_url': link_url,
+            'follow_request_enabled': follow_request_enabled,
+            'email_request_enabled': email_request_enabled,
+            'follow_up_enabled': follow_up_enabled,
+            'follow_up_text': follow_up_text,
+        }})
         edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
 
     now = datetime.utcnow()
@@ -2977,6 +3227,7 @@ def _classify_messaging_event(event: dict) -> dict:
     sender = event.get('sender') if isinstance(event, dict) else None
     recipient = event.get('recipient') if isinstance(event, dict) else None
     message = event.get('message') if isinstance(event, dict) else None
+    postback = event.get('postback') if isinstance(event, dict) else None
     sender_id = (sender or {}).get('id') if isinstance(sender, dict) else None
     recipient_id = (recipient or {}).get('id') if isinstance(recipient, dict) else None
     message_keys = sorted(list(message.keys())) if isinstance(message, dict) else []
@@ -2989,6 +3240,10 @@ def _classify_messaging_event(event: dict) -> dict:
     has_message = isinstance(message, dict)
     is_echo = bool(message.get('is_echo')) if has_message else False
     text = (message.get('text') if has_message else None) or ''
+    quick_reply = message.get('quick_reply') if has_message and isinstance(message.get('quick_reply'), dict) else None
+    quick_reply_payload = (quick_reply or {}).get('payload') if quick_reply else None
+    postback_payload = (postback or {}).get('payload') if isinstance(postback, dict) else None
+    postback_title = (postback or {}).get('title') if isinstance(postback, dict) else None
     attachments = message.get('attachments') if has_message else None
     has_attachments = bool(attachments)
     message_id = (message.get('mid') or message.get('id')) if has_message else None
@@ -3007,6 +3262,8 @@ def _classify_messaging_event(event: dict) -> dict:
     elif has_message:
         if is_echo:
             kind = 'message_echo'
+        elif quick_reply_payload:
+            kind = 'quick_reply'
         elif text:
             kind = 'message_text'
         elif has_attachments:
@@ -3022,6 +3279,9 @@ def _classify_messaging_event(event: dict) -> dict:
         'recipient_id': recipient_id,
         'message_id': message_id,
         'text': text,
+        'quick_reply_payload': quick_reply_payload,
+        'postback_payload': postback_payload,
+        'postback_title': postback_title,
         'is_echo': is_echo,
         'has_message': has_message,
         'has_read': has_read,
@@ -3147,8 +3407,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                                     or 'referral' in event):
         cls = _classify_messaging_event(event)
         sender_id = cls['sender_id']
+        recipient_id = cls['recipient_id']
         message_id = cls['message_id']
         text = cls['text']
+        quick_reply_payload = cls.get('quick_reply_payload')
+        postback_payload = cls.get('postback_payload')
+        postback_title = cls.get('postback_title')
         is_echo = cls['is_echo']
         ts = cls['timestamp']
         event_kind = cls['kind']
@@ -3157,8 +3421,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     else:
         # Legacy flattened input
         sender_id = event.get('sender_id')
+        recipient_id = event.get('recipient_id')
         message_id = event.get('message_id')
         text = event.get('text') or ''
+        quick_reply_payload = event.get('quick_reply_payload')
+        postback_payload = event.get('postback_payload')
+        postback_title = event.get('postback_title')
         is_echo = bool(event.get('is_echo'))
         ts = event.get('timestamp')
         event_kind = 'message_echo' if is_echo else ('message_text' if text else 'unknown')
@@ -3211,6 +3479,9 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             'message_keys': message_keys,
             'item_keys': item_keys,
             'incoming_text': text if text else None,
+            'quick_reply_payload': quick_reply_payload,
+            'postback_payload': postback_payload,
+            'postback_title': postback_title,
             'matched_rule_id': matched_rule.get('id') if matched_rule else None,
             'matched_rule_name': matched_rule.get('name') if matched_rule else None,
             'reply_text': matched_rule.get('reply_text') if matched_rule else None,
@@ -3262,6 +3533,25 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         return {'processed': False, 'status': 'skipped', 'reason': 'referral',
                 'event_kind': event_kind}
     if event_kind == 'postback' and not text:
+        session = await _find_pending_comment_dm_session(
+            user_doc, sender_id, payload=postback_payload
+        )
+        if session:
+            log_doc = _mk_log('matched')
+            log_doc['comment_flow_session_id'] = session.get('id')
+            if not await _persist(log_doc):
+                return {'processed': False, 'status': 'skipped', 'reason': 'race',
+                        'event_kind': event_kind}
+            ok = await _send_comment_dm_flow_completion(user_doc, session)
+            await db.dm_logs.update_one(
+                {'id': log_doc['id']},
+                {'$set': {'status': 'replied' if ok else 'failed',
+                          'skip_reason': None if ok else 'comment_flow_send_failed'}}
+            )
+            return {'processed': True, 'matched': True,
+                    'status': 'replied' if ok else 'failed',
+                    'reason': 'comment_flow_response',
+                    'log_id': log_doc['id'], 'event_kind': event_kind}
         await _persist(_mk_log('skipped', skip_reason='postback_unsupported'))
         return {'processed': False, 'status': 'skipped', 'reason': 'postback_unsupported',
                 'event_kind': event_kind}
@@ -3287,13 +3577,33 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         await _persist(_mk_log('skipped', skip_reason='missing_sender'))
         return {'processed': False, 'status': 'skipped', 'reason': 'missing_sender',
                 'event_kind': event_kind}
-    if not text:
+    if not text and not quick_reply_payload:
         await _persist(_mk_log('skipped', skip_reason='missing_text'))
         return {'processed': False, 'status': 'skipped', 'reason': 'missing_text',
                 'event_kind': event_kind}
 
     logger.info('dm_sender_extracted sender=%s', sender_id)
     logger.info('dm_text_extracted len=%s preview=%r', len(text), text[:80])
+
+    session = await _find_pending_comment_dm_session(
+        user_doc, sender_id, payload=quick_reply_payload or postback_payload
+    )
+    if session:
+        log_doc = _mk_log('matched')
+        log_doc['comment_flow_session_id'] = session.get('id')
+        if not await _persist(log_doc):
+            return {'processed': False, 'status': 'skipped', 'reason': 'race',
+                    'event_kind': event_kind}
+        ok = await _send_comment_dm_flow_completion(user_doc, session)
+        await db.dm_logs.update_one(
+            {'id': log_doc['id']},
+            {'$set': {'status': 'replied' if ok else 'failed',
+                      'skip_reason': None if ok else 'comment_flow_send_failed'}}
+        )
+        return {'processed': True, 'matched': True,
+                'status': 'replied' if ok else 'failed',
+                'reason': 'comment_flow_response',
+                'log_id': log_doc['id'], 'event_kind': event_kind}
 
     # Load active DM rules for this user
     rules = await db.dm_rules.find(
@@ -5052,6 +5362,13 @@ async def _startup():
                                        name='dm_rules_user_active')
     except Exception as e:
         logger.warning('dm_rules index create: %s', e)
+    try:
+        await db.comment_dm_sessions.create_index(
+            [('user_id', 1), ('recipient_id', 1), ('status', 1), ('created', -1)],
+            name='comment_dm_sessions_pending_lookup',
+        )
+    except Exception as e:
+        logger.warning('comment_dm_sessions index create: %s', e)
     try:
         now = datetime.utcnow()
         comment_rules = {

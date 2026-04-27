@@ -392,13 +392,11 @@ const Automations = () => {
     if (!canGoLive()) return;
     setSaving(true);
     try {
-      const dmPieces = [];
-      if (openingDmEnabled && openingDmText.trim()) dmPieces.push(openingDmText.trim());
-      if (openingDmButtonText.trim()) dmPieces.push(openingDmButtonText.trim());
-      if (linkDmText.trim()) dmPieces.push(linkDmText.trim());
-      if (linkUrl.trim()) dmPieces.push(linkUrl.trim());
-      if (followUpEnabled && followUpText.trim()) dmPieces.push(followUpText.trim());
-      const hasDm = openingDmEnabled || linkDmText.trim() || linkUrl.trim() || followRequestEnabled || emailRequestEnabled;
+      const hasDm = (
+        openingDmEnabled || linkDmText.trim() || linkUrl.trim() ||
+        followRequestEnabled || emailRequestEnabled ||
+        (followUpEnabled && followUpText.trim())
+      );
 
       const body = {
         post_scope: postScope,
@@ -409,7 +407,7 @@ const Automations = () => {
         keywords: match === 'keyword' ? keywordList : [],
         reply_under_post: replyUnderPost,
         comment_reply: replyUnderPost ? commentReply.trim() : '',
-        dm_text: dmPieces.join('\n\n'),
+        dm_text: openingDmEnabled ? openingDmText.trim() : (linkDmText.trim() || linkUrl.trim()),
         opening_dm_enabled: openingDmEnabled,
         opening_dm_text: openingDmEnabled ? openingDmText.trim() : '',
         opening_dm_button_text: openingDmButtonText.trim(),
