@@ -141,11 +141,6 @@ const DmAutomation = () => {
               Last reply: {diag.lastReplyStatus || 'none'}
             </Badge>
           </div>
-          {diag.blockerReason && (
-            <div className="mt-3 p-2 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm">
-              <b>Blocker:</b> {diag.blockerReason}
-            </div>
-          )}
           {diag.subscriptionError && (
             <div className="mt-2 text-xs text-rose-700">Subscription check error: {diag.subscriptionError}</div>
           )}
