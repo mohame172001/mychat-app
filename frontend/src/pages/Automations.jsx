@@ -71,6 +71,7 @@ const AutomationPhonePreview = ({
   commentReply,
   openingDmText,
   openingDmButtonText,
+  followRequestEnabled,
   linkDmText,
   linkUrl,
   previewTab,
@@ -182,6 +183,16 @@ const AutomationPhonePreview = ({
                   <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
                     {openingDmButtonText}
                   </div>
+                )}
+                {followRequestEnabled && (
+                  <>
+                    <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm">
+                      Please follow this account first, then tap "I followed" and I will send the link.
+                    </div>
+                    <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
+                      I followed
+                    </div>
+                  </>
                 )}
                 {(linkDmText || linkUrl) && (
                   <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm">
@@ -782,7 +793,11 @@ const Automations = () => {
                   checked={followRequestEnabled}
                   onChange={setFollowRequestEnabled}
                   icon={UserPlus}
-                />
+                >
+                  <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800">
+                    The link step will pause until Instagram confirms the user follows @{previewAccountName.replace(/^@/, '')}.
+                  </div>
+                </ToggleCard>
 
                 <ToggleCard
                   title="a DM asking for their email"
@@ -867,6 +882,7 @@ const Automations = () => {
               commentReply={replyUnderPost ? commentReply : ''}
               openingDmText={openingDmEnabled ? openingDmText : ''}
               openingDmButtonText={openingDmEnabled ? openingDmButtonText : ''}
+              followRequestEnabled={followRequestEnabled}
               linkDmText={linkDmText}
               linkUrl={linkUrl}
               previewTab={previewTab}

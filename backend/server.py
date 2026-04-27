@@ -209,6 +209,34 @@ async def send_ig_url_button(access_token: str, ig_user_id: str, recipient_ig_id
     )
 
 
+async def get_instagram_messaging_user_profile(access_token: str, ig_scoped_id: str) -> dict:
+    """Fetch the messaging user's profile, including follow relationship."""
+    if not access_token or not ig_scoped_id:
+        return {'ok': False, 'status_code': None, 'error': 'missing_access_token_or_igsid'}
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{ig_scoped_id}',
+                params={
+                    'fields': (
+                        'name,username,profile_pic,follower_count,'
+                        'is_user_follow_business,is_business_follow_user'
+                    ),
+                    'access_token': access_token,
+                },
+            )
+            try:
+                body = r.json()
+            except Exception:
+                body = {'raw': r.text[:500]}
+            if r.status_code == 200:
+                return {'ok': True, 'status_code': r.status_code, 'profile': _redact_secrets(body)}
+            return {'ok': False, 'status_code': r.status_code, 'error': _redact_secrets(body)}
+    except Exception as e:
+        logger.exception('instagram_user_profile_fetch_exception: %s', e)
+        return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+
+
 def _comment_dm_flow_enabled(automation: dict) -> bool:
     if (automation.get('mode') or '') != 'reply_and_dm':
         return False
@@ -238,10 +266,13 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
         'payload': payload,
         'status': 'pending',
+        'stage': 'awaiting_user_action',
         'link_dm_text': (automation.get('link_dm_text') or '').strip(),
         'link_button_text': (automation.get('link_button_text') or '').strip(),
         'link_url': (automation.get('link_url') or '').strip(),
         'follow_request_enabled': bool(automation.get('follow_request_enabled')),
+        'follow_verified': False,
+        'follow_verification_attempts': 0,
         'email_request_enabled': bool(automation.get('email_request_enabled')),
         'follow_up_enabled': bool(automation.get('follow_up_enabled')),
         'follow_up_text': (automation.get('follow_up_text') or '').strip(),
@@ -288,6 +319,13 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
     if opening_text:
         return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
 
+    if has_deferred_step:
+        payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
+        session = await _create_comment_dm_session(
+            user_doc, automation, recipient_ig_id, comment_context, payload
+        )
+        return await _send_comment_dm_flow_completion(user_doc, session)
+
     return await _send_comment_dm_flow_completion(
         user_doc,
         {
@@ -299,11 +337,81 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
             'link_button_text': (automation.get('link_button_text') or '').strip(),
             'link_url': (automation.get('link_url') or '').strip(),
             'follow_request_enabled': bool(automation.get('follow_request_enabled')),
+            'follow_verified': False,
             'email_request_enabled': bool(automation.get('email_request_enabled')),
             'follow_up_enabled': bool(automation.get('follow_up_enabled')),
             'follow_up_text': (automation.get('follow_up_text') or '').strip(),
         },
     )
+
+
+async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
+    """Require a real follow before continuing a gated comment DM flow."""
+    if not session.get('follow_request_enabled'):
+        return {'allowed': True, 'checked': False}
+    if session.get('follow_verified') is True:
+        return {'allowed': True, 'checked': True, 'cached': True}
+
+    access_token = user_doc.get('meta_access_token', '')
+    ig_user_id = user_doc.get('ig_user_id', '')
+    recipient_id = session.get('recipient_id')
+    now = datetime.utcnow()
+    profile_result = await get_instagram_messaging_user_profile(access_token, recipient_id)
+    profile = profile_result.get('profile') or {}
+    is_following = bool(profile.get('is_user_follow_business')) if profile_result.get('ok') else False
+
+    update = {
+        'stage': 'follow_verified' if is_following else 'awaiting_follow',
+        'follow_verified': is_following,
+        'lastFollowCheckAt': now,
+        'lastFollowCheckOk': bool(profile_result.get('ok')),
+        'lastFollowCheckStatus': profile_result.get('status_code'),
+        'lastFollowCheckError': profile_result.get('error'),
+        'updated': now,
+    }
+    if profile:
+        update['lastFollowerProfile'] = {
+            'username': profile.get('username'),
+            'name': profile.get('name'),
+            'is_user_follow_business': profile.get('is_user_follow_business'),
+            'is_business_follow_user': profile.get('is_business_follow_user'),
+        }
+    await db.comment_dm_sessions.update_one(
+        {'id': session.get('id')},
+        {'$set': update, '$inc': {'follow_verification_attempts': 1}},
+    )
+
+    if is_following:
+        logger.info('comment_dm_follow_gate_verified session=%s recipient=%s',
+                    session.get('id'), recipient_id)
+        return {'allowed': True, 'checked': True, 'profile': profile}
+
+    prompt = (
+        'Please follow this account first, then tap "I followed" and I will send the link.'
+        if profile_result.get('ok')
+        else 'I could not confirm the follow yet. Please follow this account, then tap "I followed".'
+    )
+    payload = session.get('payload') or f'comment_flow:{session.get("id")}:followed'
+    result = await send_ig_quick_reply(
+        access_token,
+        ig_user_id,
+        recipient_id,
+        prompt,
+        'I followed',
+        payload,
+    )
+    prompt_sent = bool(result.get('ok'))
+    if not prompt_sent:
+        prompt_sent = await send_ig_dm(access_token, ig_user_id, recipient_id, prompt)
+    logger.info('comment_dm_follow_gate_blocked session=%s recipient=%s prompt_sent=%s',
+                session.get('id'), recipient_id, prompt_sent)
+    return {
+        'allowed': False,
+        'checked': True,
+        'prompt_sent': prompt_sent,
+        'profile': profile,
+        'error': profile_result.get('error'),
+    }
 
 
 async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> bool:
@@ -313,8 +421,12 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
     if not recipient_id:
         return False
 
+    follow_gate = await _verify_comment_dm_follow_gate(user_doc, session)
+    if not follow_gate.get('allowed'):
+        return bool(follow_gate.get('prompt_sent'))
+
     ok_all = True
-    sent_steps = []
+    sent_steps = ['follow_verified'] if session.get('follow_request_enabled') else []
     link_text = (session.get('link_dm_text') or '').strip()
     link_url = (session.get('link_url') or '').strip()
     link_button = (session.get('link_button_text') or 'Open link').strip()
@@ -341,8 +453,6 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         sent_steps.append('link_text')
 
     extra_messages = []
-    if session.get('follow_request_enabled'):
-        extra_messages.append('Please follow this account to receive future updates.')
     if session.get('email_request_enabled'):
         extra_messages.append('Reply with your email and we will send the details.')
     if session.get('follow_up_enabled') and session.get('follow_up_text'):
@@ -352,6 +462,11 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         ok = await send_ig_dm(access_token, ig_user_id, recipient_id, text)
         ok_all = ok_all and ok
         sent_steps.append('extra_message')
+
+    if session.get('follow_request_enabled') and sent_steps == ['follow_verified']:
+        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, 'Thanks for following. You are all set.')
+        ok_all = ok_all and ok
+        sent_steps.append('follow_confirmation')
 
     if session.get('id'):
         await db.comment_dm_sessions.update_one(
