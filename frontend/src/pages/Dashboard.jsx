@@ -39,7 +39,7 @@ const Dashboard = () => {
   ];
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Good morning, {user?.name} 👋</h1>

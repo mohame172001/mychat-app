@@ -7,7 +7,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
 
-const navItems = [
+export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/app/automations', icon: Zap, label: 'Automations' },
   { to: '/app/comments', icon: AtSign, label: 'Comments' },

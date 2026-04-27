@@ -95,8 +95,8 @@ const AutomationPhonePreview = ({
 
   return (
     <div className="flex h-full flex-col bg-slate-50">
-      <div className="px-8 pt-8 text-base font-medium text-slate-600">Preview</div>
-      <div className="flex flex-1 items-center justify-center px-8 py-8">
+      <div className="px-4 pt-4 text-base font-medium text-slate-600 sm:px-8 sm:pt-8">Preview</div>
+      <div className="flex flex-1 items-center justify-center px-3 py-4 sm:px-8 sm:py-8">
         <div className="w-[390px] max-w-full rounded-[3rem] bg-slate-950 p-4 shadow-2xl shadow-slate-300">
           <div className="overflow-hidden rounded-[2.25rem] bg-[#121212] text-white">
             <div className="flex h-12 items-center justify-between px-8 text-xs font-semibold">
@@ -444,7 +444,7 @@ const Automations = () => {
 
   if (builderOpen) {
     return (
-      <div className="mx-auto max-w-7xl p-8 text-slate-950">
+      <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8 text-slate-950">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>
@@ -729,7 +729,7 @@ const Automations = () => {
   }
 
   return (
-    <div className="mx-auto max-w-6xl p-8">
+    <div className="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>

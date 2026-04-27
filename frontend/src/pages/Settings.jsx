@@ -52,16 +52,16 @@ const Settings = () => {
   }, [location.search]); // eslint-disable-line
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
       <h1 className="font-display text-3xl font-extrabold tracking-tight">Settings</h1>
       <p className="mt-1 text-slate-600">Manage your account, Instagram connection and preferences.</p>
 
       <div className="mt-8 grid md:grid-cols-[240px_1fr] gap-6">
-        <aside className="space-y-1">
+        <aside className="mobile-nav-scroll -mx-1 flex gap-2 overflow-x-auto px-1 pb-1 md:mx-0 md:block md:space-y-1 md:overflow-visible md:px-0 md:pb-0">
           {tabs.map(t => {
             const Icon = t.icon;
             return (
-              <button key={t.id} onClick={() => setTab(t.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${tab === t.id ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+              <button key={t.id} onClick={() => setTab(t.id)} className={`shrink-0 md:w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${tab === t.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100 md:bg-transparent'}`}>
                 <Icon className="w-4 h-4" /> {t.label}
               </button>
             );
@@ -96,7 +96,7 @@ const Settings = () => {
               {user?.instagramConnected && user?.instagramConnectionValid ? (
                 <>
                   <div className="mt-6 p-5 rounded-2xl bg-gradient-to-br from-pink-50 via-purple-50 to-orange-50 border border-pink-100">
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
                       <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400 flex items-center justify-center">
                         <Instagram className="w-6 h-6 text-white" />
                       </div>
@@ -104,7 +104,7 @@ const Settings = () => {
                         <div className="font-semibold">{user.instagramHandle}</div>
                         <div className="text-sm text-slate-600">Business account{user.instagramFollowers ? ` • ${user.instagramFollowers.toLocaleString()} followers` : ''}</div>
                       </div>
-                      <Badge className="bg-emerald-100 text-emerald-700 border-0 rounded-full">
+                      <Badge className="w-fit bg-emerald-100 text-emerald-700 border-0 rounded-full">
                         <Check className="w-3 h-3 mr-1" /> Connected
                       </Badge>
                     </div>
@@ -129,7 +129,7 @@ const Settings = () => {
               ) : (
                 <>
                   <div className="mt-6 p-5 rounded-2xl bg-slate-50 border border-slate-200">
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
                       <div className="w-12 h-12 rounded-xl bg-slate-200 flex items-center justify-center">
                         <Instagram className="w-6 h-6 text-slate-400" />
                       </div>
@@ -139,7 +139,7 @@ const Settings = () => {
                           {user?.instagramConnectionValid === false ? 'Reconnect Instagram to verify the access token' : 'Connect an Instagram Business or Creator account'}
                         </div>
                       </div>
-                      <Badge className="bg-slate-100 text-slate-500 border-0 rounded-full">
+                      <Badge className="w-fit bg-slate-100 text-slate-500 border-0 rounded-full">
                         <AlertCircle className="w-3 h-3 mr-1" /> Not connected
                       </Badge>
                     </div>
@@ -152,7 +152,7 @@ const Settings = () => {
                       setIgConnecting(true);
                       try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
                       catch (e) { toast.error(e?.response?.data?.detail || 'Failed - check IG_APP_ID/IG_APP_SECRET in .env'); setIgConnecting(false); }
-                    }} className="bg-slate-900 text-white rounded-xl" disabled={igConnecting}>
+                    }} className="w-full bg-slate-900 text-white rounded-xl sm:w-auto" disabled={igConnecting}>
                       {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}
                       Connect Instagram
                     </Button>

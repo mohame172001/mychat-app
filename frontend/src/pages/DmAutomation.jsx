@@ -104,15 +104,15 @@ const DmAutomation = () => {
   };
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight flex items-center gap-2">
             <Inbox className="w-7 h-7" /> Instagram DM Automation
           </h1>
           <p className="mt-1 text-slate-600">Auto-reply to direct messages based on keyword rules. Independent of comments.</p>
         </div>
-        <Button onClick={refreshDiag} variant="outline" className="rounded-xl" disabled={diagLoading}>
+        <Button onClick={refreshDiag} variant="outline" className="rounded-xl sm:w-auto" disabled={diagLoading}>
           {diagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCcw className="w-4 h-4 mr-2" />}
           Refresh status
         </Button>

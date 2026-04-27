@@ -53,17 +53,17 @@ const Contacts = () => {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Contacts</h1>
           <p className="mt-1 text-slate-600">{list.length} total contacts • {list.filter(c => c.subscribed).length} subscribed</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" className="rounded-xl" onClick={() => toast.success('Export ready')}><Download className="w-4 h-4 mr-1.5" /> Export</Button>
+        <div className="flex w-full gap-2 sm:w-auto">
+          <Button variant="outline" className="flex-1 rounded-xl sm:flex-none" onClick={() => toast.success('Export ready')}><Download className="w-4 h-4 mr-1.5" /> Export</Button>
           <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
-              <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl"><Plus className="w-4 h-4 mr-1.5" /> Add Contact</Button>
+              <Button className="flex-1 bg-slate-900 hover:bg-slate-800 text-white rounded-xl sm:flex-none"><Plus className="w-4 h-4 mr-1.5" /> Add Contact</Button>
             </DialogTrigger>
             <DialogContent className="rounded-2xl">
               <DialogHeader><DialogTitle className="font-display text-2xl">Add Contact</DialogTitle></DialogHeader>
@@ -82,7 +82,7 @@ const Contacts = () => {
       </div>
 
       <div className="mt-6 flex flex-wrap gap-3 items-center">
-        <div className="relative flex-1 min-w-[240px] max-w-sm">
+        <div className="relative flex-1 min-w-full max-w-sm sm:min-w-[240px]">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input placeholder="Search by name or username..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 h-10 rounded-xl bg-white" />
         </div>
@@ -96,12 +96,12 @@ const Contacts = () => {
       </div>
 
       <Card className="mt-6 rounded-2xl border-slate-100 overflow-hidden">
-        <div className="grid grid-cols-[40px_1fr_200px_120px_40px] md:grid-cols-[40px_1fr_260px_140px_40px] items-center gap-4 px-5 py-3 border-b border-slate-100 bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
+        <div className="grid grid-cols-[32px_minmax(0,1fr)_88px_36px] md:grid-cols-[40px_1fr_260px_140px_40px] items-center gap-3 px-3 py-3 sm:px-5 border-b border-slate-100 bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
           <Checkbox checked={selected.length === list.length && list.length > 0} onCheckedChange={toggleAll} />
-          <div>Contact</div><div className="hidden md:block">Tags</div><div>Last Active</div><div />
+          <div>Contact</div><div className="hidden md:block">Tags</div><div>Active</div><div />
         </div>
         {list.map(c => (
-          <div key={c.id} className="grid grid-cols-[40px_1fr_200px_120px_40px] md:grid-cols-[40px_1fr_260px_140px_40px] items-center gap-4 px-5 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors last:border-0">
+          <div key={c.id} className="grid grid-cols-[32px_minmax(0,1fr)_88px_36px] md:grid-cols-[40px_1fr_260px_140px_40px] items-center gap-3 px-3 py-3 sm:px-5 border-b border-slate-50 hover:bg-slate-50 transition-colors last:border-0">
             <Checkbox checked={selected.includes(c.id)} onCheckedChange={() => toggleOne(c.id)} />
             <div className="flex items-center gap-3 min-w-0">
               <img src={c.avatar} alt={c.name} className="w-9 h-9 rounded-full object-cover" />
@@ -114,7 +114,7 @@ const Contacts = () => {
             <div className="hidden md:flex gap-1.5 flex-wrap">
               {c.tags.map(t => (<Badge key={t} className={`rounded-full text-[11px] ${tagColors[t] || 'bg-slate-100 text-slate-700'}`}>{t}</Badge>))}
             </div>
-            <div className="text-sm text-slate-600">recently</div>
+            <div className="text-xs text-slate-600 sm:text-sm">recently</div>
             <Button variant="ghost" size="icon" className="rounded-lg"><MoreVertical className="w-4 h-4" /></Button>
           </div>
         ))}

@@ -82,13 +82,13 @@ const Comments = () => {
   };
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold font-display">Comments</h1>
           <p className="text-slate-500 mt-1">Instagram comments received via webhook</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-3 sm:justify-end">
           {wsReady
             ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3 h-3" /> Live</span>
             : <span className="flex items-center gap-1 text-xs text-slate-400"><WifiOff className="w-3 h-3" /> Offline</span>}
@@ -118,9 +118,9 @@ const Comments = () => {
       <div className="space-y-4">
         {comments.map(c => (
           <div key={c.id} className="bg-white rounded-2xl border border-slate-100 p-5">
-            <div className="flex items-start justify-between">
+            <div className="flex items-start justify-between gap-3">
               <div className="flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <div className="font-semibold">@{c.commenter_username}</div>
                   {c.replied && (
                     <Badge className="bg-emerald-100 text-emerald-700 border-0">
@@ -145,7 +145,7 @@ const Comments = () => {
 
             {!c.replied && (
               <form
-                className="mt-3 flex gap-2"
+                className="mt-3 flex flex-col gap-2 sm:flex-row"
                 onSubmit={(e) => { e.preventDefault(); handleReply(c); }}
               >
                 <Input
@@ -154,7 +154,7 @@ const Comments = () => {
                   onChange={(e) => setReplyText(prev => ({ ...prev, [c.id]: e.target.value }))}
                   disabled={!!sending[c.id]}
                 />
-                <Button type="submit" disabled={!!sending[c.id] || !(replyText[c.id] || '').trim()}>
+                <Button type="submit" className="sm:w-auto" disabled={!!sending[c.id] || !(replyText[c.id] || '').trim()}>
                   <Send className="w-4 h-4 mr-2" />
                   {sending[c.id] ? 'Sending…' : 'Reply'}
                 </Button>

@@ -50,7 +50,7 @@ const FlowBuilder = () => {
   const modeLabel = auto.mode === 'reply_only' ? 'Reply only' : 'Reply + DM';
 
   return (
-    <div className="p-8 max-w-3xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-3xl mx-auto">
       <Button variant="ghost" onClick={() => navigate('/app/automations')} className="mb-4">
         <ArrowLeft className="w-4 h-4 mr-1.5" /> Back
       </Button>

@@ -54,7 +54,7 @@ const Landing = () => {
   return (
     <div className="min-h-screen bg-white text-slate-900 overflow-x-hidden">
       <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-white/80 border-b border-slate-100">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
@@ -93,14 +93,14 @@ const Landing = () => {
         )}
       </nav>
 
-      <section className="relative pt-32 pb-20 px-6">
+      <section className="relative pt-28 pb-16 px-4 sm:px-6 md:pt-32 md:pb-20">
         <div className="max-w-6xl mx-auto relative">
           <div className="text-center animate-fade-up">
             <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-blue-100 rounded-full px-4 py-1.5 mb-6">
               <Sparkles className="w-3.5 h-3.5 mr-1.5" />
               Instagram automation for connected business accounts
             </Badge>
-            <h1 className="font-display text-5xl sm:text-6xl md:text-7xl font-extrabold leading-[1.05] tracking-tight">
+            <h1 className="font-display text-4xl sm:text-6xl md:text-7xl font-extrabold leading-[1.05] tracking-tight">
               Turn Instagram <br />
               conversations into <span className="gradient-text">workflows.</span>
             </h1>
@@ -116,7 +116,7 @@ const Landing = () => {
             </div>
           </div>
 
-          <div className="mt-16 relative animate-fade-up" style={{ animationDelay: '0.2s' }}>
+          <div className="mt-12 relative animate-fade-up md:mt-16" style={{ animationDelay: '0.2s' }}>
             <div className="relative rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white">
               <div className="h-10 bg-slate-50 border-b border-slate-100 flex items-center px-4 gap-1.5">
                 <div className="w-3 h-3 rounded-full bg-red-400" />
@@ -124,12 +124,12 @@ const Landing = () => {
                 <div className="w-3 h-3 rounded-full bg-green-400" />
               </div>
               <div className="grid md:grid-cols-[240px_1fr] min-h-[400px]">
-                <div className="bg-slate-50 border-r border-slate-100 p-4 space-y-1">
+                <div className="bg-slate-50 border-r border-slate-100 p-3 sm:p-4 space-y-1">
                   {['Dashboard', 'Automations', 'Contacts', 'DM Automation', 'Broadcasting'].map((item, i) => (
                     <div key={item} className={`px-3 py-2 rounded-lg text-sm font-medium ${i === 1 ? 'bg-blue-50 text-blue-700' : 'text-slate-600'}`}>{item}</div>
                   ))}
                 </div>
-                <div className="p-6 flow-grid">
+                <div className="p-4 sm:p-6 flow-grid">
                   <div className="flex gap-6 flex-wrap">
                     <div className="w-56 rounded-2xl bg-gradient-to-br from-pink-500 to-orange-400 text-white p-4 shadow-lg">
                       <div className="text-xs opacity-90 font-medium">TRIGGER</div>
@@ -154,7 +154,7 @@ const Landing = () => {
         </div>
       </section>
 
-      <section id="features" className="py-24 px-6">
+      <section id="features" className="py-16 px-4 sm:px-6 md:py-24">
         <div className="max-w-6xl mx-auto">
           <div className="max-w-2xl">
             <Badge className="bg-pink-50 text-pink-700 border-pink-100 rounded-full">Features</Badge>
@@ -183,7 +183,7 @@ const Landing = () => {
         </div>
       </section>
 
-      <section id="how" className="py-24 px-6 bg-slate-50">
+      <section id="how" className="py-16 px-4 sm:px-6 md:py-24 bg-slate-50">
         <div className="max-w-6xl mx-auto">
           <div className="text-center max-w-2xl mx-auto">
             <Badge className="bg-blue-50 text-blue-700 border-blue-100 rounded-full">How it works</Badge>
@@ -205,8 +205,8 @@ const Landing = () => {
         </div>
       </section>
 
-      <section className="py-24 px-6">
-        <div className="max-w-5xl mx-auto relative rounded-3xl overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-12 md:p-16 text-center">
+      <section className="py-16 px-4 sm:px-6 md:py-24">
+        <div className="max-w-5xl mx-auto relative rounded-3xl overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6 sm:p-12 md:p-16 text-center">
           <div className="relative">
             <h2 className="font-display text-4xl md:text-5xl font-extrabold text-white tracking-tight">Ready to manage Instagram automations?</h2>
             <p className="mt-4 text-lg text-slate-300 max-w-xl mx-auto">Create your account and connect Instagram when you are ready to automate real conversations.</p>
@@ -219,7 +219,7 @@ const Landing = () => {
         </div>
       </section>
 
-      <footer className="border-t border-slate-100 py-12 px-6">
+      <footer className="border-t border-slate-100 py-10 px-4 sm:px-6 md:py-12">
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">

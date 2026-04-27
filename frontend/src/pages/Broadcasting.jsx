@@ -82,7 +82,7 @@ const Broadcasting = () => {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Broadcasting</h1>
@@ -90,7 +90,7 @@ const Broadcasting = () => {
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
-            <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
+            <Button className="w-full bg-slate-900 hover:bg-slate-800 text-white rounded-xl sm:w-auto">
               <Plus className="w-4 h-4 mr-1.5" /> New Broadcast
             </Button>
           </DialogTrigger>
@@ -144,7 +144,7 @@ const Broadcasting = () => {
         <div className="px-5 py-4 border-b border-slate-100"><h3 className="font-display font-bold text-lg">All Broadcasts</h3></div>
         <div className="divide-y divide-slate-50">
           {list.map(b => (
-            <div key={b.id} className="grid grid-cols-[1fr_auto] md:grid-cols-[1fr_120px_140px_120px_120px_40px] items-center gap-4 px-5 py-4 hover:bg-slate-50 transition-colors">
+            <div key={b.id} className="grid grid-cols-1 sm:grid-cols-[1fr_auto] md:grid-cols-[1fr_120px_140px_120px_120px_40px] items-start sm:items-center gap-3 sm:gap-4 px-4 sm:px-5 py-4 hover:bg-slate-50 transition-colors">
               <div>
                 <div className="font-semibold text-sm">{b.name}</div>
                 <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-1.5"><Calendar className="w-3 h-3" /> {b.date || '-'}</div>
@@ -153,7 +153,7 @@ const Broadcasting = () => {
               <div className="hidden md:block text-sm"><div className="text-xs text-slate-500">Audience</div><div className="font-bold">{(b.audience || 0).toLocaleString()}</div></div>
               <div className="hidden md:block text-sm"><div className="text-xs text-slate-500">Open</div><div className="font-bold">{b.openRate || '-'}</div></div>
               <div className="hidden md:block text-sm"><div className="text-xs text-slate-500">Clicks</div><div className="font-bold">{b.clickRate || '-'}</div></div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 sm:justify-end">
                 {b.status === 'draft' && (
                   <Button size="sm" onClick={() => handleSend(b.id)} className="bg-slate-900 text-white rounded-xl text-xs h-8 px-3">
                     <Send className="w-3 h-3 mr-1" /> Send
