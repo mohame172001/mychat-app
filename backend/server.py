@@ -526,7 +526,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     nodes = automation.get('nodes', [])
     edges = automation.get('edges', [])
     if not nodes:
-        return
+        return False
 
     node_map = {n['id']: n for n in nodes}
     edge_map: Dict[str, list] = {}
@@ -535,12 +535,14 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
 
     start = next((n for n in nodes if n.get('type') == 'trigger'), None)
     if not start:
-        return
+        return False
 
     access_token = user.get('meta_access_token', '')
     ig_user_id = user.get('ig_user_id', '')
     current_ids = [start['id']]
     visited: set = set()
+    action_attempted = False
+    ok_all = True
 
     while current_ids:
         nid = current_ids.pop(0)
@@ -556,6 +558,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         if ntype == 'message':
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and sender_ig_id:
+                action_attempted = True
                 if _comment_dm_flow_enabled(automation):
                     ok = await _send_comment_dm_flow_entry(
                         user, automation, sender_ig_id, comment_context
@@ -565,12 +568,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 else:
                     ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
                     logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+                ok_all = ok_all and bool(ok)
         elif ntype == 'reply_comment':
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
+                action_attempted = True
                 ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
                 logger.info('Flow comment reply on %s: %s (ok=%s)',
                             comment_context['ig_comment_id'], msg_text[:40], ok)
+                ok_all = ok_all and bool(ok)
                 if ok and comment_context.get('comment_doc_id'):
                     await db.comments.update_one(
                         {'id': comment_context['comment_doc_id']},
@@ -596,10 +602,17 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         for next_id in edge_map.get(nid, []):
             current_ids.append(next_id)
 
-    await db.automations.update_one(
-        {'id': automation['id']},
-        {'$inc': {'sent': 1}, '$set': {'updated': datetime.utcnow()}}
-    )
+    if action_attempted and ok_all:
+        await db.automations.update_one(
+            {'id': automation['id']},
+            {'$inc': {'sent': 1}, '$set': {'updated': datetime.utcnow()}}
+        )
+    else:
+        await db.automations.update_one(
+            {'id': automation['id']},
+            {'$set': {'updated': datetime.utcnow()}}
+        )
+    return bool(action_attempted and ok_all)
 
 
 # ---------------- helpers ----------------
@@ -3110,20 +3123,32 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'self_comment'}
 
+    ts_raw = comment_data.get('timestamp')
+    comment_ts = _parse_graph_datetime(ts_raw)
+    now = datetime.utcnow()
+    retry_existing_missing_timestamp = False
+    existing_doc_id = None
+    existing_created = None
+
     # Dedupe
     existing = await db.comments.find_one({
         'user_id': user_id, 'ig_comment_id': ig_comment_id
     })
     if existing:
-        logger.info('comment_already_processed ig_comment_id=%s user=%s',
-                    ig_comment_id, user_doc.get('email'))
-        return {'processed': False, 'already_processed': True, 'matched': False,
-                'action_status': 'skipped', 'reason': 'duplicate'}
+        previous_skip = existing.get('skip_reason') or existing.get('skipReason')
+        if previous_skip == 'missing_comment_timestamp' and comment_ts:
+            retry_existing_missing_timestamp = True
+            existing_doc_id = existing.get('id')
+            existing_created = existing.get('created')
+            logger.info('comment_reprocessing_after_timestamp ig_comment_id=%s user=%s source=%s',
+                        ig_comment_id, user_doc.get('email'), source)
+        else:
+            logger.info('comment_already_processed ig_comment_id=%s user=%s',
+                        ig_comment_id, user_doc.get('email'))
+            return {'processed': False, 'already_processed': True, 'matched': False,
+                    'action_status': 'skipped', 'reason': 'duplicate'}
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
-    ts_raw = comment_data.get('timestamp')
-    comment_ts = _parse_graph_datetime(ts_raw)
-    now = datetime.utcnow()
 
     def _automation_keywords(auto: dict) -> list:
         raw = auto.get('keywords')
@@ -3162,7 +3187,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 logger.info('comment_skipped_missing_timestamp ig_comment_id=%s rule_id=%s source=%s',
                             ig_comment_id, auto.get('id'), source)
                 return 'missing_comment_timestamp'
-            if activation and comment_ts <= activation:
+            # Instagram comment timestamps are second-precision, while our
+            # activation time includes microseconds. Compare at second
+            # precision so a fresh test comment in the same second as rule
+            # creation is not treated as historical.
+            activation_floor = activation.replace(microsecond=0) if activation else None
+            comment_floor = comment_ts.replace(microsecond=0)
+            if activation_floor and comment_floor < activation_floor:
                 logger.info('comment_skipped_historical ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
                             ig_comment_id, auto.get('id'), comment_ts, activation, source)
                 return 'historical_before_rule_activation'
@@ -3233,7 +3264,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     )
     action_status = 'pending' if matched else 'skipped'
     doc = {
-        'id': str(_uuid.uuid4()),
+        'id': existing_doc_id or str(_uuid.uuid4()),
         'user_id': user_id,
         'ig_comment_id': ig_comment_id,
         'igCommentId': ig_comment_id,
@@ -3257,15 +3288,23 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'ruleActivationStartedAt': rule_activation_started_at,
         'processExistingComments': process_existing_comments,
         'processed_at': now,
-        'created': now,
+        'reprocessed_after_missing_timestamp': retry_existing_missing_timestamp,
+        'updated': now,
+        'created': existing_created or now,
     }
-    try:
-        await db.comments.insert_one(doc)
-    except Exception as e:
-        # Race against unique index — another worker inserted first.
-        logger.info('comment_insert_race ig_comment_id=%s err=%s', ig_comment_id, e)
-        return {'processed': False, 'already_processed': True, 'matched': False,
-                'action_status': 'skipped', 'reason': 'race'}
+    if retry_existing_missing_timestamp:
+        await db.comments.update_one(
+            {'id': doc['id'], 'user_id': user_id},
+            {'$set': doc},
+        )
+    else:
+        try:
+            await db.comments.insert_one(doc)
+        except Exception as e:
+            # Race against unique index; another worker inserted first.
+            logger.info('comment_insert_race ig_comment_id=%s err=%s', ig_comment_id, e)
+            return {'processed': False, 'already_processed': True, 'matched': False,
+                    'action_status': 'skipped', 'reason': 'race'}
 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
@@ -3288,7 +3327,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             )
             action_status = 'failed'
 
-    return {'processed': True, 'matched': matched, 'action_status': action_status,
+    return {'processed': True, 'reprocessed': retry_existing_missing_timestamp,
+            'matched': matched, 'action_status': action_status,
             'rule_id': rule_id, 'comment_doc_id': doc['id']}
 
 
@@ -3296,10 +3336,19 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                                  comment_doc_id: str, ig_comment_id: str):
     """Wrap execute_flow so we record success/failure on the comment doc."""
     try:
-        await execute_flow(
+        ok = await execute_flow(
             user_doc, automation, commenter_id, comment_text,
             comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': comment_doc_id}
         )
+        if not ok:
+            await db.comments.update_one(
+                {'id': comment_doc_id},
+                {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
+                          'error': 'automation_action_send_failed'}}
+            )
+            logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
+                           ig_comment_id, automation.get('id'))
+            return False
         await db.comments.update_one(
             {'id': comment_doc_id},
             {'$set': {'action_status': 'success', 'actionStatus': 'success'}}
