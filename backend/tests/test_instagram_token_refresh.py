@@ -61,11 +61,17 @@ def _match(doc, query):
             if not any(_match(doc, item) for item in expected):
                 return False
             continue
+        if key == '$and':
+            if not all(_match(doc, item) for item in expected):
+                return False
+            continue
         value = doc.get(key)
         if isinstance(expected, dict):
             if '$exists' in expected and ((key in doc) != expected['$exists']):
                 return False
             if '$lte' in expected and not (value is not None and value <= expected['$lte']):
+                return False
+            if '$gte' in expected and not (value is not None and value >= expected['$gte']):
                 return False
             if '$nin' in expected and value in expected['$nin']:
                 return False
@@ -86,8 +92,11 @@ class FakeCursor:
     def limit(self, _limit):
         return self
 
+    def skip(self, _skip):
+        return self
+
     async def to_list(self, limit):
-        return list(self.docs)[:limit]
+        return list(self.docs)[:limit] if limit else list(self.docs)
 
 
 class FakeCollection:
@@ -97,7 +106,8 @@ class FakeCollection:
     async def find_one(self, query):
         return next((doc for doc in self.docs if _match(doc, query)), None)
 
-    def find(self, query):
+    def find(self, query, projection=None):
+        """Projection is accepted but ignored — tests return full docs."""
         return FakeCursor([doc for doc in self.docs if _match(doc, query)])
 
     async def update_one(self, query, update, upsert=False):
@@ -137,6 +147,22 @@ class FakeCollection:
         await self.update_one({'id': doc['id']}, update)
         return doc
 
+    async def insert_one(self, doc):
+        self.docs.append(dict(doc))
+        return SimpleNamespace(inserted_id=doc.get('id'))
+
+    async def delete_one(self, query):
+        before = len(self.docs)
+        self.docs = [d for d in self.docs if not _match(d, query)]
+        deleted = before - len(self.docs)
+        return SimpleNamespace(deleted_count=deleted)
+
+    async def drop_index(self, name):
+        pass
+
+    async def create_index(self, *args, **kwargs):
+        pass
+
 
 class FakeDB:
     def __init__(self, account=None, user=None, **collections):
@@ -150,6 +176,9 @@ class FakeDB:
         self.contacts = FakeCollection(collections.get('contacts', []))
         self.dm_rules = FakeCollection(collections.get('dm_rules', []))
         self.dm_logs = FakeCollection(collections.get('dm_logs', []))
+        self.comment_dm_sessions = FakeCollection(collections.get('comment_dm_sessions', []))
+        self.webhook_log = FakeCollection(collections.get('webhook_log', []))
+        self.broadcasts = FakeCollection(collections.get('broadcasts', []))
 
 
 def _account(**overrides):
