@@ -101,7 +101,7 @@ const Dashboard = () => {
               <div className="flex justify-between text-sm"><span className="text-white/80">Followers</span><span className="font-bold">{user.instagramFollowers.toLocaleString()}</span></div>
             </div>
           ) : null}
-          <Link to="/app/settings"><Button className="mt-6 w-full bg-white text-slate-900 hover:bg-slate-100 rounded-xl">Manage Connection</Button></Link>
+          <Link to="/app/settings?tab=instagram"><Button className="mt-6 w-full bg-white text-slate-900 hover:bg-slate-100 rounded-xl">Manage Connection</Button></Link>
         </Card>
       </div>
 

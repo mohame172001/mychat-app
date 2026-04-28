@@ -4,6 +4,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
@@ -24,6 +25,7 @@ class FakeResponse:
         self.status_code = status_code
         self._body = body
         self.text = str(body)
+        self.headers = {'content-type': 'application/json'}
 
     def json(self):
         return self._body
@@ -33,6 +35,8 @@ class FakeAsyncClient:
     def __init__(self, responses):
         self.responses = responses
         self.calls = 0
+        self.post_calls = []
+        self.get_calls = []
 
     async def __aenter__(self):
         return self
@@ -40,8 +44,14 @@ class FakeAsyncClient:
     async def __aexit__(self, *_):
         return False
 
-    async def get(self, *_args, **_kwargs):
+    async def get(self, *args, **kwargs):
         self.calls += 1
+        self.get_calls.append((args, kwargs))
+        return self.responses.pop(0)
+
+    async def post(self, *args, **kwargs):
+        self.calls += 1
+        self.post_calls.append((args, kwargs))
         return self.responses.pop(0)
 
 
@@ -183,7 +193,13 @@ def _request(headers=None):
         (str(k).lower().encode('latin-1'), str(v).encode('latin-1'))
         for k, v in (headers or {}).items()
     ]
-    return Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': encoded_headers})
+    return Request({
+        'type': 'http',
+        'method': 'POST',
+        'path': '/',
+        'query_string': b'',
+        'headers': encoded_headers,
+    })
 
 
 def test_successful_refresh_updates_token_and_hides_token(monkeypatch):
@@ -377,6 +393,99 @@ def test_instagram_account_activate_rejects_other_user_account(monkeypatch):
         assert exc.status_code == 404
     else:
         raise AssertionError('expected HTTPException')
+
+
+def test_instagram_auth_url_uses_signed_add_account_state():
+    result = _run(server.instagram_auth_url(
+        mode='add_account',
+        returnTo='/app',
+        user_id='u1',
+    ))
+    query = parse_qs(urlparse(result['url']).query)
+    state = query['state'][0]
+    payload = server._verify_instagram_oauth_state(state)
+
+    assert result['mode'] == 'add_account'
+    assert result['returnTo'] == '/app'
+    assert query['client_id'][0] == server.IG_APP_ID
+    assert query['force_authentication'][0] == '1'
+    assert payload['userId'] == 'u1'
+    assert payload['mode'] == 'add_account'
+    assert payload['returnTo'] == '/app'
+    assert 'u1' not in state
+
+
+def _oauth_success_responses(ig_id='igB', username='account_b', token='short-b', long_token='long-b'):
+    return [
+        FakeResponse(200, {'access_token': token, 'user_id': ig_id}),
+        FakeResponse(200, {'user_id': ig_id, 'username': username}),
+        FakeResponse(200, {'data': {'app_id': server.IG_APP_ID, 'is_valid': True, 'scopes': []}}),
+        FakeResponse(200, {'access_token': long_token, 'expires_in': 60 * 60 * 24 * 60}),
+        FakeResponse(200, {'user_id': ig_id, 'username': username}),
+    ]
+
+
+def test_instagram_callback_creates_second_account_and_sets_it_active(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient(_oauth_success_responses())
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'add_account',
+        'returnTo': '/app',
+    })
+
+    response = _run(server.instagram_callback(
+        _request(), code='code-b', state=state, error=None, error_description=None,
+    ))
+    user = _run(fake_db.users.find_one({'id': 'u1'}))
+    accounts = [doc for doc in fake_db.instagram_accounts.docs if doc.get('userId') == 'u1']
+    account_b = _run(fake_db.instagram_accounts.find_one({
+        'userId': 'u1',
+        'instagramAccountId': 'igB',
+    }))
+
+    assert response.status_code == 307
+    assert '/app?ig=connected' in response.headers['location']
+    assert len(accounts) == 2
+    assert account_b['accessToken'] == 'long-b'
+    assert user['active_instagram_account_id'] == account_b['id']
+    assert user['ig_user_id'] == 'igB'
+    assert user['meta_access_token'] == 'long-b'
+    public = _run(server.instagram_accounts(user_id='u1'))
+    assert [row['id'] for row in public['accounts'] if row['active']] == [account_b['id']]
+    assert 'long-b' not in str(public)
+
+
+def test_instagram_callback_updates_existing_account_without_duplicate(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient(_oauth_success_responses(
+        ig_id='igA',
+        username='account_a_new',
+        token='short-a-new',
+        long_token='long-a-new',
+    ))
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'add_account',
+        'returnTo': '/app',
+    })
+
+    _run(server.instagram_callback(
+        _request(), code='code-a', state=state, error=None, error_description=None,
+    ))
+    accounts = [doc for doc in fake_db.instagram_accounts.docs if doc.get('userId') == 'u1']
+    account_a = _run(fake_db.instagram_accounts.find_one({'id': 'accA'}))
+    user = _run(fake_db.users.find_one({'id': 'u1'}))
+
+    assert len(accounts) == 2
+    assert account_a['accessToken'] == 'long-a-new'
+    assert account_a['username'] == 'account_a_new'
+    assert user['active_instagram_account_id'] == 'accA'
+    assert user['meta_access_token'] == 'long-a-new'
 
 
 def test_dashboard_stats_filter_by_active_instagram_account(monkeypatch):

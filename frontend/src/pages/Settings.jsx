@@ -10,6 +10,7 @@ import { Instagram, Key, Bell, CreditCard, User, Shield, Check, AlertCircle, Loa
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import api from '../lib/api';
+import { startInstagramConnect } from '../lib/instagramConnect';
 
 const tabs = [
   { id: 'profile', label: 'Profile', icon: User },
@@ -38,6 +39,10 @@ const Settings = () => {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
+    const requestedTab = params.get('tab');
+    if (tabs.some(t => t.id === requestedTab)) {
+      setTab(requestedTab);
+    }
     const igStatus = params.get('ig');
     if (igStatus === 'connected') {
       setTab('instagram');
@@ -117,7 +122,7 @@ const Settings = () => {
                     <div className="flex gap-2">
                       <Button onClick={async () => {
                         setIgConnecting(true);
-                        try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
+                        try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
                         catch (e) { toast.error(e?.response?.data?.detail || 'Failed'); setIgConnecting(false); }
                       }} variant="outline" className="rounded-xl" disabled={igConnecting}>
                         {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
@@ -150,7 +155,7 @@ const Settings = () => {
                   <div className="mt-6 flex justify-end">
                     <Button onClick={async () => {
                       setIgConnecting(true);
-                      try { const { data } = await api.get('/instagram/auth-url'); window.location.href = data.url; }
+                      try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
                       catch (e) { toast.error(e?.response?.data?.detail || 'Failed - check IG_APP_ID/IG_APP_SECRET in .env'); setIgConnecting(false); }
                     }} className="w-full bg-slate-900 text-white rounded-xl sm:w-auto" disabled={igConnecting}>
                       {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}

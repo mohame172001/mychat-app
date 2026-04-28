@@ -16,6 +16,7 @@ import {
 } from '../ui/dropdown-menu';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import { startInstagramConnect } from '../../lib/instagramConnect';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -63,6 +64,18 @@ const Sidebar = () => {
       toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
     }
     setSwitchingAccount(false);
+  };
+
+  const connectAnotherInstagramAccount = async (event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    setSwitchingAccount(true);
+    try {
+      await startInstagramConnect({ mode: 'add_account', returnTo: '/app' });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e?.message || 'Failed to start Instagram connection');
+      setSwitchingAccount(false);
+    }
   };
 
   return (
@@ -125,10 +138,12 @@ const Sidebar = () => {
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <Link to="/app/settings" className="cursor-pointer">
-                <Instagram className="h-4 w-4" /> Connect another account
-              </Link>
+            <DropdownMenuItem
+              onClick={connectAnotherInstagramAccount}
+              disabled={switchingAccount}
+              className="cursor-pointer"
+            >
+              <Instagram className="h-4 w-4" /> Connect another account
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

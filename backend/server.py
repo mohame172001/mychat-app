@@ -1,7 +1,9 @@
 import os
 import asyncio
+import base64
 import hashlib
 import hmac
+import json
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -24,7 +26,7 @@ from models import (
     MessageIn, Conversation,
     DmRuleIn, DmRulePatch, DmTestIn,
 )
-from auth_utils import hash_password, verify_password, create_token, get_current_user_id, decode_token
+from auth_utils import hash_password, verify_password, create_token, get_current_user_id, decode_token, JWT_SECRET
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1341,10 +1343,80 @@ IG_SCOPES = (
     'instagram_business_manage_comments'
 )
 VALID_IG_ACCOUNT_TYPES = {'BUSINESS', 'CREATOR', 'MEDIA_CREATOR'}
+IG_OAUTH_STATE_TTL_SECONDS = 30 * 60
 
 
 def _token_prefix(token: str) -> Optional[str]:
     return token[:6] if token else None
+
+
+def _safe_return_to(return_to: Optional[str]) -> str:
+    value = (return_to or '/app/settings?tab=instagram').strip()
+    if not value.startswith('/app') or '://' in value or '\n' in value or '\r' in value:
+        return '/app/settings?tab=instagram'
+    return value
+
+
+def _frontend_redirect_url(return_to: Optional[str], params: Optional[dict] = None) -> str:
+    path = _safe_return_to(return_to)
+    extra = urlencode(params or {})
+    if extra:
+        path = f"{path}{'&' if '?' in path else '?'}{extra}"
+    return f"{FRONTEND_URL}{path}"
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+
+def _b64url_decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+
+
+def _sign_instagram_oauth_state(payload: Dict[str, Any]) -> str:
+    state_payload = {
+        **payload,
+        'iat': int(datetime.utcnow().timestamp()),
+    }
+    body = _b64url_encode(json.dumps(
+        state_payload,
+        separators=(',', ':'),
+        sort_keys=True,
+    ).encode('utf-8'))
+    sig = hmac.new(JWT_SECRET.encode('utf-8'), body.encode('ascii'), hashlib.sha256).digest()
+    return f'{body}.{_b64url_encode(sig)}'
+
+
+def _verify_instagram_oauth_state(state: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not state or '.' not in state or not JWT_SECRET:
+        return None
+    body, sig = state.rsplit('.', 1)
+    expected = _b64url_encode(hmac.new(
+        JWT_SECRET.encode('utf-8'),
+        body.encode('ascii'),
+        hashlib.sha256,
+    ).digest())
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body).decode('utf-8'))
+    except Exception:
+        return None
+    user_id = payload.get('userId') or payload.get('user_id')
+    issued_at = int(payload.get('iat') or 0)
+    if not user_id or issued_at <= 0:
+        return None
+    if int(datetime.utcnow().timestamp()) - issued_at > IG_OAUTH_STATE_TTL_SECONDS:
+        return None
+    mode = payload.get('mode') or 'connect'
+    if mode not in {'connect', 'add_account', 'reconnect'}:
+        mode = 'connect'
+    return {
+        'userId': str(user_id),
+        'mode': mode,
+        'returnTo': _safe_return_to(payload.get('returnTo')),
+        'iat': issued_at,
+    }
 
 
 def _safe_graph_error(body: Any) -> Optional[Dict[str, Any]]:
@@ -2294,10 +2366,21 @@ async def _run_instagram_me_probes(c: httpx.AsyncClient, token: str) -> Dict[str
 
 
 @api.get('/instagram/auth-url')
-async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
+async def instagram_auth_url(
+    mode: str = Query('connect'),
+    returnTo: str = Query('/app/settings?tab=instagram'),
+    user_id: str = Depends(get_current_user_id),
+):
     if not IG_APP_ID or not IG_APP_SECRET:
         raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
+    oauth_mode = mode if mode in {'connect', 'add_account', 'reconnect'} else 'connect'
+    return_to = _safe_return_to(returnTo)
+    state = _sign_instagram_oauth_state({
+        'userId': user_id,
+        'mode': oauth_mode,
+        'returnTo': return_to,
+    })
     params = {
         'enable_fb_login': '0',
         'force_authentication': '1',
@@ -2305,12 +2388,14 @@ async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
         'redirect_uri': redirect_uri,
         'response_type': 'code',
         'scope': IG_SCOPES,
-        'state': user_id,
+        'state': state,
     }
     url = f"https://www.instagram.com/oauth/authorize?{urlencode(params)}"
     return {
         'url': url,
         'configured': True,
+        'mode': oauth_mode,
+        'returnTo': return_to,
         'redirect_uri': redirect_uri,
         'authorizeUrlDebug': {
             'host': 'www.instagram.com',
@@ -2318,6 +2403,7 @@ async def instagram_auth_url(user_id: str = Depends(get_current_user_id)):
             'redirect_uri': redirect_uri,
             'scope': IG_SCOPES,
             'response_type': 'code',
+            'force_authentication': '1',
         },
     }
 
@@ -2351,43 +2437,74 @@ async def instagram_callback(request: Request,
         'finalIgUserIdStoredSource': None,
         'verification': None,
         'debugToken': None,
+        'stateValid': False,
+        'mode': None,
+        'returnTo': None,
         'createdAt': datetime.utcnow(),
     }
 
-    async def _store_oauth_failure(uid: Optional[str], blocker: str, detail: Any = None):
+    state_payload = _verify_instagram_oauth_state(state)
+    user_id = state_payload.get('userId') if state_payload else None
+    oauth_mode = state_payload.get('mode') if state_payload else None
+    return_to = state_payload.get('returnTo') if state_payload else '/app/settings?tab=instagram'
+    audit['stateValid'] = bool(state_payload)
+    audit['mode'] = oauth_mode
+    audit['returnTo'] = return_to
+
+    async def _store_oauth_failure(
+        uid: Optional[str],
+        blocker: str,
+        detail: Any = None,
+        clear_existing_connection: bool = True,
+    ):
         if not uid:
             return
-        await db.users.update_one(
-            {'id': uid},
-            {
-                '$set': {
-                    'instagramConnected': False,
-                    'instagram_connection_valid': False,
-                    'instagram_connection_blocker': blocker,
-                    'ig_oauth_last_audit': _redact_secrets({**audit, 'failureDetail': detail}),
-                    'updated': datetime.utcnow(),
-                },
-                '$unset': {
-                    'meta_access_token': '',
-                    'ig_user_id': '',
-                    'instagramHandle': '',
-                    'instagram_account_type': '',
-                    'instagram_graph_me_id': '',
-                    'instagram_graph_me_user_id': '',
-                },
+        update = {
+            '$set': {
+                'instagram_connection_blocker': blocker,
+                'last_instagram_connect_error': blocker,
+                'ig_oauth_last_audit': _redact_secrets({**audit, 'failureDetail': detail}),
+                'updated': datetime.utcnow(),
             },
-        )
+        }
+        if clear_existing_connection:
+            update['$set'].update({
+                'instagramConnected': False,
+                'instagram_connection_valid': False,
+                'instagramConnectionValid': False,
+            })
+            update['$unset'] = {
+                'meta_access_token': '',
+                'ig_user_id': '',
+                'instagramHandle': '',
+                'instagram_account_type': '',
+                'instagram_graph_me_id': '',
+                'instagram_graph_me_user_id': '',
+            }
+        await db.users.update_one({'id': uid}, update)
 
+    clear_existing_on_failure = oauth_mode != 'add_account'
     if error:
         logger.warning('IG OAuth denied: %s — %s', error, error_description)
-        await _store_oauth_failure(state, 'oauth_denied', {'error': error})
-        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason={error}")
-    if not state:
-        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=missing_state")
+        await _store_oauth_failure(
+            user_id,
+            'oauth_denied',
+            {'error': error},
+            clear_existing_connection=clear_existing_on_failure,
+        )
+        return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': error}))
+    if not state_payload:
+        return RedirectResponse(_frontend_redirect_url(
+            '/app/settings?tab=instagram',
+            {'ig': 'error', 'reason': 'invalid_state'},
+        ))
     if not code:
-        await _store_oauth_failure(state, 'oauth_code_missing')
-        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=missing_code")
-    user_id = state
+        await _store_oauth_failure(
+            user_id,
+            'oauth_code_missing',
+            clear_existing_connection=clear_existing_on_failure,
+        )
+        return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': 'missing_code'}))
     redirect_uri = audit['redirectUriUsed']
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -2413,8 +2530,16 @@ async def instagram_callback(request: Request,
             if not token:
                 safe = _redact_secrets(data)
                 logger.error('IG token exchange failed: %s', safe)
-                await _store_oauth_failure(user_id, 'token_exchange_failed', safe)
-                return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=token_exchange_failed")
+                await _store_oauth_failure(
+                    user_id,
+                    'token_exchange_failed',
+                    safe,
+                    clear_existing_connection=clear_existing_on_failure,
+                )
+                return RedirectResponse(_frontend_redirect_url(
+                    return_to,
+                    {'ig': 'error', 'reason': 'token_exchange_failed'},
+                ))
 
             # OAuth validation path: verify the short token first, then try to
             # upgrade to long-lived without making that upgrade a blocker.
@@ -2434,10 +2559,12 @@ async def instagram_callback(request: Request,
                     user_id,
                     'token_exchange_returns_unusable_instagram_token',
                     {'shortTokenMeResults': short_me['results']},
+                    clear_existing_connection=clear_existing_on_failure,
                 )
-                return RedirectResponse(
-                    f"{FRONTEND_URL}/app/settings?ig=error&reason=token_cannot_call_graph_me"
-                )
+                return RedirectResponse(_frontend_redirect_url(
+                    return_to,
+                    {'ig': 'error', 'reason': 'token_cannot_call_graph_me'},
+                ))
 
             audit['debugToken'] = await _debug_token_with_ig_app(token)
             audit['longLivedExchangeAttempted'] = True
@@ -2527,7 +2654,7 @@ async def instagram_callback(request: Request,
                     'ig_oauth_last_audit': _redact_secrets(audit),
                 }},
             )
-            await _sync_user_instagram_account_doc({
+            account_doc = await _sync_user_instagram_account_doc({
                 'id': user_id,
                 'instagramConnected': True,
                 'instagram_connection_valid': True,
@@ -2541,9 +2668,20 @@ async def instagram_callback(request: Request,
                 token_source=final_token_source,
                 refresh_status='ok' if final_token_source == 'long_lived' else 'not_long_lived',
                 last_refreshed_at=datetime.utcnow() if final_token_source == 'long_lived' else None)
+            connected_account_id = (account_doc or {}).get('id')
+            if connected_account_id:
+                audit['connectedInstagramAccountId'] = connected_account_id
+                await db.users.update_one(
+                    {'id': user_id},
+                    {'$set': {'ig_oauth_last_audit': _redact_secrets(audit)}},
+                )
+                await instagram_account_activate(connected_account_id, user_id=user_id)
             logger.info('IG connected (Business Login) for user %s via %s',
                         user_id, audit['whichMeVariantWorks'])
-            return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
+            return RedirectResponse(_frontend_redirect_url(
+                return_to,
+                {'ig': 'connected', 'accountId': connected_account_id or ''},
+            ))
             # 2) Exchange short-lived for long-lived IG user token (60 days)
             audit['debugToken'] = await _debug_token_with_ig_app(token)
             audit['longLivedExchangeAttempted'] = True
@@ -2741,10 +2879,12 @@ async def instagram_callback(request: Request,
                     user_id,
                     verification.get('blocker') or 'token_cannot_call_graph_me',
                     graph_error,
+                    clear_existing_connection=clear_existing_on_failure,
                 )
-                return RedirectResponse(
-                    f"{FRONTEND_URL}/app/settings?ig=error&reason=token_cannot_call_graph_me"
-                )
+                return RedirectResponse(_frontend_redirect_url(
+                    return_to,
+                    {'ig': 'error', 'reason': 'token_cannot_call_graph_me'},
+                ))
             ig_user_id = verification['canonicalIgId']
             handle = '@' + verification['username']
             followers = 0
@@ -2800,10 +2940,15 @@ async def instagram_callback(request: Request,
     except Exception as e:
         logger.exception('IG callback failed')
         from fastapi.responses import RedirectResponse
-        await _store_oauth_failure(user_id, 'server_error', str(e)[:200])
-        return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=error&reason=server_error")
+        await _store_oauth_failure(
+            user_id,
+            'server_error',
+            str(e)[:200],
+            clear_existing_connection=clear_existing_on_failure,
+        )
+        return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': 'server_error'}))
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
+    return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'connected'}))
 
 
 
