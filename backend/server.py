@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 import httpx
 
 from models import (
@@ -73,6 +74,10 @@ META_WEBHOOK_APP_SECRET, META_WEBHOOK_APP_SECRET_SOURCE = _resolve_env(
 META_WEBHOOK_HMAC_ENFORCE = os.environ.get('META_WEBHOOK_HMAC_ENFORCE', '0') == '1'
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
+CRON_SECRET = os.environ.get('CRON_SECRET', '')
+TOKEN_REFRESH_LOOKAHEAD_DAYS = int(os.environ.get('IG_TOKEN_REFRESH_LOOKAHEAD_DAYS', '15'))
+TOKEN_REFRESH_MIN_AGE_HOURS = int(os.environ.get('IG_TOKEN_REFRESH_MIN_AGE_HOURS', '24'))
+TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES', '5'))
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -93,8 +98,9 @@ for _noisy in ('httpx', 'httpcore', 'httpcore.http11', 'httpcore.connection'):
 def _redact_secrets(value):
     """Recursively redact obvious credential keys from dicts/strings before
     they hit the log stream or HTTP response bodies."""
-    SECRET_KEYS = {'access_token', 'meta_access_token', 'client_secret',
-                   'app_secret', 'refresh_token', 'token', 'authorization'}
+    SECRET_KEYS = {'access_token', 'accesstoken', 'meta_access_token',
+                   'client_secret', 'app_secret', 'refresh_token',
+                   'token', 'authorization'}
     if isinstance(value, dict):
         return {k: ('***REDACTED***' if k.lower() in SECRET_KEYS else _redact_secrets(v))
                 for k, v in value.items()}
@@ -1323,6 +1329,456 @@ def _parse_graph_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
+def _iso_or_none(value: Any) -> Optional[str]:
+    dt = _parse_graph_datetime(value)
+    return dt.isoformat() if dt else None
+
+
+def _instagram_account_doc_id(user_id: str, instagram_account_id: str) -> str:
+    raw = f'{user_id}:{instagram_account_id}'
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _days_until(value: Any, now: Optional[datetime] = None) -> Optional[float]:
+    dt = _parse_graph_datetime(value)
+    if not dt:
+        return None
+    base = now or datetime.utcnow()
+    return (dt - base).total_seconds() / 86400
+
+
+def _token_refresh_public_row(account: dict, now: Optional[datetime] = None) -> dict:
+    base = now or datetime.utcnow()
+    expires_at = _parse_graph_datetime(account.get('tokenExpiresAt'))
+    days = _days_until(expires_at, base) if expires_at else None
+    refresh_status = account.get('refreshStatus') or 'unknown'
+    expired = bool(expires_at and expires_at <= base)
+    critical = bool(
+        expired or
+        (days is not None and days <= 3) or
+        (days is not None and days <= 7 and refresh_status == 'failed') or
+        int(account.get('refreshAttempts') or 0) >= 3
+    )
+    return {
+        'accountId': account.get('id'),
+        'instagramAccountId': account.get('instagramAccountId') or account.get('igUserId'),
+        'username': account.get('username'),
+        'tokenExpiresAt': expires_at.isoformat() if expires_at else None,
+        'daysUntilExpiry': round(days, 2) if days is not None else None,
+        'refreshStatus': refresh_status,
+        'lastRefreshedAt': _iso_or_none(account.get('lastRefreshedAt')),
+        'refreshAttempts': int(account.get('refreshAttempts') or 0),
+        'critical': critical,
+        'expired': expired,
+    }
+
+
+def _instagram_account_public_row(account: dict, current_ig_id: str = '') -> dict:
+    instagram_account_id = account.get('instagramAccountId') or account.get('igUserId')
+    return {
+        'id': account.get('id'),
+        'instagramAccountId': instagram_account_id,
+        'igUserId': instagram_account_id,
+        'username': account.get('username'),
+        'accountType': account.get('accountType'),
+        'connectionValid': bool(account.get('connectionValid')),
+        'isActive': bool(account.get('isActive')),
+        'isCurrent': bool(current_ig_id and instagram_account_id == current_ig_id),
+        'tokenSource': account.get('tokenSource'),
+        'tokenExpiresAt': _iso_or_none(account.get('tokenExpiresAt')),
+        'lastRefreshedAt': _iso_or_none(account.get('lastRefreshedAt')),
+        'refreshStatus': account.get('refreshStatus') or 'unknown',
+        'refreshAttempts': int(account.get('refreshAttempts') or 0),
+        'createdAt': _iso_or_none(account.get('createdAt')),
+        'updatedAt': _iso_or_none(account.get('updatedAt')),
+    }
+
+
+def _cron_secret_is_valid(provided: Optional[str]) -> bool:
+    return bool(CRON_SECRET and provided and hmac.compare_digest(str(provided), CRON_SECRET))
+
+
+def _cron_secret_from_request(request: Request) -> Optional[str]:
+    auth = request.headers.get('authorization') or request.headers.get('Authorization') or ''
+    if auth.lower().startswith('bearer '):
+        return auth.split(' ', 1)[1].strip()
+    return (
+        request.headers.get('x-cron-secret') or
+        request.headers.get('X-Cron-Secret')
+    )
+
+
+async def notifyTokenRefreshProblem(message: str, metadata: Optional[dict] = None):
+    """Placeholder alert hook. Replace with email/Slack/etc. when available."""
+    safe_metadata = _redact_secrets(metadata or {})
+    logger.warning('instagram_token_refresh_problem: %s metadata=%s', message, safe_metadata)
+
+
+async def _sync_user_instagram_account_doc(
+    user_doc: dict,
+    access_token: Optional[str] = None,
+    token_expires_at: Optional[datetime] = None,
+    token_source: Optional[str] = None,
+    refresh_status: Optional[str] = None,
+    last_refreshed_at: Optional[datetime] = None,
+) -> Optional[dict]:
+    """Mirror the current legacy users.* Instagram connection into instagram_accounts.
+
+    The production code still reads users.meta_access_token, so this collection is
+    additive/backwards-compatible and lets token refresh jobs work per account.
+    """
+    user_id = user_doc.get('id')
+    instagram_account_id = str(user_doc.get('ig_user_id') or '')
+    token = access_token if access_token is not None else (user_doc.get('meta_access_token') or '')
+    if not (user_id and instagram_account_id and token):
+        return None
+    now = datetime.utcnow()
+    account_id = _instagram_account_doc_id(user_id, instagram_account_id)
+    existing = await db.instagram_accounts.find_one({'id': account_id})
+    created_at = (
+        _parse_graph_datetime((existing or {}).get('createdAt')) or
+        _parse_graph_datetime(user_doc.get('instagram_connected_at')) or
+        _parse_graph_datetime(user_doc.get('createdAt')) or
+        _parse_graph_datetime(user_doc.get('created')) or
+        now
+    )
+    expires_at = (
+        token_expires_at or
+        _parse_graph_datetime(user_doc.get('tokenExpiresAt')) or
+        _parse_graph_datetime(user_doc.get('instagram_token_expires_at')) or
+        _parse_graph_datetime((existing or {}).get('tokenExpiresAt'))
+    )
+    doc = {
+        'id': account_id,
+        'userId': user_id,
+        'user_id': user_id,
+        'instagramAccountId': instagram_account_id,
+        'igUserId': instagram_account_id,
+        'username': (user_doc.get('instagramHandle') or '').replace('@', ''),
+        'accountType': user_doc.get('instagram_account_type'),
+        'accessToken': token,
+        'tokenSource': token_source or user_doc.get('instagram_token_source') or user_doc.get('instagramTokenSource'),
+        'authKind': user_doc.get('ig_auth_kind') or 'instagram_business_login',
+        'connectionValid': bool(user_doc.get('instagram_connection_valid')),
+        'isActive': bool(user_doc.get('instagramConnected')),
+        'tokenExpiresAt': expires_at,
+        'lastRefreshedAt': last_refreshed_at or _parse_graph_datetime(user_doc.get('lastRefreshedAt')),
+        'refreshStatus': refresh_status or user_doc.get('refreshStatus') or (existing or {}).get('refreshStatus') or 'unknown',
+        'refreshError': (existing or {}).get('refreshError'),
+        'refreshAttempts': int((existing or {}).get('refreshAttempts') or user_doc.get('refreshAttempts') or 0),
+        'refreshLockedUntil': (existing or {}).get('refreshLockedUntil'),
+        'metadata': {'source': 'users_legacy_connection'},
+        'createdAt': created_at,
+        'updatedAt': now,
+    }
+    await db.instagram_accounts.update_one(
+        {'id': account_id},
+        {
+            '$set': doc,
+            '$setOnInsert': {'connectedAt': created_at},
+        },
+        upsert=True,
+    )
+    stored = await db.instagram_accounts.find_one({'id': account_id})
+    return stored
+
+
+async def _ensure_instagram_account_docs_for_connected_users(limit: int = 1000) -> int:
+    users = await db.users.find({
+        'instagramConnected': True,
+        'ig_user_id': {'$nin': [None, '']},
+        'meta_access_token': {'$nin': [None, '']},
+    }).limit(limit).to_list(limit)
+    count = 0
+    for user_doc in users:
+        if await _sync_user_instagram_account_doc(user_doc):
+            count += 1
+    return count
+
+
+async def _mark_instagram_account_expired(account: dict, reason: str = 'token_expired') -> dict:
+    now = datetime.utcnow()
+    update = {
+        'refreshStatus': 'expired',
+        'refreshError': {'reason': reason},
+        'connectionValid': False,
+        'refreshLockedUntil': None,
+        'updatedAt': now,
+    }
+    await db.instagram_accounts.update_one({'id': account['id']}, {'$set': update})
+    await db.users.update_one(
+        {
+            'id': account.get('userId') or account.get('user_id'),
+            'ig_user_id': account.get('instagramAccountId') or account.get('igUserId'),
+        },
+        {'$set': {
+            'instagram_connection_valid': False,
+            'instagramConnectionValid': False,
+            'instagram_connection_blocker': reason,
+            'refreshStatus': 'expired',
+            'updated': now,
+        }},
+    )
+    await notifyTokenRefreshProblem('Instagram token expired; manual reconnect required', {
+        'accountId': account.get('id'),
+        'instagramAccountId': account.get('instagramAccountId') or account.get('igUserId'),
+        'userId': account.get('userId') or account.get('user_id'),
+    })
+    return {'ok': False, 'status': 'expired', 'reason': reason}
+
+
+async def refreshInstagramToken(accountId: str, force: bool = False) -> dict:
+    """Refresh one long-lived Instagram token without blocking webhook/comment paths."""
+    now = datetime.utcnow()
+    account = await db.instagram_accounts.find_one({'id': accountId})
+    if not account:
+        return {'ok': False, 'status': 'not_found', 'accountId': accountId}
+
+    token = account.get('accessToken') or ''
+    if not token:
+        await db.instagram_accounts.update_one(
+            {'id': accountId},
+            {'$set': {
+                'refreshStatus': 'missing_token',
+                'refreshError': {'reason': 'missing_access_token'},
+                'updatedAt': now,
+            }},
+        )
+        return {'ok': False, 'status': 'missing_token', 'accountId': accountId}
+
+    expires_at = _parse_graph_datetime(account.get('tokenExpiresAt'))
+    days = _days_until(expires_at, now) if expires_at else None
+    if expires_at and expires_at <= now:
+        return await _mark_instagram_account_expired(account)
+
+    token_source = account.get('tokenSource') or ''
+    if token_source and token_source != 'long_lived':
+        await db.instagram_accounts.update_one(
+            {'id': accountId},
+            {'$set': {
+                'refreshStatus': 'not_long_lived',
+                'refreshError': {'reason': 'token_source_is_not_long_lived'},
+                'refreshLockedUntil': None,
+                'updatedAt': now,
+            }},
+        )
+        return {'ok': True, 'status': 'skipped_not_long_lived', 'accountId': accountId}
+
+    if not force and expires_at and expires_at > now + timedelta(days=TOKEN_REFRESH_LOOKAHEAD_DAYS):
+        return {'ok': True, 'status': 'skipped_not_due', 'accountId': accountId}
+
+    recent_cutoff = now - timedelta(hours=TOKEN_REFRESH_MIN_AGE_HOURS)
+    last_touch = (
+        _parse_graph_datetime(account.get('lastRefreshedAt')) or
+        _parse_graph_datetime(account.get('createdAt'))
+    )
+    if not force and last_touch and last_touch > recent_cutoff:
+        return {'ok': True, 'status': 'skipped_recently_refreshed', 'accountId': accountId}
+
+    locked = await db.instagram_accounts.find_one_and_update(
+        {
+            'id': accountId,
+            '$or': [
+                {'refreshLockedUntil': {'$exists': False}},
+                {'refreshLockedUntil': None},
+                {'refreshLockedUntil': {'$lte': now}},
+            ],
+        },
+        {'$set': {
+            'refreshLockedUntil': now + timedelta(minutes=TOKEN_REFRESH_LOCK_MINUTES),
+            'refreshStatus': 'refreshing',
+            'updatedAt': now,
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not locked:
+        return {'ok': True, 'status': 'skipped_locked', 'accountId': accountId}
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                'https://graph.instagram.com/refresh_access_token',
+                params={'grant_type': 'ig_refresh_token', 'access_token': token},
+            )
+            try:
+                body = r.json()
+            except Exception:
+                body = {'raw': r.text[:500]}
+
+        if r.status_code == 200 and isinstance(body, dict):
+            new_token = body.get('access_token') or ''
+            expires_in = int(body.get('expires_in') or 0)
+            if new_token and expires_in > 0:
+                new_expires_at = now + timedelta(seconds=expires_in)
+                update = {
+                    'accessToken': new_token,
+                    'tokenExpiresAt': new_expires_at,
+                    'lastRefreshedAt': now,
+                    'refreshStatus': 'ok',
+                    'refreshError': None,
+                    'refreshAttempts': 0,
+                    'refreshLockedUntil': None,
+                    'updatedAt': now,
+                    'connectionValid': True,
+                    'isActive': True,
+                }
+                await db.instagram_accounts.update_one({'id': accountId}, {'$set': update})
+                await db.users.update_one(
+                    {
+                        'id': locked.get('userId') or locked.get('user_id'),
+                        'ig_user_id': locked.get('instagramAccountId') or locked.get('igUserId'),
+                    },
+                    {'$set': {
+                        'meta_access_token': new_token,
+                        'tokenExpiresAt': new_expires_at,
+                        'instagram_token_expires_at': new_expires_at,
+                        'lastRefreshedAt': now,
+                        'refreshStatus': 'ok',
+                        'refreshError': None,
+                        'refreshAttempts': 0,
+                        'instagram_connection_valid': True,
+                        'instagramConnectionValid': True,
+                        'instagram_connection_blocker': None,
+                        'updated': now,
+                    }},
+                )
+                logger.info('instagram_token_refresh_ok account=%s expires_at=%s',
+                            accountId, new_expires_at.isoformat())
+                return {
+                    'ok': True,
+                    'status': 'refreshed',
+                    'accountId': accountId,
+                    'tokenExpiresAt': new_expires_at.isoformat(),
+                }
+            body = {'error': {'message': 'refresh response missing access_token or expires_in',
+                              'status': r.status_code, 'keys': sorted(body.keys())}}
+
+        safe_error = _redact_secrets(body)
+        attempts = int(locked.get('refreshAttempts') or 0) + 1
+        refresh_status = 'failed'
+        if days is not None and days <= 3:
+            refresh_status = 'critical'
+        await db.instagram_accounts.update_one(
+            {'id': accountId},
+            {'$set': {
+                'refreshStatus': refresh_status,
+                'refreshError': safe_error,
+                'refreshLockedUntil': None,
+                'updatedAt': now,
+            }, '$inc': {'refreshAttempts': 1}},
+        )
+        await db.users.update_one(
+            {
+                'id': locked.get('userId') or locked.get('user_id'),
+                'ig_user_id': locked.get('instagramAccountId') or locked.get('igUserId'),
+            },
+            {'$set': {
+                'refreshStatus': refresh_status,
+                'refreshError': safe_error,
+                'refreshAttempts': attempts,
+                'updated': now,
+            }},
+        )
+        if (days is not None and days < 7) or attempts >= 3:
+            await notifyTokenRefreshProblem('Instagram token refresh failed', {
+                'accountId': accountId,
+                'instagramAccountId': locked.get('instagramAccountId') or locked.get('igUserId'),
+                'daysUntilExpiry': round(days, 2) if days is not None else None,
+                'attempts': attempts,
+                'status': refresh_status,
+                'error': safe_error,
+            })
+        return {
+            'ok': False,
+            'status': refresh_status,
+            'accountId': accountId,
+            'error': safe_error,
+        }
+    except Exception as e:
+        safe_error = {'exception': str(e)[:500]}
+        await db.instagram_accounts.update_one(
+            {'id': accountId},
+            {'$set': {
+                'refreshStatus': 'failed',
+                'refreshError': safe_error,
+                'refreshLockedUntil': None,
+                'updatedAt': now,
+            }, '$inc': {'refreshAttempts': 1}},
+        )
+        await notifyTokenRefreshProblem('Instagram token refresh exception', {
+            'accountId': accountId,
+            'error': safe_error,
+        })
+        return {'ok': False, 'status': 'failed', 'accountId': accountId, 'error': safe_error}
+
+
+async def runInstagramTokenRefreshCron() -> dict:
+    await _ensure_instagram_account_docs_for_connected_users()
+    now = datetime.utcnow()
+    lookahead = now + timedelta(days=TOKEN_REFRESH_LOOKAHEAD_DAYS)
+    accounts = await db.instagram_accounts.find({
+        'isActive': {'$ne': False},
+        'connectionValid': {'$ne': False},
+        'accessToken': {'$nin': [None, '']},
+        '$or': [
+            {'tokenExpiresAt': {'$exists': False}},
+            {'tokenExpiresAt': None},
+            {'tokenExpiresAt': {'$lte': lookahead}},
+        ],
+    }).sort('tokenExpiresAt', 1).to_list(500)
+
+    summary = {
+        'totalChecked': len(accounts),
+        'refreshed': 0,
+        'skipped': 0,
+        'failed': 0,
+        'expiringSoon': 0,
+        'critical': 0,
+        'expired': 0,
+        'results': [],
+    }
+    for account in accounts:
+        row = _token_refresh_public_row(account, now)
+        if row.get('daysUntilExpiry') is None or row['daysUntilExpiry'] <= TOKEN_REFRESH_LOOKAHEAD_DAYS:
+            summary['expiringSoon'] += 1
+        result = await refreshInstagramToken(account['id'])
+        status = result.get('status')
+        if status == 'refreshed':
+            summary['refreshed'] += 1
+        elif status in ('failed', 'critical'):
+            summary['failed'] += 1
+        elif status == 'expired':
+            summary['expired'] += 1
+            summary['failed'] += 1
+        else:
+            summary['skipped'] += 1
+        refreshed_account = await db.instagram_accounts.find_one({'id': account['id']}) or account
+        public_row = _token_refresh_public_row(refreshed_account)
+        public_row['result'] = status
+        summary['critical'] += 1 if public_row.get('critical') else 0
+        summary['results'].append(public_row)
+        if (
+            public_row.get('expired') or
+            (
+                public_row.get('daysUntilExpiry') is not None and
+                public_row['daysUntilExpiry'] < 3 and
+                status != 'refreshed'
+            )
+        ):
+            await notifyTokenRefreshProblem('Instagram token expiry critical', {
+                'accountId': public_row.get('accountId'),
+                'instagramAccountId': public_row.get('instagramAccountId'),
+                'daysUntilExpiry': public_row.get('daysUntilExpiry'),
+                'refreshStatus': public_row.get('refreshStatus'),
+                'refreshAttempts': public_row.get('refreshAttempts'),
+                'result': status,
+            })
+    logger.info('instagram_token_refresh_summary %s', {
+        k: v for k, v in summary.items() if k != 'results'
+    })
+    return summary
+
+
 def _comment_rule_trigger_value(rule: dict) -> str:
     trigger = rule.get('trigger') or ''
     if trigger:
@@ -1731,6 +2187,18 @@ async def instagram_callback(request: Request,
             audit['finalTokenLength'] = len(final_token)
             audit['finalTokenPrefix'] = _token_prefix(final_token)
             audit['finalIgUserIdStoredSource'] = 'me_user_id_or_id'
+            final_token_expires_at = None
+            try:
+                final_expires_in = (
+                    int(ll_data.get('expires_in') or 0)
+                    if final_token_source == 'long_lived' and isinstance(ll_data, dict)
+                    else int(data.get('expires_in') or 0)
+                )
+            except Exception:
+                final_expires_in = 0
+            if final_expires_in > 0:
+                final_token_expires_at = datetime.utcnow() + timedelta(seconds=final_expires_in)
+            audit['tokenExpiresAt'] = final_token_expires_at.isoformat() if final_token_expires_at else None
             audit['verification'] = {
                 'ok': True,
                 'canonicalIgId': final_me['canonicalIgUserId'],
@@ -1752,9 +2220,29 @@ async def instagram_callback(request: Request,
                     'ig_auth_kind': 'instagram_business_login',
                     'instagramTokenSource': final_token_source,
                     'instagram_token_source': final_token_source,
+                    'tokenExpiresAt': final_token_expires_at,
+                    'instagram_token_expires_at': final_token_expires_at,
+                    'lastRefreshedAt': datetime.utcnow() if final_token_source == 'long_lived' else None,
+                    'refreshStatus': 'ok' if final_token_source == 'long_lived' else 'not_long_lived',
+                    'refreshError': None,
+                    'refreshAttempts': 0,
                     'ig_oauth_last_audit': _redact_secrets(audit),
                 }},
             )
+            await _sync_user_instagram_account_doc({
+                'id': user_id,
+                'instagramConnected': True,
+                'instagram_connection_valid': True,
+                'instagramHandle': final_me.get('username') or '',
+                'ig_user_id': final_me['canonicalIgUserId'],
+                'meta_access_token': final_token,
+                'ig_auth_kind': 'instagram_business_login',
+                'instagram_token_source': final_token_source,
+                'tokenExpiresAt': final_token_expires_at,
+            }, access_token=final_token, token_expires_at=final_token_expires_at,
+                token_source=final_token_source,
+                refresh_status='ok' if final_token_source == 'long_lived' else 'not_long_lived',
+                last_refreshed_at=datetime.utcnow() if final_token_source == 'long_lived' else None)
             logger.info('IG connected (Business Login) for user %s via %s',
                         user_id, audit['whichMeVariantWorks'])
             return RedirectResponse(f"{FRONTEND_URL}/app/settings?ig=connected")
@@ -2955,6 +3443,7 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
 
 @api.post('/instagram/disconnect')
 async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
+    u = await db.users.find_one({'id': user_id})
     await db.users.update_one(
         {'id': user_id},
         {
@@ -2973,6 +3462,20 @@ async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
             },
         }
     )
+    if u and u.get('ig_user_id'):
+        await db.instagram_accounts.update_one(
+            {
+                'userId': user_id,
+                'instagramAccountId': str(u.get('ig_user_id') or ''),
+            },
+            {'$set': {
+                'isActive': False,
+                'connectionValid': False,
+                'refreshStatus': 'disconnected',
+                'refreshLockedUntil': None,
+                'updatedAt': datetime.utcnow(),
+            }},
+        )
     return {'ok': True}
 
 
@@ -5429,6 +5932,82 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
     }
 
 
+@api.get('/instagram/accounts')
+async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
+    await _ensure_instagram_account_docs_for_connected_users()
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    current_ig_id = str(user_doc.get('ig_user_id') or '')
+    rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
+    return {
+        'accounts': [_instagram_account_public_row(row, current_ig_id) for row in rows],
+        'currentInstagramAccountId': current_ig_id or None,
+        'count': len(rows),
+    }
+
+
+@api.post('/instagram/accounts/{account_id}/activate')
+async def instagram_account_activate(account_id: str, user_id: str = Depends(get_current_user_id)):
+    await _ensure_instagram_account_docs_for_connected_users()
+    account = await db.instagram_accounts.find_one({'id': account_id, 'userId': user_id})
+    if not account:
+        raise HTTPException(404, 'Instagram account not found')
+    token = account.get('accessToken') or ''
+    instagram_account_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    if not (token and instagram_account_id):
+        raise HTTPException(400, 'Instagram account is missing token or id')
+    if account.get('refreshStatus') == 'expired':
+        raise HTTPException(400, 'Instagram token expired. Reconnect this account.')
+    now = datetime.utcnow()
+    await db.instagram_accounts.update_many(
+        {'userId': user_id},
+        {'$set': {'isCurrent': False, 'updatedAt': now}},
+    )
+    await db.instagram_accounts.update_one(
+        {'id': account_id, 'userId': user_id},
+        {'$set': {'isCurrent': True, 'isActive': True, 'updatedAt': now}},
+    )
+    await db.users.update_one(
+        {'id': user_id},
+        {'$set': {
+            'instagramConnected': True,
+            'instagram_connection_valid': bool(account.get('connectionValid')),
+            'instagramConnectionValid': bool(account.get('connectionValid')),
+            'instagram_connection_blocker': None if account.get('connectionValid') else 'selected_account_invalid',
+            'instagramHandle': account.get('username') or '',
+            'instagram_account_type': account.get('accountType'),
+            'ig_user_id': instagram_account_id,
+            'meta_access_token': token,
+            'instagramTokenSource': account.get('tokenSource'),
+            'instagram_token_source': account.get('tokenSource'),
+            'tokenExpiresAt': _parse_graph_datetime(account.get('tokenExpiresAt')),
+            'instagram_token_expires_at': _parse_graph_datetime(account.get('tokenExpiresAt')),
+            'lastRefreshedAt': _parse_graph_datetime(account.get('lastRefreshedAt')),
+            'refreshStatus': account.get('refreshStatus'),
+            'refreshAttempts': int(account.get('refreshAttempts') or 0),
+            'updated': now,
+        }},
+    )
+    refreshed = await db.instagram_accounts.find_one({'id': account_id}) or account
+    return {'ok': True, 'account': _instagram_account_public_row(refreshed, instagram_account_id)}
+
+
+@api.post('/cron/refresh-instagram-tokens')
+async def cron_refresh_instagram_tokens(request: Request):
+    if not _cron_secret_is_valid(_cron_secret_from_request(request)):
+        raise HTTPException(403, 'Invalid cron secret')
+    return await runInstagramTokenRefreshCron()
+
+
+@api.get('/instagram/token-refresh/status')
+async def instagram_token_refresh_status(user_id: str = Depends(get_current_user_id)):
+    await _ensure_instagram_account_docs_for_connected_users()
+    rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
+    return {
+        'accounts': [_token_refresh_public_row(row) for row in rows],
+        'count': len(rows),
+    }
+
+
 # ---------------- root ----------------
 @api.get('/')
 async def root():
@@ -5538,6 +6117,27 @@ async def _startup():
         )
     except Exception as e:
         logger.warning('comment_dm_sessions index create: %s', e)
+    try:
+        await db.instagram_accounts.create_index([('id', 1)], unique=True,
+                                                 name='instagram_accounts_id_unique')
+        await db.instagram_accounts.create_index(
+            [('userId', 1), ('instagramAccountId', 1)],
+            unique=True,
+            sparse=True,
+            name='instagram_accounts_user_ig_unique',
+        )
+        await db.instagram_accounts.create_index(
+            [('isActive', 1), ('connectionValid', 1), ('tokenExpiresAt', 1)],
+            name='instagram_accounts_refresh_due',
+        )
+    except Exception as e:
+        logger.warning('instagram_accounts index create: %s', e)
+    try:
+        migrated = await _ensure_instagram_account_docs_for_connected_users()
+        if migrated:
+            logger.info('instagram_accounts_migrated_from_users count=%s', migrated)
+    except Exception as e:
+        logger.warning('instagram_accounts migration: %s', e)
     try:
         now = datetime.utcnow()
         comment_rules = {

@@ -1,11 +1,21 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Send, Settings,
-  MessageCircle, HelpCircle, LogOut, AtSign, Inbox
+  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import api from '../../lib/api';
+import { toast } from 'sonner';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -17,7 +27,44 @@ export const navItems = [
 ];
 
 const Sidebar = () => {
-  const { logout, user } = useAuth();
+  const { logout, user, refreshUser } = useAuth();
+  const [instagramAccounts, setInstagramAccounts] = useState([]);
+  const [switchingAccount, setSwitchingAccount] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const loadAccounts = async () => {
+      try {
+        const { data } = await api.get('/instagram/accounts');
+        if (alive) setInstagramAccounts(data?.accounts || []);
+      } catch {
+        if (alive) setInstagramAccounts([]);
+      }
+    };
+    if (user?.instagramConnected) {
+      loadAccounts();
+    }
+    return () => {
+      alive = false;
+    };
+  }, [user?.instagramConnected, user?.instagramHandle]);
+
+  const currentAccount = instagramAccounts.find(account => account.isCurrent) || instagramAccounts[0];
+
+  const switchInstagramAccount = async (account) => {
+    if (!account?.id || account.isCurrent || switchingAccount) return;
+    setSwitchingAccount(true);
+    try {
+      await api.post(`/instagram/accounts/${account.id}/activate`);
+      await refreshUser?.();
+      toast.success(`Switched to @${account.username || account.instagramAccountId}`);
+      window.location.reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
+    }
+    setSwitchingAccount(false);
+  };
+
   return (
     <aside className="hidden md:flex w-64 flex-col bg-white border-r border-slate-200">
       <Link to="/app" className="h-16 px-6 flex items-center gap-2 border-b border-slate-100">
@@ -40,13 +87,51 @@ const Sidebar = () => {
         ))}
       </nav>
       <div className="p-4 border-t border-slate-100 space-y-2">
-        <div className="flex items-center gap-3 px-3 py-2 rounded-xl bg-slate-50">
-          <img src={user?.avatar} alt={user?.name} className="w-8 h-8 rounded-full object-cover" />
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold truncate">{user?.name}</div>
-            <div className="text-xs text-slate-500 truncate">{user?.instagramHandle}</div>
-          </div>
-        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-left transition hover:bg-slate-100">
+              <img src={user?.avatar} alt={user?.name} className="w-8 h-8 rounded-full object-cover" />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold truncate">
+                  {currentAccount?.username ? `@${currentAccount.username}` : user?.name}
+                </div>
+                <div className="text-xs text-slate-500 truncate">
+                  {currentAccount?.instagramAccountId || user?.instagramHandle || 'No Instagram account'}
+                </div>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="top" className="w-64">
+            <DropdownMenuLabel>Instagram accounts</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {instagramAccounts.length === 0 && (
+              <DropdownMenuItem disabled>
+                <Instagram className="h-4 w-4" /> No account connected
+              </DropdownMenuItem>
+            )}
+            {instagramAccounts.map(account => (
+              <DropdownMenuItem
+                key={account.id}
+                onClick={() => switchInstagramAccount(account)}
+                disabled={switchingAccount || account.isCurrent}
+                className="cursor-pointer"
+              >
+                <Instagram className="h-4 w-4" />
+                <span className="min-w-0 flex-1 truncate">
+                  @{account.username || account.instagramAccountId}
+                </span>
+                {account.isCurrent && <Check className="h-4 w-4 text-emerald-600" />}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link to="/app/settings" className="cursor-pointer">
+                <Instagram className="h-4 w-4" /> Connect another account
+              </Link>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button variant="ghost" className="w-full justify-start text-slate-600" size="sm">
           <HelpCircle className="w-4 h-4 mr-2" /> Help & Support
         </Button>
