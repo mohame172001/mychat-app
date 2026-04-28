@@ -58,7 +58,7 @@ const Sidebar = () => {
       await api.post(`/instagram/accounts/${account.id}/activate`);
       await refreshUser?.();
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
-      window.location.reload();
+      window.location.assign('/app');
     } catch (e) {
       toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
     }

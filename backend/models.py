@@ -55,6 +55,9 @@ class AutomationIn(BaseModel):
     media_id: Optional[str] = None
     latest: Optional[bool] = None
     media_preview: Optional[Dict[str, Any]] = None
+    instagramAccountId: Optional[str] = None
+    igUserId: Optional[str] = None
+    instagramUsername: Optional[str] = None
     processExistingComments: bool = False
 
 
@@ -72,6 +75,9 @@ class AutomationPatch(BaseModel):
     media_id: Optional[str] = None
     latest: Optional[bool] = None
     media_preview: Optional[Dict[str, Any]] = None
+    instagramAccountId: Optional[str] = None
+    igUserId: Optional[str] = None
+    instagramUsername: Optional[str] = None
     keywords: Optional[List[str]] = None
     post_scope: Optional[str] = None
     reply_under_post: Optional[bool] = None
@@ -106,6 +112,9 @@ class Automation(BaseModel):
     media_id: Optional[str] = None
     latest: Optional[bool] = None
     media_preview: Optional[Dict[str, Any]] = None
+    instagramAccountId: Optional[str] = None
+    igUserId: Optional[str] = None
+    instagramUsername: Optional[str] = None
     processExistingComments: bool = False
     activationStartedAt: Optional[datetime] = None
     createdAt: datetime = Field(default_factory=_now)

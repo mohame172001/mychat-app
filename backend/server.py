@@ -708,13 +708,20 @@ async def me(user_id: str = Depends(get_current_user_id)):
 # ---------------- automations ----------------
 @api.get('/automations')
 async def list_automations(user_id: str = Depends(get_current_user_id)):
-    cursor = db.automations.find({'user_id': user_id}).sort('updated', -1)
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    ig_id = str(user_doc.get('ig_user_id') or '')
+    cursor = db.automations.find(_account_scoped_query(user_id, ig_id)).sort('updated', -1)
     return [_strip_mongo(d) for d in await cursor.to_list(1000)]
 
 
 @api.post('/automations')
 async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_user_id)):
     automation_data = data.model_dump()
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    ctx = _current_instagram_context(user_doc)
+    if ctx['instagramAccountId']:
+        automation_data.update(ctx)
     now = datetime.utcnow()
     # Handle None values for nodes and edges
     if automation_data.get('nodes') is None:
@@ -733,7 +740,9 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
 
 @api.get('/automations/{aid}')
 async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    d = await db.automations.find_one({'id': aid, 'user_id': user_id})
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
     if not d:
         raise HTTPException(404, 'Not found')
     return _strip_mongo(d)
@@ -742,7 +751,9 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
 @api.patch('/automations/{aid}')
 async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
-    existing = await db.automations.find_one({'id': aid, 'user_id': user_id})
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    existing = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
     if not existing:
         raise HTTPException(404, 'Not found')
     now = datetime.utcnow()
@@ -766,7 +777,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         update['activationStartedAt'] = now
         logger.info('comment_rule_activation_reset rule_id=%s user_id=%s reason=%s',
                     aid, user_id, 'status_reenabled' if status_reenabled else 'rule_changed')
-    res = await db.automations.update_one({'id': aid, 'user_id': user_id}, {'$set': update})
+    res = await db.automations.update_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
     d = await db.automations.find_one({'id': aid})
@@ -775,7 +786,9 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
 
 @api.delete('/automations/{aid}')
 async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    res = await db.automations.delete_one({'id': aid, 'user_id': user_id})
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    res = await db.automations.delete_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
     if res.deleted_count == 0:
         raise HTTPException(404, 'Not found')
     return {'ok': True}
@@ -783,7 +796,9 @@ async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id
 
 @api.post('/automations/{aid}/duplicate')
 async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    d = await db.automations.find_one({'id': aid, 'user_id': user_id})
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
     if not d:
         raise HTTPException(404, 'Not found')
     import uuid
@@ -904,6 +919,9 @@ async def create_quick_comment_rule(
     if not reply_under_post and not dm_text:
         raise HTTPException(400, 'Enable a public reply or a DM message')
 
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    ctx = _current_instagram_context(user_doc)
+
     if post_scope == 'any':
         trigger = 'comment:any'
     elif latest:
@@ -949,6 +967,7 @@ async def create_quick_comment_rule(
     doc = {
         'id': str(uuid.uuid4()),
         'user_id': user_id,
+        **({} if not ctx['instagramAccountId'] else ctx),
         'name': name,
         'status': 'active',
         'trigger': trigger,
@@ -1190,7 +1209,13 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
 # ---------------- comments ----------------
 @api.get('/comments')
 async def list_comments(user_id: str = Depends(get_current_user_id)):
-    docs = await db.comments.find({'user_id': user_id}).sort('created', -1).to_list(500)
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    ig_id = str(user_doc.get('ig_user_id') or '')
+    query = {'user_id': user_id}
+    if ig_id:
+        query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
+    docs = await db.comments.find(query).sort('created', -1).to_list(500)
     return [_strip_mongo(d) for d in docs]
 
 
@@ -1234,9 +1259,16 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
 # ---------------- dashboard ----------------
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    await _ensure_automation_account_scope_for_user(user_doc)
+    ig_id = str(user_doc.get('ig_user_id') or '')
+    scoped_automation_query = _account_scoped_query(user_id, ig_id)
+    scoped_comment_query = {'user_id': user_id}
+    if ig_id:
+        scoped_comment_query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
     total_contacts = await db.contacts.count_documents({'user_id': user_id})
-    active_automations = await db.automations.count_documents({'user_id': user_id, 'status': 'active'})
-    autos = await db.automations.find({'user_id': user_id}).to_list(1000)
+    active_automations = await db.automations.count_documents({**scoped_automation_query, 'status': 'active'})
+    autos = await db.automations.find(scoped_automation_query).to_list(1000)
     messages_sent = sum(a.get('sent', 0) for a in autos)
     clicks = sum(a.get('clicks', 0) for a in autos)
     conv_rate = round((clicks / messages_sent * 100), 1) if messages_sent else 0.0
@@ -1250,7 +1282,10 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         buckets[d.isoformat()] = {
             'day': d.strftime('%a'), 'messages': 0, 'conversions': 0,
         }
-    convs = await db.conversations.find({'user_id': user_id}).to_list(5000)
+    conv_query = {'user_id': user_id}
+    if ig_id:
+        conv_query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
+    convs = await db.conversations.find(conv_query).to_list(5000)
     for conv in convs:
         for m in conv.get('messages', []) or []:
             ts = m.get('ts') or m.get('created')
@@ -1272,6 +1307,8 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'messages_sent': messages_sent,
         'conversion_rate': conv_rate,
         'weekly_chart': chart,
+        'current_instagram_account_id': ig_id or None,
+        'comments_logged': await db.comments.count_documents(scoped_comment_query),
     }
 
 
@@ -1392,6 +1429,93 @@ def _instagram_account_public_row(account: dict, current_ig_id: str = '') -> dic
         'createdAt': _iso_or_none(account.get('createdAt')),
         'updatedAt': _iso_or_none(account.get('updatedAt')),
     }
+
+
+def _current_instagram_context(user_doc: dict) -> dict:
+    instagram_account_id = str(user_doc.get('ig_user_id') or '')
+    username = (user_doc.get('instagramHandle') or '').replace('@', '')
+    return {
+        'instagramAccountId': instagram_account_id,
+        'igUserId': instagram_account_id,
+        'instagramUsername': username,
+    }
+
+
+def _account_scoped_query(user_id: str, instagram_account_id: str) -> dict:
+    query = {'user_id': user_id}
+    if instagram_account_id:
+        query['$or'] = [
+            {'instagramAccountId': instagram_account_id},
+            {'igUserId': instagram_account_id},
+        ]
+    return query
+
+
+def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict]) -> dict:
+    if not account_doc:
+        return user_doc
+    instagram_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ''
+    merged = {**user_doc}
+    merged.update({
+        'ig_user_id': instagram_account_id,
+        'meta_access_token': account_doc.get('accessToken') or user_doc.get('meta_access_token') or '',
+        'instagramHandle': account_doc.get('username') or user_doc.get('instagramHandle') or '',
+        'instagram_connection_valid': bool(account_doc.get('connectionValid')),
+        'instagramConnectionValid': bool(account_doc.get('connectionValid')),
+        'instagram_token_source': account_doc.get('tokenSource') or user_doc.get('instagram_token_source'),
+        'instagramTokenSource': account_doc.get('tokenSource') or user_doc.get('instagramTokenSource'),
+    })
+    return merged
+
+
+async def _ensure_automation_account_scope_for_user(user_doc: dict) -> int:
+    """Attach legacy unscoped automations/comments to the user's current IG account.
+
+    This is intentionally conservative: it only fills missing account fields and
+    never moves a rule that is already tied to another Instagram account.
+    """
+    user_id = user_doc.get('id')
+    ctx = _current_instagram_context(user_doc)
+    instagram_account_id = ctx['instagramAccountId']
+    if not (user_id and instagram_account_id):
+        return 0
+    now = datetime.utcnow()
+    missing_account = {'$or': [
+        {'instagramAccountId': {'$exists': False}},
+        {'instagramAccountId': None},
+        {'instagramAccountId': ''},
+    ]}
+    auto_res = await db.automations.update_many(
+        {'user_id': user_id, **missing_account},
+        {'$set': {**ctx, 'updatedAt': now}},
+    )
+    await db.comments.update_many(
+        {'user_id': user_id, **missing_account},
+        {'$set': ctx},
+    )
+    return getattr(auto_res, 'modified_count', 0) or 0
+
+
+async def _find_user_doc_for_instagram_account_id(instagram_account_id: str) -> tuple:
+    if not instagram_account_id:
+        return None, None
+    user_doc = await db.users.find_one({'$or': [
+        {'ig_user_id': instagram_account_id},
+        {'fb_page_id': instagram_account_id},
+    ]})
+    if user_doc:
+        return user_doc, 'users.ig_user_id'
+
+    account_doc = await db.instagram_accounts.find_one({'$or': [
+        {'instagramAccountId': instagram_account_id},
+        {'igUserId': instagram_account_id},
+    ], 'isActive': {'$ne': False}})
+    if not account_doc:
+        return None, None
+    owner = await db.users.find_one({'id': account_doc.get('userId') or account_doc.get('user_id')})
+    if not owner:
+        return None, None
+    return _with_instagram_account_context(owner, account_doc), 'instagram_accounts'
 
 
 def _cron_secret_is_valid(provided: Optional[str]) -> bool:
@@ -3635,7 +3759,12 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
     # Dedupe
     existing = await db.comments.find_one({
-        'user_id': user_id, 'ig_comment_id': ig_comment_id
+        'user_id': user_id, 'ig_comment_id': ig_comment_id,
+        '$or': [
+            {'instagramAccountId': ig_account_id},
+            {'igUserId': ig_account_id},
+            {'instagramAccountId': {'$exists': False}},
+        ],
     })
     if existing:
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
@@ -3667,7 +3796,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
     # Match automations to determine rule_id BEFORE insert
     automations = await db.automations.find(
-        {'user_id': user_id, 'status': 'active'}
+        {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
     latest_media_id = None
     matched_rule = None
@@ -3769,6 +3898,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     doc = {
         'id': existing_doc_id or str(_uuid.uuid4()),
         'user_id': user_id,
+        'instagramAccountId': ig_account_id,
+        'igUserId': ig_account_id,
+        'instagramUsername': (user_doc.get('instagramHandle') or '').replace('@', ''),
         'ig_comment_id': ig_comment_id,
         'igCommentId': ig_comment_id,
         'media_id': media_id,
@@ -4360,11 +4492,9 @@ async def _process_webhook(payload: dict):
             # Find which user owns this IG account — entry.id can be either the
             # Instagram Business account id OR the Facebook Page id depending on
             # how the subscription was created, so try both.
-            user_doc = await db.users.find_one({'$or': [
-                {'ig_user_id': ig_account_id},
-                {'fb_page_id': ig_account_id},
-            ]})
-            mapping_via = 'entry.id' if user_doc else None
+            user_doc, mapping_via = await _find_user_doc_for_instagram_account_id(ig_account_id)
+            if user_doc and mapping_via == 'users.ig_user_id':
+                mapping_via = 'entry.id'
             # Fallback: if entry.id doesn't match any user, try the recipient.id
             # of any messaging-item in this entry. Read/delivery events from a
             # business account use sender=business, recipient=user — but for
@@ -4373,23 +4503,24 @@ async def _process_webhook(payload: dict):
                 for ev in entry.get('messaging', []) or []:
                     rid = (ev.get('recipient') or {}).get('id')
                     if rid:
-                        user_doc = await db.users.find_one({'$or': [
-                            {'ig_user_id': rid}, {'fb_page_id': rid},
-                        ]})
+                        user_doc, account_mapping_via = await _find_user_doc_for_instagram_account_id(rid)
                         if user_doc:
-                            mapping_via = 'recipient.id'
+                            mapping_via = f'recipient.id:{account_mapping_via}'
                             ig_account_id = rid
                             break
             # Last-resort fallback for single-tenant deployments: if exactly
             # one user has an IG account connected, attribute the event to it.
             if not user_doc:
-                connected_users = await db.users.find(
-                    {'instagramConnected': True, 'ig_user_id': {'$nin': [None, '']}}
+                connected_accounts = await db.instagram_accounts.find(
+                    {'isActive': {'$ne': False}, 'connectionValid': {'$ne': False}}
                 ).limit(2).to_list(2)
-                if len(connected_users) == 1:
-                    user_doc = connected_users[0]
-                    mapping_via = 'single_tenant_fallback'
-                    ig_account_id = user_doc.get('ig_user_id') or ig_account_id
+                if len(connected_accounts) == 1:
+                    account_doc = connected_accounts[0]
+                    owner = await db.users.find_one({'id': account_doc.get('userId') or account_doc.get('user_id')})
+                    if owner:
+                        user_doc = _with_instagram_account_context(owner, account_doc)
+                        mapping_via = 'single_tenant_instagram_account_fallback'
+                        ig_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ig_account_id
             if not user_doc:
                 logger.warning('dm_user_mapping_failed entry_id=%s', entry.get('id'))
                 continue
@@ -4418,12 +4549,23 @@ async def _process_webhook(payload: dict):
 
                 # Save incoming message to conversation
                 import uuid as _uuid
-                conv = await db.conversations.find_one({'user_id': user_id, 'contact.ig_id': sender_id})
+                conv = await db.conversations.find_one({
+                    'user_id': user_id,
+                    'contact.ig_id': sender_id,
+                    '$or': [
+                        {'instagramAccountId': ig_account_id},
+                        {'igUserId': ig_account_id},
+                        {'instagramAccountId': {'$exists': False}},
+                    ],
+                })
                 if not conv:
                     # Create new conversation for this contact
                     conv_id = str(_uuid.uuid4())
                     conv = {
                         'id': conv_id, 'user_id': user_id,
+                        'instagramAccountId': ig_account_id,
+                        'igUserId': ig_account_id,
+                        'instagramUsername': (user_doc.get('instagramHandle') or '').replace('@', ''),
                         'contact': {'name': f'User {sender_id[:8]}', 'username': f'@ig_{sender_id[:8]}',
                                     'avatar': f'https://i.pravatar.cc/150?u={sender_id}',
                                     'ig_id': sender_id},
@@ -4446,7 +4588,7 @@ async def _process_webhook(payload: dict):
 
                 # Match automations by keyword trigger (legacy flow builder)
                 automations = await db.automations.find(
-                    {'user_id': user_id, 'status': 'active'}
+                    {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
                 ).to_list(100)
                 for auto in automations:
                     trigger = (auto.get('trigger') or '').lower()
@@ -6111,6 +6253,21 @@ async def _startup():
     except Exception as e:
         logger.warning('dm_rules index create: %s', e)
     try:
+        await db.automations.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('status', 1)],
+            name='automations_user_ig_status',
+        )
+        await db.comments.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='comments_user_ig_created',
+        )
+        await db.conversations.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='conversations_user_ig_created',
+        )
+    except Exception as e:
+        logger.warning('account scoped index create: %s', e)
+    try:
         await db.comment_dm_sessions.create_index(
             [('user_id', 1), ('recipient_id', 1), ('status', 1), ('created', -1)],
             name='comment_dm_sessions_pending_lookup',
@@ -6136,6 +6293,15 @@ async def _startup():
         migrated = await _ensure_instagram_account_docs_for_connected_users()
         if migrated:
             logger.info('instagram_accounts_migrated_from_users count=%s', migrated)
+        scoped_users = await db.users.find({
+            'instagramConnected': True,
+            'ig_user_id': {'$nin': [None, '']},
+        }).limit(1000).to_list(1000)
+        scoped_rules = 0
+        for user_doc in scoped_users:
+            scoped_rules += await _ensure_automation_account_scope_for_user(user_doc)
+        if scoped_rules:
+            logger.info('instagram_automation_account_scope_migrated count=%s', scoped_rules)
     except Exception as e:
         logger.warning('instagram_accounts migration: %s', e)
     try:
