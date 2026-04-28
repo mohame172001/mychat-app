@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2 } from 'lucide-react';
+import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
 
@@ -11,24 +11,41 @@ const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
 const Comments = () => {
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [replyText, setReplyText] = useState({});
   const [sending, setSending] = useState({});
   const [wsReady, setWsReady] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [unrepliedOnly, setUnrepliedOnly] = useState(true); // Default to unreplied
+
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const fetchComments = useCallback(async (pageToFetch, isReset) => {
+    if (isReset) setLoading(true);
+    else setLoadingMore(true);
+
     try {
-      const { data } = await api.get('/comments');
-      setComments(data);
+      const { data } = await api.get('/comments', {
+        params: { page: pageToFetch, limit: 30, unreplied: unrepliedOnly }
+      });
+      
+      // Fallback for older backend cache just in case
+      const incomingComments = Array.isArray(data) ? data : data.comments;
+      const incomingHasMore = data.has_more ?? false;
+
+      setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);
+      setHasMore(incomingHasMore);
+      setPage(pageToFetch);
     } catch (err) {
       console.error('[Comments] load failed', err);
       toast.error('Failed to load comments');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, []);
+  }, [unrepliedOnly]);
 
   const connectWs = useCallback(() => {
     const token = localStorage.getItem('mychat_token');
@@ -54,13 +71,16 @@ const Comments = () => {
   }, []);
 
   useEffect(() => {
-    load();
+    fetchComments(1, true);
+  }, [fetchComments]);
+
+  useEffect(() => {
     connectWs();
     return () => {
       clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
     };
-  }, [load, connectWs]);
+  }, [connectWs]);
 
   const handleReply = async (comment) => {
     const text = (replyText[comment.id] || '').trim();
@@ -88,11 +108,22 @@ const Comments = () => {
           <h1 className="text-3xl font-bold font-display">Comments</h1>
           <p className="text-slate-500 mt-1">Instagram comments received via webhook</p>
         </div>
-        <div className="flex items-center justify-between gap-3 sm:justify-end">
+        <div className="flex flex-wrap items-center gap-3 sm:justify-end">
           {wsReady
             ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3 h-3" /> Live</span>
             : <span className="flex items-center gap-1 text-xs text-slate-400"><WifiOff className="w-3 h-3" /> Offline</span>}
-          <Button variant="outline" size="sm" onClick={load}>
+          
+          <Button 
+            variant={unrepliedOnly ? "default" : "outline"} 
+            size="sm" 
+            onClick={() => setUnrepliedOnly(!unrepliedOnly)}
+            className="rounded-full"
+          >
+            <Filter className="w-4 h-4 mr-2" /> 
+            {unrepliedOnly ? 'Unreplied Only' : 'All Comments'}
+          </Button>
+
+          <Button variant="outline" size="sm" onClick={() => fetchComments(1, true)}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </Button>
         </div>
@@ -105,13 +136,15 @@ const Comments = () => {
       {!loading && comments.length === 0 && (
         <div className="text-center py-20 bg-white rounded-2xl border border-slate-100">
           <AtSign className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold">No comments yet</h3>
+          <h3 className="text-lg font-semibold">{unrepliedOnly ? 'No unreplied comments' : 'No comments yet'}</h3>
           <p className="text-sm text-slate-500 mt-1">
-            Comments on your Instagram posts will appear here in real time.
+            {unrepliedOnly ? "You're all caught up! Great job." : "Comments on your Instagram posts will appear here in real time."}
           </p>
-          <p className="text-xs text-slate-400 mt-3">
-            Make sure the webhook is subscribed in Meta → Instagram → Webhooks.
-          </p>
+          {!unrepliedOnly && (
+            <p className="text-xs text-slate-400 mt-3">
+              Make sure the webhook is subscribed in Meta → Instagram → Webhooks.
+            </p>
+          )}
         </div>
       )}
 
@@ -163,8 +196,22 @@ const Comments = () => {
           </div>
         ))}
       </div>
+
+      {hasMore && (
+        <div className="mt-8 text-center">
+          <Button 
+            variant="outline" 
+            onClick={() => fetchComments(page + 1, false)}
+            disabled={loadingMore}
+            className="rounded-full px-8"
+          >
+            {loadingMore ? 'Loading...' : 'Load More'}
+          </Button>
+        </div>
+      )}
     </div>
   );
 };
 
 export default Comments;
+

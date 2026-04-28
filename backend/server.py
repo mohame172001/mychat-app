@@ -1224,7 +1224,12 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
 
 # ---------------- comments ----------------
 @api.get('/comments')
-async def list_comments(user_id: str = Depends(get_current_user_id)):
+async def list_comments(
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(50, le=100),
+    page: int = Query(1, ge=1),
+    unreplied: bool = Query(False)
+):
     try:
         account = await getActiveInstagramAccount(user_id)
         query = _account_scoped_query(user_id, account)
@@ -1232,8 +1237,21 @@ async def list_comments(user_id: str = Depends(get_current_user_id)):
         if e.status_code != 400:
             raise
         query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-    docs = await db.comments.find(query).sort('created', -1).to_list(500)
-    return [_strip_mongo(d) for d in docs]
+        
+    if unreplied:
+        query['replied'] = {'$ne': True}
+
+    skip = (page - 1) * limit
+    total = await db.comments.count_documents(query)
+    docs = await db.comments.find(query).sort('created', -1).skip(skip).limit(limit).to_list(limit)
+    
+    return {
+        'comments': [_strip_mongo(d) for d in docs],
+        'total': total,
+        'page': page,
+        'limit': limit,
+        'has_more': (skip + limit) < total
+    }
 
 
 @api.post('/comments/{cid}/reply')
