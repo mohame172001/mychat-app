@@ -51,6 +51,12 @@ const Sidebar = () => {
   }, [user?.instagramConnected, user?.instagramHandle]);
 
   const currentAccount = instagramAccounts.find(account => account.active || account.isCurrent) || instagramAccounts[0];
+  const currentAccountName = currentAccount?.username
+    ? `@${currentAccount.username}`
+    : user?.instagramHandle
+      ? `@${String(user.instagramHandle).replace('@', '')}`
+      : user?.name;
+  const currentAccountAvatar = currentAccount?.profilePictureUrl || user?.instagramProfilePictureUrl || user?.avatar;
 
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;
@@ -103,13 +109,14 @@ const Sidebar = () => {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-left transition hover:bg-slate-100">
-              <img src={user?.avatar} alt={user?.name} className="w-8 h-8 rounded-full object-cover" />
+              <img
+                src={currentAccountAvatar}
+                alt={currentAccountName || 'Instagram account'}
+                className="w-8 h-8 rounded-full object-cover"
+              />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold truncate">
-                  {currentAccount?.username ? `@${currentAccount.username}` : user?.name}
-                </div>
-                <div className="text-xs text-slate-500 truncate">
-                  {currentAccount?.instagramAccountId || user?.instagramHandle || 'No Instagram account'}
+                  {currentAccountName || 'No Instagram account'}
                 </div>
               </div>
               <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
@@ -130,7 +137,15 @@ const Sidebar = () => {
                 disabled={switchingAccount || account.active || account.isCurrent}
                 className="cursor-pointer"
               >
-                <Instagram className="h-4 w-4" />
+                {account.profilePictureUrl ? (
+                  <img
+                    src={account.profilePictureUrl}
+                    alt={account.username || 'Instagram account'}
+                    className="h-5 w-5 rounded-full object-cover"
+                  />
+                ) : (
+                  <Instagram className="h-4 w-4" />
+                )}
                 <span className="min-w-0 flex-1 truncate">
                   @{account.username || account.instagramAccountId}
                 </span>
