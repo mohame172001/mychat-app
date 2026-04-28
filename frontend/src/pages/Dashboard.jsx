@@ -15,35 +15,46 @@ const Dashboard = () => {
   const [autos, setAutos] = useState([]);
 
   useEffect(() => {
+    let alive = true;
     (async () => {
       try {
         const [s, a] = await Promise.all([
           api.get('/dashboard/stats'),
           api.get('/automations'),
         ]);
-        setStats(s.data); setAutos(a.data);
+        if (!alive) return;
+        setStats(s.data);
+        setAutos(a.data);
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
       }
     })();
-  }, []);
+    return () => {
+      alive = false;
+    };
+  }, [user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
 
-  const chart = stats?.weekly_chart || [];
-  const maxVal = chart.length ? Math.max(...chart.map(d => d.messages)) : 1;
+  const chart = stats?.weeklyPerformance || stats?.weekly_chart || [];
+  const maxVal = Math.max(
+    1,
+    ...chart.map(d => Math.max(Number(d.messages || 0), Number(d.conversions || 0)))
+  );
+  const instagram = stats?.instagram || {};
+  const instagramHandle = String(instagram.username || user?.instagramHandle || 'your_handle').replace(/^@/, '');
 
   const statsCards = [
-    { label: 'Total Contacts', value: stats?.total_contacts ?? '—', icon: Users },
-    { label: 'Active Automations', value: stats?.active_automations ?? '—', icon: Zap },
-    { label: 'Messages Sent', value: (stats?.messages_sent ?? 0).toLocaleString(), icon: Send },
-    { label: 'Conversion Rate', value: `${stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
+    { label: 'Total Contacts', value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
+    { label: 'Active Automations', value: stats?.activeAutomations ?? stats?.active_automations ?? '-', icon: Zap },
+    { label: 'Messages Sent', value: (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString(), icon: Send },
+    { label: 'Conversion Rate', value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
   ];
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
-          <h1 className="font-display text-3xl font-extrabold tracking-tight">Good morning, {user?.name} 👋</h1>
-          <p className="mt-1 text-slate-600">Here’s what’s happening with your Instagram automations today.</p>
+          <h1 className="font-display text-3xl font-extrabold tracking-tight">Good morning, {user?.name}</h1>
+          <p className="mt-1 text-slate-600">Here is what is happening with your Instagram automations today.</p>
         </div>
         <Link to="/app/automations">
           <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
@@ -81,10 +92,10 @@ const Dashboard = () => {
           </div>
           <div className="mt-6 flex items-end justify-between gap-3 h-56">
             {chart.map((d) => (
-              <div key={d.day} className="flex-1 flex flex-col items-center gap-2">
+              <div key={d.date || d.day} className="flex-1 flex flex-col items-center gap-2">
                 <div className="w-full flex items-end gap-1 h-48">
-                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-blue-500 to-cyan-400" style={{ height: `${(d.messages / maxVal) * 100}%` }} />
-                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-pink-500 to-orange-400" style={{ height: `${(d.conversions / maxVal) * 100}%` }} />
+                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-blue-500 to-cyan-400" style={{ height: `${(Number(d.messages || 0) / maxVal) * 100}%` }} />
+                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-pink-500 to-orange-400" style={{ height: `${(Number(d.conversions || 0) / maxVal) * 100}%` }} />
                 </div>
                 <div className="text-xs text-slate-500 font-medium">{d.day}</div>
               </div>
@@ -94,8 +105,8 @@ const Dashboard = () => {
 
         <Card className="p-6 rounded-2xl border-slate-100 bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400 text-white relative overflow-hidden">
           <Instagram className="w-8 h-8" />
-          <h3 className="mt-4 font-display font-bold text-xl">{user?.instagramConnected ? 'Instagram Connected' : 'Connect Instagram'}</h3>
-          <p className="mt-1 text-sm text-white/90">{user?.instagramHandle || '@your_handle'} is {user?.instagramConnected ? 'linked and actively responding' : 'not connected yet'}.</p>
+          <h3 className="mt-4 font-display font-bold text-xl">{instagram.connected || user?.instagramConnected ? 'Instagram Connected' : 'Connect Instagram'}</h3>
+          <p className="mt-1 text-sm text-white/90">@{instagramHandle} is {instagram.connected || user?.instagramConnected ? 'linked and actively responding' : 'not connected yet'}.</p>
           {user?.instagramConnected && user?.instagramFollowers ? (
             <div className="mt-6 space-y-3">
               <div className="flex justify-between text-sm"><span className="text-white/80">Followers</span><span className="font-bold">{user.instagramFollowers.toLocaleString()}</span></div>
@@ -117,7 +128,7 @@ const Dashboard = () => {
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center"><Zap className="w-5 h-5 text-white" /></div>
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-sm truncate">{a.name}</div>
-                  <div className="text-xs text-slate-500">{a.trigger} • {(a.sent || 0).toLocaleString()} sent</div>
+                  <div className="text-xs text-slate-500">{a.trigger} - {(a.sent || 0).toLocaleString()} sent</div>
                 </div>
                 <Badge className={`rounded-full ${a.status === 'active' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : a.status === 'paused' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                   {a.status}

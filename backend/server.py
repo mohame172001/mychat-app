@@ -266,6 +266,7 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
     session = {
         'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
         'user_id': user_doc['id'],
+        **_current_instagram_context(user_doc),
         'ig_user_id': user_doc.get('ig_user_id') or '',
         'recipient_id': recipient_ig_id,
         'automation_id': automation.get('id'),
@@ -1302,62 +1303,224 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
 
 
 # ---------------- dashboard ----------------
+def _dashboard_dt(*values) -> Optional[datetime]:
+    for value in values:
+        parsed = _parse_graph_datetime(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _dashboard_key(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.replace('@', '').lower()
+
+
+def _dashboard_is_unscoped(doc: dict) -> bool:
+    return not any(doc.get(k) for k in (
+        'instagramAccountId', 'igUserId', 'instagramAccountDbId', 'instagram_account_id'
+    ))
+
+
+async def _dashboard_include_unscoped(user_id: str) -> bool:
+    try:
+        count = await db.instagram_accounts.count_documents({
+            'userId': user_id,
+            'isActive': {'$ne': False},
+        })
+        return count <= 1
+    except Exception:
+        return False
+
+
+async def _dashboard_scoped_docs(collection_name: str, user_id: str, account: Optional[dict],
+                                 include_unscoped: bool, limit: int = 5000) -> list:
+    collection = getattr(db, collection_name)
+    docs: list = []
+    seen: set = set()
+
+    async def add_many(query: dict):
+        try:
+            rows = await collection.find(query).sort('created', -1).to_list(limit)
+        except Exception:
+            rows = await collection.find(query).to_list(limit)
+        for row in rows:
+            key = row.get('id') or str(row.get('_id') or id(row))
+            if key not in seen:
+                seen.add(key)
+                docs.append(row)
+
+    if account:
+        await add_many(_account_scoped_query(user_id, account))
+    if include_unscoped:
+        await add_many({
+            'user_id': user_id,
+            'instagramAccountId': {'$exists': False},
+            'igUserId': {'$exists': False},
+            'instagramAccountDbId': {'$exists': False},
+            'instagram_account_id': {'$exists': False},
+        })
+    if not account and not include_unscoped:
+        await add_many({'user_id': user_id})
+    return docs
+
+
+def _automation_active(auto: dict) -> bool:
+    status = str(auto.get('status') or '').lower()
+    if status:
+        return status == 'active'
+    if 'enabled' in auto:
+        return bool(auto.get('enabled'))
+    if 'isActive' in auto:
+        return bool(auto.get('isActive'))
+    return False
+
+
+def _sent_day(doc: dict) -> Optional[str]:
+    ts = _dashboard_dt(
+        doc.get('sentAt'), doc.get('sent_at'), doc.get('completedAt'),
+        doc.get('processed_at'), doc.get('updated'), doc.get('updatedAt'),
+        doc.get('created'), doc.get('createdAt'),
+    )
+    return ts.date().isoformat() if ts else None
+
+
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     try:
         account = await getActiveInstagramAccount(user_id)
-        scoped_automation_query = _account_scoped_query(user_id, account)
-        scoped_comment_query = _account_scoped_query(user_id, account)
-        conv_query = _account_scoped_query(user_id, account)
     except HTTPException as e:
         if e.status_code != 400:
             raise
         account = None
-        scoped_automation_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-        scoped_comment_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-        conv_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-    total_contacts = await db.contacts.count_documents({'user_id': user_id})
-    active_automations = await db.automations.count_documents({**scoped_automation_query, 'status': 'active'})
-    autos = await db.automations.find(scoped_automation_query).to_list(1000)
-    messages_sent = sum(a.get('sent', 0) for a in autos)
-    clicks = sum(a.get('clicks', 0) for a in autos)
-    conv_rate = round((clicks / messages_sent * 100), 1) if messages_sent else 0.0
 
-    # Real 7-day chart built from actual conversation messages
+    include_unscoped = await _dashboard_include_unscoped(user_id)
+    ig_owner_id = _dashboard_key(
+        (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
+    )
+
+    autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 5000)
+    comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 5000)
+    conversations = await _dashboard_scoped_docs('conversations', user_id, account, include_unscoped, 5000)
+    dm_logs = await _dashboard_scoped_docs('dm_logs', user_id, account, include_unscoped, 5000)
+    sessions = await _dashboard_scoped_docs('comment_dm_sessions', user_id, account, include_unscoped, 5000)
+    contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 5000)
+
+    active_automations = sum(1 for auto in autos if _automation_active(auto))
+    automation_sent = sum(int(auto.get('sent') or 0) for auto in autos)
+
+    contacts_seen: set = set()
+
+    def add_contact(*values):
+        for value in values:
+            key = _dashboard_key(value)
+            if key and key != ig_owner_id:
+                contacts_seen.add(key)
+                return
+
+    for c in comments:
+        add_contact(c.get('commenter_id'), c.get('commenterId'), c.get('commenter_username'))
+    for log in dm_logs:
+        if not log.get('is_echo'):
+            add_contact(log.get('sender_id'), log.get('senderId'))
+    for session in sessions:
+        add_contact(session.get('recipient_id'), session.get('instagramUserId'))
+    for conv in conversations:
+        contact = conv.get('contact') or {}
+        add_contact(contact.get('ig_id'), contact.get('instagramUserId'), contact.get('username'))
+    for contact in contacts:
+        if account or include_unscoped or not _dashboard_is_unscoped(contact):
+            add_contact(contact.get('ig_id'), contact.get('instagramUserId'), contact.get('username'))
+
     from collections import OrderedDict
     today = datetime.utcnow().date()
     buckets = OrderedDict()
     for i in range(6, -1, -1):
         d = today - timedelta(days=i)
         buckets[d.isoformat()] = {
-            'day': d.strftime('%a'), 'messages': 0, 'conversions': 0,
+            'day': d.strftime('%a'),
+            'date': d.isoformat(),
+            'messages': 0,
+            'conversions': 0,
         }
-    convs = await db.conversations.find(conv_query).to_list(5000)
-    for conv in convs:
+
+    def add_message(day: Optional[str], count: int = 1):
+        if day in buckets and count > 0:
+            buckets[day]['messages'] += count
+
+    event_messages = 0
+    for c in comments:
+        sent_count = 0
+        if c.get('replied') is True:
+            sent_count += 1
+        if (c.get('action_status') or c.get('actionStatus')) == 'success' and not c.get('replied'):
+            sent_count += 1
+        if sent_count:
+            event_messages += sent_count
+            add_message(_sent_day(c), sent_count)
+
+    for log in dm_logs:
+        if str(log.get('status') or '').lower() == 'replied':
+            event_messages += 1
+            add_message(_sent_day(log), 1)
+
+    for session in sessions:
+        if str(session.get('status') or '').lower() in {'completed', 'sent'}:
+            event_messages += 1
+            add_message(_sent_day(session), 1)
+
+    for conv in conversations:
         for m in conv.get('messages', []) or []:
-            ts = m.get('ts') or m.get('created')
-            try:
-                if isinstance(ts, datetime):
-                    dkey = ts.date().isoformat()
-                elif isinstance(ts, str):
-                    dkey = datetime.fromisoformat(ts.replace('Z', '+00:00')).date().isoformat()
-                else:
-                    continue
-            except Exception:
-                continue
-            if dkey in buckets:
-                buckets[dkey]['messages'] += 1
-    chart = list(buckets.values())
-    return {
-        'total_contacts': total_contacts,
+            is_outgoing = (m.get('from') == 'me' or m.get('from_') == 'me')
+            failed = m.get('delivered') is False or m.get('status') in {'failed', 'skipped'}
+            if is_outgoing and not failed:
+                event_messages += 1
+                add_message(_sent_day(m), 1)
+
+    if automation_sent > event_messages:
+        remaining = automation_sent - event_messages
+        for auto in autos:
+            if remaining <= 0:
+                break
+            count = min(int(auto.get('sent') or 0), remaining)
+            add_message(_sent_day(auto), count)
+            remaining -= count
+
+    messages_sent = max(event_messages, automation_sent)
+    conversions = 0
+    conversion_rate = 0 if not contacts_seen else round((conversions / len(contacts_seen)) * 100, 1)
+    weekly_performance = list(buckets.values())
+    instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
+
+    response = {
+        'totalContacts': len(contacts_seen),
+        'activeAutomations': active_automations,
+        'messagesSent': messages_sent,
+        'conversionRate': conversion_rate,
+        'weeklyPerformance': weekly_performance,
+        'instagram': {
+            'connected': bool(account and account.get('connectionValid')),
+            'username': (account or {}).get('username') or None,
+            'activeAccountId': (account or {}).get('id') or None,
+            'instagramAccountId': instagram_account_id or None,
+        },
+        'conversionTrackingImplemented': False,
+        'commentsLogged': len(comments),
+        # Backward-compatible keys used by older frontend bundles.
+        'total_contacts': len(contacts_seen),
         'active_automations': active_automations,
         'messages_sent': messages_sent,
-        'conversion_rate': conv_rate,
-        'weekly_chart': chart,
-        'activeInstagramAccountId': account.get('id') if account else None,
-        'current_instagram_account_id': (account.get('instagramAccountId') or account.get('igUserId')) if account else None,
-        'comments_logged': await db.comments.count_documents(scoped_comment_query),
+        'conversion_rate': conversion_rate,
+        'weekly_chart': weekly_performance,
+        'activeInstagramAccountId': (account or {}).get('id') or None,
+        'current_instagram_account_id': instagram_account_id or None,
+        'comments_logged': len(comments),
     }
+    return response
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -6414,6 +6577,14 @@ async def _startup():
         await db.dm_logs.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='dm_logs_user_ig_created',
+        )
+        await db.comment_dm_sessions.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='comment_dm_sessions_user_ig_created',
+        )
+        await db.contacts.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='contacts_user_ig_created',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

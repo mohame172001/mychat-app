@@ -86,6 +86,10 @@ class FakeCursor:
     def limit(self, _limit):
         return self
 
+    def skip(self, n):
+        self.docs = self.docs[n:]
+        return self
+
     async def to_list(self, limit):
         return list(self.docs)[:limit]
 
@@ -148,6 +152,7 @@ class FakeDB:
         self.comments = FakeCollection(collections.get('comments', []))
         self.conversations = FakeCollection(collections.get('conversations', []))
         self.contacts = FakeCollection(collections.get('contacts', []))
+        self.comment_dm_sessions = FakeCollection(collections.get('comment_dm_sessions', []))
         self.dm_rules = FakeCollection(collections.get('dm_rules', []))
         self.dm_logs = FakeCollection(collections.get('dm_logs', []))
 
@@ -502,20 +507,124 @@ def test_dashboard_stats_filter_by_active_instagram_account(monkeypatch):
     assert after['active_automations'] == 1
 
 
+def test_dashboard_stats_counts_active_account_contacts_messages_and_weekly_rows(monkeypatch):
+    now = datetime.utcnow()
+    acc_a = _account(id='accA', userId='u1', instagramAccountId='igA',
+                     igUserId='igA', username='account_a', accessToken='token-a')
+    acc_b = _account(id='accB', userId='u1', instagramAccountId='igB',
+                     igUserId='igB', username='account_b', accessToken='token-b')
+    fake_db = FakeDB(
+        [acc_a, acc_b],
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {'id': 'autoA', 'user_id': 'u1', 'status': 'active',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'sent': 6, 'updated': now},
+            {'id': 'pausedA', 'user_id': 'u1', 'status': 'paused',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'sent': 0, 'updated': now},
+            {'id': 'autoB', 'user_id': 'u1', 'status': 'active',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'sent': 4, 'updated': now},
+        ],
+        comments=[
+            {'id': 'commentA1', 'user_id': 'u1', 'commenter_id': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'replied': True, 'action_status': 'success', 'created': now},
+            {'id': 'commentA2', 'user_id': 'u1', 'commenter_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'replied': False, 'action_status': 'success', 'created': now},
+            {'id': 'commentB', 'user_id': 'u1', 'commenter_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'replied': True, 'created': now},
+            {'id': 'oldGlobal', 'user_id': 'u1', 'commenter_id': 'global',
+             'replied': True, 'created': now},
+        ],
+        dm_logs=[
+            {'id': 'dmA1', 'user_id': 'u1', 'sender_id': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'replied', 'created': now},
+            {'id': 'dmA2', 'user_id': 'u1', 'sender_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'failed', 'created': now},
+            {'id': 'dmB', 'user_id': 'u1', 'sender_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'status': 'replied', 'created': now},
+        ],
+        comment_dm_sessions=[
+            {'id': 'sessionA', 'user_id': 'u1', 'recipient_id': 'contact4',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'completed', 'completedAt': now, 'created': now},
+        ],
+        conversations=[
+            {'id': 'convA', 'user_id': 'u1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'contact': {'ig_id': 'contact5'},
+             'messages': [
+                 {'from': 'me', 'created': now, 'delivered': True},
+                 {'from': 'contact', 'created': now},
+                 {'from': 'me', 'created': now, 'delivered': False},
+             ],
+             'created': now},
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_stats(user_id='u1'))
+    today = now.date().isoformat()
+
+    assert result['instagram']['activeAccountId'] == 'accA'
+    assert result['instagram']['instagramAccountId'] == 'igA'
+    assert result['activeAutomations'] == 1
+    assert result['active_automations'] == 1
+    assert result['totalContacts'] == 4
+    assert result['messagesSent'] == 6
+    assert result['conversionRate'] == 0
+    assert len(result['weeklyPerformance']) == 7
+    assert all({'day', 'date', 'messages', 'conversions'} <= set(row) for row in result['weeklyPerformance'])
+    assert next(row for row in result['weeklyPerformance'] if row['date'] == today)['messages'] == 6
+    assert 'token-a' not in str(result)
+    assert 'accessToken' not in str(result)
+
+
+def test_dashboard_stats_includes_unscoped_old_records_only_for_single_account(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {'id': 'oldAuto', 'user_id': 'u1', 'status': 'active',
+             'sent': 2, 'updated': now},
+        ],
+        comments=[
+            {'id': 'oldComment', 'user_id': 'u1', 'commenter_id': 'oldContact',
+             'replied': True, 'created': now},
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_stats(user_id='u1'))
+
+    assert result['activeAutomations'] == 1
+    assert result['totalContacts'] == 1
+    assert result['messagesSent'] == 2
+
+
 def test_rules_and_comment_logs_filter_by_active_instagram_account(monkeypatch):
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)
 
     rules_a = _run(server.list_automations(user_id='u1'))
-    comments_a = _run(server.list_comments(user_id='u1'))
+    comments_a = _run(server.list_comments(user_id='u1', limit=50, page=1, unreplied=False))
     _run(server.instagram_account_activate('accB', user_id='u1'))
     rules_b = _run(server.list_automations(user_id='u1'))
-    comments_b = _run(server.list_comments(user_id='u1'))
+    comments_b = _run(server.list_comments(user_id='u1', limit=50, page=1, unreplied=False))
 
     assert [r['id'] for r in rules_a] == ['autoA']
     assert [r['id'] for r in rules_b] == ['autoB']
-    assert [c['id'] for c in comments_a] == ['commentA']
-    assert [c['id'] for c in comments_b] == ['commentB']
+    assert [c['id'] for c in comments_a['comments']] == ['commentA']
+    assert [c['id'] for c in comments_b['comments']] == ['commentB']
 
 
 def test_webhook_mapping_uses_target_instagram_account_not_active_account(monkeypatch):
