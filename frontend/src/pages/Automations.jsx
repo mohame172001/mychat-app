@@ -254,6 +254,8 @@ const Automations = () => {
   const [keyword, setKeyword] = useState('');
   const [replyUnderPost, setReplyUnderPost] = useState(false);
   const [commentReply, setCommentReply] = useState('Thanks. Check your DM.');
+  const [commentReply2, setCommentReply2] = useState('');
+  const [commentReply3, setCommentReply3] = useState('');
   const [openingDmEnabled, setOpeningDmEnabled] = useState(true);
   const [openingDmText, setOpeningDmText] = useState("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
   const [openingDmButtonText, setOpeningDmButtonText] = useState('Send me the link');
@@ -327,6 +329,8 @@ const Automations = () => {
     setKeyword('');
     setReplyUnderPost(false);
     setCommentReply('Thanks. Check your DM.');
+    setCommentReply2('');
+    setCommentReply3('');
     setOpeningDmEnabled(true);
     setOpeningDmText("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
     setOpeningDmButtonText('Send me the link');
@@ -373,6 +377,8 @@ const Automations = () => {
         : Boolean(automation.comment_reply)
     );
     setCommentReply(automation.comment_reply || 'Thanks. Check your DM.');
+    setCommentReply2(automation.comment_reply_2 || '');
+    setCommentReply3(automation.comment_reply_3 || '');
     setOpeningDmEnabled(
       typeof automation.opening_dm_enabled === 'boolean'
         ? automation.opening_dm_enabled
@@ -474,7 +480,7 @@ const Automations = () => {
   const canGoLive = () => {
     if (postScope === 'specific' && !selectedMedia) return false;
     if (match === 'keyword' && keywordList.length === 0) return false;
-    if (replyUnderPost && !commentReply.trim()) return false;
+    if (replyUnderPost && !commentReply.trim() && !commentReply2.trim() && !commentReply3.trim()) return false;
     if (openingDmEnabled && !openingDmText.trim()) return false;
     if (!replyUnderPost && !openingDmEnabled && !linkDmText.trim() && !linkUrl.trim()) return false;
     return true;
@@ -511,8 +517,8 @@ const Automations = () => {
       }];
       const edges = [];
       let prev = 'n_trigger';
-      if (replyUnderPost && commentReply.trim()) {
-        nodes.push({ id: 'n_reply', type: 'reply_comment', data: { text: commentReply.trim() } });
+      if (replyUnderPost && (commentReply.trim() || commentReply2.trim() || commentReply3.trim())) {
+        nodes.push({ id: 'n_reply', type: 'reply_comment', data: { text: commentReply.trim() || commentReply2.trim() || commentReply3.trim() } });
         edges.push({ id: 'e1', source: prev, target: 'n_reply' });
         prev = 'n_reply';
       }
@@ -549,6 +555,8 @@ const Automations = () => {
         keywords: match === 'keyword' ? keywordList : [],
         reply_under_post: replyUnderPost,
         comment_reply: replyUnderPost ? commentReply.trim() : '',
+        comment_reply_2: replyUnderPost ? commentReply2.trim() : '',
+        comment_reply_3: replyUnderPost ? commentReply3.trim() : '',
         dm_text: dmText,
         opening_dm_enabled: openingDmEnabled,
         opening_dm_text: openingDmEnabled ? openingDmText.trim() : '',
@@ -755,12 +763,27 @@ const Automations = () => {
                   onChange={setReplyUnderPost}
                   icon={MessageCircle}
                 >
-                  <Input
-                    value={commentReply}
-                    onChange={e => setCommentReply(e.target.value)}
-                    placeholder="Write a public reply"
-                    className="h-10 rounded-lg bg-white"
-                  />
+                  <div className="space-y-2">
+                    <Input
+                      value={commentReply}
+                      onChange={e => setCommentReply(e.target.value)}
+                      placeholder="Reply variation 1"
+                      className="h-10 rounded-lg bg-white"
+                    />
+                    <Input
+                      value={commentReply2}
+                      onChange={e => setCommentReply2(e.target.value)}
+                      placeholder="Reply variation 2 (optional)"
+                      className="h-10 rounded-lg bg-white"
+                    />
+                    <Input
+                      value={commentReply3}
+                      onChange={e => setCommentReply3(e.target.value)}
+                      placeholder="Reply variation 3 (optional)"
+                      className="h-10 rounded-lg bg-white"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">We will pick one randomly to avoid spam filters.</p>
+                  </div>
                 </ToggleCard>
               </div>
             </section>

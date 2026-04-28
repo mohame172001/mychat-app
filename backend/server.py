@@ -578,7 +578,12 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
                 ok_all = ok_all and bool(ok)
         elif ntype == 'reply_comment':
-            msg_text = data.get('text') or data.get('message', '')
+            replies = data.get('replies')
+            if replies and isinstance(replies, list) and len(replies) > 0:
+                import random
+                msg_text = random.choice(replies)
+            else:
+                msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
                 action_attempted = True
                 ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
@@ -884,6 +889,8 @@ async def create_quick_comment_rule(
 
     reply_under_post = bool(data.get('reply_under_post', True))
     comment_reply = (data.get('comment_reply') or '').strip()
+    comment_reply_2 = (data.get('comment_reply_2') or '').strip()
+    comment_reply_3 = (data.get('comment_reply_3') or '').strip()
     opening_dm_enabled = bool(data.get('opening_dm_enabled', mode == 'reply_and_dm'))
     opening_dm_text = (data.get('opening_dm_text') or data.get('dm_text') or '').strip()
     opening_dm_button_text = (data.get('opening_dm_button_text') or '').strip()
@@ -913,8 +920,8 @@ async def create_quick_comment_rule(
     if mode == 'reply_and_dm' and has_dm_action and not dm_text:
         dm_text = 'Thanks for your comment.'
     process_existing_comments = bool(data.get('processExistingComments', False))
-    if reply_under_post and not comment_reply:
-        raise HTTPException(400, 'comment_reply is required')
+    if reply_under_post and not (comment_reply or comment_reply_2 or comment_reply_3):
+        raise HTTPException(400, 'At least one comment reply is required')
     if mode == 'reply_and_dm' and not dm_text:
         dm_text = 'Thanks for your comment.'
 
@@ -947,9 +954,10 @@ async def create_quick_comment_rule(
                        'match': match, 'keyword': keyword, 'keywords': keywords}}]
     edges = []
     prev = 'n_trigger'
-    if reply_under_post and comment_reply:
+    if reply_under_post and (comment_reply or comment_reply_2 or comment_reply_3):
+        replies = [r for r in [comment_reply, comment_reply_2, comment_reply_3] if r]
         nodes.append({'id': 'n_reply', 'type': 'reply_comment',
-                      'data': {'text': comment_reply}})
+                      'data': {'text': replies[0] if replies else '', 'replies': replies}})
         edges.append({'id': 'e1', 'source': prev, 'target': 'n_reply'})
         prev = 'n_reply'
     if dm_text:
@@ -982,6 +990,8 @@ async def create_quick_comment_rule(
         'post_scope': post_scope,
         'reply_under_post': reply_under_post,
         'comment_reply': comment_reply,
+        'comment_reply_2': comment_reply_2,
+        'comment_reply_3': comment_reply_3,
         'dm_text': dm_text,
         'opening_dm_enabled': opening_dm_enabled,
         'opening_dm_text': opening_dm_text,
