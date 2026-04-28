@@ -1612,10 +1612,10 @@ async def getActiveInstagramAccount(user_id: str) -> dict:
     Legacy users.ig_user_id/meta_access_token are kept in sync for older paths,
     but new account-scoped code should use this helper's returned account doc.
     """
-    await _ensure_instagram_account_docs_for_connected_users()
     user_doc = await db.users.find_one({'id': user_id})
     if not user_doc:
         raise HTTPException(404, 'User not found')
+    await _sync_user_instagram_account_doc(user_doc)
 
     active_id = user_doc.get('active_instagram_account_id') or ''
     account = None
@@ -6170,8 +6170,9 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
 
 @api.get('/instagram/accounts')
 async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
-    await _ensure_instagram_account_docs_for_connected_users()
     user_doc = await db.users.find_one({'id': user_id}) or {}
+    if user_doc:
+        await _sync_user_instagram_account_doc(user_doc)
     try:
         active_account = await getActiveInstagramAccount(user_id)
         active_account_id = active_account.get('id') or ''
@@ -6189,7 +6190,9 @@ async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
 
 @api.post('/instagram/accounts/{account_id}/activate')
 async def instagram_account_activate(account_id: str, user_id: str = Depends(get_current_user_id)):
-    await _ensure_instagram_account_docs_for_connected_users()
+    user_doc = await db.users.find_one({'id': user_id})
+    if user_doc:
+        await _sync_user_instagram_account_doc(user_doc)
     account = await db.instagram_accounts.find_one({'id': account_id, 'userId': user_id})
     if not account:
         raise HTTPException(404, 'Instagram account not found')
@@ -6243,7 +6246,9 @@ async def cron_refresh_instagram_tokens(request: Request):
 
 @api.get('/instagram/token-refresh/status')
 async def instagram_token_refresh_status(user_id: str = Depends(get_current_user_id)):
-    await _ensure_instagram_account_docs_for_connected_users()
+    user_doc = await db.users.find_one({'id': user_id})
+    if user_doc:
+        await _sync_user_instagram_account_doc(user_doc)
     rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
     return {
         'accounts': [_token_refresh_public_row(row) for row in rows],
