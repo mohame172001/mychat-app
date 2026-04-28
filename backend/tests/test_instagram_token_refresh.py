@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
@@ -105,6 +106,20 @@ class FakeCollection:
             doc[key] = int(doc.get(key) or 0) + value
         return None
 
+    async def update_many(self, query, update):
+        count = 0
+        for doc in self.docs:
+            if _match(doc, query):
+                for key, value in update.get('$set', {}).items():
+                    doc[key] = value
+                for key, value in update.get('$inc', {}).items():
+                    doc[key] = int(doc.get(key) or 0) + value
+                count += 1
+        return SimpleNamespace(modified_count=count)
+
+    async def count_documents(self, query):
+        return len([doc for doc in self.docs if _match(doc, query)])
+
     async def find_one_and_update(self, query, update, **_kwargs):
         doc = await self.find_one(query)
         if not doc:
@@ -114,9 +129,17 @@ class FakeCollection:
 
 
 class FakeDB:
-    def __init__(self, account, user=None):
-        self.instagram_accounts = FakeCollection([account] if account else [])
-        self.users = FakeCollection([user] if user else [])
+    def __init__(self, account=None, user=None, **collections):
+        accounts = account if isinstance(account, list) else ([account] if account else [])
+        users = user if isinstance(user, list) else ([user] if user else [])
+        self.instagram_accounts = FakeCollection(accounts)
+        self.users = FakeCollection(users)
+        self.automations = FakeCollection(collections.get('automations', []))
+        self.comments = FakeCollection(collections.get('comments', []))
+        self.conversations = FakeCollection(collections.get('conversations', []))
+        self.contacts = FakeCollection(collections.get('contacts', []))
+        self.dm_rules = FakeCollection(collections.get('dm_rules', []))
+        self.dm_logs = FakeCollection(collections.get('dm_logs', []))
 
 
 def _account(**overrides):
@@ -133,6 +156,19 @@ def _account(**overrides):
         'connectionValid': True,
         'isActive': True,
         'createdAt': now - timedelta(days=10),
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _user(**overrides):
+    doc = {
+        'id': 'u1',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+        'active_instagram_account_id': 'accA',
+        'instagramConnected': True,
+        'instagram_connection_valid': True,
     }
     doc.update(overrides)
     return doc
@@ -273,3 +309,114 @@ def test_public_refresh_status_never_returns_access_token():
 
     assert 'accessToken' not in row
     assert 'secret-token' not in str(row)
+
+
+def _multi_account_db():
+    acc_a = _account(id='accA', userId='u1', instagramAccountId='igA',
+                     igUserId='igA', username='account_a', accessToken='token-a')
+    acc_b = _account(id='accB', userId='u1', instagramAccountId='igB',
+                     igUserId='igB', username='account_b', accessToken='token-b')
+    other = _account(id='accOther', userId='u2', instagramAccountId='igOther',
+                     igUserId='igOther', username='other', accessToken='token-other')
+    return FakeDB(
+        [acc_a, acc_b, other],
+        [_user(), _user(id='u2', active_instagram_account_id='accOther', ig_user_id='igOther')],
+        automations=[
+            {'id': 'autoA', 'user_id': 'u1', 'name': 'A', 'status': 'active',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA', 'updated': datetime.utcnow()},
+            {'id': 'autoB', 'user_id': 'u1', 'name': 'B', 'status': 'active',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB', 'updated': datetime.utcnow()},
+        ],
+        comments=[
+            {'id': 'commentA', 'user_id': 'u1', 'ig_comment_id': 'cA',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'created': datetime.utcnow()},
+            {'id': 'commentB', 'user_id': 'u1', 'ig_comment_id': 'cB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'created': datetime.utcnow()},
+        ],
+        conversations=[],
+    )
+
+
+def test_instagram_accounts_marks_server_side_active_and_hides_tokens(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.instagram_accounts(user_id='u1'))
+
+    assert result['activeInstagramAccountId'] == 'accA'
+    assert result['count'] == 2
+    assert [row['id'] for row in result['accounts'] if row['active']] == ['accA']
+    assert 'token-a' not in str(result)
+    assert 'accessToken' not in str(result)
+
+
+def test_instagram_account_activate_switches_active_account(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.instagram_account_activate('accB', user_id='u1'))
+    user = _run(fake_db.users.find_one({'id': 'u1'}))
+
+    assert result['account']['id'] == 'accB'
+    assert result['account']['active'] is True
+    assert user['active_instagram_account_id'] == 'accB'
+    assert user['ig_user_id'] == 'igB'
+    assert user['meta_access_token'] == 'token-b'
+    assert 'token-b' not in str(result)
+
+
+def test_instagram_account_activate_rejects_other_user_account(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    try:
+        _run(server.instagram_account_activate('accOther', user_id='u1'))
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError('expected HTTPException')
+
+
+def test_dashboard_stats_filter_by_active_instagram_account(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    before = _run(server.dashboard_stats(user_id='u1'))
+    _run(server.instagram_account_activate('accB', user_id='u1'))
+    after = _run(server.dashboard_stats(user_id='u1'))
+
+    assert before['activeInstagramAccountId'] == 'accA'
+    assert after['activeInstagramAccountId'] == 'accB'
+    assert before['active_automations'] == 1
+    assert after['active_automations'] == 1
+
+
+def test_rules_and_comment_logs_filter_by_active_instagram_account(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    rules_a = _run(server.list_automations(user_id='u1'))
+    comments_a = _run(server.list_comments(user_id='u1'))
+    _run(server.instagram_account_activate('accB', user_id='u1'))
+    rules_b = _run(server.list_automations(user_id='u1'))
+    comments_b = _run(server.list_comments(user_id='u1'))
+
+    assert [r['id'] for r in rules_a] == ['autoA']
+    assert [r['id'] for r in rules_b] == ['autoB']
+    assert [c['id'] for c in comments_a] == ['commentA']
+    assert [c['id'] for c in comments_b] == ['commentB']
+
+
+def test_webhook_mapping_uses_target_instagram_account_not_active_account(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    user_doc, via = _run(server._find_user_doc_for_instagram_account_id('igB'))
+
+    assert via == 'instagram_accounts'
+    assert user_doc['id'] == 'u1'
+    assert user_doc['active_instagram_account_id'] == 'accB'
+    assert user_doc['ig_user_id'] == 'igB'
+    assert user_doc['meta_access_token'] == 'token-b'

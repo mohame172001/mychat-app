@@ -23,6 +23,8 @@ class UserPublic(BaseModel):
     instagramProfilePictureUrl: Optional[str] = None
     instagramConnectionValid: bool = False
     instagramAccountType: Optional[str] = None
+    activeInstagramAccountId: Optional[str] = None
+    activeInstagramIgUserId: Optional[str] = None
 
 
 class SignupIn(BaseModel):

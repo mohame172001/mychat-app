@@ -638,6 +638,8 @@ def _public_user(u: dict) -> UserPublic:
         instagramProfilePictureUrl=u.get('instagram_profile_picture_url'),
         instagramConnectionValid=instagram_valid,
         instagramAccountType=u.get('instagram_account_type'),
+        activeInstagramAccountId=u.get('active_instagram_account_id'),
+        activeInstagramIgUserId=u.get('ig_user_id'),
     )
 
 
@@ -708,18 +710,21 @@ async def me(user_id: str = Depends(get_current_user_id)):
 # ---------------- automations ----------------
 @api.get('/automations')
 async def list_automations(user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    ig_id = str(user_doc.get('ig_user_id') or '')
-    cursor = db.automations.find(_account_scoped_query(user_id, ig_id)).sort('updated', -1)
+    try:
+        account = await getActiveInstagramAccount(user_id)
+    except HTTPException as e:
+        if e.status_code == 400:
+            return []
+        raise
+    cursor = db.automations.find(_account_scoped_query(user_id, account)).sort('updated', -1)
     return [_strip_mongo(d) for d in await cursor.to_list(1000)]
 
 
 @api.post('/automations')
 async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_user_id)):
     automation_data = data.model_dump()
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    ctx = _current_instagram_context(user_doc)
+    account = await getActiveInstagramAccount(user_id)
+    ctx = _instagram_context_from_account(account)
     if ctx['instagramAccountId']:
         automation_data.update(ctx)
     now = datetime.utcnow()
@@ -740,9 +745,8 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
 
 @api.get('/automations/{aid}')
 async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
+    account = await getActiveInstagramAccount(user_id)
+    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, account)})
     if not d:
         raise HTTPException(404, 'Not found')
     return _strip_mongo(d)
@@ -751,9 +755,9 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
 @api.patch('/automations/{aid}')
 async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    existing = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
+    existing = await db.automations.find_one({'id': aid, **scoped})
     if not existing:
         raise HTTPException(404, 'Not found')
     now = datetime.utcnow()
@@ -777,7 +781,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         update['activationStartedAt'] = now
         logger.info('comment_rule_activation_reset rule_id=%s user_id=%s reason=%s',
                     aid, user_id, 'status_reenabled' if status_reenabled else 'rule_changed')
-    res = await db.automations.update_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))}, {'$set': update})
+    res = await db.automations.update_one({'id': aid, **scoped}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
     d = await db.automations.find_one({'id': aid})
@@ -786,9 +790,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
 
 @api.delete('/automations/{aid}')
 async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    res = await db.automations.delete_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
+    account = await getActiveInstagramAccount(user_id)
+    res = await db.automations.delete_one({'id': aid, **_account_scoped_query(user_id, account)})
     if res.deleted_count == 0:
         raise HTTPException(404, 'Not found')
     return {'ok': True}
@@ -796,9 +799,8 @@ async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id
 
 @api.post('/automations/{aid}/duplicate')
 async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, str(user_doc.get('ig_user_id') or ''))})
+    account = await getActiveInstagramAccount(user_id)
+    d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, account)})
     if not d:
         raise HTTPException(404, 'Not found')
     import uuid
@@ -919,8 +921,8 @@ async def create_quick_comment_rule(
     if not reply_under_post and not dm_text:
         raise HTTPException(400, 'Enable a public reply or a DM message')
 
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    ctx = _current_instagram_context(user_doc)
+    account = await getActiveInstagramAccount(user_id)
+    ctx = _instagram_context_from_account(account)
 
     if post_scope == 'any':
         trigger = 'comment:any'
@@ -1147,13 +1149,21 @@ async def _send_broadcast_task(bid: str, broadcast: dict, user_doc: dict, contac
 # ---------------- conversations ----------------
 @api.get('/conversations')
 async def list_conversations(user_id: str = Depends(get_current_user_id)):
-    docs = await db.conversations.find({'user_id': user_id}).sort('created', -1).to_list(500)
+    try:
+        account = await getActiveInstagramAccount(user_id)
+        query = _account_scoped_query(user_id, account)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
+    docs = await db.conversations.find(query).sort('created', -1).to_list(500)
     return [_strip_mongo(d) for d in docs]
 
 
 @api.get('/conversations/{cid}')
 async def get_conversation(cid: str, user_id: str = Depends(get_current_user_id)):
-    d = await db.conversations.find_one({'id': cid, 'user_id': user_id})
+    account = await getActiveInstagramAccount(user_id)
+    d = await db.conversations.find_one({'id': cid, **_account_scoped_query(user_id, account)})
     if not d:
         raise HTTPException(404, 'Not found')
     return _strip_mongo(d)
@@ -1164,7 +1174,12 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
     """Send a message. If the conversation is tied to a real IG contact and the
     user is connected to Instagram, send via Graph API. No fake auto-reply."""
     import uuid
-    conv = await db.conversations.find_one({'id': cid, 'user_id': user_id})
+    account = await getActiveInstagramAccount(user_id)
+    user_doc = _with_instagram_account_context(
+        await db.users.find_one({'id': user_id}) or {},
+        account,
+    )
+    conv = await db.conversations.find_one({'id': cid, **_account_scoped_query(user_id, account)})
     if not conv:
         raise HTTPException(404, 'Not found')
     text = (data.text or '').strip()
@@ -1176,7 +1191,6 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
     new_messages = conv['messages'] + [msg_me]
 
     # Try to deliver to Instagram if we have a real recipient
-    user_doc = await db.users.find_one({'id': user_id})
     delivered = False
     delivery_error = None
     ig_recipient = (conv.get('contact') or {}).get('ig_id')
@@ -1197,7 +1211,7 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
     if delivery_error:
         msg_me['error'] = delivery_error
     await db.conversations.update_one(
-        {'id': cid, 'user_id': user_id},
+        {'id': cid, **_account_scoped_query(user_id, account)},
         {'$set': {'messages': new_messages, 'lastMessage': text,
                   'time': 'now', 'unread': 0}}
     )
@@ -1209,12 +1223,13 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
 # ---------------- comments ----------------
 @api.get('/comments')
 async def list_comments(user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    ig_id = str(user_doc.get('ig_user_id') or '')
-    query = {'user_id': user_id}
-    if ig_id:
-        query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
+    try:
+        account = await getActiveInstagramAccount(user_id)
+        query = _account_scoped_query(user_id, account)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
     docs = await db.comments.find(query).sort('created', -1).to_list(500)
     return [_strip_mongo(d) for d in docs]
 
@@ -1223,16 +1238,16 @@ async def list_comments(user_id: str = Depends(get_current_user_id)):
 async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get_current_user_id)):
     """Reply to an Instagram comment via Graph API.
     POST /{comment-id}/replies with message=..."""
-    comment = await db.comments.find_one({'id': cid, 'user_id': user_id})
+    account = await getActiveInstagramAccount(user_id)
+    comment = await db.comments.find_one({'id': cid, **_account_scoped_query(user_id, account)})
     if not comment:
         raise HTTPException(404, 'Comment not found')
-    user_doc = await db.users.find_one({'id': user_id})
-    if not user_doc or not user_doc.get('instagramConnected'):
+    if not account.get('connectionValid'):
         raise HTTPException(400, 'Instagram not connected')
     ig_comment_id = comment.get('ig_comment_id')
     if not ig_comment_id:
         raise HTTPException(400, 'Comment has no Instagram ID (seed data cannot be replied to)')
-    access_token = user_doc.get('meta_access_token', '')
+    access_token = account.get('accessToken', '')
     text = (data.text or '').strip()
     if not text:
         raise HTTPException(400, 'Empty reply')
@@ -1259,13 +1274,18 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
 # ---------------- dashboard ----------------
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
-    user_doc = await db.users.find_one({'id': user_id}) or {}
-    await _ensure_automation_account_scope_for_user(user_doc)
-    ig_id = str(user_doc.get('ig_user_id') or '')
-    scoped_automation_query = _account_scoped_query(user_id, ig_id)
-    scoped_comment_query = {'user_id': user_id}
-    if ig_id:
-        scoped_comment_query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
+    try:
+        account = await getActiveInstagramAccount(user_id)
+        scoped_automation_query = _account_scoped_query(user_id, account)
+        scoped_comment_query = _account_scoped_query(user_id, account)
+        conv_query = _account_scoped_query(user_id, account)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        account = None
+        scoped_automation_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
+        scoped_comment_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
+        conv_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
     total_contacts = await db.contacts.count_documents({'user_id': user_id})
     active_automations = await db.automations.count_documents({**scoped_automation_query, 'status': 'active'})
     autos = await db.automations.find(scoped_automation_query).to_list(1000)
@@ -1282,9 +1302,6 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         buckets[d.isoformat()] = {
             'day': d.strftime('%a'), 'messages': 0, 'conversions': 0,
         }
-    conv_query = {'user_id': user_id}
-    if ig_id:
-        conv_query['$or'] = [{'instagramAccountId': ig_id}, {'igUserId': ig_id}]
     convs = await db.conversations.find(conv_query).to_list(5000)
     for conv in convs:
         for m in conv.get('messages', []) or []:
@@ -1307,7 +1324,8 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'messages_sent': messages_sent,
         'conversion_rate': conv_rate,
         'weekly_chart': chart,
-        'current_instagram_account_id': ig_id or None,
+        'activeInstagramAccountId': account.get('id') if account else None,
+        'current_instagram_account_id': (account.get('instagramAccountId') or account.get('igUserId')) if account else None,
         'comments_logged': await db.comments.count_documents(scoped_comment_query),
     }
 
@@ -1410,18 +1428,28 @@ def _token_refresh_public_row(account: dict, now: Optional[datetime] = None) -> 
     }
 
 
-def _instagram_account_public_row(account: dict, current_ig_id: str = '') -> dict:
+def _instagram_account_public_row(account: dict, active_account_id: str = '') -> dict:
     instagram_account_id = account.get('instagramAccountId') or account.get('igUserId')
+    token_row = _token_refresh_public_row(account)
     return {
         'id': account.get('id'),
         'instagramAccountId': instagram_account_id,
         'igUserId': instagram_account_id,
         'username': account.get('username'),
+        'profilePictureUrl': account.get('profilePictureUrl') or account.get('profile_picture_url'),
         'accountType': account.get('accountType'),
         'connectionValid': bool(account.get('connectionValid')),
         'isActive': bool(account.get('isActive')),
-        'isCurrent': bool(current_ig_id and instagram_account_id == current_ig_id),
+        'active': bool(active_account_id and account.get('id') == active_account_id),
+        'isCurrent': bool(active_account_id and account.get('id') == active_account_id),
         'tokenSource': account.get('tokenSource'),
+        'tokenStatus': {
+            'refreshStatus': token_row.get('refreshStatus'),
+            'tokenExpiresAt': token_row.get('tokenExpiresAt'),
+            'daysUntilExpiry': token_row.get('daysUntilExpiry'),
+            'critical': token_row.get('critical'),
+            'expired': token_row.get('expired'),
+        },
         'tokenExpiresAt': _iso_or_none(account.get('tokenExpiresAt')),
         'lastRefreshedAt': _iso_or_none(account.get('lastRefreshedAt')),
         'refreshStatus': account.get('refreshStatus') or 'unknown',
@@ -1431,22 +1459,58 @@ def _instagram_account_public_row(account: dict, current_ig_id: str = '') -> dic
     }
 
 
-def _current_instagram_context(user_doc: dict) -> dict:
-    instagram_account_id = str(user_doc.get('ig_user_id') or '')
-    username = (user_doc.get('instagramHandle') or '').replace('@', '')
+def _instagram_context_from_account(account_doc: Optional[dict]) -> dict:
+    account_doc = account_doc or {}
+    instagram_account_id = str(account_doc.get('instagramAccountId') or account_doc.get('igUserId') or '')
+    username = (account_doc.get('username') or '').replace('@', '')
     return {
+        'instagramAccountDbId': account_doc.get('id') or '',
+        'instagram_account_id': account_doc.get('id') or '',
         'instagramAccountId': instagram_account_id,
         'igUserId': instagram_account_id,
         'instagramUsername': username,
     }
 
 
-def _account_scoped_query(user_id: str, instagram_account_id: str) -> dict:
+def _current_instagram_context(user_doc: dict) -> dict:
+    return {
+        'instagramAccountDbId': user_doc.get('active_instagram_account_id') or '',
+        'instagram_account_id': user_doc.get('active_instagram_account_id') or '',
+        'instagramAccountId': str(user_doc.get('ig_user_id') or ''),
+        'igUserId': str(user_doc.get('ig_user_id') or ''),
+        'instagramUsername': (user_doc.get('instagramHandle') or '').replace('@', ''),
+    }
+
+
+def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
     query = {'user_id': user_id}
+    if isinstance(account_or_ig_id, dict):
+        account_id = str(
+            account_or_ig_id.get('id') or
+            account_or_ig_id.get('instagramAccountDbId') or
+            account_or_ig_id.get('instagram_account_id') or
+            ''
+        )
+        instagram_account_id = str(account_or_ig_id.get('instagramAccountId') or account_or_ig_id.get('igUserId') or '')
+    else:
+        account_id = ''
+        instagram_account_id = str(account_or_ig_id or '')
+    clauses = []
+    if account_id:
+        clauses.extend([
+            {'instagramAccountDbId': account_id},
+            {'instagram_account_id': account_id},
+            {'instagramAccountId': account_id},
+        ])
     if instagram_account_id:
-        query['$or'] = [
+        clauses.extend([
             {'instagramAccountId': instagram_account_id},
             {'igUserId': instagram_account_id},
+        ])
+    if clauses:
+        query['$or'] = [
+            clause for i, clause in enumerate(clauses)
+            if clause not in clauses[:i]
         ]
     return query
 
@@ -1457,6 +1521,7 @@ def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict])
     instagram_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ''
     merged = {**user_doc}
     merged.update({
+        'active_instagram_account_id': account_doc.get('id') or user_doc.get('active_instagram_account_id'),
         'ig_user_id': instagram_account_id,
         'meta_access_token': account_doc.get('accessToken') or user_doc.get('meta_access_token') or '',
         'instagramHandle': account_doc.get('username') or user_doc.get('instagramHandle') or '',
@@ -1468,6 +1533,86 @@ def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict])
     return merged
 
 
+async def getActiveInstagramAccount(user_id: str) -> dict:
+    """Return the server-side active Instagram account for this website user.
+
+    The active account id is persisted on users.active_instagram_account_id.
+    Legacy users.ig_user_id/meta_access_token are kept in sync for older paths,
+    but new account-scoped code should use this helper's returned account doc.
+    """
+    await _ensure_instagram_account_docs_for_connected_users()
+    user_doc = await db.users.find_one({'id': user_id})
+    if not user_doc:
+        raise HTTPException(404, 'User not found')
+
+    active_id = user_doc.get('active_instagram_account_id') or ''
+    account = None
+    if active_id:
+        account = await db.instagram_accounts.find_one({
+            'id': active_id,
+            'userId': user_id,
+            'isActive': {'$ne': False},
+        })
+    if not account:
+        account = await db.instagram_accounts.find_one({
+            'userId': user_id,
+            'isCurrent': True,
+            'isActive': {'$ne': False},
+        })
+    if not account and user_doc.get('ig_user_id'):
+        account = await db.instagram_accounts.find_one({
+            'userId': user_id,
+            '$or': [
+                {'instagramAccountId': str(user_doc.get('ig_user_id'))},
+                {'igUserId': str(user_doc.get('ig_user_id'))},
+            ],
+            'isActive': {'$ne': False},
+        })
+    if not account:
+        account = await db.instagram_accounts.find_one({
+            'userId': user_id,
+            'isActive': {'$ne': False},
+        })
+    if not account:
+        raise HTTPException(400, 'No Instagram account connected')
+
+    instagram_account_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    token = account.get('accessToken') or ''
+    now = datetime.utcnow()
+    await db.instagram_accounts.update_many(
+        {'userId': user_id},
+        {'$set': {'isCurrent': False}},
+    )
+    await db.instagram_accounts.update_one(
+        {'id': account['id'], 'userId': user_id},
+        {'$set': {'isCurrent': True, 'updatedAt': now}},
+    )
+    await db.users.update_one(
+        {'id': user_id},
+        {'$set': {
+            'active_instagram_account_id': account['id'],
+            'instagramConnected': True,
+            'instagram_connection_valid': bool(account.get('connectionValid')),
+            'instagramConnectionValid': bool(account.get('connectionValid')),
+            'instagram_connection_blocker': None if account.get('connectionValid') else 'selected_account_invalid',
+            'instagramHandle': account.get('username') or '',
+            'instagram_account_type': account.get('accountType'),
+            'instagram_profile_picture_url': account.get('profilePictureUrl') or account.get('profile_picture_url'),
+            'ig_user_id': instagram_account_id,
+            'meta_access_token': token,
+            'instagramTokenSource': account.get('tokenSource'),
+            'instagram_token_source': account.get('tokenSource'),
+            'tokenExpiresAt': _parse_graph_datetime(account.get('tokenExpiresAt')),
+            'instagram_token_expires_at': _parse_graph_datetime(account.get('tokenExpiresAt')),
+            'lastRefreshedAt': _parse_graph_datetime(account.get('lastRefreshedAt')),
+            'refreshStatus': account.get('refreshStatus'),
+            'refreshAttempts': int(account.get('refreshAttempts') or 0),
+            'updated': now,
+        }},
+    )
+    return account
+
+
 async def _ensure_automation_account_scope_for_user(user_doc: dict) -> int:
     """Attach legacy unscoped automations/comments to the user's current IG account.
 
@@ -1475,10 +1620,15 @@ async def _ensure_automation_account_scope_for_user(user_doc: dict) -> int:
     never moves a rule that is already tied to another Instagram account.
     """
     user_id = user_doc.get('id')
-    ctx = _current_instagram_context(user_doc)
-    instagram_account_id = ctx['instagramAccountId']
-    if not (user_id and instagram_account_id):
+    if not user_id:
         return 0
+    accounts = await db.instagram_accounts.find({
+        'userId': user_id,
+        'isActive': {'$ne': False},
+    }).to_list(2)
+    if len(accounts) != 1:
+        return 0
+    ctx = _instagram_context_from_account(accounts[0])
     now = datetime.utcnow()
     missing_account = {'$or': [
         {'instagramAccountId': {'$exists': False}},
@@ -1493,29 +1643,40 @@ async def _ensure_automation_account_scope_for_user(user_doc: dict) -> int:
         {'user_id': user_id, **missing_account},
         {'$set': ctx},
     )
+    await db.conversations.update_many(
+        {'user_id': user_id, **missing_account},
+        {'$set': ctx},
+    )
+    await db.dm_rules.update_many(
+        {'user_id': user_id, **missing_account},
+        {'$set': ctx},
+    )
+    await db.dm_logs.update_many(
+        {'user_id': user_id, **missing_account},
+        {'$set': ctx},
+    )
     return getattr(auto_res, 'modified_count', 0) or 0
 
 
 async def _find_user_doc_for_instagram_account_id(instagram_account_id: str) -> tuple:
     if not instagram_account_id:
         return None, None
+    account_doc = await db.instagram_accounts.find_one({'$or': [
+        {'instagramAccountId': instagram_account_id},
+        {'igUserId': instagram_account_id},
+    ], 'isActive': {'$ne': False}})
+    if account_doc:
+        owner = await db.users.find_one({'id': account_doc.get('userId') or account_doc.get('user_id')})
+        if owner:
+            return _with_instagram_account_context(owner, account_doc), 'instagram_accounts'
+
     user_doc = await db.users.find_one({'$or': [
         {'ig_user_id': instagram_account_id},
         {'fb_page_id': instagram_account_id},
     ]})
     if user_doc:
         return user_doc, 'users.ig_user_id'
-
-    account_doc = await db.instagram_accounts.find_one({'$or': [
-        {'instagramAccountId': instagram_account_id},
-        {'igUserId': instagram_account_id},
-    ], 'isActive': {'$ne': False}})
-    if not account_doc:
-        return None, None
-    owner = await db.users.find_one({'id': account_doc.get('userId') or account_doc.get('user_id')})
-    if not owner:
-        return None, None
-    return _with_instagram_account_context(owner, account_doc), 'instagram_accounts'
+    return None, None
 
 
 def _cron_secret_is_valid(provided: Optional[str]) -> bool:
@@ -1557,8 +1718,13 @@ async def _sync_user_instagram_account_doc(
     if not (user_id and instagram_account_id and token):
         return None
     now = datetime.utcnow()
-    account_id = _instagram_account_doc_id(user_id, instagram_account_id)
-    existing = await db.instagram_accounts.find_one({'id': account_id})
+    deterministic_account_id = _instagram_account_doc_id(user_id, instagram_account_id)
+    existing = await db.instagram_accounts.find_one({'$or': [
+        {'id': deterministic_account_id},
+        {'userId': user_id, 'instagramAccountId': instagram_account_id},
+        {'userId': user_id, 'igUserId': instagram_account_id},
+    ]})
+    account_id = (existing or {}).get('id') or deterministic_account_id
     created_at = (
         _parse_graph_datetime((existing or {}).get('createdAt')) or
         _parse_graph_datetime(user_doc.get('instagram_connected_at')) or
@@ -1602,6 +1768,14 @@ async def _sync_user_instagram_account_doc(
             '$setOnInsert': {'connectedAt': created_at},
         },
         upsert=True,
+    )
+    await db.users.update_one(
+        {'id': user_id, '$or': [
+            {'active_instagram_account_id': {'$exists': False}},
+            {'active_instagram_account_id': None},
+            {'active_instagram_account_id': ''},
+        ]},
+        {'$set': {'active_instagram_account_id': account_id}},
     )
     stored = await db.instagram_accounts.find_one({'id': account_id})
     return stored
@@ -2733,19 +2907,17 @@ async def instagram_profile(user_id: str = Depends(get_current_user_id)):
     Never returns the access token. If Graph does not expose a profile picture
     for the current token, we fall back to the stored account metadata.
     """
-    u = await db.users.find_one({'id': user_id})
-    if not u:
-        raise HTTPException(404, 'User not found')
-
-    connected = _has_valid_instagram_connection(u)
+    account = await getActiveInstagramAccount(user_id)
+    connected = bool(account.get('connectionValid') and account.get('accessToken'))
     out = {
         'connected': connected,
-        'username': u.get('instagramHandle') or None,
-        'profilePictureUrl': u.get('instagram_profile_picture_url') or None,
-        'igUserId': u.get('ig_user_id') or None,
-        'accountType': u.get('instagram_account_type') or None,
+        'accountId': account.get('id'),
+        'username': account.get('username') or None,
+        'profilePictureUrl': account.get('profilePictureUrl') or account.get('profile_picture_url') or None,
+        'igUserId': account.get('instagramAccountId') or account.get('igUserId') or None,
+        'accountType': account.get('accountType') or None,
     }
-    token = u.get('meta_access_token') or ''
+    token = account.get('accessToken') or ''
     if not connected or not token:
         return out
 
@@ -2778,6 +2950,15 @@ async def instagram_profile(user_id: str = Depends(get_current_user_id)):
                         'instagram_account_type': account_type,
                     }},
                 )
+                await db.instagram_accounts.update_one(
+                    {'id': account['id'], 'userId': user_id},
+                    {'$set': {
+                        'username': username,
+                        'profilePictureUrl': profile_picture_url,
+                        'accountType': account_type,
+                        'updatedAt': datetime.utcnow(),
+                    }},
+                )
             else:
                 out['profilePictureUnavailable'] = True
     except Exception as e:
@@ -2791,11 +2972,9 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
     """Force-subscribe the user's connected IG user to webhook fields via
     Instagram API (graph.instagram.com). Requires an IG user access token
     obtained through Instagram Business Login."""
-    u = await db.users.find_one({'id': user_id})
-    if not _has_valid_instagram_connection(u):
-        raise HTTPException(400, _instagram_connection_error(u))
-    token = u.get('meta_access_token', '')
-    ig_user_id = u.get('ig_user_id', '')
+    account = await getActiveInstagramAccount(user_id)
+    token = account.get('accessToken') or ''
+    ig_user_id = account.get('instagramAccountId') or account.get('igUserId') or ''
     if not ig_user_id:
         raise HTTPException(400, 'ig_user_id missing — reconnect Instagram')
     async with httpx.AsyncClient(timeout=20) as c:
@@ -3091,11 +3270,11 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
 
     The wizard never sees the /{ig_user_id}/media error if /me/media succeeded.
     """
-    u = await db.users.find_one({'id': user_id})
-    if not _has_valid_instagram_connection(u):
-        raise HTTPException(400, _instagram_connection_error(u))
-    token = u.get('meta_access_token', '')
-    ig_id = str(u.get('ig_user_id') or '')
+    account = await getActiveInstagramAccount(user_id)
+    if not account.get('connectionValid'):
+        raise HTTPException(400, 'Instagram account is not connected')
+    token = account.get('accessToken', '')
+    ig_id = str(account.get('instagramAccountId') or account.get('igUserId') or '')
     if not token:
         raise HTTPException(400, 'Missing access token')
     fields = 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count'
@@ -3127,6 +3306,7 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
                         items = (r.json() or {}).get('data') or []
                         return {
                             'ok': True,
+                            'accountId': account.get('id'),
                             'endpointUsed': label,
                             'media': items,
                             'items': items,
@@ -3144,6 +3324,7 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
 
         return {
             'ok': False,
+            'accountId': account.get('id'),
             'endpointUsed': None,
             'media': [],
             'items': [],
@@ -3763,7 +3944,6 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         '$or': [
             {'instagramAccountId': ig_account_id},
             {'igUserId': ig_account_id},
-            {'instagramAccountId': {'$exists': False}},
         ],
     })
     if existing:
@@ -4274,6 +4454,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         return {
             'id': str(_uuid.uuid4()),
             'user_id': user_id,
+            **_current_instagram_context(user_doc),
             'ig_user_id': ig_account_id,
             'sender_id': sender_id,
             'recipient_id': locals().get('recipient_id') if 'recipient_id' in locals() else None,
@@ -4312,7 +4493,15 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             return False
 
     # Dedup FIRST so replays never double-reply.
-    existing = await db.dm_logs.find_one({'user_id': user_id, 'dedup_key': dedup_key})
+    existing = await db.dm_logs.find_one({
+        'user_id': user_id,
+        'dedup_key': dedup_key,
+        '$or': [
+            {'instagramAccountId': ig_account_id},
+            {'igUserId': ig_account_id},
+            {'instagramAccountId': {'$exists': False}},
+        ],
+    })
     if existing:
         logger.info('dm_message_duplicate_skipped dedup_key=%s', dedup_key)
         return {'processed': False, 'status': 'skipped', 'reason': 'duplicate',
@@ -4411,7 +4600,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
 
     # Load active DM rules for this user
     rules = await db.dm_rules.find(
-        {'user_id': user_id, 'is_active': True}
+        {**_account_scoped_query(user_id, _current_instagram_context(user_doc)), 'is_active': True}
     ).to_list(200)
     logger.info('dm_rule_loaded count=%s user=%s', len(rules), user_doc.get('email'))
 
@@ -5236,6 +5425,9 @@ def _dm_rule_out(d: dict) -> dict:
         return d
     return {
         'id': d.get('id'),
+        'instagramAccountId': d.get('instagramAccountId') or d.get('igUserId'),
+        'instagramAccountDbId': d.get('instagramAccountDbId') or d.get('instagram_account_id'),
+        'instagramUsername': d.get('instagramUsername'),
         'name': d.get('name'),
         'keyword': d.get('keyword'),
         'matchMode': d.get('match_mode'),
@@ -5248,7 +5440,8 @@ def _dm_rule_out(d: dict) -> dict:
 
 @api.get('/instagram/dm/rules')
 async def list_dm_rules(user_id: str = Depends(get_current_user_id)):
-    rows = await db.dm_rules.find({'user_id': user_id}).sort('created_at', -1).to_list(500)
+    account = await getActiveInstagramAccount(user_id)
+    rows = await db.dm_rules.find(_account_scoped_query(user_id, account)).sort('created_at', -1).to_list(500)
     return {'items': [_dm_rule_out(r) for r in rows], 'count': len(rows)}
 
 
@@ -5260,12 +5453,14 @@ async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_user
         raise HTTPException(400, f'matchMode must be one of {sorted(_DM_VALID_MODES)}')
     if not data.name.strip() or not data.keyword.strip() or not data.replyText.strip():
         raise HTTPException(400, 'name, keyword and replyText are required')
-    u = await db.users.find_one({'id': user_id})
+    account = await getActiveInstagramAccount(user_id)
+    ctx = _instagram_context_from_account(account)
     now = datetime.utcnow()
     doc = {
         'id': str(_uuid.uuid4()),
         'user_id': user_id,
-        'ig_user_id': u.get('ig_user_id') if u else None,
+        **ctx,
+        'ig_user_id': ctx.get('igUserId') or None,
         'name': data.name.strip(),
         'keyword': data.keyword.strip(),
         'match_mode': mode,
@@ -5280,6 +5475,8 @@ async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_user
 
 @api.patch('/instagram/dm/rules/{rid}')
 async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_current_user_id)):
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
     update: dict = {'updated_at': datetime.utcnow()}
     if data.name is not None:
         update['name'] = data.name.strip()
@@ -5294,16 +5491,17 @@ async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_
         update['reply_text'] = data.replyText
     if data.isActive is not None:
         update['is_active'] = bool(data.isActive)
-    res = await db.dm_rules.update_one({'id': rid, 'user_id': user_id}, {'$set': update})
+    res = await db.dm_rules.update_one({'id': rid, **scoped}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'rule not found')
-    doc = await db.dm_rules.find_one({'id': rid, 'user_id': user_id})
+    doc = await db.dm_rules.find_one({'id': rid, **scoped})
     return _dm_rule_out(doc)
 
 
 @api.delete('/instagram/dm/rules/{rid}')
 async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_user_id)):
-    res = await db.dm_rules.delete_one({'id': rid, 'user_id': user_id})
+    account = await getActiveInstagramAccount(user_id)
+    res = await db.dm_rules.delete_one({'id': rid, **_account_scoped_query(user_id, account)})
     if res.deleted_count == 0:
         raise HTTPException(404, 'rule not found')
     return {'ok': True}
@@ -5312,8 +5510,9 @@ async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_user_id)):
 @api.post('/instagram/dm/test-rule')
 async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_user_id)):
     """Match `text` against the user's active rules without sending anything."""
+    account = await getActiveInstagramAccount(user_id)
     rules = await db.dm_rules.find(
-        {'user_id': user_id, 'is_active': True}
+        {**_account_scoped_query(user_id, account), 'is_active': True}
     ).to_list(200)
     matches = []
     for r in rules:
@@ -5337,13 +5536,17 @@ async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_user_i
 @api.get('/instagram/dm/logs')
 async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_id)):
     limit = max(1, min(limit, 200))
-    rows = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(limit).to_list(limit)
+    account = await getActiveInstagramAccount(user_id)
+    rows = await db.dm_logs.find(_account_scoped_query(user_id, account)).sort('created', -1).limit(limit).to_list(limit)
     out = []
     for d in rows:
         d.pop('_id', None)
         created = d.get('created')
         out.append({
             'id': d.get('id'),
+            'instagramAccountId': d.get('instagramAccountId') or d.get('igUserId'),
+            'instagramAccountDbId': d.get('instagramAccountDbId') or d.get('instagram_account_id'),
+            'instagramUsername': d.get('instagramUsername'),
             'senderId': d.get('sender_id'),
             'messageId': d.get('message_id'),
             'dedupKey': d.get('dedup_key'),
@@ -5364,12 +5567,11 @@ async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_
 
 @api.get('/instagram/dm/diagnostics')
 async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
-    u = await db.users.find_one({'id': user_id})
-    if not u:
-        raise HTTPException(404, 'user not found')
-    ig_user_id = u.get('ig_user_id') or ''
-    token = u.get('meta_access_token') or ''
-    connected = bool(u.get('instagramConnected') and token and ig_user_id)
+    account = await getActiveInstagramAccount(user_id)
+    u = _with_instagram_account_context(await db.users.find_one({'id': user_id}) or {}, account)
+    ig_user_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    token = account.get('accessToken') or ''
+    connected = bool(account.get('connectionValid') and token and ig_user_id)
 
     # messaging webhook subscription state — read live from Graph
     messaging_subscribed = False
@@ -5393,7 +5595,7 @@ async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
         except Exception as e:
             subscription_error = str(e)[:200]
 
-    active_rules = await db.dm_rules.count_documents({'user_id': user_id, 'is_active': True})
+    active_rules = await db.dm_rules.count_documents({**_account_scoped_query(user_id, account), 'is_active': True})
 
     # Recent messaging events (count from last 50 webhook log rows)
     wh = await db.webhook_log.find().sort('received', -1).limit(50).to_list(50)
@@ -5411,7 +5613,7 @@ async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
         except Exception:
             pass
 
-    last_log = await db.dm_logs.find({'user_id': user_id}).sort('created', -1).limit(1).to_list(1)
+    last_log = await db.dm_logs.find(_account_scoped_query(user_id, account)).sort('created', -1).limit(1).to_list(1)
     last_reply_status = last_log[0].get('status') if last_log else 'none'
 
     blocker_reason = None
@@ -6078,11 +6280,17 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
 async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
     await _ensure_instagram_account_docs_for_connected_users()
     user_doc = await db.users.find_one({'id': user_id}) or {}
-    current_ig_id = str(user_doc.get('ig_user_id') or '')
+    try:
+        active_account = await getActiveInstagramAccount(user_id)
+        active_account_id = active_account.get('id') or ''
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        active_account_id = user_doc.get('active_instagram_account_id') or ''
     rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
     return {
-        'accounts': [_instagram_account_public_row(row, current_ig_id) for row in rows],
-        'currentInstagramAccountId': current_ig_id or None,
+        'accounts': [_instagram_account_public_row(row, active_account_id) for row in rows],
+        'activeInstagramAccountId': active_account_id or None,
         'count': len(rows),
     }
 
@@ -6111,6 +6319,7 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
     await db.users.update_one(
         {'id': user_id},
         {'$set': {
+            'active_instagram_account_id': account_id,
             'instagramConnected': True,
             'instagram_connection_valid': bool(account.get('connectionValid')),
             'instagramConnectionValid': bool(account.get('connectionValid')),
@@ -6130,7 +6339,7 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
         }},
     )
     refreshed = await db.instagram_accounts.find_one({'id': account_id}) or account
-    return {'ok': True, 'account': _instagram_account_public_row(refreshed, instagram_account_id)}
+    return {'ok': True, 'account': _instagram_account_public_row(refreshed, account_id)}
 
 
 @api.post('/cron/refresh-instagram-tokens')
@@ -6225,9 +6434,13 @@ async def _startup():
     global _poll_task
     # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
     try:
+        await db.comments.drop_index('uniq_user_ig_comment')
+    except Exception:
+        pass
+    try:
         await db.comments.create_index(
-            [('user_id', 1), ('ig_comment_id', 1)],
-            unique=True, sparse=True, name='uniq_user_ig_comment'
+            [('user_id', 1), ('instagramAccountId', 1), ('ig_comment_id', 1)],
+            unique=True, sparse=True, name='uniq_user_account_ig_comment'
         )
     except Exception as e:
         logger.warning('comments index create: %s', e)
@@ -6241,9 +6454,13 @@ async def _startup():
     except Exception:
         pass
     try:
+        await db.dm_logs.drop_index('uniq_user_dm_dedup_key')
+    except Exception:
+        pass
+    try:
         await db.dm_logs.create_index(
-            [('user_id', 1), ('dedup_key', 1)],
-            unique=True, sparse=True, name='uniq_user_dm_dedup_key',
+            [('user_id', 1), ('instagramAccountId', 1), ('dedup_key', 1)],
+            unique=True, sparse=True, name='uniq_user_ig_dm_dedup_key',
         )
     except Exception as e:
         logger.warning('dm_logs dedup_key index create: %s', e)
@@ -6264,6 +6481,14 @@ async def _startup():
         await db.conversations.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='conversations_user_ig_created',
+        )
+        await db.dm_rules.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('is_active', 1)],
+            name='dm_rules_user_ig_active',
+        )
+        await db.dm_logs.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='dm_logs_user_ig_created',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

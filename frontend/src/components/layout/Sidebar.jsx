@@ -49,7 +49,7 @@ const Sidebar = () => {
     };
   }, [user?.instagramConnected, user?.instagramHandle]);
 
-  const currentAccount = instagramAccounts.find(account => account.isCurrent) || instagramAccounts[0];
+  const currentAccount = instagramAccounts.find(account => account.active || account.isCurrent) || instagramAccounts[0];
 
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;
@@ -58,7 +58,7 @@ const Sidebar = () => {
       await api.post(`/instagram/accounts/${account.id}/activate`);
       await refreshUser?.();
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
-      window.location.assign('/app');
+      window.location.assign(`/app?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {
       toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
     }
@@ -114,14 +114,14 @@ const Sidebar = () => {
               <DropdownMenuItem
                 key={account.id}
                 onClick={() => switchInstagramAccount(account)}
-                disabled={switchingAccount || account.isCurrent}
+                disabled={switchingAccount || account.active || account.isCurrent}
                 className="cursor-pointer"
               >
                 <Instagram className="h-4 w-4" />
                 <span className="min-w-0 flex-1 truncate">
                   @{account.username || account.instagramAccountId}
                 </span>
-                {account.isCurrent && <Check className="h-4 w-4 text-emerald-600" />}
+                {(account.active || account.isCurrent) && <Check className="h-4 w-4 text-emerald-600" />}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
