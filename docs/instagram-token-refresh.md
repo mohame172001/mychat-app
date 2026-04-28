@@ -36,17 +36,76 @@ curl -X POST \
 The response is a JSON summary with counts for checked, refreshed, skipped,
 failed, critical, and expired accounts. It never returns access tokens.
 
-## Railway Cron
+## Railway Setup
 
-Configure a Railway cron or any external cron service to call the endpoint once
-per day. Daily is enough because long-lived Instagram tokens are refreshed only
-when they are within the refresh window.
+Use two Railway services:
+
+1. Backend service
+   - Keep it as the normal always-on FastAPI web service.
+   - Set a stable secret:
+
+```text
+CRON_SECRET=<stable long random secret>
+```
+
+2. `instagram-token-refresh-cron` service
+   - Create it as a separate Railway service from the repo `cron/` directory.
+   - Start command: `npm start`
+   - Set variables:
+
+```text
+CRON_SECRET=${{ backend.CRON_SECRET }}
+BACKEND_URL=https://backend-production-a1a3.up.railway.app
+```
+
+The cron service must not have its own unrelated `CRON_SECRET` value. It should
+reference the backend service variable so both services use the same secret.
+
+Configure the cron schedule to call/run the cron service once per day. Daily is
+enough because long-lived Instagram tokens are refreshed only when they are
+within the refresh window.
 
 Suggested schedule:
 
 ```text
 0 3 * * *
 ```
+
+The cron script logs only:
+
+```text
+CRON_SECRET exists: true/false
+CRON_SECRET length: <number>
+Status: <number>
+```
+
+It never prints the secret value.
+
+## Verifying Railway Logs
+
+Backend logs should show:
+
+```text
+POST /api/cron/refresh-instagram-tokens 200
+```
+
+Cron service logs should show:
+
+```text
+CRON_SECRET exists: true
+CRON_SECRET length: <non-zero number>
+Status: 200
+```
+
+Meaning of common statuses:
+
+- `403`: the endpoint path is correct, but the cron service did not send the
+  same secret as the backend `CRON_SECRET`. Check that the cron service has
+  `CRON_SECRET=${{ backend.CRON_SECRET }}` and redeploy it.
+- `404`: the cron service is calling the wrong backend URL or path.
+- `200`: the backend accepted the cron request and ran the refresh job. The
+  JSON summary contains checked/refreshed/skipped/failed counts and never
+  returns access tokens.
 
 ## How Refresh Works
 
@@ -114,6 +173,13 @@ $env:IG_APP_ID='123'
 $env:IG_APP_SECRET='secret'
 $env:CRON_SECRET='cron-test'
 python -m pytest backend\tests\test_instagram_token_refresh.py -q
+```
+
+Cron script tests:
+
+```powershell
+cd cron
+node --test
 ```
 
 ## Remaining Failure Cases

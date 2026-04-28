@@ -1,0 +1,13 @@
+{
+  "name": "instagram-token-refresh-cron",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node instagram-token-refresh-cron.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

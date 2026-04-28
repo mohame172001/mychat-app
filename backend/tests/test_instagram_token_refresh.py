@@ -14,6 +14,8 @@ os.environ.setdefault('CRON_SECRET', 'cron-secret')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 
 class FakeResponse:
@@ -140,6 +142,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _request(headers=None):
+    encoded_headers = [
+        (str(k).lower().encode('latin-1'), str(v).encode('latin-1'))
+        for k, v in (headers or {}).items()
+    ]
+    return Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': encoded_headers})
+
+
 def test_successful_refresh_updates_token_and_hides_token(monkeypatch):
     user = {'id': 'u1', 'ig_user_id': 'ig1', 'meta_access_token': 'old-token'}
     fake_db = FakeDB(_account(), user)
@@ -214,6 +224,48 @@ def test_cron_secret_validation(monkeypatch):
     assert server._cron_secret_is_valid(None) is False
     assert server._cron_secret_is_valid('wrong') is False
     assert server._cron_secret_is_valid('expected') is True
+
+
+def test_cron_endpoint_rejects_missing_authorization(monkeypatch):
+    monkeypatch.setattr(server, 'CRON_SECRET', 'expected')
+
+    try:
+        _run(server.cron_refresh_instagram_tokens(_request()))
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert 'expected' not in str(exc.detail)
+    else:
+        raise AssertionError('expected HTTPException')
+
+
+def test_cron_endpoint_rejects_wrong_authorization(monkeypatch):
+    monkeypatch.setattr(server, 'CRON_SECRET', 'expected')
+
+    try:
+        _run(server.cron_refresh_instagram_tokens(
+            _request({'Authorization': 'Bearer wrong'})
+        ))
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert 'wrong' not in str(exc.detail)
+    else:
+        raise AssertionError('expected HTTPException')
+
+
+def test_cron_endpoint_accepts_correct_authorization(monkeypatch):
+    monkeypatch.setattr(server, 'CRON_SECRET', 'expected')
+
+    async def fake_cron():
+        return {'totalChecked': 0, 'refreshed': 0, 'results': []}
+
+    monkeypatch.setattr(server, 'runInstagramTokenRefreshCron', fake_cron)
+
+    result = _run(server.cron_refresh_instagram_tokens(
+        _request({'Authorization': 'Bearer expected'})
+    ))
+
+    assert result['totalChecked'] == 0
+    assert 'expected' not in str(result)
 
 
 def test_public_refresh_status_never_returns_access_token():
