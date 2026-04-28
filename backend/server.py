@@ -5,9 +5,10 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
@@ -1304,49 +1305,75 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
 # ---------------- dashboard ----------------
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
+    from collections import OrderedDict
     try:
         account = await getActiveInstagramAccount(user_id)
         scoped_automation_query = _account_scoped_query(user_id, account)
         scoped_comment_query = _account_scoped_query(user_id, account)
-        conv_query = _account_scoped_query(user_id, account)
     except HTTPException as e:
         if e.status_code != 400:
             raise
         account = None
         scoped_automation_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
         scoped_comment_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-        conv_query = {'user_id': user_id, 'instagramAccountId': {'$exists': False}}
-    total_contacts = await db.contacts.count_documents({'user_id': user_id})
-    active_automations = await db.automations.count_documents({**scoped_automation_query, 'status': 'active'})
-    autos = await db.automations.find(scoped_automation_query).to_list(1000)
+
+    # Run independent counts in parallel to reduce latency
+    total_contacts, active_automations, autos, comments_logged = await asyncio.gather(
+        db.contacts.count_documents({'user_id': user_id}),
+        db.automations.count_documents({**scoped_automation_query, 'status': 'active'}),
+        db.automations.find(scoped_automation_query).to_list(1000),
+        db.comments.count_documents(scoped_comment_query),
+    )
+
     messages_sent = sum(a.get('sent', 0) for a in autos)
     clicks = sum(a.get('clicks', 0) for a in autos)
     conv_rate = round((clicks / messages_sent * 100), 1) if messages_sent else 0.0
 
-    # Real 7-day chart built from actual conversation messages
-    from collections import OrderedDict
+    # 7-day weekly performance: one row per day, always 7 rows.
+    # Count messages from comment_logs (action_status=success) scoped to this account.
     today = datetime.utcnow().date()
-    buckets = OrderedDict()
+    week_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+    buckets: OrderedDict = OrderedDict()
     for i in range(6, -1, -1):
         d = today - timedelta(days=i)
         buckets[d.isoformat()] = {
             'day': d.strftime('%a'), 'messages': 0, 'conversions': 0,
         }
-    convs = await db.conversations.find(conv_query).to_list(5000)
-    for conv in convs:
-        for m in conv.get('messages', []) or []:
-            ts = m.get('ts') or m.get('created')
-            try:
-                if isinstance(ts, datetime):
-                    dkey = ts.date().isoformat()
-                elif isinstance(ts, str):
-                    dkey = datetime.fromisoformat(ts.replace('Z', '+00:00')).date().isoformat()
-                else:
-                    continue
-            except Exception:
+
+    # Load comment logs for the last 7 days in one query (scoped by account)
+    comment_log_query = {
+        **scoped_comment_query,
+        'action_status': 'success',
+        'processed_at': {'$gte': week_start},
+    }
+    recent_comment_logs = await db.comments.find(
+        comment_log_query,
+        {'processed_at': 1, 'matched': 1},
+    ).to_list(5000)
+
+    for log in recent_comment_logs:
+        ts = log.get('processed_at')
+        try:
+            if isinstance(ts, datetime):
+                dkey = ts.date().isoformat()
+            elif isinstance(ts, str):
+                dkey = datetime.fromisoformat(ts.replace('Z', '+00:00')).date().isoformat()
+            else:
                 continue
-            if dkey in buckets:
-                buckets[dkey]['messages'] += 1
+        except Exception:
+            continue
+        if dkey in buckets:
+            buckets[dkey]['messages'] += 1
+            if log.get('matched'):
+                buckets[dkey]['conversions'] += 1
+
+    # Also count unique commenters (contacts) from comment logs
+    unique_commenters = len({
+        log.get('commenter_id') for log in
+        await db.comments.find(scoped_comment_query, {'commenter_id': 1}).to_list(10000)
+        if log.get('commenter_id')
+    })
+
     chart = list(buckets.values())
     return {
         'total_contacts': total_contacts,
@@ -1354,9 +1381,11 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'messages_sent': messages_sent,
         'conversion_rate': conv_rate,
         'weekly_chart': chart,
+        'weeklyPerformance': chart,
         'activeInstagramAccountId': account.get('id') if account else None,
         'current_instagram_account_id': (account.get('instagramAccountId') or account.get('igUserId')) if account else None,
-        'comments_logged': await db.comments.count_documents(scoped_comment_query),
+        'comments_logged': comments_logged,
+        'unique_commenters': unique_commenters,
     }
 
 
@@ -3822,7 +3851,15 @@ async def instagram_webhook_log(request: Request, limit: int = 20, token: Option
     return {'items': docs, 'count': await db.webhook_log.count_documents({})}
 
 
-async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 'webhook'):
+async def _handle_new_comment(
+    user_doc: dict,
+    comment_data: dict,
+    source: str = 'webhook',
+    *,
+    preloaded_automations: Optional[list] = None,
+    preloaded_processed_ids: Optional[Set[str]] = None,
+    preloaded_existing_docs: Optional[Dict[str, dict]] = None,
+):
     """Process one incoming Instagram comment (shared by webhook + polling).
 
     Returns a dict with keys:
@@ -3831,6 +3868,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
       action_status    — 'pending'|'success'|'failed'|'skipped'
       rule_id          — id of the matched automation, when matched
       already_processed (bool) — True if dedup hit
+
+    Optional keyword-only args for batch polling (avoids N+1 DB queries):
+      preloaded_automations     — list of active automation docs for this account
+      preloaded_processed_ids   — set of ig_comment_id strings already in DB
+      preloaded_existing_docs   — dict mapping ig_comment_id -> existing comment doc
     """
     import uuid as _uuid
     user_id = user_doc['id']
@@ -3858,27 +3900,60 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     existing_doc_id = None
     existing_created = None
 
-    # Dedupe
-    existing = await db.comments.find_one({
-        'user_id': user_id, 'ig_comment_id': ig_comment_id,
-        '$or': [
-            {'instagramAccountId': ig_account_id},
-            {'igUserId': ig_account_id},
-        ],
-    })
-    if existing:
-        previous_skip = existing.get('skip_reason') or existing.get('skipReason')
-        if previous_skip == 'missing_comment_timestamp' and comment_ts:
-            retry_existing_missing_timestamp = True
-            existing_doc_id = existing.get('id')
-            existing_created = existing.get('created')
-            logger.info('comment_reprocessing_after_timestamp ig_comment_id=%s user=%s source=%s',
-                        ig_comment_id, user_doc.get('email'), source)
-        else:
-            logger.info('comment_already_processed ig_comment_id=%s user=%s',
-                        ig_comment_id, user_doc.get('email'))
-            return {'processed': False, 'already_processed': True, 'matched': False,
-                    'action_status': 'skipped', 'reason': 'duplicate'}
+    # Dedupe — use pre-loaded set when available to avoid per-comment DB query
+    if preloaded_processed_ids is not None:
+        if ig_comment_id in preloaded_processed_ids:
+            # Check if it's a missing-timestamp retry candidate
+            existing = (preloaded_existing_docs or {}).get(ig_comment_id)
+            if existing is None:
+                # Not in the pre-loaded docs map; fall back to DB for the retry check
+                existing = await db.comments.find_one({
+                    'user_id': user_id, 'ig_comment_id': ig_comment_id,
+                    '$or': [
+                        {'instagramAccountId': ig_account_id},
+                        {'igUserId': ig_account_id},
+                    ],
+                })
+            if existing:
+                previous_skip = existing.get('skip_reason') or existing.get('skipReason')
+                if previous_skip == 'missing_comment_timestamp' and comment_ts:
+                    retry_existing_missing_timestamp = True
+                    existing_doc_id = existing.get('id')
+                    existing_created = existing.get('created')
+                    logger.info('comment_reprocessing_after_timestamp ig_comment_id=%s user=%s source=%s',
+                                ig_comment_id, user_doc.get('email'), source)
+                else:
+                    logger.info('comment_already_processed ig_comment_id=%s user=%s',
+                                ig_comment_id, user_doc.get('email'))
+                    return {'processed': False, 'already_processed': True, 'matched': False,
+                            'action_status': 'skipped', 'reason': 'duplicate'}
+            else:
+                logger.info('comment_already_processed ig_comment_id=%s user=%s',
+                            ig_comment_id, user_doc.get('email'))
+                return {'processed': False, 'already_processed': True, 'matched': False,
+                        'action_status': 'skipped', 'reason': 'duplicate'}
+    else:
+        # Original per-comment DB dedup path (webhook path)
+        existing = await db.comments.find_one({
+            'user_id': user_id, 'ig_comment_id': ig_comment_id,
+            '$or': [
+                {'instagramAccountId': ig_account_id},
+                {'igUserId': ig_account_id},
+            ],
+        })
+        if existing:
+            previous_skip = existing.get('skip_reason') or existing.get('skipReason')
+            if previous_skip == 'missing_comment_timestamp' and comment_ts:
+                retry_existing_missing_timestamp = True
+                existing_doc_id = existing.get('id')
+                existing_created = existing.get('created')
+                logger.info('comment_reprocessing_after_timestamp ig_comment_id=%s user=%s source=%s',
+                            ig_comment_id, user_doc.get('email'), source)
+            else:
+                logger.info('comment_already_processed ig_comment_id=%s user=%s',
+                            ig_comment_id, user_doc.get('email'))
+                return {'processed': False, 'already_processed': True, 'matched': False,
+                        'action_status': 'skipped', 'reason': 'duplicate'}
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
 
@@ -3894,10 +3969,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         text = comment_text.lower()
         return any(kw.lower() in text for kw in _automation_keywords(auto))
 
-    # Match automations to determine rule_id BEFORE insert
-    automations = await db.automations.find(
-        {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
-    ).to_list(100)
+    # Match automations to determine rule_id BEFORE insert.
+    # Use pre-loaded list when available (batch polling) to avoid per-comment DB query.
+    if preloaded_automations is not None:
+        automations = preloaded_automations
+    else:
+        automations = await db.automations.find(
+            {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
+        ).to_list(100)
     latest_media_id = None
     matched_rule = None
     cutoff_rule = None
@@ -4071,23 +4150,31 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                                  comment_doc_id: str, ig_comment_id: str):
     """Wrap execute_flow so we record success/failure on the comment doc."""
     try:
+        reply_start = time.time()
         ok = await execute_flow(
             user_doc, automation, commenter_id, comment_text,
             comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': comment_doc_id}
         )
+        reply_ms = (time.time() - reply_start) * 1000
         if not ok:
+            write_start = time.time()
             await db.comments.update_one(
                 {'id': comment_doc_id},
                 {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
                           'error': 'automation_action_send_failed'}}
             )
-            logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
-                           ig_comment_id, automation.get('id'))
+            write_ms = (time.time() - write_start) * 1000
+            logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s reply_durationMs=%.1f write_durationMs=%.1f',
+                           ig_comment_id, automation.get('id'), reply_ms, write_ms)
             return False
+        write_start = time.time()
         await db.comments.update_one(
             {'id': comment_doc_id},
             {'$set': {'action_status': 'success', 'actionStatus': 'success'}}
         )
+        write_ms = (time.time() - write_start) * 1000
+        logger.info('reply_send ig_comment_id=%s rule_id=%s reply_durationMs=%.1f db_write_durationMs=%.1f',
+                    ig_comment_id, automation.get('id'), reply_ms, write_ms)
         logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
                     ig_comment_id, automation.get('id'))
         return True
@@ -4792,7 +4879,13 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
 
 
 async def _poll_user_comments(user_doc: dict) -> dict:
-    """Poll comments for one user's automations. Returns aggregated stats."""
+    """Poll comments for one user's automations. Returns aggregated stats.
+
+    Optimized: loads all active automations and all processed comment IDs once
+    per poll run (O(1) DB queries), then passes them into _handle_new_comment
+    to avoid N+1 queries during per-comment processing.
+    """
+    poll_start = time.time()
     user_id = user_doc['id']
     token = user_doc.get('meta_access_token', '')
     ig_id = user_doc.get('ig_user_id', '')
@@ -4812,9 +4905,15 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         stats['errors'].append('missing_token_or_ig_id')
         return stats
 
+    # --- Load all active automations once (not per-comment) ---
+    rules_start = time.time()
     automations = await db.automations.find(
         {'user_id': user_id, 'status': 'active'}
     ).to_list(200)
+    rules_ms = (time.time() - rules_start) * 1000
+    logger.info('db_load_rules user=%s count=%s durationMs=%.1f',
+                user_doc.get('email'), len(automations), rules_ms)
+
     if not automations:
         return stats
 
@@ -4822,9 +4921,38 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     if not media_ids:
         return stats
 
+    # --- Load all processed comment IDs once (not per-comment) ---
+    processed_start = time.time()
+    ig_account_id = ig_id
+    processed_cursor = db.comments.find(
+        {
+            'user_id': user_id,
+            '$or': [
+                {'instagramAccountId': ig_account_id},
+                {'igUserId': ig_account_id},
+            ],
+        },
+        {'ig_comment_id': 1, 'skip_reason': 1, 'skipReason': 1, 'id': 1, 'created': 1},
+    )
+    processed_docs = await processed_cursor.to_list(10000)
+    processed_ids: Set[str] = {d['ig_comment_id'] for d in processed_docs if d.get('ig_comment_id')}
+    # Build a map for docs that may need missing-timestamp retry
+    existing_docs: Dict[str, dict] = {
+        d['ig_comment_id']: d for d in processed_docs
+        if d.get('ig_comment_id') and (d.get('skip_reason') == 'missing_comment_timestamp'
+                                        or d.get('skipReason') == 'missing_comment_timestamp')
+    }
+    processed_ms = (time.time() - processed_start) * 1000
+    logger.info('db_load_processed_comments user=%s count=%s durationMs=%.1f',
+                user_doc.get('email'), len(processed_ids), processed_ms)
+
+    logger.info('poll_start user=%s media_count=%s rules=%s processed_ids=%s',
+                user_doc.get('email'), len(media_ids), len(automations), len(processed_ids))
+
     async with httpx.AsyncClient(timeout=20) as c:
         for mid in media_ids[:10]:  # cap per-user per-tick
             stats['mediaChecked'] += 1
+            fetch_start = time.time()
             logger.info('media_comments_fetch_started user=%s media_id=%s',
                         user_doc.get('email'), mid)
             try:
@@ -4836,21 +4964,38 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         'limit': 25,
                     },
                 )
+                fetch_ms = (time.time() - fetch_start) * 1000
                 if r.status_code != 200:
-                    logger.warning('media_comments_fetch_failed user=%s media_id=%s http=%s body=%s',
-                                   user_doc.get('email'), mid, r.status_code, r.text[:200])
+                    logger.warning('media_comments_fetch_failed user=%s media_id=%s http=%s body=%s durationMs=%.1f',
+                                   user_doc.get('email'), mid, r.status_code, r.text[:200], fetch_ms)
                     stats['media'][mid] = {'http': r.status_code, 'error': r.text[:200]}
                     stats['errors'].append({'media_id': mid, 'http': r.status_code, 'error': r.text[:200]})
                     continue
                 data = (r.json() or {}).get('data') or []
-                logger.info('media_comments_fetch_success user=%s media_id=%s count=%s',
-                            user_doc.get('email'), mid, len(data))
+                logger.info('media_comments_fetch_success user=%s media_id=%s count=%s durationMs=%.1f',
+                            user_doc.get('email'), mid, len(data), fetch_ms)
                 stats['commentsSeen'] += len(data)
+
+                # Filter to new comments using the pre-loaded set (no DB query per comment)
+                new_comments = [
+                    cm for cm in data
+                    if cm.get('id') and cm['id'] not in processed_ids
+                ]
+                # Also include any that need missing-timestamp retry
+                retry_comments = [
+                    cm for cm in data
+                    if cm.get('id') and cm['id'] in existing_docs
+                ]
+                comments_to_process = new_comments + [
+                    cm for cm in retry_comments if cm not in new_comments
+                ]
+
                 new_count = 0
                 matched_count = 0
                 succeeded = 0
                 failed = 0
-                for cm in data:
+                proc_start = time.time()
+                for cm in comments_to_process:
                     ig_comment_id = cm.get('id')
                     from_obj = cm.get('from') or {}
                     commenter_id = from_obj.get('id')
@@ -4860,16 +5005,26 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     )
                     if not commenter_id and commenter_username:
                         commenter_id = f'u:{commenter_username}'
-                    res = await _handle_new_comment(user_doc, {
-                        'ig_comment_id': ig_comment_id,
-                        'media_id': mid,
-                        'commenter_id': commenter_id,
-                        'commenter_username': commenter_username,
-                        'text': cm.get('text') or '',
-                        'timestamp': cm.get('timestamp'),
-                    }, source='polling') or {}
+                    res = await _handle_new_comment(
+                        user_doc,
+                        {
+                            'ig_comment_id': ig_comment_id,
+                            'media_id': mid,
+                            'commenter_id': commenter_id,
+                            'commenter_username': commenter_username,
+                            'text': cm.get('text') or '',
+                            'timestamp': cm.get('timestamp'),
+                        },
+                        source='polling',
+                        preloaded_automations=automations,
+                        preloaded_processed_ids=processed_ids,
+                        preloaded_existing_docs=existing_docs,
+                    ) or {}
                     if res.get('processed'):
                         new_count += 1
+                        # Add to processed set so subsequent media don't re-process
+                        if ig_comment_id:
+                            processed_ids.add(ig_comment_id)
                     if res.get('matched'):
                         matched_count += 1
                     st = res.get('action_status')
@@ -4877,6 +5032,9 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         succeeded += 1
                     elif st == 'failed':
                         failed += 1
+                proc_ms = (time.time() - proc_start) * 1000
+                logger.info('comment_processing user=%s media_id=%s total=%s new=%s matched=%s durationMs=%.1f',
+                            user_doc.get('email'), mid, len(data), new_count, matched_count, proc_ms)
                 stats['newComments'] += new_count
                 stats['matched'] += matched_count
                 stats['actionsSucceeded'] += succeeded
@@ -4888,6 +5046,11 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                                  user_doc.get('email'), mid, e)
                 stats['media'][mid] = {'error': f'exc:{e}'}
                 stats['errors'].append({'media_id': mid, 'error': f'exc:{e}'})
+
+    poll_ms = (time.time() - poll_start) * 1000
+    logger.info('poll_end user=%s mediaChecked=%s commentsSeen=%s newComments=%s matched=%s durationMs=%.1f',
+                user_doc.get('email'), stats['mediaChecked'], stats['commentsSeen'],
+                stats['newComments'], stats['matched'], poll_ms)
     return stats
 
 
@@ -6399,9 +6562,19 @@ async def _startup():
             [('user_id', 1), ('instagramAccountId', 1), ('status', 1)],
             name='automations_user_ig_status',
         )
+        # Polling hot path: load all processed comment IDs for an account
+        await db.comments.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('ig_comment_id', 1)],
+            name='comments_user_ig_comment_id',
+        )
         await db.comments.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='comments_user_ig_created',
+        )
+        # Dashboard weekly performance query
+        await db.comments.create_index(
+            [('instagramAccountId', 1), ('processed_at', -1)],
+            name='comments_ig_processed_at',
         )
         await db.conversations.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
@@ -6411,9 +6584,15 @@ async def _startup():
             [('user_id', 1), ('instagramAccountId', 1), ('is_active', 1)],
             name='dm_rules_user_ig_active',
         )
+        # Reply logs for dashboard stats
         await db.dm_logs.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='dm_logs_user_ig_created',
+        )
+        # Conversations scoped lookup
+        await db.conversations.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('senderId', 1)],
+            name='conversations_user_ig_sender',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)
