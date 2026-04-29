@@ -20,6 +20,10 @@ const exampleWords = ['Price', 'Link', 'Shop'];
 const DEFAULT_FOLLOW_MESSAGE = 'فرحان إنك مهتم 😊\nتابع الحساب الأول، وبعدها اضغط على الزر عشان أبعتلك الرابط.';
 const DEFAULT_FOLLOW_BUTTON = 'تمت المتابعة';
 const DEFAULT_FOLLOW_KEYWORDS = 'Following, I followed, تمت المتابعة, تابعت';
+const DEFAULT_FOLLOW_NOT_DETECTED = 'لسه مش ظاهر عندي إنك تابعت الحساب 😊\nتابع الحساب الأول وبعدها اضغط الزر تاني وهبعتلك الرابط فورًا.';
+const DEFAULT_FOLLOW_VERIFICATION_FAILED = 'مش قادر أتأكد من المتابعة دلوقتي. جرّب تتابع الحساب واضغط الزر مرة تانية.';
+const DEFAULT_FOLLOW_RETRY_BUTTON = DEFAULT_FOLLOW_BUTTON;
+const DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3;
 
 const TextArea = ({ className = '', ...props }) => (
   <textarea
@@ -280,6 +284,11 @@ const Automations = () => {
   const [followRequestButtonText, setFollowRequestButtonText] = useState(DEFAULT_FOLLOW_BUTTON);
   const [followConfirmationKeywords, setFollowConfirmationKeywords] = useState(DEFAULT_FOLLOW_KEYWORDS);
   const [followGateFallbackMessage, setFollowGateFallbackMessage] = useState('');
+  const [verifyActualFollow, setVerifyActualFollow] = useState(true);
+  const [followNotDetectedMessage, setFollowNotDetectedMessage] = useState(DEFAULT_FOLLOW_NOT_DETECTED);
+  const [followVerificationFailedMessage, setFollowVerificationFailedMessage] = useState(DEFAULT_FOLLOW_VERIFICATION_FAILED);
+  const [followRetryButtonText, setFollowRetryButtonText] = useState(DEFAULT_FOLLOW_RETRY_BUTTON);
+  const [maxFollowVerificationAttempts, setMaxFollowVerificationAttempts] = useState(DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS);
   const [emailRequestEnabled, setEmailRequestEnabled] = useState(false);
   const [linkDmText, setLinkDmText] = useState('');
   const [linkButtonText, setLinkButtonText] = useState('Open link');
@@ -358,6 +367,11 @@ const Automations = () => {
     setFollowRequestMessage(DEFAULT_FOLLOW_MESSAGE);
     setFollowRequestButtonText(DEFAULT_FOLLOW_BUTTON);
     setFollowConfirmationKeywords(DEFAULT_FOLLOW_KEYWORDS);
+    setVerifyActualFollow(true);
+    setFollowNotDetectedMessage(DEFAULT_FOLLOW_NOT_DETECTED);
+    setFollowVerificationFailedMessage(DEFAULT_FOLLOW_VERIFICATION_FAILED);
+    setFollowRetryButtonText(DEFAULT_FOLLOW_RETRY_BUTTON);
+    setMaxFollowVerificationAttempts(DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS);
     setFollowGateFallbackMessage('');
     setEmailRequestEnabled(false);
     setLinkDmText('');
@@ -419,6 +433,23 @@ const Automations = () => {
         : (automation.followGateConfirmationKeywords || DEFAULT_FOLLOW_KEYWORDS)
     );
     setFollowGateFallbackMessage(automation.follow_gate_fallback_message || automation.followGateFallbackMessage || '');
+    setVerifyActualFollow(
+      automation.verify_actual_follow === false || automation.verifyActualFollow === false
+        ? false
+        : true
+    );
+    setFollowNotDetectedMessage(
+      automation.follow_not_detected_message || automation.followNotDetectedMessage || DEFAULT_FOLLOW_NOT_DETECTED
+    );
+    setFollowVerificationFailedMessage(
+      automation.follow_verification_failed_message || automation.followVerificationFailedMessage || DEFAULT_FOLLOW_VERIFICATION_FAILED
+    );
+    setFollowRetryButtonText(
+      automation.follow_retry_button_text || automation.followRetryButtonText || automation.follow_request_button_text || DEFAULT_FOLLOW_RETRY_BUTTON
+    );
+    setMaxFollowVerificationAttempts(
+      Number(automation.max_follow_verification_attempts || automation.maxFollowVerificationAttempts || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)
+    );
     setEmailRequestEnabled(Boolean(automation.email_request_enabled));
     setLinkDmText(automation.link_dm_text || '');
     setLinkButtonText(automation.link_button_text || 'Open link');
@@ -581,6 +612,11 @@ const Automations = () => {
             follow_request_button_text: followRequestButtonText.trim(),
             follow_confirmation_keywords: followConfirmationKeywords.split(',').map(item => item.trim()).filter(Boolean),
             follow_gate_fallback_message: followGateFallbackMessage.trim(),
+            verify_actual_follow: verifyActualFollow,
+            follow_not_detected_message: followNotDetectedMessage.trim(),
+            follow_verification_failed_message: followVerificationFailedMessage.trim(),
+            follow_retry_button_text: followRetryButtonText.trim(),
+            max_follow_verification_attempts: Number(maxFollowVerificationAttempts) || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS,
             email_request_enabled: emailRequestEnabled,
             follow_up_enabled: followUpEnabled,
             follow_up_text: followUpText.trim(),
@@ -616,6 +652,11 @@ const Automations = () => {
         follow_request_button_text: followRequestButtonText.trim(),
         follow_confirmation_keywords: followConfirmationKeywords.split(',').map(item => item.trim()).filter(Boolean),
         follow_gate_fallback_message: followGateFallbackMessage.trim(),
+        verify_actual_follow: verifyActualFollow,
+        follow_not_detected_message: followNotDetectedMessage.trim(),
+        follow_verification_failed_message: followVerificationFailedMessage.trim(),
+        follow_retry_button_text: followRetryButtonText.trim(),
+        max_follow_verification_attempts: Number(maxFollowVerificationAttempts) || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS,
         email_request_enabled: emailRequestEnabled,
         follow_up_enabled: followUpEnabled,
         follow_up_text: followUpText.trim(),
@@ -869,8 +910,10 @@ const Automations = () => {
                   icon={UserPlus}
                 >
                   <div className="space-y-2.5">
-                    <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
-                      This is a confirmation gate: the final link waits until the user taps or replies with your configured confirmation text.
+                    <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-900">
+                      {verifyActualFollow
+                        ? 'When the user taps the button, we call Meta\'s User Profile API and only send the link if is_user_follow_business is true.'
+                        : 'Click-only gate: the link is sent as soon as the user taps the button (no live follow check).'}
                     </div>
                     <TextArea
                       value={followRequestMessage}
@@ -900,6 +943,51 @@ const Automations = () => {
                       rows={2}
                       placeholder="Optional expiry/fallback message"
                     />
+                    <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-slate-950">Verify actual follow via Meta API</div>
+                        <div className="text-xs text-slate-500">Recommended. Disable to fall back to a click-only gate.</div>
+                      </div>
+                      <Switch checked={verifyActualFollow} onCheckedChange={setVerifyActualFollow} />
+                    </div>
+                    {verifyActualFollow && (
+                      <>
+                        <TextArea
+                          value={followNotDetectedMessage}
+                          onChange={e => setFollowNotDetectedMessage(e.target.value)}
+                          rows={3}
+                          placeholder="Sent when the user tapped but is_user_follow_business is false"
+                        />
+                        <Input
+                          value={followRetryButtonText}
+                          onChange={e => setFollowRetryButtonText(e.target.value)}
+                          placeholder="Retry button text"
+                          className="h-10 rounded-lg bg-white"
+                          dir={detectTextDirection(followRetryButtonText).dir}
+                          style={{ textAlign: detectTextDirection(followRetryButtonText).align }}
+                        />
+                        <TextArea
+                          value={followVerificationFailedMessage}
+                          onChange={e => setFollowVerificationFailedMessage(e.target.value)}
+                          rows={2}
+                          placeholder="Sent when verification fails because of permission/consent"
+                        />
+                        <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-semibold text-slate-950">Max verification attempts</div>
+                            <div className="text-xs text-slate-500">Prevents reminder spam. After this we stop checking.</div>
+                          </div>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={10}
+                            value={maxFollowVerificationAttempts}
+                            onChange={e => setMaxFollowVerificationAttempts(Number(e.target.value) || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)}
+                            className="h-10 w-20 rounded-lg text-center"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                 </ToggleCard>
 

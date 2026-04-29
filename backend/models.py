@@ -66,6 +66,11 @@ class AutomationIn(BaseModel):
     follow_confirmation_keywords: Optional[List[str]] = None
     follow_gate_expires_after_minutes: Optional[int] = None
     follow_gate_fallback_message: Optional[str] = None
+    verify_actual_follow: Optional[bool] = None
+    follow_not_detected_message: Optional[str] = None
+    follow_verification_failed_message: Optional[str] = None
+    follow_retry_button_text: Optional[str] = None
+    max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
 
 
@@ -108,6 +113,16 @@ class AutomationPatch(BaseModel):
     followGateConfirmationKeywords: Optional[List[str]] = None
     followGateExpiresAfterMinutes: Optional[int] = None
     followGateFallbackMessage: Optional[str] = None
+    verify_actual_follow: Optional[bool] = None
+    verifyActualFollow: Optional[bool] = None
+    follow_not_detected_message: Optional[str] = None
+    followNotDetectedMessage: Optional[str] = None
+    follow_verification_failed_message: Optional[str] = None
+    followVerificationFailedMessage: Optional[str] = None
+    follow_retry_button_text: Optional[str] = None
+    followRetryButtonText: Optional[str] = None
+    max_follow_verification_attempts: Optional[int] = None
+    maxFollowVerificationAttempts: Optional[int] = None
     email_request_enabled: Optional[bool] = None
     follow_up_enabled: Optional[bool] = None
     follow_up_text: Optional[str] = None
@@ -141,6 +156,11 @@ class Automation(BaseModel):
     follow_confirmation_keywords: Optional[List[str]] = None
     follow_gate_expires_after_minutes: Optional[int] = None
     follow_gate_fallback_message: Optional[str] = None
+    verify_actual_follow: Optional[bool] = None
+    follow_not_detected_message: Optional[str] = None
+    follow_verification_failed_message: Optional[str] = None
+    follow_retry_button_text: Optional[str] = None
+    max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
     activationStartedAt: Optional[datetime] = None
     createdAt: datetime = Field(default_factory=_now)

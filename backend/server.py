@@ -218,6 +218,23 @@ DEFAULT_FOLLOW_GATE_CONFIRMATION_KEYWORDS = [
     'تمت المتابعة',
     'تابعت',
 ]
+# When verify_actual_follow is on, the bot calls Meta's User Profile API to
+# read is_user_follow_business after every confirmation. The defaults below
+# are the messages the bot sends when verification reports the user is NOT
+# actually following, when permission/consent makes verification impossible,
+# and the maximum number of times we will re-check before pausing.
+DEFAULT_FOLLOW_NOT_DETECTED_MESSAGE = (
+    'لسه مش ظاهر عندي إنك تابعت الحساب 😊\n'
+    'تابع الحساب الأول وبعدها اضغط الزر تاني وهبعتلك الرابط فورًا.'
+)
+DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE = (
+    'مش قادر أتأكد من المتابعة دلوقتي. جرّب تتابع الحساب واضغط الزر مرة تانية.'
+)
+DEFAULT_FOLLOW_RETRY_BUTTON_TEXT = DEFAULT_FOLLOW_GATE_BUTTON_TEXT
+DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3
+# Cooldown between live API checks for the same session — protects against
+# the user spamming the confirmation button.
+FOLLOW_VERIFICATION_COOLDOWN_SECONDS = 30
 
 
 def _split_follow_keywords(value) -> list:
@@ -268,6 +285,39 @@ def _normalize_follow_gate_config(data: dict) -> dict:
         or data.get('followGateFallbackMessage')
         or ''
     )
+    # Verify-actual-follow defaults to True for any new rule, but we honor
+    # explicit False so admins can opt out and keep the legacy click-only gate.
+    raw_verify = data.get('verify_actual_follow')
+    if raw_verify is None:
+        raw_verify = data.get('verifyActualFollow')
+    verify_actual_follow = True if raw_verify is None else bool(raw_verify)
+    not_detected = (
+        data.get('follow_not_detected_message')
+        or data.get('followNotDetectedMessage')
+        or DEFAULT_FOLLOW_NOT_DETECTED_MESSAGE
+    )
+    verification_failed = (
+        data.get('follow_verification_failed_message')
+        or data.get('followVerificationFailedMessage')
+        or DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE
+    )
+    retry_button = (
+        data.get('follow_retry_button_text')
+        or data.get('followRetryButtonText')
+        or str(button or '').strip()
+        or DEFAULT_FOLLOW_RETRY_BUTTON_TEXT
+    )
+    max_attempts_raw = (
+        data.get('max_follow_verification_attempts')
+        if 'max_follow_verification_attempts' in data
+        else data.get('maxFollowVerificationAttempts',
+                      DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)
+    )
+    try:
+        max_attempts = int(max_attempts_raw)
+    except (TypeError, ValueError):
+        max_attempts = DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS
+    max_attempts = max(1, min(max_attempts, 10))
     return {
         'follow_request_enabled': enabled,
         'follow_request_message': str(message or '').strip(),
@@ -275,6 +325,11 @@ def _normalize_follow_gate_config(data: dict) -> dict:
         'follow_confirmation_keywords': keywords,
         'follow_gate_expires_after_minutes': expires_minutes,
         'follow_gate_fallback_message': str(fallback or '').strip(),
+        'verify_actual_follow': verify_actual_follow,
+        'follow_not_detected_message': str(not_detected or '').strip(),
+        'follow_verification_failed_message': str(verification_failed or '').strip(),
+        'follow_retry_button_text': str(retry_button or '').strip(),
+        'max_follow_verification_attempts': max_attempts,
     }
 
 
@@ -344,6 +399,64 @@ async def get_instagram_messaging_user_profile(access_token: str, ig_scoped_id: 
     except Exception as e:
         logger.exception('instagram_user_profile_fetch_exception: %s', e)
         return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+
+
+# Meta Graph error codes that indicate the app or page lacks the permissions
+# required to read is_user_follow_business. Anything else is treated as a
+# transient API error so we don't permanently mark the session as failed
+# for a one-off network blip.
+_PERMISSION_ERROR_CODES = {10, 100, 200, 4, 17, 190}
+
+
+def _classify_profile_error(error: Any) -> str:
+    """Map a Graph error body to a stable reason code."""
+    if not isinstance(error, dict):
+        return 'temporary_api_error'
+    inner = error.get('error') if isinstance(error.get('error'), dict) else error
+    code = inner.get('code') if isinstance(inner, dict) else None
+    subcode = inner.get('error_subcode') if isinstance(inner, dict) else None
+    msg = (inner.get('message') if isinstance(inner, dict) else '') or ''
+    msg_l = str(msg).lower()
+    if code in _PERMISSION_ERROR_CODES:
+        return 'permission_or_consent_required'
+    if subcode in {2018028, 2018032}:
+        return 'permission_or_consent_required'
+    if 'permission' in msg_l or 'not authorized' in msg_l or 'consent' in msg_l:
+        return 'permission_or_consent_required'
+    return 'temporary_api_error'
+
+
+async def verify_instagram_user_follows_business(access_token: str,
+                                                 ig_scoped_id: str) -> dict:
+    """High-level wrapper around the User Profile API.
+
+    Always returns a structured dict — never raises into webhook processing.
+        { ok: True,  follows: bool,  raw_status: int|None, profile_excerpt }
+        { ok: False, reason: 'permission_or_consent_required'|'temporary_api_error'|
+                              'missing_token_or_id',
+          raw_status: int|None }
+    """
+    if not access_token or not ig_scoped_id:
+        return {'ok': False, 'reason': 'missing_token_or_id', 'raw_status': None}
+    raw = await get_instagram_messaging_user_profile(access_token, ig_scoped_id)
+    if raw.get('ok'):
+        profile = raw.get('profile') or {}
+        return {
+            'ok': True,
+            'follows': bool(profile.get('is_user_follow_business')),
+            'raw_status': raw.get('status_code'),
+            'profile_excerpt': {
+                'username': profile.get('username'),
+                'is_user_follow_business': profile.get('is_user_follow_business'),
+                'is_business_follow_user': profile.get('is_business_follow_user'),
+            },
+        }
+    reason = _classify_profile_error(raw.get('error'))
+    return {
+        'ok': False,
+        'reason': reason,
+        'raw_status': raw.get('status_code'),
+    }
 
 
 def _comment_dm_flow_enabled(automation: dict) -> bool:
@@ -584,6 +697,12 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         **follow_gate,
         'follow_confirmed': False,
         'follow_confirmation_attempts': 0,
+        'follow_verified': False,
+        'follow_verification_attempts': 0,
+        'followLastCheckedAt': None,
+        'followReminderCount': 0,
+        'lastFollowVerificationError': None,
+        'finalDmSentAt': None,
         'expiresAt': now + timedelta(minutes=follow_gate['follow_gate_expires_after_minutes']),
         'email_request_enabled': bool(automation.get('email_request_enabled')),
         'follow_up_enabled': bool(automation.get('follow_up_enabled')),
@@ -768,19 +887,195 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
     )
 
 
+async def _send_follow_reminder(user_doc: dict, session: dict, message: str,
+                                stage: str) -> bool:
+    """Send the not-detected / verification-failed message with a retry button."""
+    access_token = user_doc.get('meta_access_token', '')
+    ig_user_id = user_doc.get('ig_user_id', '')
+    recipient_id = session.get('recipient_id')
+    if not (recipient_id and message):
+        return False
+    button = (session.get('follow_retry_button_text')
+              or session.get('follow_request_button_text')
+              or DEFAULT_FOLLOW_RETRY_BUTTON_TEXT).strip()
+    payload = session.get('follow_payload') or f'comment_flow:{session.get("id")}:followed'
+    result = await send_ig_quick_reply(
+        access_token, ig_user_id, recipient_id, message, button, payload,
+    )
+    sent = bool(result.get('ok'))
+    if not sent:
+        sent = await send_ig_dm(access_token, ig_user_id, recipient_id, message)
+    now = datetime.utcnow()
+    if session.get('id'):
+        await db.comment_dm_sessions.update_one(
+            {'id': session['id']},
+            {
+                '$set': {
+                    'stage': stage,
+                    'lastFollowReminderAt': now,
+                    'updated': now,
+                    # Reset follow_confirmed so the user must click again to
+                    # trigger another verification attempt.
+                    'follow_confirmed': False,
+                },
+                '$inc': {'followReminderCount': 1},
+            },
+        )
+    if sent:
+        logger.info('follow_reminder_sent session=%s stage=%s',
+                    session.get('id'), stage)
+    return sent
+
+
 async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
-    """Confirmation gate: ask for a follow confirmation before sending the link."""
+    """Decide whether the final link may be sent for this session.
+
+    Behavior:
+      - If the gate is disabled → allow.
+      - If verify_actual_follow is False (admin opt-out) → fall back to the
+        legacy click-only gate using session.follow_confirmed.
+      - If the user clicked confirmation, call Meta's User Profile API and
+        check is_user_follow_business. The click alone is never enough.
+      - Cooldown protects against confirmation spam.
+      - max_follow_verification_attempts caps the number of API checks.
+    """
     if not session.get('follow_request_enabled'):
         return {'allowed': True, 'checked': False}
-    if session.get('follow_confirmed') is True:
-        return {'allowed': True, 'checked': True, 'confirmed': True}
 
-    prompt_sent = await _send_comment_dm_follow_gate_prompt(user_doc, session)
-    return {
-        'allowed': False,
-        'checked': True,
-        'prompt_sent': prompt_sent,
+    # Idempotency: if the link has already been delivered for this session,
+    # never resend.
+    if session.get('finalDmSentAt') or session.get('stage') == 'final_sent':
+        return {'allowed': False, 'checked': True, 'reason': 'final_already_sent'}
+
+    verify_enabled = session.get('verify_actual_follow')
+    if verify_enabled is None:
+        verify_enabled = True
+
+    # Legacy click-only gate when admin disabled API verification.
+    if not verify_enabled:
+        if session.get('follow_confirmed') is True:
+            return {'allowed': True, 'checked': True, 'confirmed': True,
+                    'reason': 'click_only_gate'}
+        prompt_sent = await _send_comment_dm_follow_gate_prompt(user_doc, session)
+        return {'allowed': False, 'checked': True, 'prompt_sent': prompt_sent,
+                'reason': 'awaiting_confirmation'}
+
+    # Cached previous success.
+    if session.get('follow_verified') is True:
+        return {'allowed': True, 'checked': True, 'cached': True}
+
+    # If the user has not actually pressed/typed confirmation yet, send the
+    # initial follow request once and wait.
+    if not session.get('follow_confirmed'):
+        prompt_sent = await _send_comment_dm_follow_gate_prompt(user_doc, session)
+        return {'allowed': False, 'checked': True, 'prompt_sent': prompt_sent,
+                'reason': 'awaiting_confirmation'}
+
+    # If we already exceeded max attempts, do not call the API again.
+    max_attempts = int(session.get('max_follow_verification_attempts')
+                       or DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)
+    attempts_so_far = int(session.get('follow_verification_attempts') or 0)
+    if attempts_so_far >= max_attempts:
+        if session.get('stage') != 'verification_failed':
+            failed_msg = (session.get('follow_verification_failed_message') or
+                          DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE)
+            await _send_follow_reminder(user_doc, session, failed_msg,
+                                        'verification_failed')
+            await db.comment_dm_sessions.update_one(
+                {'id': session.get('id')},
+                {'$set': {'status': 'verification_failed',
+                          'stage': 'verification_failed',
+                          'updated': datetime.utcnow()}},
+            )
+        logger.info('follow_verification_failed session=%s reason=max_attempts attempts=%s',
+                    session.get('id'), attempts_so_far)
+        return {'allowed': False, 'checked': True, 'reason': 'max_attempts_exceeded'}
+
+    # Cooldown — protects against confirmation-button spam.
+    last_check = session.get('followLastCheckedAt')
+    if isinstance(last_check, datetime):
+        elapsed = (datetime.utcnow() - last_check).total_seconds()
+        if elapsed < FOLLOW_VERIFICATION_COOLDOWN_SECONDS:
+            logger.info('follow_verification_cooldown session=%s elapsed=%ss',
+                        session.get('id'), int(elapsed))
+            return {'allowed': False, 'checked': True, 'reason': 'cooldown'}
+
+    access_token = user_doc.get('meta_access_token', '')
+    ig_scoped_id = session.get('recipient_id')
+    igsid_present = bool(ig_scoped_id)
+    logger.info('follow_verification_started session=%s igsid_present=%s attempt=%s/%s',
+                session.get('id'), igsid_present, attempts_so_far + 1, max_attempts)
+
+    result = await verify_instagram_user_follows_business(access_token, ig_scoped_id)
+    now = datetime.utcnow()
+    update_set = {
+        'followLastCheckedAt': now,
+        'lastFollowCheckOk': bool(result.get('ok')),
+        'lastFollowCheckStatus': result.get('raw_status'),
+        'updated': now,
     }
+    if result.get('ok'):
+        update_set['lastFollowerProfile'] = result.get('profile_excerpt')
+        update_set['lastFollowVerificationError'] = None
+    else:
+        update_set['lastFollowVerificationError'] = result.get('reason')
+    await db.comment_dm_sessions.update_one(
+        {'id': session.get('id')},
+        {'$set': update_set, '$inc': {'follow_verification_attempts': 1}},
+    )
+    # Mirror locally so the rest of this request sees the new counters.
+    session['follow_verification_attempts'] = attempts_so_far + 1
+    session['followLastCheckedAt'] = now
+
+    if not result.get('ok'):
+        reason = result.get('reason')
+        if reason == 'permission_or_consent_required':
+            failed_msg = (session.get('follow_verification_failed_message') or
+                          DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE)
+            await _send_follow_reminder(user_doc, session, failed_msg,
+                                        'verification_failed')
+            await db.comment_dm_sessions.update_one(
+                {'id': session.get('id')},
+                {'$set': {'status': 'verification_failed',
+                          'stage': 'verification_failed',
+                          'updated': datetime.utcnow()}},
+            )
+            logger.warning('follow_verification_failed session=%s reason=%s',
+                           session.get('id'), reason)
+            return {'allowed': False, 'checked': True, 'reason': reason}
+        # temporary_api_error / missing_token_or_id — keep session pending,
+        # send the verification-failed message but do not lock the state.
+        soft_msg = (session.get('follow_verification_failed_message') or
+                    DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE)
+        await _send_follow_reminder(user_doc, session, soft_msg,
+                                    'awaiting_actual_follow')
+        logger.warning('follow_verification_failed session=%s reason=%s',
+                       session.get('id'), reason)
+        return {'allowed': False, 'checked': True, 'reason': reason or 'temporary_api_error'}
+
+    if result.get('follows') is True:
+        await db.comment_dm_sessions.update_one(
+            {'id': session.get('id')},
+            {'$set': {
+                'follow_verified': True,
+                'verifiedFollowAt': now,
+                'stage': 'follow_verified',
+                'updated': now,
+            }},
+        )
+        session['follow_verified'] = True
+        session['verifiedFollowAt'] = now
+        logger.info('follow_verified_true session=%s', session.get('id'))
+        return {'allowed': True, 'checked': True, 'verified': True,
+                'profile': result.get('profile_excerpt')}
+
+    # follows == False → reminder, do not send link.
+    not_detected = (session.get('follow_not_detected_message') or
+                    DEFAULT_FOLLOW_NOT_DETECTED_MESSAGE)
+    await _send_follow_reminder(user_doc, session, not_detected,
+                                'awaiting_actual_follow')
+    logger.info('follow_verified_false session=%s', session.get('id'))
+    return {'allowed': False, 'checked': True, 'reason': 'not_following'}
 
 
 async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> bool:
@@ -790,9 +1085,23 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
     if not recipient_id:
         return False
 
+    # Idempotency: never resend the final link if it has already been sent
+    # for this session — even on duplicate webhook events. We check both the
+    # in-memory session and the persisted record before doing anything.
+    if session.get('finalDmSentAt') or session.get('stage') == 'final_sent':
+        logger.info('final_link_already_sent session=%s', session.get('id'))
+        return True
+    if session.get('id'):
+        persisted = await db.comment_dm_sessions.find_one({'id': session['id']})
+        if persisted and (persisted.get('finalDmSentAt') or
+                          persisted.get('stage') == 'final_sent'):
+            logger.info('final_link_already_sent session=%s (db check)', session.get('id'))
+            return True
+
     follow_gate = await _verify_comment_dm_follow_gate(user_doc, session)
     if not follow_gate.get('allowed'):
-        return bool(follow_gate.get('prompt_sent'))
+        return bool(follow_gate.get('prompt_sent') or follow_gate.get('reason')
+                    in ('cooldown', 'final_already_sent'))
 
     ok_all = True
     sent_steps = ['follow_confirmed'] if session.get('follow_request_enabled') else []
@@ -873,6 +1182,8 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         )
     if ok_all:
         logger.info('final_link_sent session=%s recipient=%s', session.get('id'), recipient_id)
+        if session.get('follow_request_enabled') and session.get('verify_actual_follow') is not False:
+            logger.info('final_link_sent_after_verified_follow session=%s', session.get('id'))
     logger.info('comment_dm_flow_completed session=%s ok=%s steps=%s',
                 session.get('id'), ok_all, sent_steps)
     return ok_all
@@ -1174,6 +1485,11 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_confirmation_keywords',
         'follow_gate_expires_after_minutes',
         'follow_gate_fallback_message',
+        'verify_actual_follow',
+        'follow_not_detected_message',
+        'follow_verification_failed_message',
+        'follow_retry_button_text',
+        'max_follow_verification_attempts',
     }
     if any(key in update for key in follow_keys):
         normalized_follow = _normalize_follow_gate_config(update)
@@ -1203,6 +1519,9 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_request_enabled', 'follow_request_message',
         'follow_request_button_text', 'follow_confirmation_keywords',
         'follow_gate_expires_after_minutes', 'follow_gate_fallback_message',
+        'verify_actual_follow', 'follow_not_detected_message',
+        'follow_verification_failed_message', 'follow_retry_button_text',
+        'max_follow_verification_attempts',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
         'processExistingComments',
     }
@@ -1412,6 +1731,11 @@ async def create_quick_comment_rule(
             'follow_confirmation_keywords': follow_gate['follow_confirmation_keywords'],
             'follow_gate_expires_after_minutes': follow_gate['follow_gate_expires_after_minutes'],
             'follow_gate_fallback_message': follow_gate['follow_gate_fallback_message'],
+            'verify_actual_follow': follow_gate['verify_actual_follow'],
+            'follow_not_detected_message': follow_gate['follow_not_detected_message'],
+            'follow_verification_failed_message': follow_gate['follow_verification_failed_message'],
+            'follow_retry_button_text': follow_gate['follow_retry_button_text'],
+            'max_follow_verification_attempts': follow_gate['max_follow_verification_attempts'],
             'email_request_enabled': email_request_enabled,
             'follow_up_enabled': follow_up_enabled,
             'follow_up_text': follow_up_text,
@@ -1449,6 +1773,11 @@ async def create_quick_comment_rule(
         'follow_confirmation_keywords': follow_gate['follow_confirmation_keywords'],
         'follow_gate_expires_after_minutes': follow_gate['follow_gate_expires_after_minutes'],
         'follow_gate_fallback_message': follow_gate['follow_gate_fallback_message'],
+        'verify_actual_follow': follow_gate['verify_actual_follow'],
+        'follow_not_detected_message': follow_gate['follow_not_detected_message'],
+        'follow_verification_failed_message': follow_gate['follow_verification_failed_message'],
+        'follow_retry_button_text': follow_gate['follow_retry_button_text'],
+        'max_follow_verification_attempts': follow_gate['max_follow_verification_attempts'],
         'email_request_enabled': email_request_enabled,
         'follow_up_enabled': follow_up_enabled,
         'follow_up_text': follow_up_text,
