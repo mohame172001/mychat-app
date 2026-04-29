@@ -54,13 +54,13 @@ const OptionRow = ({ active, title, children, onClick }) => (
 );
 
 const ToggleCard = ({ icon: Icon, title, checked, onChange, children }) => (
-  <div className="rounded-lg bg-slate-100 p-3">
+  <div className="rounded-lg bg-slate-100 p-2.5">
     <div className="flex items-center gap-2.5">
       {Icon && <Icon className="h-4 w-4 shrink-0 text-slate-500" />}
       <div className="flex-1 text-sm font-semibold leading-snug text-slate-950">{title}</div>
       <Switch checked={checked} onCheckedChange={onChange} />
     </div>
-    {checked && children && <div className="mt-2.5">{children}</div>}
+    {checked && children && <div className="mt-2">{children}</div>}
   </div>
 );
 
@@ -97,9 +97,9 @@ const AutomationPhonePreview = ({
 
   return (
     <div className="flex h-full flex-col bg-slate-50">
-      <div className="px-4 pt-4 text-sm font-medium text-slate-600 sm:px-6 sm:pt-6">Preview</div>
-      <div className="flex flex-1 items-center justify-center px-3 py-4 sm:px-6 sm:py-6">
-        <div className="w-[340px] max-w-full rounded-[2.5rem] bg-slate-950 p-3 shadow-2xl shadow-slate-300">
+      <div className="px-4 pt-4 text-sm font-medium text-slate-600">Preview</div>
+      <div className="flex flex-1 items-center justify-center px-3 py-3 lg:py-4">
+        <div className="w-[300px] max-w-full rounded-[2.25rem] bg-slate-950 p-2.5 shadow-xl shadow-slate-300">
           <div className="overflow-hidden rounded-[2rem] bg-[#121212] text-white">
             <div className="flex h-10 items-center justify-between px-7 text-[11px] font-semibold">
               <span>2:34</span>
@@ -147,7 +147,7 @@ const AutomationPhonePreview = ({
             )}
 
             {previewTab === 'Comments' && (
-              <div className="min-h-[430px] px-4 py-4">
+              <div className="min-h-[360px] px-4 py-4">
                 <div className="mb-5 text-center font-bold">Comments</div>
                 <div className="flex gap-3">
                   <div className="h-9 w-9 rounded-full bg-slate-200" />
@@ -169,7 +169,7 @@ const AutomationPhonePreview = ({
             )}
 
             {previewTab === 'DM' && (
-              <div className="min-h-[430px] px-4 py-4">
+              <div className="min-h-[360px] px-4 py-4">
                 <div className="mb-5 text-center font-bold">DM</div>
                 <div className="ml-auto max-w-[82%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm">
                   {commentText}
@@ -212,7 +212,7 @@ const AutomationPhonePreview = ({
           </div>
         </div>
       </div>
-      <div className="pb-5 text-center">
+      <div className="pb-4 text-center">
         <div className="inline-flex rounded-full bg-slate-200 p-1">
           {['Post', 'Comments', 'DM'].map(tab => (
             <button
@@ -600,13 +600,13 @@ const Automations = () => {
 
   if (builderOpen) {
     return (
-      <div className="mx-auto max-w-7xl p-3 text-slate-950 sm:p-4 lg:p-5">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="mx-auto max-w-[1180px] p-3 text-slate-950 sm:p-4 lg:p-5">
+        <div className="sticky top-0 z-30 -mx-3 flex flex-wrap items-end justify-between gap-3 border-b border-slate-200/70 bg-slate-50/95 px-3 py-3 backdrop-blur sm:-mx-4 sm:px-4 lg:-mx-5 lg:px-5">
           <div>
-            <h1 className="font-display text-2xl font-extrabold tracking-tight lg:text-3xl">
+            <h1 className="font-display text-2xl font-extrabold tracking-tight">
               {editingAutomation ? 'Edit automation' : 'Automations'}
             </h1>
-            <p className="mt-0.5 text-sm text-slate-600 lg:text-base">
+            <p className="mt-0.5 text-sm text-slate-600">
               {editingAutomation
                 ? 'Update this Instagram comment automation while keeping its stats.'
                 : 'Create an Instagram comment automation inside your workspace.'}
@@ -631,21 +631,21 @@ const Automations = () => {
           </div>
         </div>
         {editingAutomation && (
-          <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
             Current stats stay attached to this automation: {(editingAutomation.sent || 0).toLocaleString()} fired.
           </div>
         )}
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(440px,500px)_minmax(0,1fr)]">
+        <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(390px,0.58fr)_minmax(320px,0.42fr)]">
           <Card className="overflow-hidden rounded-xl border-slate-100 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-5 py-4">
+            <div className="border-b border-slate-100 px-4 py-3">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
               <div className="mt-0.5 text-base font-bold">Build rule</div>
             </div>
-            <div className="max-h-[calc(100vh-190px)] overflow-y-auto px-5 py-5">
+            <div className="px-4 py-4">
             <section>
-              <h2 className="text-xl font-extrabold tracking-tight">When someone comments on</h2>
-              <div className="mt-4 space-y-2.5">
+              <h2 className="text-lg font-extrabold tracking-tight">When someone comments on</h2>
+              <div className="mt-3 space-y-2">
                 <OptionRow
                   active={postScope === 'specific'}
                   title="a specific post or reel"
@@ -716,9 +716,9 @@ const Automations = () => {
               </div>
             </section>
 
-            <section className="mt-7">
-              <h2 className="text-xl font-extrabold tracking-tight">And this comment has</h2>
-              <div className="mt-4 space-y-2.5">
+            <section className="mt-5">
+              <h2 className="text-lg font-extrabold tracking-tight">And this comment has</h2>
+              <div className="mt-3 space-y-2">
                 <OptionRow
                   active={match === 'keyword'}
                   title="a specific word or words"
@@ -788,9 +788,9 @@ const Automations = () => {
               </div>
             </section>
 
-            <section className="mt-7">
-              <h2 className="text-xl font-extrabold tracking-tight">They will get</h2>
-              <div className="mt-4 space-y-2.5">
+            <section className="mt-5">
+              <h2 className="text-lg font-extrabold tracking-tight">They will get</h2>
+              <div className="mt-3 space-y-2">
                 <ToggleCard
                   title="an opening DM"
                   checked={openingDmEnabled}
@@ -831,9 +831,9 @@ const Automations = () => {
               </div>
             </section>
 
-            <section className="mt-7">
-              <h2 className="text-xl font-extrabold tracking-tight">And then, they will get</h2>
-              <div className="mt-4 space-y-2.5">
+            <section className="mt-5">
+              <h2 className="text-lg font-extrabold tracking-tight">And then, they will get</h2>
+              <div className="mt-3 space-y-2">
                 <div className="rounded-lg bg-slate-100 p-3">
                   <div className="mb-2.5 flex items-center gap-2.5 text-sm font-semibold">
                     <LinkIcon className="h-4 w-4 text-slate-500" /> a DM with a link
@@ -897,7 +897,7 @@ const Automations = () => {
             </div>
           </Card>
 
-          <Card className="min-w-0 overflow-hidden rounded-2xl border-slate-100 bg-white shadow-sm">
+          <Card className="min-w-0 self-start overflow-hidden rounded-xl border-slate-100 bg-white shadow-sm lg:sticky lg:top-[92px]">
             <AutomationPhonePreview
               selectedMedia={selectedMedia}
               postScope={postScope}
