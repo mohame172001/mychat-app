@@ -289,6 +289,70 @@ def _comment_dm_flow_enabled(automation: dict) -> bool:
     ])
 
 
+def _normalize_comment_text(value: Any) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def _automation_keywords(rule: dict) -> list:
+    raw = rule.get('keywords')
+    if isinstance(raw, list):
+        parts = raw
+    else:
+        parts = str(rule.get('keyword') or '').split(',')
+    return [str(item or '').strip() for item in parts if str(item or '').strip()]
+
+
+def _keyword_in_text(keyword: str, text: str) -> bool:
+    keyword_norm = str(keyword or '').strip().casefold()
+    text_norm = str(text or '').strip().casefold()
+    return bool(keyword_norm and text_norm and keyword_norm in text_norm)
+
+
+def matchesAutomationRule(rule: dict, comment_text: Any, context: Optional[dict] = None) -> dict:
+    """Unicode-safe comment matcher used by webhook and polling paths.
+
+    Reply-all rules match any non-empty trimmed text, including Arabic,
+    emoji-only, punctuation-only, and one-word comments. Keyword rules remain
+    keyword-specific and use case-insensitive contains matching.
+    """
+    text = _normalize_comment_text(comment_text)
+    if not text:
+        return {'matches': False, 'mode': 'empty', 'reason': 'skipped_empty_comment'}
+
+    raw_trigger = str(rule.get('trigger') or '')
+    trigger = raw_trigger.casefold()
+    match_mode = str(
+        rule.get('match') or rule.get('matchMode') or rule.get('match_mode') or 'any'
+    ).strip().casefold()
+
+    if trigger.startswith('keyword:'):
+        trigger_keyword = raw_trigger.split(':', 1)[1].strip()
+        return {
+            'matches': _keyword_in_text(trigger_keyword, text),
+            'mode': 'keyword',
+            'keywords': [trigger_keyword] if trigger_keyword else [],
+            'reason': None if _keyword_in_text(trigger_keyword, text) else 'keyword_no_match',
+        }
+
+    if match_mode in ('any', 'all', 'any_comment', 'all_comments', 'reply_all', 'any word'):
+        return {'matches': True, 'mode': 'any', 'reason': None}
+
+    keywords = _automation_keywords(rule)
+    if match_mode in ('keyword', 'keywords', 'specific', 'specific_words', 'specific word or words'):
+        matched = any(_keyword_in_text(kw, text) for kw in keywords)
+        return {
+            'matches': matched,
+            'mode': 'keyword',
+            'keywords': keywords,
+            'reason': None if matched else 'keyword_no_match',
+        }
+
+    # Conservative fallback: unknown modes behave like existing "any" rules.
+    return {'matches': True, 'mode': match_mode or 'any', 'reason': None}
+
+
 def _conversion_tracking_enabled(source: dict, url: str = '') -> bool:
     if 'conversionTrackingEnabled' in source:
         return bool(source.get('conversionTrackingEnabled'))
@@ -4329,7 +4393,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     ig_comment_id = comment_data.get('ig_comment_id')
     commenter_id = comment_data.get('commenter_id')
     media_id = comment_data.get('media_id')
-    comment_text = comment_data.get('text') or ''
+    comment_text = _normalize_comment_text(comment_data.get('text'))
 
     # log: comment_seen (every comment we observe, before dedup)
     logger.info('comment_seen ig_comment_id=%s media=%s source=%s text=%r',
@@ -4345,7 +4409,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
     now = datetime.utcnow()
-    retry_existing_missing_timestamp = False
+    retry_existing = False
+    retry_reason = None
     existing_doc_id = None
     existing_created = None
 
@@ -4359,12 +4424,25 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     })
     if existing:
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
-        if previous_skip == 'missing_comment_timestamp' and comment_ts:
-            retry_existing_missing_timestamp = True
+        previous_status = str(existing.get('action_status') or existing.get('actionStatus') or '').lower()
+        already_replied = bool(existing.get('replied')) or previous_status in ('success', 'replied')
+        retryable_status = previous_status in ('failed', 'skipped')
+        retryable_skip = previous_skip in (
+            'missing_comment_timestamp',
+            'no_rule_match',
+            'skipped_empty_comment',
+        )
+        if not already_replied and (
+            (previous_skip == 'missing_comment_timestamp' and comment_ts)
+            or retryable_status
+            or retryable_skip
+        ):
+            retry_existing = True
+            retry_reason = previous_skip or previous_status or 'unreplied_existing'
             existing_doc_id = existing.get('id')
             existing_created = existing.get('created')
-            logger.info('comment_reprocessing_after_timestamp ig_comment_id=%s user=%s source=%s',
-                        ig_comment_id, user_doc.get('email'), source)
+            logger.info('comment_reprocessing_retryable ig_comment_id=%s user=%s source=%s reason=%s',
+                        ig_comment_id, user_doc.get('email'), source, retry_reason)
         else:
             logger.info('comment_already_processed ig_comment_id=%s user=%s',
                         ig_comment_id, user_doc.get('email'))
@@ -4372,18 +4450,6 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     'action_status': 'skipped', 'reason': 'duplicate'}
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
-
-    def _automation_keywords(auto: dict) -> list:
-        raw = auto.get('keywords')
-        if isinstance(raw, list):
-            parts = raw
-        else:
-            parts = str(auto.get('keyword') or '').split(',')
-        return [str(item or '').strip() for item in parts if str(item or '').strip()]
-
-    def _comment_matches_keywords(auto: dict) -> bool:
-        text = comment_text.lower()
-        return any(kw.lower() in text for kw in _automation_keywords(auto))
 
     # Match automations to determine rule_id BEFORE insert
     automations = await db.automations.find(
@@ -4429,9 +4495,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             if cutoff_skip_reason:
                 cutoff_rule = auto
                 break
-            keyword = trigger.split(':', 1)[1].strip()
-            if keyword and keyword.lower() in comment_text.lower():
-                fire = True
+            match_result = matchesAutomationRule(
+                auto,
+                comment_text,
+                {'media_id': media_id, 'source': source},
+            )
+            fire = bool(match_result.get('matches'))
+            if not fire:
+                cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
         elif trigger.startswith('comment:'):
             target = raw_trigger.split(':', 1)[1].strip()
             media_hit = False
@@ -4452,15 +4523,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 if cutoff_skip_reason:
                     cutoff_rule = auto
                     break
-                match_mode = (auto.get('match') or 'any').lower()
-                kws = _automation_keywords(auto)
-                if match_mode == 'keyword' and kws:
-                    if _comment_matches_keywords(auto):
-                        fire = True
-                elif match_mode == 'keyword':
-                    fire = False
-                else:
-                    fire = True
+                match_result = matchesAutomationRule(
+                    auto,
+                    comment_text,
+                    {'media_id': media_id, 'source': source},
+                )
+                fire = bool(match_result.get('matches'))
+                if not fire:
+                    cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
         if fire:
             matched_rule = auto
             break
@@ -4474,6 +4544,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
     else:
+        cutoff_skip_reason = 'no_rule_match'
         logger.info('rule_not_matched ig_comment_id=%s user=%s',
                     ig_comment_id, user_doc.get('email'))
 
@@ -4514,11 +4585,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'ruleActivationStartedAt': rule_activation_started_at,
         'processExistingComments': process_existing_comments,
         'processed_at': now,
-        'reprocessed_after_missing_timestamp': retry_existing_missing_timestamp,
+        'reprocessed_after_missing_timestamp': retry_reason == 'missing_comment_timestamp',
+        'reprocessed_retryable': retry_existing,
+        'reprocessed_reason': retry_reason,
         'updated': now,
         'created': existing_created or now,
     }
-    if retry_existing_missing_timestamp:
+    if retry_existing:
         await db.comments.update_one(
             {'id': doc['id'], 'user_id': user_id},
             {'$set': doc},
@@ -4553,7 +4626,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             )
             action_status = 'failed'
 
-    return {'processed': True, 'reprocessed': retry_existing_missing_timestamp,
+    return {'processed': True, 'reprocessed': retry_existing,
             'matched': matched, 'action_status': action_status,
             'rule_id': rule_id, 'comment_doc_id': doc['id']}
 
@@ -5309,7 +5382,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         return stats
 
     automations = await db.automations.find(
-        {'user_id': user_id, 'status': 'active'}
+        {**_account_scoped_query(user_id, _current_instagram_context(user_doc)), 'status': 'active'}
     ).to_list(200)
     if not automations:
         return stats

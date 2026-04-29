@@ -879,6 +879,156 @@ def test_final_dm_link_is_replaced_with_tracking_url(monkeypatch):
     assert fake_db.tracked_links.docs[0]['relatedMessageId'] == 'mid1'
 
 
+def test_comment_matcher_reply_all_matches_unicode_and_emoji_comments():
+    rule = {'id': 'autoAny', 'trigger': 'comment:any', 'match': 'any'}
+    for text in ['Link', 'url', '🔥👏', '🙌🙌', 'محتاج التفاصيل', '؟؟', '👌', 'Price', 'لينك']:
+        result = server.matchesAutomationRule(rule, text)
+        assert result['matches'] is True, text
+
+    empty = server.matchesAutomationRule(rule, '   ')
+    assert empty['matches'] is False
+    assert empty['reason'] == 'skipped_empty_comment'
+
+
+def test_comment_matcher_keyword_remains_specific_and_unicode_safe():
+    english = {'id': 'autoKeyword', 'trigger': 'comment:any', 'match': 'keyword', 'keywords': ['Price']}
+    arabic = {'id': 'autoArabic', 'trigger': 'comment:any', 'match': 'keyword', 'keyword': 'لينك'}
+
+    assert server.matchesAutomationRule(english, 'price please')['matches'] is True
+    assert server.matchesAutomationRule(arabic, 'ابعت لينك')['matches'] is True
+    assert server.matchesAutomationRule(english, '🔥👏')['matches'] is False
+
+
+def test_handle_new_comment_reply_all_replies_to_emoji_comment(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {
+                'id': 'autoAny',
+                'user_id': 'u1',
+                'status': 'active',
+                'trigger': 'comment:any',
+                'match': 'any',
+                'instagramAccountDbId': 'accA',
+                'instagramAccountId': 'igA',
+                'activationStartedAt': now - timedelta(minutes=5),
+                'nodes': [
+                    {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                    {'id': 'n_reply', 'type': 'reply_comment',
+                     'data': {'text': 'Thanks for your comment'}},
+                ],
+                'edges': [{'source': 'n_trigger', 'target': 'n_reply'}],
+            }
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_args, **_kwargs: asyncio.sleep(0)))
+    replies = []
+
+    async def fake_reply(_token, ig_comment_id, text):
+        replies.append((ig_comment_id, text))
+        return True
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment', fake_reply)
+    user_doc = {
+        'id': 'u1',
+        'email': 'u1@example.com',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+        'instagramHandle': 'account_a',
+    }
+
+    result = _run(server._handle_new_comment(user_doc, {
+        'ig_comment_id': 'commentEmoji',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'commenter_username': 'contact',
+        'text': '🔥👏',
+        'timestamp': now,
+    }, source='polling'))
+
+    assert result['matched'] is True
+    assert result['action_status'] == 'success'
+    assert replies == [('commentEmoji', 'Thanks for your comment')]
+    assert fake_db.comments.docs[0]['replied'] is True
+    assert fake_db.comments.docs[0]['action_status'] == 'success'
+
+
+def test_handle_new_comment_retries_existing_failed_unreplied_comment(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {
+                'id': 'autoAny',
+                'user_id': 'u1',
+                'status': 'active',
+                'trigger': 'comment:any',
+                'match': 'any',
+                'instagramAccountDbId': 'accA',
+                'instagramAccountId': 'igA',
+                'activationStartedAt': now - timedelta(minutes=5),
+                'nodes': [
+                    {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                    {'id': 'n_reply', 'type': 'reply_comment',
+                     'data': {'text': 'Retry worked'}},
+                ],
+                'edges': [{'source': 'n_trigger', 'target': 'n_reply'}],
+            }
+        ],
+        comments=[
+            {
+                'id': 'existingComment',
+                'user_id': 'u1',
+                'ig_comment_id': 'commentRetry',
+                'instagramAccountId': 'igA',
+                'igUserId': 'igA',
+                'commenter_id': 'contact1',
+                'text': 'url',
+                'replied': False,
+                'action_status': 'failed',
+                'created': now - timedelta(minutes=1),
+            }
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_args, **_kwargs: asyncio.sleep(0)))
+
+    async def fake_reply(_token, _ig_comment_id, _text):
+        return True
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment', fake_reply)
+    user_doc = {
+        'id': 'u1',
+        'email': 'u1@example.com',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+        'instagramHandle': 'account_a',
+    }
+
+    result = _run(server._handle_new_comment(user_doc, {
+        'ig_comment_id': 'commentRetry',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'commenter_username': 'contact',
+        'text': 'url',
+        'timestamp': now,
+    }, source='polling'))
+
+    assert result['reprocessed'] is True
+    assert result['matched'] is True
+    assert result['action_status'] == 'success'
+    assert len(fake_db.comments.docs) == 1
+    assert fake_db.comments.docs[0]['replied'] is True
+
+
 def test_rules_and_comment_logs_filter_by_active_instagram_account(monkeypatch):
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)
