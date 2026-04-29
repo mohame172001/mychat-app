@@ -207,6 +207,77 @@ def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
     return value[:20]
 
 
+DEFAULT_FOLLOW_GATE_MESSAGE = (
+    'فرحان إنك مهتم 😊\n'
+    'تابع الحساب الأول، وبعدها اضغط على الزر عشان أبعتلك الرابط.'
+)
+DEFAULT_FOLLOW_GATE_BUTTON_TEXT = 'تمت المتابعة'
+DEFAULT_FOLLOW_GATE_CONFIRMATION_KEYWORDS = [
+    'following',
+    'i followed',
+    'تمت المتابعة',
+    'تابعت',
+]
+
+
+def _split_follow_keywords(value) -> list:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value or '').split(',')
+    seen = set()
+    out = []
+    for item in raw_items:
+        keyword = str(item or '').strip()
+        key = keyword.casefold()
+        if keyword and key not in seen:
+            seen.add(key)
+            out.append(keyword)
+    return out
+
+
+def _normalize_follow_gate_config(data: dict) -> dict:
+    enabled = bool(data.get('follow_request_enabled', data.get('followGateEnabled', False)))
+    message = (
+        data.get('follow_request_message')
+        or data.get('follow_gate_message')
+        or data.get('followGateMessage')
+        or DEFAULT_FOLLOW_GATE_MESSAGE
+    )
+    button = (
+        data.get('follow_request_button_text')
+        or data.get('follow_gate_button_text')
+        or data.get('followGateButtonText')
+        or DEFAULT_FOLLOW_GATE_BUTTON_TEXT
+    )
+    keywords = _split_follow_keywords(
+        data.get('follow_confirmation_keywords')
+        if 'follow_confirmation_keywords' in data
+        else data.get('followGateConfirmationKeywords')
+    )
+    if not keywords:
+        keywords = DEFAULT_FOLLOW_GATE_CONFIRMATION_KEYWORDS.copy()
+    expires_raw = data.get('follow_gate_expires_after_minutes', data.get('followGateExpiresAfterMinutes', 1440))
+    try:
+        expires_minutes = int(expires_raw)
+    except (TypeError, ValueError):
+        expires_minutes = 1440
+    expires_minutes = max(5, min(expires_minutes, 10080))
+    fallback = (
+        data.get('follow_gate_fallback_message')
+        or data.get('followGateFallbackMessage')
+        or ''
+    )
+    return {
+        'follow_request_enabled': enabled,
+        'follow_request_message': str(message or '').strip(),
+        'follow_request_button_text': str(button or '').strip(),
+        'follow_confirmation_keywords': keywords,
+        'follow_gate_expires_after_minutes': expires_minutes,
+        'follow_gate_fallback_message': str(fallback or '').strip(),
+    }
+
+
 async def send_ig_quick_reply(access_token: str, ig_user_id: str, recipient_ig_id: str,
                               text: str, title: str, payload: str) -> dict:
     return await send_ig_message(
@@ -490,6 +561,7 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
                                      comment_context: Optional[dict], payload: str) -> dict:
     import uuid as _uuid
     now = datetime.utcnow()
+    follow_gate = _normalize_follow_gate_config(automation)
     session = {
         'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
         'user_id': user_doc['id'],
@@ -509,9 +581,10 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'conversionTrackingEnabled': _conversion_tracking_enabled(
             automation, (automation.get('link_url') or '').strip()
         ),
-        'follow_request_enabled': bool(automation.get('follow_request_enabled')),
-        'follow_verified': False,
-        'follow_verification_attempts': 0,
+        **follow_gate,
+        'follow_confirmed': False,
+        'follow_confirmation_attempts': 0,
+        'expiresAt': now + timedelta(minutes=follow_gate['follow_gate_expires_after_minutes']),
         'email_request_enabled': bool(automation.get('email_request_enabled')),
         'follow_up_enabled': bool(automation.get('follow_up_enabled')),
         'follow_up_text': (automation.get('follow_up_text') or '').strip(),
@@ -520,6 +593,100 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
     }
     await db.comment_dm_sessions.insert_one(session)
     return session
+
+
+def _comment_dm_follow_confirmation_matches(session: dict, text: str = '',
+                                            payload: Optional[str] = None) -> bool:
+    if not session.get('follow_request_enabled'):
+        return True
+    if session.get('follow_confirmed'):
+        return True
+    payload_value = str(payload or '')
+    follow_payload = str(session.get('follow_payload') or '')
+    if follow_payload and payload_value == follow_payload:
+        return True
+    if payload_value.endswith(':followed'):
+        return True
+    normalized_text = str(text or '').strip().casefold()
+    if not normalized_text:
+        return False
+    candidates = [
+        session.get('follow_request_button_text'),
+        *list(session.get('follow_confirmation_keywords') or []),
+    ]
+    return any(normalized_text == str(item or '').strip().casefold() for item in candidates if item)
+
+
+async def _mark_comment_dm_follow_confirmed(session: dict) -> None:
+    if not session.get('id') or session.get('follow_confirmed'):
+        return
+    now = datetime.utcnow()
+    await db.comment_dm_sessions.update_one(
+        {'id': session['id'], 'status': 'pending'},
+        {'$set': {
+            'follow_confirmed': True,
+            'stage': 'follow_confirmed',
+            'confirmedAt': now,
+            'updated': now,
+        }},
+    )
+    session['follow_confirmed'] = True
+    session['stage'] = 'follow_confirmed'
+    session['confirmedAt'] = now
+
+
+async def _send_comment_dm_follow_gate_prompt(user_doc: dict, session: dict) -> bool:
+    access_token = user_doc.get('meta_access_token', '')
+    ig_user_id = user_doc.get('ig_user_id', '')
+    recipient_id = session.get('recipient_id')
+    if not recipient_id:
+        return False
+    now = datetime.utcnow()
+    expires_at = session.get('expiresAt')
+    if expires_at and isinstance(expires_at, datetime) and expires_at <= now:
+        fallback = (session.get('follow_gate_fallback_message') or '').strip()
+        sent_fallback = False
+        if fallback:
+            sent_fallback = await send_ig_dm(access_token, ig_user_id, recipient_id, fallback)
+        await db.comment_dm_sessions.update_one(
+            {'id': session.get('id')},
+            {'$set': {'status': 'expired', 'stage': 'expired', 'updated': now}},
+        )
+        logger.info('follow_gate_expired session=%s fallback_sent=%s',
+                    session.get('id'), sent_fallback)
+        return sent_fallback
+
+    if session.get('stage') == 'awaiting_follow_confirmation' and session.get('followPromptSentAt'):
+        logger.info('duplicate_skipped follow_gate_prompt session=%s', session.get('id'))
+        return True
+
+    prompt = (session.get('follow_request_message') or DEFAULT_FOLLOW_GATE_MESSAGE).strip()
+    button = (session.get('follow_request_button_text') or DEFAULT_FOLLOW_GATE_BUTTON_TEXT).strip()
+    payload = session.get('follow_payload') or f'comment_flow:{session.get("id")}:followed'
+    result = await send_ig_quick_reply(
+        access_token,
+        ig_user_id,
+        recipient_id,
+        prompt,
+        button,
+        payload,
+    )
+    prompt_sent = bool(result.get('ok'))
+    if not prompt_sent:
+        prompt_sent = await send_ig_dm(access_token, ig_user_id, recipient_id, prompt)
+    await db.comment_dm_sessions.update_one(
+        {'id': session.get('id')},
+        {'$set': {
+            'status': 'pending',
+            'stage': 'awaiting_follow_confirmation',
+            'follow_payload': payload,
+            'followPromptSentAt': now,
+            'updated': now,
+        }},
+    )
+    logger.info('follow_gate_started session=%s recipient=%s prompt_sent=%s',
+                session.get('id'), recipient_id, prompt_sent)
+    return prompt_sent
 
 
 async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
@@ -602,71 +769,17 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
 
 
 async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
-    """Require a real follow before continuing a gated comment DM flow."""
+    """Confirmation gate: ask for a follow confirmation before sending the link."""
     if not session.get('follow_request_enabled'):
         return {'allowed': True, 'checked': False}
-    if session.get('follow_verified') is True:
-        return {'allowed': True, 'checked': True, 'cached': True}
+    if session.get('follow_confirmed') is True:
+        return {'allowed': True, 'checked': True, 'confirmed': True}
 
-    access_token = user_doc.get('meta_access_token', '')
-    ig_user_id = user_doc.get('ig_user_id', '')
-    recipient_id = session.get('recipient_id')
-    now = datetime.utcnow()
-    profile_result = await get_instagram_messaging_user_profile(access_token, recipient_id)
-    profile = profile_result.get('profile') or {}
-    is_following = bool(profile.get('is_user_follow_business')) if profile_result.get('ok') else False
-
-    update = {
-        'stage': 'follow_verified' if is_following else 'awaiting_follow',
-        'follow_verified': is_following,
-        'lastFollowCheckAt': now,
-        'lastFollowCheckOk': bool(profile_result.get('ok')),
-        'lastFollowCheckStatus': profile_result.get('status_code'),
-        'lastFollowCheckError': profile_result.get('error'),
-        'updated': now,
-    }
-    if profile:
-        update['lastFollowerProfile'] = {
-            'username': profile.get('username'),
-            'name': profile.get('name'),
-            'is_user_follow_business': profile.get('is_user_follow_business'),
-            'is_business_follow_user': profile.get('is_business_follow_user'),
-        }
-    await db.comment_dm_sessions.update_one(
-        {'id': session.get('id')},
-        {'$set': update, '$inc': {'follow_verification_attempts': 1}},
-    )
-
-    if is_following:
-        logger.info('comment_dm_follow_gate_verified session=%s recipient=%s',
-                    session.get('id'), recipient_id)
-        return {'allowed': True, 'checked': True, 'profile': profile}
-
-    prompt = (
-        'Please follow this account first, then tap "I followed" and I will send the link.'
-        if profile_result.get('ok')
-        else 'I could not confirm the follow yet. Please follow this account, then tap "I followed".'
-    )
-    payload = session.get('payload') or f'comment_flow:{session.get("id")}:followed'
-    result = await send_ig_quick_reply(
-        access_token,
-        ig_user_id,
-        recipient_id,
-        prompt,
-        'I followed',
-        payload,
-    )
-    prompt_sent = bool(result.get('ok'))
-    if not prompt_sent:
-        prompt_sent = await send_ig_dm(access_token, ig_user_id, recipient_id, prompt)
-    logger.info('comment_dm_follow_gate_blocked session=%s recipient=%s prompt_sent=%s',
-                session.get('id'), recipient_id, prompt_sent)
+    prompt_sent = await _send_comment_dm_follow_gate_prompt(user_doc, session)
     return {
         'allowed': False,
         'checked': True,
         'prompt_sent': prompt_sent,
-        'profile': profile,
-        'error': profile_result.get('error'),
     }
 
 
@@ -682,7 +795,7 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         return bool(follow_gate.get('prompt_sent'))
 
     ok_all = True
-    sent_steps = ['follow_verified'] if session.get('follow_request_enabled') else []
+    sent_steps = ['follow_confirmed'] if session.get('follow_request_enabled') else []
     link_text = (session.get('link_dm_text') or '').strip()
     link_url = (session.get('link_url') or '').strip()
     link_button = (session.get('link_button_text') or 'Open link').strip()
@@ -746,21 +859,20 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         ok_all = ok_all and ok
         sent_steps.append('extra_message')
 
-    if session.get('follow_request_enabled') and sent_steps == ['follow_verified']:
-        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, 'Thanks for following. You are all set.')
-        ok_all = ok_all and ok
-        sent_steps.append('follow_confirmation')
-
     if session.get('id'):
         await db.comment_dm_sessions.update_one(
             {'id': session['id']},
             {'$set': {
                 'status': 'completed' if ok_all else 'failed',
+                'stage': 'final_sent' if ok_all else 'failed',
                 'completedAt': datetime.utcnow(),
+                'finalDmSentAt': datetime.utcnow() if ok_all else None,
                 'updated': datetime.utcnow(),
                 'sentSteps': sent_steps,
             }},
         )
+    if ok_all:
+        logger.info('final_link_sent session=%s recipient=%s', session.get('id'), recipient_id)
     logger.info('comment_dm_flow_completed session=%s ok=%s steps=%s',
                 session.get('id'), ok_all, sent_steps)
     return ok_all
@@ -1044,6 +1156,35 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
 @api.patch('/automations/{aid}')
 async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
+    camel_aliases = {
+        'followGateEnabled': 'follow_request_enabled',
+        'followGateMessage': 'follow_request_message',
+        'followGateButtonText': 'follow_request_button_text',
+        'followGateConfirmationKeywords': 'follow_confirmation_keywords',
+        'followGateExpiresAfterMinutes': 'follow_gate_expires_after_minutes',
+        'followGateFallbackMessage': 'follow_gate_fallback_message',
+    }
+    for src, dest in camel_aliases.items():
+        if src in update:
+            update[dest] = update.pop(src)
+    follow_keys = {
+        'follow_request_enabled',
+        'follow_request_message',
+        'follow_request_button_text',
+        'follow_confirmation_keywords',
+        'follow_gate_expires_after_minutes',
+        'follow_gate_fallback_message',
+    }
+    if any(key in update for key in follow_keys):
+        normalized_follow = _normalize_follow_gate_config(update)
+        for key in follow_keys:
+            if key in update or update.get('follow_request_enabled'):
+                update[key] = normalized_follow[key]
+        if update.get('follow_request_enabled'):
+            if not update.get('follow_request_message'):
+                raise HTTPException(400, 'Follow request message is required')
+            if not update.get('follow_request_button_text'):
+                raise HTTPException(400, 'Follow confirmation button text is required')
     account = await getActiveInstagramAccount(user_id)
     scoped = _account_scoped_query(user_id, account)
     existing = await db.automations.find_one({'id': aid, **scoped})
@@ -1059,7 +1200,9 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'post_scope', 'reply_under_post', 'opening_dm_enabled',
         'opening_dm_text', 'opening_dm_button_text', 'link_dm_text',
         'link_button_text', 'link_url', 'conversionTrackingEnabled',
-        'follow_request_enabled',
+        'follow_request_enabled', 'follow_request_message',
+        'follow_request_button_text', 'follow_confirmation_keywords',
+        'follow_gate_expires_after_minutes', 'follow_gate_fallback_message',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
         'processExistingComments',
     }
@@ -1185,7 +1328,13 @@ async def create_quick_comment_rule(
         if 'conversionTrackingEnabled' in data
         else bool(link_url)
     )
-    follow_request_enabled = bool(data.get('follow_request_enabled', False))
+    follow_gate = _normalize_follow_gate_config(data)
+    follow_request_enabled = follow_gate['follow_request_enabled']
+    if follow_request_enabled:
+        if not follow_gate['follow_request_message']:
+            raise HTTPException(400, 'Follow request message is required')
+        if not follow_gate['follow_request_button_text']:
+            raise HTTPException(400, 'Follow confirmation button text is required')
     email_request_enabled = bool(data.get('email_request_enabled', False))
     follow_up_enabled = bool(data.get('follow_up_enabled', False))
     follow_up_text = (data.get('follow_up_text') or '').strip()
@@ -1258,6 +1407,11 @@ async def create_quick_comment_rule(
             'link_url': link_url,
             'conversionTrackingEnabled': conversion_tracking_enabled,
             'follow_request_enabled': follow_request_enabled,
+            'follow_request_message': follow_gate['follow_request_message'],
+            'follow_request_button_text': follow_gate['follow_request_button_text'],
+            'follow_confirmation_keywords': follow_gate['follow_confirmation_keywords'],
+            'follow_gate_expires_after_minutes': follow_gate['follow_gate_expires_after_minutes'],
+            'follow_gate_fallback_message': follow_gate['follow_gate_fallback_message'],
             'email_request_enabled': email_request_enabled,
             'follow_up_enabled': follow_up_enabled,
             'follow_up_text': follow_up_text,
@@ -1290,6 +1444,11 @@ async def create_quick_comment_rule(
         'link_url': link_url,
         'conversionTrackingEnabled': conversion_tracking_enabled,
         'follow_request_enabled': follow_request_enabled,
+        'follow_request_message': follow_gate['follow_request_message'],
+        'follow_request_button_text': follow_gate['follow_request_button_text'],
+        'follow_confirmation_keywords': follow_gate['follow_confirmation_keywords'],
+        'follow_gate_expires_after_minutes': follow_gate['follow_gate_expires_after_minutes'],
+        'follow_gate_fallback_message': follow_gate['follow_gate_fallback_message'],
         'email_request_enabled': email_request_enabled,
         'follow_up_enabled': follow_up_enabled,
         'follow_up_text': follow_up_text,
@@ -5024,6 +5183,14 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             if not await _persist(log_doc):
                 return {'processed': False, 'status': 'skipped', 'reason': 'race',
                         'event_kind': event_kind}
+            if _comment_dm_follow_confirmation_matches(
+                session,
+                text=postback_title or '',
+                payload=postback_payload,
+            ):
+                await _mark_comment_dm_follow_confirmed(session)
+                logger.info('follow_gate_confirmation_received session=%s via=postback',
+                            session.get('id'))
             ok = await _send_comment_dm_flow_completion(user_doc, session)
             await db.dm_logs.update_one(
                 {'id': log_doc['id']},
@@ -5076,6 +5243,14 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         if not await _persist(log_doc):
             return {'processed': False, 'status': 'skipped', 'reason': 'race',
                     'event_kind': event_kind}
+        if _comment_dm_follow_confirmation_matches(
+            session,
+            text=text or postback_title or '',
+            payload=quick_reply_payload or postback_payload,
+        ):
+            await _mark_comment_dm_follow_confirmed(session)
+            logger.info('follow_gate_confirmation_received session=%s via=message',
+                        session.get('id'))
         ok = await _send_comment_dm_flow_completion(user_doc, session)
         await db.dm_logs.update_one(
             {'id': log_doc['id']},

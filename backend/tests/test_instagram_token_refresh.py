@@ -879,6 +879,69 @@ def test_final_dm_link_is_replaced_with_tracking_url(monkeypatch):
     assert fake_db.tracked_links.docs[0]['relatedMessageId'] == 'mid1'
 
 
+def test_follow_gate_sends_custom_prompt_before_final_link(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    sent = {'prompts': [], 'finals': []}
+
+    async def fake_quick_reply(_token, _ig_id, _recipient, text, title, payload):
+        sent['prompts'].append({'text': text, 'title': title, 'payload': payload})
+        return {'ok': True}
+
+    async def fake_send_url_button(*args):
+        sent['finals'].append(args)
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'send_ig_quick_reply', fake_quick_reply)
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    user_doc = {'id': 'u1', 'active_instagram_account_id': 'accA',
+                'ig_user_id': 'igA', 'meta_access_token': 'token-a'}
+    session = {
+        'id': 'session-follow',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accA',
+        'instagramAccountId': 'igA',
+        'recipient_id': 'contact1',
+        'automation_id': 'auto1',
+        'status': 'pending',
+        'follow_request_enabled': True,
+        'follow_request_message': 'Custom follow message',
+        'follow_request_button_text': 'Following',
+        'follow_confirmation_keywords': ['Following', 'I followed'],
+        'link_dm_text': 'Here is the link',
+        'link_button_text': 'Open link',
+        'link_url': 'https://example.org/product',
+    }
+
+    ok = _run(server._send_comment_dm_flow_completion(user_doc, session))
+
+    assert ok is True
+    assert sent['prompts'][0]['text'] == 'Custom follow message'
+    assert sent['prompts'][0]['title'] == 'Following'
+    assert sent['prompts'][0]['payload'].endswith(':followed')
+    assert sent['finals'] == []
+
+
+def test_follow_gate_confirmation_match_uses_custom_button_and_keywords():
+    session = {
+        'follow_request_enabled': True,
+        'follow_request_button_text': 'تمت المتابعة',
+        'follow_confirmation_keywords': ['Following', 'تابعت'],
+        'follow_payload': 'comment_flow:session-follow:followed',
+    }
+
+    assert server._comment_dm_follow_confirmation_matches(session, text='تمت المتابعة') is True
+    assert server._comment_dm_follow_confirmation_matches(session, text='تابعت') is True
+    assert server._comment_dm_follow_confirmation_matches(
+        session, payload='comment_flow:session-follow:followed'
+    ) is True
+    assert server._comment_dm_follow_confirmation_matches(session, text='hello') is False
+
+
 def test_comment_matcher_reply_all_matches_unicode_and_emoji_comments():
     rule = {'id': 'autoAny', 'trigger': 'comment:any', 'match': 'any'}
     for text in ['Link', 'url', '🔥👏', '🙌🙌', 'محتاج التفاصيل', '؟؟', '👌', 'Price', 'لينك']:

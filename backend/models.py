@@ -60,6 +60,12 @@ class AutomationIn(BaseModel):
     instagramAccountId: Optional[str] = None
     igUserId: Optional[str] = None
     instagramUsername: Optional[str] = None
+    follow_request_enabled: Optional[bool] = None
+    follow_request_message: Optional[str] = None
+    follow_request_button_text: Optional[str] = None
+    follow_confirmation_keywords: Optional[List[str]] = None
+    follow_gate_expires_after_minutes: Optional[int] = None
+    follow_gate_fallback_message: Optional[str] = None
     processExistingComments: bool = False
 
 
@@ -91,6 +97,17 @@ class AutomationPatch(BaseModel):
     link_url: Optional[str] = None
     conversionTrackingEnabled: Optional[bool] = None
     follow_request_enabled: Optional[bool] = None
+    follow_request_message: Optional[str] = None
+    follow_request_button_text: Optional[str] = None
+    follow_confirmation_keywords: Optional[List[str]] = None
+    follow_gate_expires_after_minutes: Optional[int] = None
+    follow_gate_fallback_message: Optional[str] = None
+    followGateEnabled: Optional[bool] = None
+    followGateMessage: Optional[str] = None
+    followGateButtonText: Optional[str] = None
+    followGateConfirmationKeywords: Optional[List[str]] = None
+    followGateExpiresAfterMinutes: Optional[int] = None
+    followGateFallbackMessage: Optional[str] = None
     email_request_enabled: Optional[bool] = None
     follow_up_enabled: Optional[bool] = None
     follow_up_text: Optional[str] = None
@@ -118,6 +135,12 @@ class Automation(BaseModel):
     instagramAccountId: Optional[str] = None
     igUserId: Optional[str] = None
     instagramUsername: Optional[str] = None
+    follow_request_enabled: Optional[bool] = None
+    follow_request_message: Optional[str] = None
+    follow_request_button_text: Optional[str] = None
+    follow_confirmation_keywords: Optional[List[str]] = None
+    follow_gate_expires_after_minutes: Optional[int] = None
+    follow_gate_fallback_message: Optional[str] = None
     processExistingComments: bool = False
     activationStartedAt: Optional[datetime] = None
     createdAt: datetime = Field(default_factory=_now)

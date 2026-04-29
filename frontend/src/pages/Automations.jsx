@@ -14,12 +14,18 @@ import {
 import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
+import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
 
 const exampleWords = ['Price', 'Link', 'Shop'];
+const DEFAULT_FOLLOW_MESSAGE = 'فرحان إنك مهتم 😊\nتابع الحساب الأول، وبعدها اضغط على الزر عشان أبعتلك الرابط.';
+const DEFAULT_FOLLOW_BUTTON = 'تمت المتابعة';
+const DEFAULT_FOLLOW_KEYWORDS = 'Following, I followed, تمت المتابعة, تابعت';
 
 const TextArea = ({ className = '', ...props }) => (
   <textarea
     {...props}
+    dir={detectTextDirection(props.value || '').dir}
+    style={{ ...autoDirStyle(props.value || ''), ...(props.style || {}) }}
     className={`w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-900/10 ${className}`}
   />
 );
@@ -72,6 +78,8 @@ const AutomationPhonePreview = ({
   openingDmText,
   openingDmButtonText,
   followRequestEnabled,
+  followRequestMessage,
+  followRequestButtonText,
   linkDmText,
   linkUrl,
   previewTab,
@@ -175,7 +183,7 @@ const AutomationPhonePreview = ({
                   {commentText}
                 </div>
                 {openingDmText && (
-                  <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm">
+                  <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(openingDmText)}>
                     {openingDmText}
                   </div>
                 )}
@@ -184,18 +192,26 @@ const AutomationPhonePreview = ({
                     {openingDmButtonText}
                   </div>
                 )}
+                {openingDmButtonText && (followRequestEnabled || linkDmText || linkUrl) && (
+                  <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(openingDmButtonText)}>
+                    {openingDmButtonText}
+                  </div>
+                )}
                 {followRequestEnabled && (
                   <>
-                    <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm">
-                      Please follow this account first, then tap "I followed" and I will send the link.
+                    <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followRequestMessage)}>
+                      {followRequestMessage}
                     </div>
                     <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
-                      I followed
+                      {followRequestButtonText}
+                    </div>
+                    <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
+                      {followRequestButtonText}
                     </div>
                   </>
                 )}
                 {(linkDmText || linkUrl) && (
-                  <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm">
+                  <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(`${linkDmText} ${linkUrl}`)}>
                     {linkDmText || 'Here is the link'}
                     {linkUrl && <div className="mt-2 text-blue-300">{linkUrl}</div>}
                   </div>
@@ -260,6 +276,10 @@ const Automations = () => {
   const [openingDmText, setOpeningDmText] = useState("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
   const [openingDmButtonText, setOpeningDmButtonText] = useState('Send me the link');
   const [followRequestEnabled, setFollowRequestEnabled] = useState(false);
+  const [followRequestMessage, setFollowRequestMessage] = useState(DEFAULT_FOLLOW_MESSAGE);
+  const [followRequestButtonText, setFollowRequestButtonText] = useState(DEFAULT_FOLLOW_BUTTON);
+  const [followConfirmationKeywords, setFollowConfirmationKeywords] = useState(DEFAULT_FOLLOW_KEYWORDS);
+  const [followGateFallbackMessage, setFollowGateFallbackMessage] = useState('');
   const [emailRequestEnabled, setEmailRequestEnabled] = useState(false);
   const [linkDmText, setLinkDmText] = useState('');
   const [linkButtonText, setLinkButtonText] = useState('Open link');
@@ -335,6 +355,10 @@ const Automations = () => {
     setOpeningDmText("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
     setOpeningDmButtonText('Send me the link');
     setFollowRequestEnabled(false);
+    setFollowRequestMessage(DEFAULT_FOLLOW_MESSAGE);
+    setFollowRequestButtonText(DEFAULT_FOLLOW_BUTTON);
+    setFollowConfirmationKeywords(DEFAULT_FOLLOW_KEYWORDS);
+    setFollowGateFallbackMessage('');
     setEmailRequestEnabled(false);
     setLinkDmText('');
     setLinkButtonText('Open link');
@@ -387,6 +411,14 @@ const Automations = () => {
     setOpeningDmText(automation.opening_dm_text || automation.dm_text || "Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
     setOpeningDmButtonText(automation.opening_dm_button_text || 'Send me the link');
     setFollowRequestEnabled(Boolean(automation.follow_request_enabled));
+    setFollowRequestMessage(automation.follow_request_message || automation.followGateMessage || DEFAULT_FOLLOW_MESSAGE);
+    setFollowRequestButtonText(automation.follow_request_button_text || automation.followGateButtonText || DEFAULT_FOLLOW_BUTTON);
+    setFollowConfirmationKeywords(
+      Array.isArray(automation.follow_confirmation_keywords)
+        ? automation.follow_confirmation_keywords.join(', ')
+        : (automation.followGateConfirmationKeywords || DEFAULT_FOLLOW_KEYWORDS)
+    );
+    setFollowGateFallbackMessage(automation.follow_gate_fallback_message || automation.followGateFallbackMessage || '');
     setEmailRequestEnabled(Boolean(automation.email_request_enabled));
     setLinkDmText(automation.link_dm_text || '');
     setLinkButtonText(automation.link_button_text || 'Open link');
@@ -482,6 +514,7 @@ const Automations = () => {
     if (match === 'keyword' && keywordList.length === 0) return false;
     if (replyUnderPost && !commentReply.trim() && !commentReply2.trim() && !commentReply3.trim()) return false;
     if (openingDmEnabled && !openingDmText.trim()) return false;
+    if (followRequestEnabled && (!followRequestMessage.trim() || !followRequestButtonText.trim())) return false;
     if (!replyUnderPost && !openingDmEnabled && !linkDmText.trim() && !linkUrl.trim()) return false;
     return true;
   };
@@ -490,6 +523,16 @@ const Automations = () => {
     if (!canGoLive()) return;
     setSaving(true);
     try {
+      if (followRequestEnabled && !followRequestMessage.trim()) {
+        toast.error('Follow request message is required');
+        setSaving(false);
+        return;
+      }
+      if (followRequestEnabled && !followRequestButtonText.trim()) {
+        toast.error('Follow confirmation button text is required');
+        setSaving(false);
+        return;
+      }
       const hasDm = (
         openingDmEnabled || linkDmText.trim() || linkUrl.trim() ||
         followRequestEnabled || emailRequestEnabled ||
@@ -534,6 +577,10 @@ const Automations = () => {
             link_button_text: linkButtonText.trim(),
             link_url: linkUrl.trim(),
             follow_request_enabled: followRequestEnabled,
+            follow_request_message: followRequestMessage.trim(),
+            follow_request_button_text: followRequestButtonText.trim(),
+            follow_confirmation_keywords: followConfirmationKeywords.split(',').map(item => item.trim()).filter(Boolean),
+            follow_gate_fallback_message: followGateFallbackMessage.trim(),
             email_request_enabled: emailRequestEnabled,
             follow_up_enabled: followUpEnabled,
             follow_up_text: followUpText.trim(),
@@ -565,6 +612,10 @@ const Automations = () => {
         link_button_text: linkButtonText.trim(),
         link_url: linkUrl.trim(),
         follow_request_enabled: followRequestEnabled,
+        follow_request_message: followRequestMessage.trim(),
+        follow_request_button_text: followRequestButtonText.trim(),
+        follow_confirmation_keywords: followConfirmationKeywords.split(',').map(item => item.trim()).filter(Boolean),
+        follow_gate_fallback_message: followGateFallbackMessage.trim(),
         email_request_enabled: emailRequestEnabled,
         follow_up_enabled: followUpEnabled,
         follow_up_text: followUpText.trim(),
@@ -812,13 +863,43 @@ const Automations = () => {
                 </ToggleCard>
 
                 <ToggleCard
-                  title="a DM asking to follow you before they get the link"
+                  title="Ask them to follow before sending the link"
                   checked={followRequestEnabled}
                   onChange={setFollowRequestEnabled}
                   icon={UserPlus}
                 >
-                  <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800">
-                    The link step will pause until Instagram confirms the user follows @{previewAccountName.replace(/^@/, '')}.
+                  <div className="space-y-2.5">
+                    <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+                      This is a confirmation gate: the final link waits until the user taps or replies with your configured confirmation text.
+                    </div>
+                    <TextArea
+                      value={followRequestMessage}
+                      onChange={e => setFollowRequestMessage(e.target.value)}
+                      rows={4}
+                      placeholder="Write the follow request message"
+                    />
+                    <Input
+                      value={followRequestButtonText}
+                      onChange={e => setFollowRequestButtonText(e.target.value)}
+                      placeholder="Confirmation button text"
+                      className="h-10 rounded-lg bg-white"
+                      dir={detectTextDirection(followRequestButtonText).dir}
+                      style={{ textAlign: detectTextDirection(followRequestButtonText).align }}
+                    />
+                    <Input
+                      value={followConfirmationKeywords}
+                      onChange={e => setFollowConfirmationKeywords(e.target.value)}
+                      placeholder="Following, I followed, تمت المتابعة"
+                      className="h-10 rounded-lg bg-white"
+                      dir={detectTextDirection(followConfirmationKeywords).dir}
+                      style={{ textAlign: detectTextDirection(followConfirmationKeywords).align }}
+                    />
+                    <TextArea
+                      value={followGateFallbackMessage}
+                      onChange={e => setFollowGateFallbackMessage(e.target.value)}
+                      rows={2}
+                      placeholder="Optional expiry/fallback message"
+                    />
                   </div>
                 </ToggleCard>
 
@@ -906,6 +987,8 @@ const Automations = () => {
               openingDmText={openingDmEnabled ? openingDmText : ''}
               openingDmButtonText={openingDmEnabled ? openingDmButtonText : ''}
               followRequestEnabled={followRequestEnabled}
+              followRequestMessage={followRequestMessage}
+              followRequestButtonText={followRequestButtonText}
               linkDmText={linkDmText}
               linkUrl={linkUrl}
               previewTab={previewTab}
