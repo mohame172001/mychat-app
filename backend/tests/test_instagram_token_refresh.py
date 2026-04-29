@@ -519,13 +519,13 @@ def test_dashboard_stats_counts_active_account_contacts_messages_and_weekly_rows
         automations=[
             {'id': 'autoA', 'user_id': 'u1', 'status': 'active',
              'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
-             'sent': 6, 'updated': now},
+             'sent': 99, 'updated': now},
             {'id': 'pausedA', 'user_id': 'u1', 'status': 'paused',
              'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
              'sent': 0, 'updated': now},
             {'id': 'autoB', 'user_id': 'u1', 'status': 'active',
              'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
-             'sent': 4, 'updated': now},
+             'sent': 88, 'updated': now},
         ],
         comments=[
             {'id': 'commentA1', 'user_id': 'u1', 'commenter_id': 'contact1',
@@ -547,6 +547,12 @@ def test_dashboard_stats_counts_active_account_contacts_messages_and_weekly_rows
             {'id': 'dmA2', 'user_id': 'u1', 'sender_id': 'contact2',
              'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
              'status': 'failed', 'created': now},
+            {'id': 'dmA3', 'user_id': 'u1', 'sender_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'sent', 'created': now},
+            {'id': 'dmA4', 'user_id': 'u1', 'sender_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'queued', 'created': now},
             {'id': 'dmB', 'user_id': 'u1', 'sender_id': 'contactB',
              'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
              'status': 'replied', 'created': now},
@@ -585,6 +591,100 @@ def test_dashboard_stats_counts_active_account_contacts_messages_and_weekly_rows
     assert next(row for row in result['weeklyPerformance'] if row['date'] == today)['messages'] == 6
     assert 'token-a' not in str(result)
     assert 'accessToken' not in str(result)
+
+
+def test_dashboard_messages_sent_isolated_between_instagram_accounts(monkeypatch):
+    now = datetime.utcnow()
+    acc_a = _account(id='accA', userId='u1', instagramAccountId='igA',
+                     igUserId='igA', username='account_a', accessToken='token-a')
+    acc_b = _account(id='accB', userId='u1', instagramAccountId='igB',
+                     igUserId='igB', username='account_b', accessToken='token-b')
+    fake_db = FakeDB(
+        [acc_a, acc_b],
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {'id': 'autoA', 'user_id': 'u1', 'status': 'active',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'sent': 500, 'updated': now},
+            {'id': 'autoB', 'user_id': 'u1', 'status': 'active',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'sent': 500, 'updated': now},
+        ],
+        comments=[
+            {'id': 'commentA1', 'user_id': 'u1', 'commenter_id': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'replied': True, 'created': now},
+            {'id': 'commentA2', 'user_id': 'u1', 'commenter_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'action_status': 'success', 'created': now},
+            {'id': 'oldUnscopedComment', 'user_id': 'u1', 'commenter_id': 'old',
+             'replied': True, 'created': now},
+            {'id': 'commentBFailed', 'user_id': 'u1', 'commenter_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'action_status': 'failed', 'created': now},
+        ],
+        dm_logs=[
+            {'id': 'dmA1', 'user_id': 'u1', 'sender_id': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'replied', 'created': now},
+            {'id': 'dmA2', 'user_id': 'u1', 'sender_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'sent', 'created': now},
+            {'id': 'dmAQueued', 'user_id': 'u1', 'sender_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'queued', 'created': now},
+            {'id': 'dmBQueued', 'user_id': 'u1', 'sender_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'status': 'queued', 'created': now},
+            {'id': 'oldUnscopedDm', 'user_id': 'u1', 'sender_id': 'old',
+             'status': 'replied', 'created': now},
+        ],
+        comment_dm_sessions=[
+            {'id': 'sessionA', 'user_id': 'u1', 'recipient_id': 'contact3',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'status': 'completed', 'completedAt': now, 'created': now},
+            {'id': 'sessionBPending', 'user_id': 'u1', 'recipient_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'status': 'pending', 'created': now},
+        ],
+        conversations=[
+            {'id': 'convA', 'user_id': 'u1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'contact': {'ig_id': 'contact4'},
+             'messages': [
+                 {'from': 'me', 'status': 'sent', 'created': now},
+                 {'from': 'me', 'status': 'failed', 'created': now},
+             ],
+             'created': now},
+            {'id': 'convB', 'user_id': 'u1',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'contact': {'ig_id': 'contactB'},
+             'messages': [
+                 {'from': 'me', 'status': 'failed', 'created': now},
+             ],
+             'created': now},
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result_a = _run(server.dashboard_stats(user_id='u1'))
+    _run(server.instagram_account_activate('accB', user_id='u1'))
+    result_b = _run(server.dashboard_stats(user_id='u1'))
+    today = now.date().isoformat()
+
+    assert result_a['activeInstagramAccountId'] == 'accA'
+    assert result_a['messagesSent'] == 6
+    assert next(row for row in result_a['weeklyPerformance'] if row['date'] == today)['messages'] == 6
+    assert result_a['totalContacts'] == 4
+
+    assert result_b['activeInstagramAccountId'] == 'accB'
+    assert result_b['messagesSent'] == 0
+    assert next(row for row in result_b['weeklyPerformance'] if row['date'] == today)['messages'] == 0
+    assert result_b['totalContacts'] == 1
+    assert 'token-a' not in str(result_a)
+    assert 'token-b' not in str(result_b)
+    assert 'accessToken' not in str(result_a)
+    assert 'accessToken' not in str(result_b)
 
 
 def test_dashboard_stats_includes_unscoped_old_records_only_for_single_account(monkeypatch):

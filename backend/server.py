@@ -594,7 +594,14 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 if ok and comment_context.get('comment_doc_id'):
                     await db.comments.update_one(
                         {'id': comment_context['comment_doc_id']},
-                        {'$set': {'replied': True, 'reply_text': msg_text}}
+                        {'$set': {
+                            'replied': True,
+                            'reply_text': msg_text,
+                            'reply_status': 'sent',
+                            'replyStatus': 'sent',
+                            'replySentAt': datetime.utcnow(),
+                            'updated': datetime.utcnow(),
+                        }}
                     )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
@@ -1199,8 +1206,18 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
     if not text:
         raise HTTPException(400, 'Empty message')
 
-    msg_me = {'id': str(uuid.uuid4()), 'from': 'me', 'text': text,
-              'time': datetime.utcnow().strftime('%I:%M %p')}
+    now = datetime.utcnow()
+    msg_me = {
+        'id': str(uuid.uuid4()),
+        'from': 'me',
+        'text': text,
+        'time': now.strftime('%I:%M %p'),
+        'createdAt': now,
+        'created': now,
+        'instagramAccountId': account.get('instagramAccountId') or account.get('igUserId'),
+        'instagramAccountDbId': account.get('id'),
+        'instagram_account_id': account.get('id'),
+    }
     new_messages = conv['messages'] + [msg_me]
 
     # Try to deliver to Instagram if we have a real recipient
@@ -1221,6 +1238,7 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
             logger.exception('send_message graph call failed')
 
     msg_me['delivered'] = delivered
+    msg_me['status'] = 'sent' if delivered else 'failed'
     if delivery_error:
         msg_me['error'] = delivery_error
     await db.conversations.update_one(
@@ -1322,7 +1340,8 @@ def _dashboard_key(value: Any) -> Optional[str]:
 
 def _dashboard_is_unscoped(doc: dict) -> bool:
     return not any(doc.get(k) for k in (
-        'instagramAccountId', 'igUserId', 'instagramAccountDbId', 'instagram_account_id'
+        'instagramAccountId', 'igUserId', 'ig_user_id',
+        'instagramAccountDbId', 'instagram_account_id', 'accountId'
     ))
 
 
@@ -1361,8 +1380,10 @@ async def _dashboard_scoped_docs(collection_name: str, user_id: str, account: Op
             'user_id': user_id,
             'instagramAccountId': {'$exists': False},
             'igUserId': {'$exists': False},
+            'ig_user_id': {'$exists': False},
             'instagramAccountDbId': {'$exists': False},
             'instagram_account_id': {'$exists': False},
+            'accountId': {'$exists': False},
         })
     if not account and not include_unscoped:
         await add_many({'user_id': user_id})
@@ -1389,8 +1410,40 @@ def _sent_day(doc: dict) -> Optional[str]:
     return ts.date().isoformat() if ts else None
 
 
+_DASHBOARD_SUCCESS_STATUSES = {
+    'success', 'sent', 'replied', 'completed', 'delivered', 'ok',
+}
+
+
+def _dashboard_success_status(value: Any) -> bool:
+    return str(value or '').strip().lower() in _DASHBOARD_SUCCESS_STATUSES
+
+
+def _dashboard_comment_message_count(comment: dict) -> int:
+    sent_count = 0
+    if comment.get('replied') is True:
+        sent_count += 1
+    action_status = comment.get('action_status') or comment.get('actionStatus')
+    if _dashboard_success_status(action_status) and not comment.get('replied'):
+        sent_count += 1
+    return sent_count
+
+
+def _dashboard_conversation_message_sent(message: dict) -> bool:
+    is_outgoing = message.get('from') == 'me' or message.get('from_') == 'me'
+    if not is_outgoing:
+        return False
+    status = message.get('status')
+    if status is not None:
+        return _dashboard_success_status(status)
+    if 'delivered' in message:
+        return message.get('delivered') is True
+    return False
+
+
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
+    started = datetime.utcnow()
     try:
         account = await getActiveInstagramAccount(user_id)
     except HTTPException as e:
@@ -1453,48 +1506,70 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
             buckets[day]['messages'] += count
 
     event_messages = 0
+    source_counts = {
+        'comments': 0,
+        'dm_logs': 0,
+        'comment_dm_sessions': 0,
+        'conversations': 0,
+        'legacy_automation_sent': 0,
+    }
     for c in comments:
-        sent_count = 0
-        if c.get('replied') is True:
-            sent_count += 1
-        if (c.get('action_status') or c.get('actionStatus')) == 'success' and not c.get('replied'):
-            sent_count += 1
+        sent_count = _dashboard_comment_message_count(c)
         if sent_count:
             event_messages += sent_count
+            source_counts['comments'] += sent_count
             add_message(_sent_day(c), sent_count)
 
     for log in dm_logs:
-        if str(log.get('status') or '').lower() == 'replied':
+        if _dashboard_success_status(log.get('status')):
             event_messages += 1
+            source_counts['dm_logs'] += 1
             add_message(_sent_day(log), 1)
 
     for session in sessions:
-        if str(session.get('status') or '').lower() in {'completed', 'sent'}:
+        if _dashboard_success_status(session.get('status')):
             event_messages += 1
+            source_counts['comment_dm_sessions'] += 1
             add_message(_sent_day(session), 1)
 
     for conv in conversations:
         for m in conv.get('messages', []) or []:
-            is_outgoing = (m.get('from') == 'me' or m.get('from_') == 'me')
-            failed = m.get('delivered') is False or m.get('status') in {'failed', 'skipped'}
-            if is_outgoing and not failed:
+            if _dashboard_conversation_message_sent(m):
                 event_messages += 1
+                source_counts['conversations'] += 1
                 add_message(_sent_day(m), 1)
 
-    if automation_sent > event_messages:
+    # automation.sent is a legacy aggregate counter. It is safe only for old
+    # single-account workspaces where no account-specific sent-event logs exist.
+    if include_unscoped and automation_sent > event_messages:
         remaining = automation_sent - event_messages
         for auto in autos:
             if remaining <= 0:
                 break
             count = min(int(auto.get('sent') or 0), remaining)
             add_message(_sent_day(auto), count)
+            source_counts['legacy_automation_sent'] += count
             remaining -= count
 
-    messages_sent = max(event_messages, automation_sent)
+    messages_sent = event_messages + source_counts['legacy_automation_sent']
     conversions = 0
     conversion_rate = 0 if not contacts_seen else round((conversions / len(contacts_seen)) * 100, 1)
     weekly_performance = list(buckets.values())
     instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
+
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'dashboard_stats_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
+        'messagesSent=%s sources=%s totalContacts=%s activeAutomations=%s durationMs=%s',
+        user_id,
+        (account or {}).get('id'),
+        instagram_account_id,
+        messages_sent,
+        source_counts,
+        len(contacts_seen),
+        active_automations,
+        duration_ms,
+    )
 
     response = {
         'totalContacts': len(contacts_seen),
@@ -1764,11 +1839,14 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
             {'instagramAccountDbId': account_id},
             {'instagram_account_id': account_id},
             {'instagramAccountId': account_id},
+            {'accountId': account_id},
         ])
     if instagram_account_id:
         clauses.extend([
             {'instagramAccountId': instagram_account_id},
             {'igUserId': instagram_account_id},
+            {'ig_user_id': instagram_account_id},
+            {'accountId': instagram_account_id},
         ])
     if clauses:
         query['$or'] = [
@@ -4249,7 +4327,12 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             return False
         await db.comments.update_one(
             {'id': comment_doc_id},
-            {'$set': {'action_status': 'success', 'actionStatus': 'success'}}
+            {'$set': {
+                'action_status': 'success',
+                'actionStatus': 'success',
+                'actionSentAt': datetime.utcnow(),
+                'updated': datetime.utcnow(),
+            }}
         )
         logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
                     ig_comment_id, automation.get('id'))

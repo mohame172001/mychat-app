@@ -3,7 +3,7 @@ import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import {
-  Users, Zap, Send, TrendingUp, Instagram, Plus
+  Users, Zap, Send, TrendingUp, Plus
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -39,8 +39,6 @@ const Dashboard = () => {
     1,
     ...chart.map(d => Math.max(Number(d.messages || 0), Number(d.conversions || 0)))
   );
-  const instagram = stats?.instagram || {};
-  const instagramHandle = String(instagram.username || user?.instagramHandle || 'your_handle').replace(/^@/, '');
 
   const statsCards = [
     { label: 'Total Contacts', value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
@@ -78,8 +76,8 @@ const Dashboard = () => {
         })}
       </div>
 
-      <div className="mt-6 grid lg:grid-cols-3 gap-4">
-        <Card className="lg:col-span-2 p-6 rounded-2xl border-slate-100">
+      <div className="mt-6">
+        <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="font-display font-bold text-lg">Weekly Performance</h3>
@@ -101,18 +99,6 @@ const Dashboard = () => {
               </div>
             ))}
           </div>
-        </Card>
-
-        <Card className="p-6 rounded-2xl border-slate-100 bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400 text-white relative overflow-hidden">
-          <Instagram className="w-8 h-8" />
-          <h3 className="mt-4 font-display font-bold text-xl">{instagram.connected || user?.instagramConnected ? 'Instagram Connected' : 'Connect Instagram'}</h3>
-          <p className="mt-1 text-sm text-white/90">@{instagramHandle} is {instagram.connected || user?.instagramConnected ? 'linked and actively responding' : 'not connected yet'}.</p>
-          {user?.instagramConnected && user?.instagramFollowers ? (
-            <div className="mt-6 space-y-3">
-              <div className="flex justify-between text-sm"><span className="text-white/80">Followers</span><span className="font-bold">{user.instagramFollowers.toLocaleString()}</span></div>
-            </div>
-          ) : null}
-          <Link to="/app/settings?tab=instagram"><Button className="mt-6 w-full bg-white text-slate-900 hover:bg-slate-100 rounded-xl">Manage Connection</Button></Link>
         </Card>
       </div>
 
