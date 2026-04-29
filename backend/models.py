@@ -89,6 +89,7 @@ class AutomationPatch(BaseModel):
     link_dm_text: Optional[str] = None
     link_button_text: Optional[str] = None
     link_url: Optional[str] = None
+    conversionTrackingEnabled: Optional[bool] = None
     follow_request_enabled: Optional[bool] = None
     email_request_enabled: Optional[bool] = None
     follow_up_enabled: Optional[bool] = None

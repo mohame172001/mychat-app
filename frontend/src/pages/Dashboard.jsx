@@ -13,6 +13,7 @@ const Dashboard = () => {
   const { user } = useAuth();
   const [stats, setStats] = useState(null);
   const [autos, setAutos] = useState([]);
+  const [hoveredBar, setHoveredBar] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -39,6 +40,9 @@ const Dashboard = () => {
     1,
     ...chart.map(d => Math.max(Number(d.messages || 0), Number(d.conversions || 0)))
   );
+  const tickStep = maxVal <= 4 ? 1 : Math.ceil(maxVal / 4);
+  const axisMax = Math.max(1, tickStep * 4);
+  const yTicks = Array.from({ length: 5 }, (_, i) => axisMax - (tickStep * i));
 
   const statsCards = [
     { label: 'Total Contacts', value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
@@ -88,16 +92,63 @@ const Dashboard = () => {
               <div className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-pink-500" />Conversions</div>
             </div>
           </div>
-          <div className="mt-6 flex items-end justify-between gap-3 h-56">
-            {chart.map((d) => (
-              <div key={d.date || d.day} className="flex-1 flex flex-col items-center gap-2">
-                <div className="w-full flex items-end gap-1 h-48">
-                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-blue-500 to-cyan-400" style={{ height: `${(Number(d.messages || 0) / maxVal) * 100}%` }} />
-                  <div className="flex-1 rounded-t-lg bg-gradient-to-t from-pink-500 to-orange-400" style={{ height: `${(Number(d.conversions || 0) / maxVal) * 100}%` }} />
-                </div>
-                <div className="text-xs text-slate-500 font-medium">{d.day}</div>
+          <div className="mt-6">
+            <div className="flex gap-3">
+              <div className="h-48 w-8 flex flex-col justify-between text-[11px] font-medium text-slate-400 text-right">
+                {yTicks.map((tick) => (
+                  <span key={tick}>{tick}</span>
+                ))}
               </div>
-            ))}
+              <div className="relative flex-1">
+                <div className="absolute inset-0 flex flex-col justify-between pointer-events-none">
+                  {yTicks.map((tick) => (
+                    <div key={tick} className="border-t border-slate-100 first:border-slate-200" />
+                  ))}
+                </div>
+                <div className="relative flex items-end justify-between gap-2 sm:gap-3 h-48">
+                  {chart.map((d) => {
+                    const key = d.date || d.day;
+                    const messages = Number(d.messages || 0);
+                    const conversions = Number(d.conversions || 0);
+                    const isActive = hoveredBar === key;
+                    return (
+                      <div
+                        key={key}
+                        className="relative flex-1 h-full flex items-end justify-center gap-1.5"
+                        onMouseEnter={() => setHoveredBar(key)}
+                        onMouseLeave={() => setHoveredBar(null)}
+                        onFocus={() => setHoveredBar(key)}
+                        onBlur={() => setHoveredBar(null)}
+                        tabIndex={0}
+                      >
+                        {isActive && (
+                          <div className="absolute -top-16 left-1/2 -translate-x-1/2 z-10 min-w-[150px] rounded-xl bg-slate-950 px-3 py-2 text-xs text-white shadow-xl">
+                            <div className="font-semibold">{d.day}{d.date ? `, ${d.date}` : ''}</div>
+                            <div className="mt-1 flex justify-between gap-4"><span>Messages</span><b>{messages}</b></div>
+                            <div className="flex justify-between gap-4"><span>Conversions</span><b>{conversions}</b></div>
+                          </div>
+                        )}
+                        <div
+                          aria-label={`${d.day} messages ${messages}`}
+                          className={`w-full max-w-[18px] rounded-t-lg bg-gradient-to-t from-blue-500 to-cyan-400 transition-all duration-150 ${isActive ? 'opacity-100 ring-2 ring-blue-200' : 'opacity-80 hover:opacity-100'}`}
+                          style={{ height: `${messages > 0 ? Math.max(2, (messages / axisMax) * 100) : 0}%` }}
+                        />
+                        <div
+                          aria-label={`${d.day} conversions ${conversions}`}
+                          className={`w-full max-w-[18px] rounded-t-lg bg-gradient-to-t from-pink-500 to-orange-400 transition-all duration-150 ${isActive ? 'opacity-100 ring-2 ring-pink-200' : 'opacity-80 hover:opacity-100'}`}
+                          style={{ height: `${conversions > 0 ? Math.max(2, (conversions / axisMax) * 100) : 0}%` }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="ml-11 mt-2 grid grid-cols-7 gap-2 sm:gap-3">
+              {chart.map((d) => (
+                <div key={d.date || d.day} className="text-center text-xs text-slate-500 font-medium">{d.day}</div>
+              ))}
+            </div>
           </div>
         </Card>
       </div>

@@ -5,13 +5,15 @@ import hashlib
 import hmac
 import json
 import logging
+import re
+import secrets
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -109,6 +111,34 @@ def _redact_secrets(value):
     if isinstance(value, list):
         return [_redact_secrets(v) for v in value]
     return value
+
+
+TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
+_HTTP_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
+
+
+def _is_valid_original_url(url: str) -> bool:
+    try:
+        parsed = urlparse(str(url or '').strip())
+        return parsed.scheme in {'http', 'https'} and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def _extract_first_url(text: str) -> str:
+    match = _HTTP_URL_RE.search(str(text or ''))
+    return match.group(0).rstrip(').,؛،') if match else ''
+
+
+def _tracked_link_url(short_code: str) -> str:
+    return f"{BACKEND_PUBLIC_URL.rstrip('/')}/r/{short_code}"
+
+
+def _hash_tracking_value(value: str) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    return hashlib.sha256(f'{JWT_SECRET}:{raw}'.encode()).hexdigest()
 
 
 # ---------------- WebSocket manager ----------------
@@ -259,6 +289,139 @@ def _comment_dm_flow_enabled(automation: dict) -> bool:
     ])
 
 
+def _conversion_tracking_enabled(source: dict, url: str = '') -> bool:
+    if 'conversionTrackingEnabled' in source:
+        return bool(source.get('conversionTrackingEnabled'))
+    if 'conversion_tracking_enabled' in source:
+        return bool(source.get('conversion_tracking_enabled'))
+    return bool((url or source.get('link_url') or source.get('finalLinkUrl') or '').strip())
+
+
+async def _create_tracked_link(user_doc: dict, session: dict, original_url: str) -> Optional[dict]:
+    original_url = (original_url or '').strip()
+    if not _is_valid_original_url(original_url):
+        logger.warning('tracked_link_invalid_original_url user_id=%s session=%s',
+                       user_doc.get('id'), session.get('id'))
+        return None
+
+    now = datetime.utcnow()
+    ctx = {
+        **_current_instagram_context(user_doc),
+        'instagramAccountDbId': (
+            session.get('instagramAccountDbId')
+            or session.get('instagram_account_id')
+            or user_doc.get('active_instagram_account_id')
+            or ''
+        ),
+        'instagram_account_id': (
+            session.get('instagram_account_id')
+            or session.get('instagramAccountDbId')
+            or user_doc.get('active_instagram_account_id')
+            or ''
+        ),
+        'instagramAccountId': (
+            session.get('instagramAccountId')
+            or session.get('igUserId')
+            or user_doc.get('ig_user_id')
+            or ''
+        ),
+        'igUserId': (
+            session.get('igUserId')
+            or session.get('instagramAccountId')
+            or user_doc.get('ig_user_id')
+            or ''
+        ),
+    }
+    base_doc = {
+        'id': '',
+        'shortCode': '',
+        'user_id': user_doc.get('id'),
+        'userId': user_doc.get('id'),
+        **ctx,
+        'ruleId': session.get('automation_id') or session.get('ruleId'),
+        'automation_id': session.get('automation_id') or session.get('ruleId'),
+        'instagramUserId': session.get('recipient_id') or session.get('instagramUserId'),
+        'recipient_id': session.get('recipient_id') or session.get('instagramUserId'),
+        'originalUrl': original_url,
+        'relatedCommentId': session.get('ig_comment_id') or session.get('relatedCommentId'),
+        'comment_doc_id': session.get('comment_doc_id'),
+        'relatedMessageId': None,
+        'clicksCount': 0,
+        'firstClickedAt': None,
+        'lastClickedAt': None,
+        'createdAt': now,
+        'created': now,
+        'updatedAt': now,
+        'updated': now,
+        'expiresAt': now + timedelta(days=TRACKED_LINK_TTL_DAYS),
+        'isActive': False,
+        'status': 'created',
+    }
+    for _ in range(5):
+        short_code = secrets.token_urlsafe(6).replace('_', '').replace('-', '')[:10]
+        doc = {**base_doc, 'id': short_code, 'shortCode': short_code}
+        try:
+            await db.tracked_links.insert_one(doc)
+            return doc
+        except Exception:
+            continue
+    logger.warning('tracked_link_create_failed user_id=%s session=%s',
+                   user_doc.get('id'), session.get('id'))
+    return None
+
+
+async def _activate_tracked_link(tracked_link: Optional[dict], related_message_id: Optional[str] = None):
+    if not tracked_link:
+        return
+    update = {
+        'isActive': True,
+        'status': 'sent',
+        'updatedAt': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    }
+    if related_message_id:
+        update['relatedMessageId'] = related_message_id
+    await db.tracked_links.update_one(
+        {'shortCode': tracked_link.get('shortCode')},
+        {'$set': update},
+    )
+
+
+async def _mark_tracked_link_unused(tracked_link: Optional[dict], status: str = 'send_failed'):
+    if not tracked_link:
+        return
+    await db.tracked_links.update_one(
+        {'shortCode': tracked_link.get('shortCode')},
+        {'$set': {
+            'isActive': False,
+            'status': status,
+            'updatedAt': datetime.utcnow(),
+            'updated': datetime.utcnow(),
+        }},
+    )
+
+
+async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, text: str) -> bool:
+    text_to_send = text
+    tracked_link = None
+    original_url = _extract_first_url(text)
+    if original_url and _conversion_tracking_enabled(session, original_url):
+        tracked_link = await _create_tracked_link(user_doc, session, original_url)
+        if tracked_link:
+            text_to_send = text.replace(original_url, _tracked_link_url(tracked_link['shortCode']))
+    ok = await send_ig_dm(
+        user_doc.get('meta_access_token', ''),
+        user_doc.get('ig_user_id', ''),
+        session.get('recipient_id'),
+        text_to_send,
+    )
+    if ok:
+        await _activate_tracked_link(tracked_link)
+    else:
+        await _mark_tracked_link_unused(tracked_link)
+    return ok
+
+
 async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient_ig_id: str,
                                      comment_context: Optional[dict], payload: str) -> dict:
     import uuid as _uuid
@@ -279,6 +442,9 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'link_dm_text': (automation.get('link_dm_text') or '').strip(),
         'link_button_text': (automation.get('link_button_text') or '').strip(),
         'link_url': (automation.get('link_url') or '').strip(),
+        'conversionTrackingEnabled': _conversion_tracking_enabled(
+            automation, (automation.get('link_url') or '').strip()
+        ),
         'follow_request_enabled': bool(automation.get('follow_request_enabled')),
         'follow_verified': False,
         'follow_verification_attempts': 0,
@@ -326,7 +492,21 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
         return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
 
     if opening_text:
-        return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
+        return await _send_text_dm_with_optional_tracking(
+            user_doc,
+            {
+                'user_id': user_doc['id'],
+                **_current_instagram_context(user_doc),
+                'recipient_id': recipient_ig_id,
+                'automation_id': automation.get('id'),
+                'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
+                'comment_doc_id': (comment_context or {}).get('comment_doc_id'),
+                'conversionTrackingEnabled': _conversion_tracking_enabled(
+                    automation, _extract_first_url(opening_text)
+                ),
+            },
+            opening_text,
+        )
 
     if has_deferred_step:
         payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
@@ -345,6 +525,9 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
             'link_dm_text': (automation.get('link_dm_text') or '').strip(),
             'link_button_text': (automation.get('link_button_text') or '').strip(),
             'link_url': (automation.get('link_url') or '').strip(),
+            'conversionTrackingEnabled': _conversion_tracking_enabled(
+                automation, (automation.get('link_url') or '').strip()
+            ),
             'follow_request_enabled': bool(automation.get('follow_request_enabled')),
             'follow_verified': False,
             'email_request_enabled': bool(automation.get('email_request_enabled')),
@@ -439,27 +622,54 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
     link_text = (session.get('link_dm_text') or '').strip()
     link_url = (session.get('link_url') or '').strip()
     link_button = (session.get('link_button_text') or 'Open link').strip()
+    tracked_link = None
+    tracked_url = ''
+    url_to_send = link_url
+    text_to_send = link_text
+    should_track = _conversion_tracking_enabled(session, link_url or _extract_first_url(link_text))
+    if should_track:
+        original_url = link_url or _extract_first_url(link_text)
+        if original_url:
+            tracked_link = await _create_tracked_link(user_doc, session, original_url)
+            if tracked_link:
+                tracked_url = _tracked_link_url(tracked_link['shortCode'])
+                if link_url:
+                    url_to_send = tracked_url
+                if text_to_send:
+                    text_to_send = text_to_send.replace(original_url, tracked_url)
 
     if link_url:
-        text_for_button = link_text or 'Here is the link'
+        text_for_button = text_to_send or 'Here is the link'
         result = await send_ig_url_button(
             access_token, ig_user_id, recipient_id,
-            text_for_button, link_button, link_url,
+            text_for_button, link_button, url_to_send,
         )
         if result.get('ok'):
+            await _activate_tracked_link(
+                tracked_link,
+                (result.get('body') or {}).get('message_id') or (result.get('body') or {}).get('id'),
+            )
             sent_steps.append('link_button')
         else:
-            fallback_text = f'{text_for_button}\n\n{link_url}'.strip()
+            fallback_text = f'{text_for_button}\n\n{url_to_send}'.strip()
             ok = await send_ig_dm(access_token, ig_user_id, recipient_id, fallback_text)
             ok_all = ok_all and ok
             sent_steps.append('link_text_fallback')
+            if ok:
+                await _activate_tracked_link(tracked_link)
+            else:
+                await _mark_tracked_link_unused(tracked_link)
             if not ok:
                 logger.warning('comment_dm_link_fallback_failed session=%s err=%s',
                                session.get('id'), result.get('error'))
     elif link_text:
-        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, link_text)
+        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, text_to_send)
         ok_all = ok_all and ok
         sent_steps.append('link_text')
+        if ok:
+            await _activate_tracked_link(tracked_link)
+        else:
+            await _mark_tracked_link_unused(tracked_link)
 
     extra_messages = []
     if session.get('email_request_enabled'):
@@ -784,7 +994,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'mode', 'comment_reply', 'dm_text', 'media_preview', 'keywords',
         'post_scope', 'reply_under_post', 'opening_dm_enabled',
         'opening_dm_text', 'opening_dm_button_text', 'link_dm_text',
-        'link_button_text', 'link_url', 'follow_request_enabled',
+        'link_button_text', 'link_url', 'conversionTrackingEnabled',
+        'follow_request_enabled',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
         'processExistingComments',
     }
@@ -905,6 +1116,11 @@ async def create_quick_comment_rule(
     link_dm_text = (data.get('link_dm_text') or '').strip()
     link_button_text = (data.get('link_button_text') or '').strip()
     link_url = (data.get('link_url') or '').strip()
+    conversion_tracking_enabled = (
+        bool(data.get('conversionTrackingEnabled'))
+        if 'conversionTrackingEnabled' in data
+        else bool(link_url)
+    )
     follow_request_enabled = bool(data.get('follow_request_enabled', False))
     email_request_enabled = bool(data.get('email_request_enabled', False))
     follow_up_enabled = bool(data.get('follow_up_enabled', False))
@@ -976,6 +1192,7 @@ async def create_quick_comment_rule(
             'link_dm_text': link_dm_text,
             'link_button_text': link_button_text,
             'link_url': link_url,
+            'conversionTrackingEnabled': conversion_tracking_enabled,
             'follow_request_enabled': follow_request_enabled,
             'email_request_enabled': email_request_enabled,
             'follow_up_enabled': follow_up_enabled,
@@ -1007,6 +1224,7 @@ async def create_quick_comment_rule(
         'link_dm_text': link_dm_text,
         'link_button_text': link_button_text,
         'link_url': link_url,
+        'conversionTrackingEnabled': conversion_tracking_enabled,
         'follow_request_enabled': follow_request_enabled,
         'email_request_enabled': email_request_enabled,
         'follow_up_enabled': follow_up_enabled,
@@ -1462,6 +1680,7 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     dm_logs = await _dashboard_scoped_docs('dm_logs', user_id, account, include_unscoped, 5000)
     sessions = await _dashboard_scoped_docs('comment_dm_sessions', user_id, account, include_unscoped, 5000)
     contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 5000)
+    click_events = await _dashboard_scoped_docs('link_click_events', user_id, account, include_unscoped, 10000)
 
     active_automations = sum(1 for auto in autos if _automation_active(auto))
     automation_sent = sum(int(auto.get('sent') or 0) for auto in autos)
@@ -1552,7 +1771,31 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
             remaining -= count
 
     messages_sent = event_messages + source_counts['legacy_automation_sent']
-    conversions = 0
+    converted_contacts: set = set()
+    click_events_count = 0
+    for event in click_events:
+        click_events_count += 1
+        contact_key = _dashboard_key(
+            event.get('instagramUserId')
+            or event.get('recipient_id')
+            or event.get('instagram_user_id')
+        )
+        if contact_key and contact_key != ig_owner_id:
+            contacts_seen.add(contact_key)
+            converted_contacts.add(contact_key)
+            clicked_day = _dashboard_dt(event.get('clickedAt'), event.get('createdAt'), event.get('created'))
+            if clicked_day:
+                day_key = clicked_day.date().isoformat()
+                if day_key in buckets:
+                    bucket = buckets[day_key]
+                    day_conversions = bucket.setdefault('_convertedUsers', set())
+                    day_conversions.add(contact_key)
+
+    for bucket in buckets.values():
+        day_conversions = bucket.pop('_convertedUsers', set())
+        bucket['conversions'] = len(day_conversions)
+
+    conversions = len(converted_contacts)
     conversion_rate = 0 if not contacts_seen else round((conversions / len(contacts_seen)) * 100, 1)
     weekly_performance = list(buckets.values())
     instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
@@ -1560,7 +1803,8 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
         'dashboard_stats_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
-        'messagesSent=%s sources=%s totalContacts=%s activeAutomations=%s durationMs=%s',
+        'messagesSent=%s sources=%s totalContacts=%s activeAutomations=%s '
+        'linkClicks=%s convertedContacts=%s durationMs=%s',
         user_id,
         (account or {}).get('id'),
         instagram_account_id,
@@ -1568,6 +1812,8 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         source_counts,
         len(contacts_seen),
         active_automations,
+        click_events_count,
+        conversions,
         duration_ms,
     )
 
@@ -1577,13 +1823,15 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'messagesSent': messages_sent,
         'conversionRate': conversion_rate,
         'weeklyPerformance': weekly_performance,
+        'linkClicks': click_events_count,
+        'convertedContacts': conversions,
         'instagram': {
             'connected': bool(account and account.get('connectionValid')),
             'username': (account or {}).get('username') or None,
             'activeAccountId': (account or {}).get('id') or None,
             'instagramAccountId': instagram_account_id or None,
         },
-        'conversionTrackingImplemented': False,
+        'conversionTrackingImplemented': True,
         'commentsLogged': len(comments),
         # Backward-compatible keys used by older frontend bundles.
         'total_contacts': len(contacts_seen),
@@ -1591,6 +1839,8 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'messages_sent': messages_sent,
         'conversion_rate': conversion_rate,
         'weekly_chart': weekly_performance,
+        'link_clicks': click_events_count,
+        'converted_contacts': conversions,
         'activeInstagramAccountId': (account or {}).get('id') or None,
         'current_instagram_account_id': instagram_account_id or None,
         'comments_logged': len(comments),
@@ -6536,6 +6786,61 @@ async def root():
     return {'app': 'mychat', 'status': 'ok'}
 
 
+@app.get('/r/{short_code}')
+async def tracked_link_redirect(short_code: str, request: Request):
+    link = await db.tracked_links.find_one({'shortCode': short_code})
+    if not link:
+        raise HTTPException(404, 'Tracked link not found')
+
+    now = datetime.utcnow()
+    expires_at = _parse_graph_datetime(link.get('expiresAt')) if link.get('expiresAt') else None
+    if not link.get('isActive') or (expires_at and expires_at <= now):
+        raise HTTPException(410, 'Tracked link is expired or inactive')
+
+    original_url = (link.get('originalUrl') or '').strip()
+    if not _is_valid_original_url(original_url):
+        raise HTTPException(410, 'Tracked link destination is unavailable')
+
+    client_ip = request.client.host if request.client else ''
+    user_agent = request.headers.get('user-agent', '')
+    referrer = request.headers.get('referer') or request.headers.get('referrer') or ''
+    event = {
+        'id': secrets.token_urlsafe(12),
+        'shortCode': short_code,
+        'trackedLinkId': link.get('id'),
+        'user_id': link.get('user_id') or link.get('userId'),
+        'userId': link.get('userId') or link.get('user_id'),
+        'instagramAccountId': link.get('instagramAccountId') or link.get('igUserId'),
+        'instagramAccountDbId': link.get('instagramAccountDbId') or link.get('instagram_account_id'),
+        'instagram_account_id': link.get('instagram_account_id') or link.get('instagramAccountDbId'),
+        'igUserId': link.get('igUserId') or link.get('instagramAccountId'),
+        'ruleId': link.get('ruleId') or link.get('automation_id'),
+        'automation_id': link.get('automation_id') or link.get('ruleId'),
+        'instagramUserId': link.get('instagramUserId') or link.get('recipient_id'),
+        'recipient_id': link.get('recipient_id') or link.get('instagramUserId'),
+        'relatedCommentId': link.get('relatedCommentId'),
+        'ipHash': _hash_tracking_value(client_ip),
+        'userAgentHash': _hash_tracking_value(user_agent),
+        'referrer': referrer[:500],
+        'clickedAt': now,
+        'createdAt': now,
+        'created': now,
+    }
+    await db.link_click_events.insert_one(event)
+    update = {
+        'lastClickedAt': now,
+        'updatedAt': now,
+        'updated': now,
+    }
+    if not link.get('firstClickedAt'):
+        update['firstClickedAt'] = now
+    await db.tracked_links.update_one(
+        {'shortCode': short_code},
+        {'$inc': {'clicksCount': 1}, '$set': update},
+    )
+    return RedirectResponse(original_url, status_code=302)
+
+
 app.include_router(api)
 
 
@@ -6668,6 +6973,40 @@ async def _startup():
         await db.contacts.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='contacts_user_ig_created',
+        )
+        await db.tracked_links.create_index(
+            [('shortCode', 1)],
+            unique=True,
+            sparse=True,
+            name='tracked_links_short_code_unique',
+        )
+        await db.tracked_links.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('ruleId', 1)],
+            name='tracked_links_user_ig_rule',
+        )
+        await db.tracked_links.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+            name='tracked_links_user_ig_created',
+        )
+        await db.tracked_links.create_index(
+            [('expiresAt', 1)],
+            name='tracked_links_expires_at',
+        )
+        await db.link_click_events.create_index(
+            [('trackedLinkId', 1)],
+            name='link_click_events_tracked_link',
+        )
+        await db.link_click_events.create_index(
+            [('shortCode', 1)],
+            name='link_click_events_short_code',
+        )
+        await db.link_click_events.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('clickedAt', -1)],
+            name='link_click_events_user_ig_clicked',
+        )
+        await db.link_click_events.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
+            name='link_click_events_user_ig_contact',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

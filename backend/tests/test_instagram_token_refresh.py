@@ -131,6 +131,10 @@ class FakeCollection:
                 count += 1
         return SimpleNamespace(modified_count=count)
 
+    async def insert_one(self, doc):
+        self.docs.append(dict(doc))
+        return SimpleNamespace(inserted_id=doc.get('id'))
+
     async def count_documents(self, query):
         return len([doc for doc in self.docs if _match(doc, query)])
 
@@ -155,6 +159,8 @@ class FakeDB:
         self.comment_dm_sessions = FakeCollection(collections.get('comment_dm_sessions', []))
         self.dm_rules = FakeCollection(collections.get('dm_rules', []))
         self.dm_logs = FakeCollection(collections.get('dm_logs', []))
+        self.tracked_links = FakeCollection(collections.get('tracked_links', []))
+        self.link_click_events = FakeCollection(collections.get('link_click_events', []))
 
 
 def _account(**overrides):
@@ -709,6 +715,168 @@ def test_dashboard_stats_includes_unscoped_old_records_only_for_single_account(m
     assert result['activeAutomations'] == 1
     assert result['totalContacts'] == 1
     assert result['messagesSent'] == 2
+
+
+def test_dashboard_conversion_rate_uses_unique_tracked_click_users(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        comments=[
+            {'id': 'comment1', 'user_id': 'u1', 'commenter_id': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'created': now},
+            {'id': 'comment2', 'user_id': 'u1', 'commenter_id': 'contact2',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'created': now},
+        ],
+        link_click_events=[
+            {'id': 'click1', 'user_id': 'u1', 'instagramUserId': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'clickedAt': now, 'created': now},
+            {'id': 'click2', 'user_id': 'u1', 'instagramUserId': 'contact1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'clickedAt': now, 'created': now},
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_stats(user_id='u1'))
+    today = now.date().isoformat()
+
+    assert result['totalContacts'] == 2
+    assert result['convertedContacts'] == 1
+    assert result['linkClicks'] == 2
+    assert result['conversionRate'] == 50.0
+    assert next(row for row in result['weeklyPerformance'] if row['date'] == today)['conversions'] == 1
+    assert result['conversionTrackingImplemented'] is True
+    assert 'accessToken' not in str(result)
+
+
+def test_dashboard_conversions_are_scoped_by_active_instagram_account(monkeypatch):
+    now = datetime.utcnow()
+    acc_a = _account(id='accA', userId='u1', instagramAccountId='igA',
+                     igUserId='igA', username='account_a', accessToken='token-a')
+    acc_b = _account(id='accB', userId='u1', instagramAccountId='igB',
+                     igUserId='igB', username='account_b', accessToken='token-b')
+    fake_db = FakeDB(
+        [acc_a, acc_b],
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        comments=[
+            {'id': 'commentA', 'user_id': 'u1', 'commenter_id': 'contactA',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'created': now},
+            {'id': 'commentB', 'user_id': 'u1', 'commenter_id': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'created': now},
+        ],
+        link_click_events=[
+            {'id': 'clickA', 'user_id': 'u1', 'instagramUserId': 'contactA',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'clickedAt': now, 'created': now},
+            {'id': 'clickB', 'user_id': 'u1', 'instagramUserId': 'contactB',
+             'instagramAccountDbId': 'accB', 'instagramAccountId': 'igB',
+             'clickedAt': now, 'created': now},
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result_a = _run(server.dashboard_stats(user_id='u1'))
+    _run(server.instagram_account_activate('accB', user_id='u1'))
+    result_b = _run(server.dashboard_stats(user_id='u1'))
+
+    assert result_a['activeInstagramAccountId'] == 'accA'
+    assert result_a['convertedContacts'] == 1
+    assert result_a['conversionRate'] == 100.0
+    assert result_b['activeInstagramAccountId'] == 'accB'
+    assert result_b['convertedContacts'] == 1
+    assert result_b['conversionRate'] == 100.0
+    assert 'token-a' not in str(result_a)
+    assert 'token-b' not in str(result_b)
+
+
+def test_tracked_link_redirect_records_click_and_redirects(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        tracked_links=[
+            {'id': 'abc123', 'shortCode': 'abc123', 'user_id': 'u1', 'userId': 'u1',
+             'instagramAccountDbId': 'accA', 'instagramAccountId': 'igA',
+             'igUserId': 'igA', 'instagramUserId': 'contact1',
+             'originalUrl': 'https://example.org/product', 'clicksCount': 0,
+             'isActive': True, 'expiresAt': now + timedelta(days=5),
+             'created': now, 'createdAt': now}
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    scope = {
+        'type': 'http',
+        'method': 'GET',
+        'path': '/r/abc123',
+        'headers': [(b'user-agent', b'pytest'), (b'referer', b'https://instagram.com/')],
+        'client': ('203.0.113.10', 12345),
+    }
+    request = Request(scope, receive=lambda: None)
+
+    response = _run(server.tracked_link_redirect('abc123', request))
+
+    assert response.status_code == 302
+    assert response.headers['location'] == 'https://example.org/product'
+    assert fake_db.tracked_links.docs[0]['clicksCount'] == 1
+    assert fake_db.tracked_links.docs[0]['firstClickedAt'] is not None
+    assert len(fake_db.link_click_events.docs) == 1
+    event = fake_db.link_click_events.docs[0]
+    assert event['instagramAccountId'] == 'igA'
+    assert event['instagramUserId'] == 'contact1'
+    assert event['ipHash'] != '203.0.113.10'
+
+
+def test_final_dm_link_is_replaced_with_tracking_url(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    sent = {}
+
+    async def fake_send_url_button(_token, _ig_id, _recipient, text, _button, url):
+        sent['text'] = text
+        sent['url'] = url
+        return {'ok': True, 'body': {'message_id': 'mid1'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    user_doc = {
+        'id': 'u1',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+    }
+    session = {
+        'id': 'session1',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accA',
+        'instagramAccountId': 'igA',
+        'recipient_id': 'contact1',
+        'automation_id': 'auto1',
+        'ig_comment_id': 'comment1',
+        'link_dm_text': 'Here is your product link',
+        'link_button_text': 'Open link',
+        'link_url': 'https://example.org/product',
+        'conversionTrackingEnabled': True,
+    }
+
+    ok = _run(server._send_comment_dm_flow_completion(user_doc, session))
+
+    assert ok is True
+    assert sent['url'].startswith('https://example.com/r/')
+    assert sent['url'] != 'https://example.org/product'
+    assert fake_db.tracked_links.docs[0]['originalUrl'] == 'https://example.org/product'
+    assert fake_db.tracked_links.docs[0]['isActive'] is True
+    assert fake_db.tracked_links.docs[0]['relatedMessageId'] == 'mid1'
 
 
 def test_rules_and_comment_logs_filter_by_active_instagram_account(monkeypatch):
