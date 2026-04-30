@@ -21,6 +21,8 @@ const Comments = () => {
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const wsAttempts = useRef(0);
+  const wsGaveUp = useRef(false);
 
   const fetchComments = useCallback(async (pageToFetch, isReset) => {
     if (isReset) setLoading(true);
@@ -48,15 +50,35 @@ const Comments = () => {
   }, [unrepliedOnly]);
 
   const connectWs = useCallback(() => {
+    if (wsGaveUp.current) return;
     const token = localStorage.getItem('mychat_token');
     const user = JSON.parse(localStorage.getItem('mychat_user') || '{}');
     if (!token || !user.id) return;
-    const ws = new WebSocket(`${WS_URL}/ws/${user.id}?token=${token}`);
+    let ws;
+    try {
+      ws = new WebSocket(`${WS_URL}/ws/${user.id}?token=${token}`);
+    } catch (_e) {
+      wsGaveUp.current = true;
+      return;
+    }
     wsRef.current = ws;
-    ws.onopen = () => setWsReady(true);
+    ws.onopen = () => {
+      wsAttempts.current = 0;
+      setWsReady(true);
+    };
     ws.onclose = () => {
       setWsReady(false);
-      reconnectTimer.current = setTimeout(connectWs, 3000);
+      wsAttempts.current += 1;
+      // Exponential backoff capped at 60s. After 6 failed attempts (~2 min)
+      // we stop reconnecting to avoid spamming /ws 404s in backend logs
+      // when the route is unreachable behind the current proxy. The user
+      // can refresh the page to retry.
+      if (wsAttempts.current >= 6) {
+        wsGaveUp.current = true;
+        return;
+      }
+      const delayMs = Math.min(60000, 3000 * Math.pow(2, wsAttempts.current - 1));
+      reconnectTimer.current = setTimeout(connectWs, delayMs);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {

@@ -340,6 +340,7 @@ const Automations = () => {
   const [followUpEnabled, setFollowUpEnabled] = useState(false);
   const [followUpText, setFollowUpText] = useState('');
   const [processExistingComments, setProcessExistingComments] = useState(false);
+  const [processExistingUnrepliedComments, setProcessExistingUnrepliedComments] = useState(false);
   const [previewTab, setPreviewTab] = useState('Post');
   const [saving, setSaving] = useState(false);
 
@@ -505,6 +506,9 @@ const Automations = () => {
     setFollowUpEnabled(Boolean(automation.follow_up_enabled));
     setFollowUpText(automation.follow_up_text || '');
     setProcessExistingComments(Boolean(automation.processExistingComments));
+    setProcessExistingUnrepliedComments(Boolean(
+      automation.process_existing_unreplied_comments ?? automation.processExistingUnrepliedComments
+    ));
     setPreviewTab('Post');
     setSelectedMedia(scope === 'specific' ? mediaPreviewToItem(automation) : null);
   };
@@ -718,6 +722,7 @@ const Automations = () => {
         follow_up_enabled: followUpEnabled,
         follow_up_text: followUpText.trim(),
         processExistingComments,
+        process_existing_unreplied_comments: processExistingUnrepliedComments,
       };
 
       if (postScope === 'specific' && selectedMedia) {
@@ -1115,6 +1120,19 @@ const Automations = () => {
                       <span className="block text-sm font-semibold">Also process existing comments</span>
                       <span className="block text-xs text-slate-500">
                         Leave unchecked to only respond to comments created after this automation goes live.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-3 flex items-start gap-3">
+                    <Checkbox
+                      checked={processExistingUnrepliedComments}
+                      onCheckedChange={v => setProcessExistingUnrepliedComments(Boolean(v))}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block text-sm font-semibold">Reply to existing unreplied comments</span>
+                      <span className="block text-xs text-slate-500">
+                        When enabled, this automation can reply to old unreplied comments that match this rule. Replies are still deduplicated and rate-limited.
                       </span>
                     </span>
                   </label>

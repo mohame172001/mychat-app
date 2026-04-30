@@ -1543,6 +1543,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'followGateConfirmationKeywords': 'follow_confirmation_keywords',
         'followGateExpiresAfterMinutes': 'follow_gate_expires_after_minutes',
         'followGateFallbackMessage': 'follow_gate_fallback_message',
+        'processExistingUnrepliedComments': 'process_existing_unreplied_comments',
     }
     for src, dest in camel_aliases.items():
         if src in update:
@@ -1633,7 +1634,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_verification_failed_message', 'follow_retry_button_text',
         'follow_cooldown_message', 'max_follow_verification_attempts',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
-        'processExistingComments',
+        'processExistingComments', 'process_existing_unreplied_comments',
     }
     status_reenabled = (
         update.get('status') == 'active' and existing.get('status') != 'active'
@@ -1678,6 +1679,7 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
     copy['createdAt'] = now
     copy['updatedAt'] = now
     copy['processExistingComments'] = False
+    copy['process_existing_unreplied_comments'] = False
     if _is_comment_automation_rule(copy):
         copy['activationStartedAt'] = now
     await db.automations.insert_one(copy)
@@ -1786,6 +1788,10 @@ async def create_quick_comment_rule(
     if mode == 'reply_and_dm' and has_dm_action and not dm_text:
         dm_text = 'Thanks for your comment.'
     process_existing_comments = bool(data.get('processExistingComments', False))
+    process_existing_unreplied = bool(
+        data.get('process_existing_unreplied_comments',
+                 data.get('processExistingUnrepliedComments', False))
+    )
     if reply_under_post and not (comment_reply or comment_reply_2 or comment_reply_3):
         raise HTTPException(400, 'At least one comment reply is required')
     if mode == 'reply_and_dm' and not dm_text:
@@ -1901,6 +1907,7 @@ async def create_quick_comment_rule(
         'sent': 0,
         'clicks': 0,
         'processExistingComments': process_existing_comments,
+        'process_existing_unreplied_comments': process_existing_unreplied,
         'activationStartedAt': now,
         'createdAt': now,
         'updatedAt': now,
@@ -5057,6 +5064,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'missing_comment_timestamp',
             'no_rule_match',
             'skipped_empty_comment',
+            # When admin enables process_existing_unreplied_comments
+            # AFTER comments were already classified as historical, those
+            # comments must be re-evaluated on the next poll/webhook —
+            # otherwise the toggle would only affect future comments.
+            'historical_before_rule_activation',
         )
         if not already_replied and (
             (previous_skip == 'missing_comment_timestamp' and comment_ts)
@@ -5091,7 +5103,18 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         fire = False
 
         def apply_activation_cutoff() -> Optional[str]:
+            # Two opt-out paths:
+            #  (a) processExistingComments=True   — legacy blanket bypass.
+            #  (b) process_existing_unreplied_comments=True — safer: the
+            #      caller has opted in to processing OLD comments, but only
+            #      when they are unreplied. Dedup at the top of
+            #      _handle_new_comment already guarantees we only get here
+            #      for unreplied comments, so the cutoff is simply skipped.
             if auto.get('processExistingComments') is True:
+                return None
+            if auto.get('process_existing_unreplied_comments') is True:
+                logger.info('historical_unreplied_allowed rule_id=%s comment=%s',
+                            auto.get('id'), ig_comment_id)
                 return None
             activation = _parse_graph_datetime(
                 auto.get('activationStartedAt') or auto.get('createdAt') or auto.get('created')
@@ -6383,6 +6406,83 @@ async def instagram_automation_health(user_id: str = Depends(get_current_user_id
             'watchdog_interval_seconds': _WATCHDOG_INTERVAL_SECONDS,
         },
     }
+
+
+@api.post('/instagram/process-unreplied-comments')
+async def instagram_process_unreplied_comments(user_id: str = Depends(get_current_user_id)):
+    """Manual catch-up: re-process unreplied comments that may have been
+    skipped historically.
+
+    Walks the user's stored comment docs (no extra Graph quota) and asks
+    each automation rule to re-evaluate any comment whose previous skip
+    reason was historical_before_rule_activation OR which has never been
+    successfully replied to and matches an active rule.
+
+    Safe by construction:
+      • Reuses _handle_new_comment which performs its own dedup. Comments
+        that were already successfully replied are returned as duplicates
+        and skipped.
+      • Only rules with process_existing_unreplied_comments=True (or the
+        legacy processExistingComments=True) will allow processing of
+        comments older than activation. Other rules continue to skip.
+      • Account-scoped: only the calling user's active IG account.
+      • Never sends two replies for the same comment_id thanks to the
+        existing replied/action_status guards.
+
+    Response:
+      checked, matched, replied, skipped_historical, skipped_duplicate, failed
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'user not found')
+    if not u.get('instagramConnected'):
+        return {
+            'checked': 0, 'matched': 0, 'replied': 0,
+            'skipped_historical': 0, 'skipped_duplicate': 0, 'failed': 0,
+            'reason': 'instagram_not_connected',
+        }
+    ig_account_id = u.get('ig_user_id') or ''
+    # Pull stored comments that are NOT already successfully replied.
+    cursor = db.comments.find({
+        'user_id': user_id,
+        '$or': [
+            {'instagramAccountId': ig_account_id},
+            {'igUserId': ig_account_id},
+        ],
+        # Only those where the action did not previously succeed.
+        'replied': {'$ne': True},
+        'action_status': {'$ne': 'success'},
+    }).sort('created', -1).limit(500)
+    docs = await cursor.to_list(500)
+    summary = {'checked': 0, 'matched': 0, 'replied': 0,
+               'skipped_historical': 0, 'skipped_duplicate': 0, 'failed': 0}
+    for d in docs:
+        summary['checked'] += 1
+        try:
+            res = await _handle_new_comment(u, {
+                'ig_comment_id': d.get('ig_comment_id') or d.get('igCommentId'),
+                'media_id': d.get('media_id') or d.get('mediaId'),
+                'commenter_id': d.get('commenter_id'),
+                'commenter_username': d.get('commenter_username'),
+                'text': d.get('text') or '',
+                'timestamp': d.get('timestamp') or d.get('commentTimestamp'),
+            }, source='manual_catchup') or {}
+            reason = res.get('reason') or res.get('skip_reason')
+            if res.get('already_processed'):
+                summary['skipped_duplicate'] += 1
+            elif reason == 'historical_before_rule_activation':
+                summary['skipped_historical'] += 1
+            elif res.get('matched'):
+                summary['matched'] += 1
+                if res.get('action_status') == 'success':
+                    summary['replied'] += 1
+                elif res.get('action_status') == 'failed':
+                    summary['failed'] += 1
+        except Exception:
+            logger.exception('process_unreplied_comments per-doc error doc=%s', d.get('id'))
+            summary['failed'] += 1
+    logger.info('process_unreplied_comments_summary user_id=%s %s', user_id, summary)
+    return summary
 
 
 @api.get('/instagram/poll-now')

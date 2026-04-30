@@ -15,19 +15,37 @@ const LiveChat = () => {
   const scrollRef = useRef(null);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const wsAttempts = useRef(0);
+  const wsGaveUp = useRef(false);
 
   const connectWs = useCallback(() => {
+    if (wsGaveUp.current) return;
     const token = localStorage.getItem('mychat_token');
     const user = JSON.parse(localStorage.getItem('mychat_user') || '{}');
     if (!token || !user.id) return;
 
-    const ws = new WebSocket(`${WS_URL}/ws/${user.id}?token=${token}`);
+    let ws;
+    try {
+      ws = new WebSocket(`${WS_URL}/ws/${user.id}?token=${token}`);
+    } catch (_e) {
+      wsGaveUp.current = true;
+      return;
+    }
     wsRef.current = ws;
 
-    ws.onopen = () => setWsReady(true);
+    ws.onopen = () => {
+      wsAttempts.current = 0;
+      setWsReady(true);
+    };
     ws.onclose = () => {
       setWsReady(false);
-      reconnectTimer.current = setTimeout(connectWs, 3000);
+      wsAttempts.current += 1;
+      if (wsAttempts.current >= 6) {
+        wsGaveUp.current = true;
+        return;
+      }
+      const delayMs = Math.min(60000, 3000 * Math.pow(2, wsAttempts.current - 1));
+      reconnectTimer.current = setTimeout(connectWs, delayMs);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {

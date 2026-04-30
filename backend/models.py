@@ -75,6 +75,8 @@ class AutomationIn(BaseModel):
     follow_cooldown_message: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
+    process_existing_unreplied_comments: Optional[bool] = None
+    processExistingUnrepliedComments: Optional[bool] = None
 
 
 class AutomationPatch(BaseModel):
@@ -130,6 +132,8 @@ class AutomationPatch(BaseModel):
     followCooldownMessage: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     maxFollowVerificationAttempts: Optional[int] = None
+    process_existing_unreplied_comments: Optional[bool] = None
+    processExistingUnrepliedComments: Optional[bool] = None
     email_request_enabled: Optional[bool] = None
     follow_up_enabled: Optional[bool] = None
     follow_up_text: Optional[str] = None
@@ -172,6 +176,7 @@ class Automation(BaseModel):
     follow_cooldown_message: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
+    process_existing_unreplied_comments: bool = False
     activationStartedAt: Optional[datetime] = None
     createdAt: datetime = Field(default_factory=_now)
     updatedAt: datetime = Field(default_factory=_now)
