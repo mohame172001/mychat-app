@@ -53,6 +53,8 @@ class AutomationIn(BaseModel):
     keyword: Optional[str] = None
     mode: Optional[str] = None
     comment_reply: Optional[str] = None
+    comment_reply_2: Optional[str] = None
+    comment_reply_3: Optional[str] = None
     dm_text: Optional[str] = None
     media_id: Optional[str] = None
     latest: Optional[bool] = None
@@ -85,6 +87,8 @@ class AutomationPatch(BaseModel):
     keyword: Optional[str] = None
     mode: Optional[str] = None
     comment_reply: Optional[str] = None
+    comment_reply_2: Optional[str] = None
+    comment_reply_3: Optional[str] = None
     dm_text: Optional[str] = None
     media_id: Optional[str] = None
     latest: Optional[bool] = None
@@ -146,6 +150,8 @@ class Automation(BaseModel):
     keyword: Optional[str] = None
     mode: Optional[str] = None
     comment_reply: Optional[str] = None
+    comment_reply_2: Optional[str] = None
+    comment_reply_3: Optional[str] = None
     dm_text: Optional[str] = None
     media_id: Optional[str] = None
     latest: Optional[bool] = None

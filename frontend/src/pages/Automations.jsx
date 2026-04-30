@@ -640,7 +640,15 @@ const Automations = () => {
       const edges = [];
       let prev = 'n_trigger';
       if (replyUnderPost && (commentReply.trim() || commentReply2.trim() || commentReply3.trim())) {
-        nodes.push({ id: 'n_reply', type: 'reply_comment', data: { text: commentReply.trim() || commentReply2.trim() || commentReply3.trim() } });
+        const replyVariations = [commentReply.trim(), commentReply2.trim(), commentReply3.trim()].filter(Boolean);
+        nodes.push({
+          id: 'n_reply',
+          type: 'reply_comment',
+          data: {
+            text: replyVariations[0] || '',
+            replies: replyVariations,
+          },
+        });
         edges.push({ id: 'e1', source: prev, target: 'n_reply' });
         prev = 'n_reply';
       }

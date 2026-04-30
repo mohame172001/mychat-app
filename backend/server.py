@@ -1569,10 +1569,50 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     now = datetime.utcnow()
     update['updated'] = now
     update['updatedAt'] = now
+    # If any of the comment reply variations changed, rebuild the n_reply
+    # node on the persisted flow graph so execute_flow's random.choice
+    # actually picks from the updated list. Without this, edits to
+    # comment_reply_2 / _3 would land on the document but never reach
+    # the runtime, since the runtime reads from nodes[i].data.replies.
+    reply_keys_changed = any(
+        k in update for k in ('comment_reply', 'comment_reply_2', 'comment_reply_3')
+    )
+    if reply_keys_changed:
+        merged_replies = [
+            (update.get('comment_reply')
+             if 'comment_reply' in update
+             else existing.get('comment_reply') or ''),
+            (update.get('comment_reply_2')
+             if 'comment_reply_2' in update
+             else existing.get('comment_reply_2') or ''),
+            (update.get('comment_reply_3')
+             if 'comment_reply_3' in update
+             else existing.get('comment_reply_3') or ''),
+        ]
+        merged_replies = [str(r or '').strip() for r in merged_replies]
+        merged_replies = [r for r in merged_replies if r]
+        existing_nodes = list(existing.get('nodes') or [])
+        rebuilt_nodes = []
+        for node in existing_nodes:
+            if node.get('id') == 'n_reply' and node.get('type') == 'reply_comment':
+                node = {
+                    **node,
+                    'data': {
+                        **(node.get('data') or {}),
+                        'text': merged_replies[0] if merged_replies else '',
+                        'replies': merged_replies,
+                    },
+                }
+            rebuilt_nodes.append(node)
+        # Only persist the rebuilt graph; if the FE is already sending
+        # nodes/edges in the same patch, prefer their version.
+        if 'nodes' not in update:
+            update['nodes'] = rebuilt_nodes
     prospective = {**existing, **update}
     reset_fields = {
         'trigger', 'nodes', 'edges', 'match', 'keyword', 'media_id', 'latest',
-        'mode', 'comment_reply', 'dm_text', 'media_preview', 'keywords',
+        'mode', 'comment_reply', 'comment_reply_2', 'comment_reply_3',
+        'dm_text', 'media_preview', 'keywords',
         'post_scope', 'reply_under_post', 'opening_dm_enabled',
         'opening_dm_text', 'opening_dm_button_text', 'link_dm_text',
         'link_button_text', 'link_url', 'conversionTrackingEnabled',
