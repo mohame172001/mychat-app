@@ -17,6 +17,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
 
 
+def test_follow_verification_cooldown_env_is_clamped(monkeypatch):
+    monkeypatch.setenv('FOLLOW_VERIFICATION_COOLDOWN_SECONDS', '0')
+    assert server._follow_verification_cooldown_seconds() == 2
+    monkeypatch.setenv('FOLLOW_VERIFICATION_COOLDOWN_SECONDS', '99')
+    assert server._follow_verification_cooldown_seconds() == 30
+    monkeypatch.setenv('FOLLOW_VERIFICATION_COOLDOWN_SECONDS', '7')
+    assert server._follow_verification_cooldown_seconds() == 7
+    monkeypatch.setenv('FOLLOW_VERIFICATION_COOLDOWN_SECONDS', 'not-a-number')
+    assert server._follow_verification_cooldown_seconds() == 2
+
+
 def _match(doc, query):
     for key, expected in query.items():
         value = doc.get(key)
@@ -318,7 +329,7 @@ def test_cooldown_sends_notice_and_does_not_call_meta(monkeypatch):
     """Second tap inside cooldown must not call Meta but must answer."""
     sess = _session(
         follow_verification_attempts=1,
-        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=2),
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=1),
         follow_cooldown_message='wait a few seconds',
     )
     db = FakeDB(sessions=[sess])
@@ -342,7 +353,7 @@ def test_cooldown_notice_rate_limited_to_once_per_window(monkeypatch):
     now = datetime.utcnow()
     sess = _session(
         follow_verification_attempts=1,
-        followLastCheckedAt=now - timedelta(seconds=2),
+        followLastCheckedAt=now - timedelta(seconds=1),
         lastCooldownNoticeAt=now - timedelta(seconds=1),
         follow_cooldown_message='wait',
     )
@@ -358,6 +369,32 @@ def test_cooldown_notice_rate_limited_to_once_per_window(monkeypatch):
     assert calls['text_dm'] == []
     assert calls['url_button'] == []
     assert calls['verify'] == []
+
+
+def test_retry_after_two_seconds_calls_meta_and_sends_final_once(monkeypatch):
+    sess = _session(
+        follow_verification_attempts=1,
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=2.1),
+        follow_confirmed=True,
+    )
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(
+        monkeypatch,
+        [{'ok': True, 'follows': True, 'raw_status': 200,
+          'profile_excerpt': {'is_user_follow_business': True}}],
+        calls,
+    )
+
+    ok = _run(server._send_comment_dm_flow_completion(_user(), sess))
+    again = _run(server._send_comment_dm_flow_completion(_user(), db.comment_dm_sessions.docs[0]))
+
+    assert ok is True
+    assert again is True
+    assert len(calls['verify']) == 1
+    assert len(calls['url_button']) == 1
+    assert db.comment_dm_sessions.docs[0]['stage'] == 'final_sent'
 
 
 def test_follow_false_then_true_sends_final_link(monkeypatch):

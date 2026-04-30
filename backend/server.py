@@ -232,11 +232,21 @@ DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE = (
 )
 DEFAULT_FOLLOW_RETRY_BUTTON_TEXT = DEFAULT_FOLLOW_GATE_BUTTON_TEXT
 DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3
+
+
+def _follow_verification_cooldown_seconds() -> int:
+    try:
+        configured = int(os.getenv('FOLLOW_VERIFICATION_COOLDOWN_SECONDS', '2'))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(2, min(configured, 30))
+
+
 # Short concurrency-dedup window. Two webhook events triggered by the same
 # tap arrive milliseconds apart; only the first should call Meta. Anything
 # longer than this would block legitimate retries (a user who follows
 # between two taps must succeed on the second tap).
-FOLLOW_VERIFICATION_COOLDOWN_SECONDS = 5
+FOLLOW_VERIFICATION_COOLDOWN_SECONDS = _follow_verification_cooldown_seconds()
 # Background verifier wakes up at this cadence and re-checks pending
 # sessions whose user hasn't been verified yet — covers the case where
 # Meta updates is_user_follow_business a few seconds AFTER the user follows.
