@@ -4955,11 +4955,27 @@ async def instagram_webhook(request: Request):
     logger.info('IG webhook: %s', payload)
     # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
     # the webhook ACK well under the 5-second Meta retry threshold.
+    global WEBHOOK_LAST_RECEIVED_AT
+    WEBHOOK_LAST_RECEIVED_AT = datetime.utcnow()
+    logger.info('webhook_received')
     asyncio.create_task(_write_webhook_log_async(payload, sig_result))
-    asyncio.create_task(_process_webhook(payload))
+    asyncio.create_task(_supervised_process_webhook(payload))
     ack_ms = int((_time.monotonic() - ack_start) * 1000)
     logger.info('webhook_ack_duration_ms=%s', ack_ms)
     return {'ok': True}
+
+
+async def _supervised_process_webhook(payload: dict):
+    """Wrap _process_webhook so a fire-and-forget task can never silently
+    swallow exceptions. Stamps WEBHOOK_LAST_PROCESSED_AT for the health
+    endpoint and logs webhook_processor_failed on error."""
+    global WEBHOOK_LAST_PROCESSED_AT
+    try:
+        logger.info('webhook_processor_started')
+        await _process_webhook(payload)
+        WEBHOOK_LAST_PROCESSED_AT = datetime.utcnow()
+    except Exception:
+        logger.exception('webhook_processor_failed')
 
 
 @api.get('/instagram/webhook-log')
@@ -5945,6 +5961,8 @@ async def _process_webhook(payload: dict):
 # "Advanced Access is required to receive comments and live_comments webhook notifications."
 IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
+# Background tasks are tracked in _BG_TASKS (see _register_bg_task below).
+# These legacy globals stayed here only as fallbacks during the migration.
 _poll_task: Optional[asyncio.Task] = None
 _follow_verifier_task: Optional[asyncio.Task] = None
 
@@ -6087,49 +6105,177 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     return stats
 
 
+# ---------------- Background task supervision ----------------
+# Every long-lived loop registers itself here so a watchdog can detect
+# silent deaths (uncaught exception, asyncio cancellation, container
+# pause) and restart the task. The registry is also surfaced to admins
+# via /api/instagram/automation-health — never with secrets.
+_BG_TASKS: Dict[str, Dict[str, Any]] = {}
+_BG_FACTORIES: Dict[str, Any] = {}
+_WATCHDOG_INTERVAL_SECONDS = 60
+WEBHOOK_LAST_RECEIVED_AT: Optional[datetime] = None
+WEBHOOK_LAST_PROCESSED_AT: Optional[datetime] = None
+
+
+def _register_bg_task(name: str, factory):
+    """Register a background loop coroutine factory and start it once.
+
+    Idempotent: re-registering the same name with an already-running task
+    is a no-op. Factories must be plain coroutine functions () -> coroutine.
+    """
+    existing = _BG_TASKS.get(name)
+    if existing is not None:
+        existing_task = existing.get('task')
+        if existing_task is not None and not existing_task.done():
+            return existing
+    prior_restarts = (existing or {}).get('restarts', 0)
+    _BG_FACTORIES[name] = factory
+    task = asyncio.create_task(factory())
+    _BG_TASKS[name] = {
+        'task': task,
+        'started_at': datetime.utcnow(),
+        'last_tick_at': None,
+        'last_success_at': None,
+        'last_error_at': None,
+        'last_error_type': None,
+        'restarts': prior_restarts,
+        'consecutive_failures': 0,
+    }
+    return _BG_TASKS[name]
+
+
+def _bg_tick(name: str, success: bool = True, error: Optional[BaseException] = None):
+    """Update tick metadata for a registered background loop. Safe to call
+    from inside the loop itself — the watchdog reads from this map."""
+    info = _BG_TASKS.get(name)
+    if info is None:
+        return
+    now = datetime.utcnow()
+    info['last_tick_at'] = now
+    if success:
+        info['last_success_at'] = now
+        info['consecutive_failures'] = 0
+        info['last_error_type'] = None
+    else:
+        info['last_error_at'] = now
+        info['last_error_type'] = type(error).__name__ if error else 'unknown'
+        info['consecutive_failures'] = int(info.get('consecutive_failures') or 0) + 1
+
+
+async def _watchdog_loop():
+    """Restart any registered background task that has died.
+
+    Logs background_task_crashed (with safe metadata) and
+    background_task_restarted on recovery. Never raises into the runtime.
+    """
+    logger.info('background_task_watchdog_started interval=%ss',
+                _WATCHDOG_INTERVAL_SECONDS)
+    while True:
+        try:
+            for name, info in list(_BG_TASKS.items()):
+                if name == 'watchdog':
+                    continue
+                task = info.get('task')
+                if task is None or task.done():
+                    exc_type = None
+                    if task is not None:
+                        try:
+                            exc = task.exception()
+                            exc_type = type(exc).__name__ if exc else None
+                        except Exception:
+                            exc_type = 'unknown'
+                    logger.error('background_task_crashed name=%s exc=%s',
+                                 name, exc_type)
+                    factory = _BG_FACTORIES.get(name)
+                    if factory is not None:
+                        new_task = asyncio.create_task(factory())
+                        info['task'] = new_task
+                        info['started_at'] = datetime.utcnow()
+                        info['restarts'] = int(info.get('restarts') or 0) + 1
+                        logger.info('background_task_restarted name=%s restarts=%s',
+                                    name, info['restarts'])
+        except Exception:
+            logger.exception('watchdog_loop error')
+        await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+
+
+def _classify_meta_error(exc: BaseException, status: Optional[int] = None) -> str:
+    """Map a Graph error to a stable category for retry/back-off decisions."""
+    if status == 429:
+        return 'rate_limit'
+    if status in (401, 403):
+        return 'invalid_token_or_permission'
+    if status and 500 <= status < 600:
+        return 'temporary_5xx'
+    name = type(exc).__name__
+    if name in ('TimeoutException', 'ReadTimeout', 'ConnectTimeout',
+                'ConnectError', 'NetworkError'):
+        return 'network_timeout'
+    return 'unknown'
+
+
 async def _comment_poller_loop():
     """Runs forever: every IG_POLL_INTERVAL_SECONDS, poll comments for all
-    connected users that have active comment automations."""
-    logger.info('Comment poller started (interval=%ss)', IG_POLL_INTERVAL_SECONDS)
+    connected users that have active comment automations.
+
+    Resilience guarantees:
+      • Per-user errors stay scoped — one bad account never blocks others.
+      • Outer try/except keeps the loop alive on Mongo errors.
+      • Consecutive-failure backoff prevents tight loops on persistent error.
+      • _bg_tick updates the supervisor so the watchdog and health endpoint
+        can see liveness.
+    """
+    logger.info('comment_poller_started interval=%ss', IG_POLL_INTERVAL_SECONDS)
     while True:
+        cycle_ok = True
+        cycle_err: Optional[BaseException] = None
         try:
             cursor = db.users.find({'instagramConnected': True})
             users = await cursor.to_list(500)
-            logger.info('polling_started accounts=%s', len(users))
+            logger.info('comment_poller_tick accounts=%s', len(users))
             for u in users:
                 try:
                     s = await _poll_user_comments(u)
                     if s.get('newComments'):
-                        logger.info('polling_user_summary user=%s new=%s matched=%s ok=%s fail=%s',
-                                    u.get('email'), s['newComments'], s['matched'],
+                        logger.info('polling_user_summary user_id=%s new=%s matched=%s ok=%s fail=%s',
+                                    u.get('id'), s['newComments'], s['matched'],
                                     s['actionsSucceeded'], s['actionsFailed'])
-                except Exception:
-                    logger.exception('Poller per-user error for %s', u.get('id'))
-        except Exception:
-            logger.exception('Poller outer loop error')
-        await asyncio.sleep(IG_POLL_INTERVAL_SECONDS)
+                except Exception as per_user_exc:
+                    logger.exception('comment_poller_per_user_error user_id=%s',
+                                     u.get('id'))
+                    cycle_err = per_user_exc
+        except Exception as exc:
+            cycle_ok = False
+            cycle_err = exc
+            logger.exception('comment_poller_tick_failed')
+        else:
+            logger.info('comment_poller_tick_success')
+        _bg_tick('comment_poller', success=cycle_ok, error=cycle_err)
+        # Back off when consecutive failures pile up (capped).
+        info = _BG_TASKS.get('comment_poller') or {}
+        consecutive = int(info.get('consecutive_failures') or 0)
+        sleep_s = IG_POLL_INTERVAL_SECONDS
+        if not cycle_ok and consecutive > 0:
+            sleep_s = min(IG_POLL_INTERVAL_SECONDS * (2 ** min(consecutive, 5)),
+                          IG_POLL_INTERVAL_SECONDS * 32)
+        await asyncio.sleep(sleep_s)
 
 
 async def _follow_verifier_loop():
     """Background re-verifier for pending follow-gate sessions.
 
     Meta sometimes updates is_user_follow_business a few seconds after
-    the user actually follows. If the user doesn't tap the confirmation
-    button again, the link would never get sent. This loop re-checks
-    pending sessions so a user who followed but didn't re-tap still
-    gets the link.
+    the user actually follows. This loop re-checks pending sessions so a
+    user who followed but didn't re-tap still gets the link.
 
-    Idempotency is enforced by:
-      • Only sessions with status='pending' and follow_verified=False
-        are eligible.
-      • _send_comment_dm_flow_completion checks finalDmSentAt before
-        sending — duplicate sends are impossible.
-      • A short cutoff (FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES)
-        bounds work and avoids verifying very old sessions.
+    Idempotency: _send_comment_dm_flow_completion checks finalDmSentAt
+    before sending; only sessions inside the cutoff window are processed.
     """
-    logger.info('Follow verifier started (interval=%ss)',
+    logger.info('follow_verifier_started interval=%ss',
                 FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
     while True:
+        cycle_ok = True
+        cycle_err: Optional[BaseException] = None
         try:
             cutoff = datetime.utcnow() - timedelta(
                 minutes=FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES
@@ -6140,7 +6286,7 @@ async def _follow_verifier_loop():
                 'verify_actual_follow': {'$ne': False},
                 'follow_verified': {'$ne': True},
                 'finalDmSentAt': None,
-                'follow_confirmed': True,  # only once user has tapped at least once
+                'follow_confirmed': True,
                 'created': {'$gte': cutoff},
             })
             sessions = await cursor.to_list(200)
@@ -6151,15 +6297,92 @@ async def _follow_verifier_loop():
                     user_doc = await db.users.find_one({'id': sess.get('user_id')})
                     if not user_doc:
                         continue
-                    # Reuse the verify gate. It already handles cooldown,
-                    # idempotency, max_attempts, and link send.
                     await _send_comment_dm_flow_completion(user_doc, sess)
                 except Exception:
-                    logger.exception('follow_verifier per-session error session=%s',
+                    logger.exception('follow_verifier_per_session_error session=%s',
                                      sess.get('id'))
-        except Exception:
-            logger.exception('follow_verifier outer loop error')
+        except Exception as exc:
+            cycle_ok = False
+            cycle_err = exc
+            logger.exception('follow_verifier_tick_failed')
+        _bg_tick('follow_verifier', success=cycle_ok, error=cycle_err)
         await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
+
+
+@api.get('/instagram/automation-health')
+async def instagram_automation_health(user_id: str = Depends(get_current_user_id)):
+    """Operational status for comment / DM / follow automation.
+
+    Returns liveness data for every background loop, the time of the
+    last webhook receive/process, and a per-account token-health summary.
+    Never exposes tokens, secrets, or message content.
+    """
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        return dt.isoformat() if isinstance(dt, datetime) else None
+
+    tasks_out = {}
+    for name, info in _BG_TASKS.items():
+        task = info.get('task')
+        running = bool(task is not None and not task.done())
+        tasks_out[name] = {
+            'running': running,
+            'started_at': _iso(info.get('started_at')),
+            'last_tick_at': _iso(info.get('last_tick_at')),
+            'last_success_at': _iso(info.get('last_success_at')),
+            'last_error_at': _iso(info.get('last_error_at')),
+            'last_error_type': info.get('last_error_type'),
+            'restarts': info.get('restarts') or 0,
+            'consecutive_failures': info.get('consecutive_failures') or 0,
+        }
+
+    # Per-user token health summary, scoped to the caller's user_id.
+    accounts_out = []
+    try:
+        u = await db.users.find_one({'id': user_id})
+        if u:
+            accounts_out.append({
+                'user_id': u.get('id'),
+                'instagramAccountId': u.get('ig_user_id') or None,
+                'instagramConnected': bool(u.get('instagramConnected')),
+                'connectionValid': bool(u.get('instagramConnectionValid', True)),
+                'auth_kind': u.get('ig_auth_kind'),
+                # Token presence as a boolean; never the value.
+                'tokenPresent': bool(u.get('meta_access_token')),
+            })
+    except Exception:
+        logger.exception('automation_health user_lookup failed')
+
+    pending_jobs = 0
+    failed_jobs = 0
+    try:
+        pending_jobs = await db.comment_dm_sessions.count_documents(
+            {'status': 'pending', 'user_id': user_id}
+        )
+        failed_jobs = await db.comment_dm_sessions.count_documents(
+            {'status': {'$in': ['failed', 'verification_failed']},
+             'user_id': user_id}
+        )
+    except Exception:
+        logger.exception('automation_health session_counts failed')
+
+    return {
+        'tasks': tasks_out,
+        'webhook': {
+            'last_received_at': _iso(WEBHOOK_LAST_RECEIVED_AT),
+            'last_processed_at': _iso(WEBHOOK_LAST_PROCESSED_AT),
+        },
+        'accounts': accounts_out,
+        'jobs': {
+            'pending_comment_dm_sessions': pending_jobs,
+            'failed_comment_dm_sessions': failed_jobs,
+        },
+        'config': {
+            'comment_poller_interval_seconds': IG_POLL_INTERVAL_SECONDS,
+            'comment_poller_enabled': IG_POLL_ENABLED,
+            'follow_verifier_interval_seconds': FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS,
+            'watchdog_interval_seconds': _WATCHDOG_INTERVAL_SECONDS,
+        },
+    }
 
 
 @api.get('/instagram/poll-now')
@@ -7826,26 +8049,22 @@ async def _startup():
     except Exception as e:
         logger.warning('comment rule activation migration: %s', e)
     if IG_POLL_ENABLED:
-        _poll_task = asyncio.create_task(_comment_poller_loop())
+        _register_bg_task('comment_poller', _comment_poller_loop)
     else:
         logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
-    global _follow_verifier_task
-    _follow_verifier_task = asyncio.create_task(_follow_verifier_loop())
+    _register_bg_task('follow_verifier', _follow_verifier_loop)
+    # Watchdog last so it can supervise the others.
+    _register_bg_task('watchdog', _watchdog_loop)
 
 
 @app.on_event('shutdown')
 async def shutdown_db_client():
-    global _poll_task, _follow_verifier_task
-    if _poll_task:
-        _poll_task.cancel()
-        try:
-            await _poll_task
-        except Exception:
-            pass
-    if _follow_verifier_task:
-        _follow_verifier_task.cancel()
-        try:
-            await _follow_verifier_task
-        except Exception:
-            pass
+    for name, info in list(_BG_TASKS.items()):
+        task = info.get('task')
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except Exception:
+                pass
     client.close()
