@@ -2012,7 +2012,7 @@ async def send_broadcast(bid: str, user_id: str = Depends(get_current_user_id)):
     contacts = await db.contacts.find({'user_id': user_id, 'subscribed': True}).to_list(5000)
 
     await db.broadcasts.update_one({'id': bid}, {'$set': {'status': 'sending'}})
-    asyncio.create_task(_send_broadcast_task(bid, broadcast, user_doc, contacts))
+    create_tracked_task(_send_broadcast_task(bid, broadcast, user_doc, contacts), 'broadcast')
     return {'ok': True, 'status': 'sending', 'recipients': len(contacts)}
 
 
@@ -4965,8 +4965,8 @@ async def instagram_webhook(request: Request):
     global WEBHOOK_LAST_RECEIVED_AT
     WEBHOOK_LAST_RECEIVED_AT = datetime.utcnow()
     logger.info('webhook_received')
-    asyncio.create_task(_write_webhook_log_async(payload, sig_result))
-    asyncio.create_task(_supervised_process_webhook(payload))
+    create_tracked_task(_write_webhook_log_async(payload, sig_result), 'webhook_log')
+    create_tracked_task(_supervised_process_webhook(payload), 'webhook_processor')
     ack_ms = int((_time.monotonic() - ack_start) * 1000)
     logger.info('webhook_ack_duration_ms=%s', ack_ms)
     return {'ok': True}
@@ -5020,6 +5020,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
       rule_id          — id of the matched automation, when matched
       already_processed (bool) — True if dedup hit
     """
+    if IS_SHUTTING_DOWN:
+        return {'processed': False, 'matched': False, 'action_status': 'skipped',
+                'reason': 'shutting_down'}
     import uuid as _uuid
     user_id = user_doc['id']
     ig_account_id = user_doc.get('ig_user_id') or ''
@@ -5042,6 +5045,22 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
     now = datetime.utcnow()
+
+    # For webhook events: if the payload carries no comment timestamp, use
+    # entry.time (the Meta dispatch time) as the effective timestamp so the
+    # activation-cutoff check still works. Webhook events are by definition
+    # real-time, so this is safe — we never risk processing a historical
+    # pre-rule comment via this path.
+    effective_ts = comment_ts
+    if effective_ts is None and source == 'webhook':
+        entry_time_iso = comment_data.get('entry_time')
+        effective_ts = _parse_graph_datetime(entry_time_iso) if entry_time_iso else now
+        logger.info(
+            'webhook_comment_missing_timestamp_using_entry_time '
+            'ig_comment_id=%s entry_time=%s effective_ts=%s',
+            ig_comment_id, entry_time_iso, effective_ts.isoformat())
+        logger.info('webhook_comment_effective_timestamp ig_comment_id=%s ts=%s',
+                    ig_comment_id, effective_ts.isoformat())
     retry_existing = False
     retry_reason = None
     existing_doc_id = None
@@ -5071,7 +5090,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'historical_before_rule_activation',
         )
         if not already_replied and (
-            (previous_skip == 'missing_comment_timestamp' and comment_ts)
+            (previous_skip == 'missing_comment_timestamp' and effective_ts)
             or retryable_status
             or retryable_skip
         ):
@@ -5121,7 +5140,12 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             ) or now
             logger.info('rule_activation_cutoff_applied rule_id=%s comment=%s activation=%s process_existing=%s',
                         auto.get('id'), ig_comment_id, activation, bool(auto.get('processExistingComments')))
-            if not comment_ts:
+            # For polling: no timestamp means we cannot safely determine
+            # whether the comment predates the rule — skip it. The poller
+            # will retry once timestamp becomes available via Graph API.
+            # For webhook: effective_ts is always set (entry.time or now),
+            # so this branch is only reached for polling.
+            if not effective_ts:
                 logger.info('comment_skipped_missing_timestamp ig_comment_id=%s rule_id=%s source=%s',
                             ig_comment_id, auto.get('id'), source)
                 return 'missing_comment_timestamp'
@@ -5130,13 +5154,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             # precision so a fresh test comment in the same second as rule
             # creation is not treated as historical.
             activation_floor = activation.replace(microsecond=0) if activation else None
-            comment_floor = comment_ts.replace(microsecond=0)
+            comment_floor = effective_ts.replace(microsecond=0)
             if activation_floor and comment_floor < activation_floor:
                 logger.info('comment_skipped_historical ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
-                            ig_comment_id, auto.get('id'), comment_ts, activation, source)
+                            ig_comment_id, auto.get('id'), effective_ts, activation, source)
                 return 'historical_before_rule_activation'
             logger.info('comment_processed_after_activation ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
-                        ig_comment_id, auto.get('id'), comment_ts, activation, source)
+                        ig_comment_id, auto.get('id'), effective_ts, activation, source)
             return None
 
         if trigger.startswith('keyword:'):
@@ -5230,7 +5254,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'skipReason': cutoff_skip_reason,
         'error': None,
         'timestamp': ts_raw,
-        'commentTimestamp': comment_ts or ts_raw,
+        'commentTimestamp': effective_ts or comment_ts or ts_raw,
+        'effective_timestamp': effective_ts,
+        'timestamp_source': 'payload' if comment_ts else ('entry_time' if source == 'webhook' else 'none'),
         'ruleActivationStartedAt': rule_activation_started_at,
         'processExistingComments': process_existing_comments,
         'processed_at': now,
@@ -5938,9 +5964,9 @@ async def _process_webhook(payload: dict):
                     if trigger.startswith('keyword:'):
                         keyword = trigger.split(':', 1)[1].strip()
                         if keyword and keyword.lower() in msg_text.lower():
-                            asyncio.create_task(execute_flow(user_doc, auto, sender_id, msg_text))
+                            create_tracked_task(execute_flow(user_doc, auto, sender_id, msg_text), 'execute_flow')
                     elif trigger == 'new follower' and event.get('follow'):
-                        asyncio.create_task(execute_flow(user_doc, auto, sender_id, msg_text))
+                        create_tracked_task(execute_flow(user_doc, auto, sender_id, msg_text), 'execute_flow')
 
                 # DM Automation handler was already called at the top of the
                 # loop with the raw messaging item.
@@ -5953,6 +5979,17 @@ async def _process_webhook(payload: dict):
                 if is_comment:
                     commenter = value.get('from', {}) or {}
                     media_obj = value.get('media') or {}
+                    # entry.time is a Unix timestamp (int) set by Meta when the
+                    # entry was dispatched. It is a reliable proxy for "now"
+                    # when the comment payload itself carries no timestamp.
+                    entry_time_unix = entry.get('time')
+                    entry_time_iso: Optional[str] = None
+                    if entry_time_unix:
+                        try:
+                            entry_time_iso = datetime.utcfromtimestamp(
+                                int(entry_time_unix)).strftime('%Y-%m-%dT%H:%M:%S+0000')
+                        except (ValueError, OSError, OverflowError):
+                            entry_time_iso = None
                     await _handle_new_comment(user_doc, {
                         'ig_comment_id': value.get('comment_id') or value.get('id'),
                         'media_id': media_obj.get('id') or value.get('post_id') or value.get('parent_id'),
@@ -5963,6 +6000,9 @@ async def _process_webhook(payload: dict):
                             value.get('timestamp') or value.get('created_time') or
                             value.get('created_at') or value.get('time')
                         ),
+                        # Fallback for activation-cutoff when payload has no timestamp.
+                        # Only used when timestamp is absent and source='webhook'.
+                        'entry_time': entry_time_iso,
                     }, source='webhook')
                 elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
@@ -5971,7 +6011,7 @@ async def _process_webhook(payload: dict):
                             {'user_id': user_id, 'status': 'active', 'trigger': 'Story Reply'}
                         ).to_list(20)
                         for auto in automations:
-                            asyncio.create_task(execute_flow(user_doc, auto, replier_id, ''))
+                            create_tracked_task(execute_flow(user_doc, auto, replier_id, ''), 'execute_flow')
     except Exception:
         logger.exception('Webhook processing error')
 
@@ -6139,6 +6179,58 @@ _WATCHDOG_INTERVAL_SECONDS = 60
 WEBHOOK_LAST_RECEIVED_AT: Optional[datetime] = None
 WEBHOOK_LAST_PROCESSED_AT: Optional[datetime] = None
 
+# Graceful-shutdown plumbing. SHUTDOWN_EVENT is awaited by long-lived
+# loops in place of plain asyncio.sleep so they exit promptly when the
+# container receives SIGTERM. IS_SHUTTING_DOWN is checked at every
+# entry point that does Mongo writes — once set, the entry point
+# bails out instead of touching the database, since the Motor client
+# is about to close.
+SHUTDOWN_EVENT: asyncio.Event = asyncio.Event()
+IS_SHUTTING_DOWN: bool = False
+# Short-lived fire-and-forget tasks (webhook processors, send-DM
+# tasks, broadcast jobs) register here so the shutdown hook can wait
+# for them to finish before closing Mongo. The set is bounded by the
+# rate of incoming webhooks and is self-cleaning via _release_inflight.
+_INFLIGHT_TASKS: "set[asyncio.Task]" = set()
+SHUTDOWN_BG_CANCEL_TIMEOUT_SECONDS = 5
+SHUTDOWN_INFLIGHT_WAIT_SECONDS = 10
+
+
+def _release_inflight(task: asyncio.Task):
+    _INFLIGHT_TASKS.discard(task)
+    try:
+        exc = task.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        exc = None
+    if exc is not None:
+        logger.exception('inflight_task_failed name=%s exc=%s',
+                         getattr(task, '_mychat_name', '?'),
+                         type(exc).__name__,
+                         exc_info=exc)
+
+
+def create_tracked_task(coro, name: str) -> Optional[asyncio.Task]:
+    """asyncio.create_task wrapper that registers the task in
+    _INFLIGHT_TASKS so the shutdown hook can wait for it.
+
+    If shutdown has already begun the coroutine is closed immediately
+    rather than scheduled — this prevents new Mongo writes after the
+    Motor client starts closing. Returns the Task on success, or None
+    if the work was refused due to shutdown.
+    """
+    if IS_SHUTTING_DOWN:
+        try:
+            coro.close()
+        except Exception:
+            pass
+        logger.info('inflight_task_refused_shutting_down name=%s', name)
+        return None
+    task = asyncio.create_task(coro)
+    setattr(task, '_mychat_name', name)
+    _INFLIGHT_TASKS.add(task)
+    task.add_done_callback(_release_inflight)
+    return task
+
 
 def _register_bg_task(name: str, factory):
     """Register a background loop coroutine factory and start it once.
@@ -6193,11 +6285,13 @@ async def _watchdog_loop():
     """
     logger.info('background_task_watchdog_started interval=%ss',
                 _WATCHDOG_INTERVAL_SECONDS)
-    while True:
+    while not SHUTDOWN_EVENT.is_set():
         try:
             for name, info in list(_BG_TASKS.items()):
                 if name == 'watchdog':
                     continue
+                if IS_SHUTTING_DOWN:
+                    break
                 task = info.get('task')
                 if task is None or task.done():
                     exc_type = None
@@ -6210,7 +6304,7 @@ async def _watchdog_loop():
                     logger.error('background_task_crashed name=%s exc=%s',
                                  name, exc_type)
                     factory = _BG_FACTORIES.get(name)
-                    if factory is not None:
+                    if factory is not None and not IS_SHUTTING_DOWN:
                         new_task = asyncio.create_task(factory())
                         info['task'] = new_task
                         info['started_at'] = datetime.utcnow()
@@ -6219,7 +6313,10 @@ async def _watchdog_loop():
                                     name, info['restarts'])
         except Exception:
             logger.exception('watchdog_loop error')
-        await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=_WATCHDOG_INTERVAL_SECONDS)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
 
 
 def _classify_meta_error(exc: BaseException, status: Optional[int] = None) -> str:
@@ -6249,7 +6346,9 @@ async def _comment_poller_loop():
         can see liveness.
     """
     logger.info('comment_poller_started interval=%ss', IG_POLL_INTERVAL_SECONDS)
-    while True:
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
         cycle_ok = True
         cycle_err: Optional[BaseException] = None
         try:
@@ -6257,6 +6356,8 @@ async def _comment_poller_loop():
             users = await cursor.to_list(500)
             logger.info('comment_poller_tick accounts=%s', len(users))
             for u in users:
+                if IS_SHUTTING_DOWN:
+                    break
                 try:
                     s = await _poll_user_comments(u)
                     if s.get('newComments'):
@@ -6267,13 +6368,18 @@ async def _comment_poller_loop():
                     logger.exception('comment_poller_per_user_error user_id=%s',
                                      u.get('id'))
                     cycle_err = per_user_exc
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             cycle_ok = False
             cycle_err = exc
             logger.exception('comment_poller_tick_failed')
         else:
-            logger.info('comment_poller_tick_success')
+            if not IS_SHUTTING_DOWN:
+                logger.info('comment_poller_tick_success')
         _bg_tick('comment_poller', success=cycle_ok, error=cycle_err)
+        if SHUTDOWN_EVENT.is_set():
+            break
         # Back off when consecutive failures pile up (capped).
         info = _BG_TASKS.get('comment_poller') or {}
         consecutive = int(info.get('consecutive_failures') or 0)
@@ -6281,7 +6387,11 @@ async def _comment_poller_loop():
         if not cycle_ok and consecutive > 0:
             sleep_s = min(IG_POLL_INTERVAL_SECONDS * (2 ** min(consecutive, 5)),
                           IG_POLL_INTERVAL_SECONDS * 32)
-        await asyncio.sleep(sleep_s)
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=sleep_s)
+        except (asyncio.TimeoutError, RuntimeError):
+            # RuntimeError when event is bound to a different loop (tests).
+            await asyncio.sleep(sleep_s)
 
 
 async def _follow_verifier_loop():
@@ -6296,7 +6406,9 @@ async def _follow_verifier_loop():
     """
     logger.info('follow_verifier_started interval=%ss',
                 FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
-    while True:
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
         cycle_ok = True
         cycle_err: Optional[BaseException] = None
         try:
@@ -6316,6 +6428,8 @@ async def _follow_verifier_loop():
             if sessions:
                 logger.info('follow_verifier_tick pending=%s', len(sessions))
             for sess in sessions:
+                if IS_SHUTTING_DOWN:
+                    break
                 try:
                     user_doc = await db.users.find_one({'id': sess.get('user_id')})
                     if not user_doc:
@@ -6324,12 +6438,18 @@ async def _follow_verifier_loop():
                 except Exception:
                     logger.exception('follow_verifier_per_session_error session=%s',
                                      sess.get('id'))
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             cycle_ok = False
             cycle_err = exc
             logger.exception('follow_verifier_tick_failed')
         _bg_tick('follow_verifier', success=cycle_ok, error=cycle_err)
-        await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(),
+                                   timeout=FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
 
 
 @api.get('/instagram/automation-health')
@@ -7982,7 +8102,9 @@ app.add_middleware(
 
 @app.on_event('startup')
 async def _startup():
-    global _poll_task
+    global _poll_task, IS_SHUTTING_DOWN
+    IS_SHUTTING_DOWN = False
+    SHUTDOWN_EVENT.clear()
     # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
     try:
         await db.comments.drop_index('uniq_user_ig_comment')
@@ -8159,12 +8281,69 @@ async def _startup():
 
 @app.on_event('shutdown')
 async def shutdown_db_client():
+    global IS_SHUTTING_DOWN
+    # Step 1 — announce
+    logger.info('shutdown_started')
+
+    # Step 2 — signal all loops to stop; new write guards check this flag
+    IS_SHUTTING_DOWN = True
+    SHUTDOWN_EVENT.set()
+
+    # Step 3 — watchdog: it checks IS_SHUTTING_DOWN before restarting tasks,
+    # so setting the flag above is sufficient. Cancel it explicitly now.
+    watchdog_info = _BG_TASKS.get('watchdog')
+    watchdog_task = watchdog_info.get('task') if watchdog_info else None
+    if watchdog_task is not None and not watchdog_task.done():
+        watchdog_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(watchdog_task),
+                                   timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+
+    # Step 4 — cancel registered long-running background loops (not watchdog)
+    bg_cancel_tasks = []
     for name, info in list(_BG_TASKS.items()):
+        if name == 'watchdog':
+            continue
         task = info.get('task')
-        if task is not None:
+        if task is not None and not task.done():
             task.cancel()
-            try:
-                await task
-            except Exception:
-                pass
-    client.close()
+            bg_cancel_tasks.append(task)
+
+    # Step 5 — wait for background loops to exit
+    if bg_cancel_tasks:
+        done, pending = await asyncio.wait(
+            bg_cancel_tasks, timeout=SHUTDOWN_BG_CANCEL_TIMEOUT_SECONDS)
+        for t in pending:
+            logger.warning('shutdown_bg_task_still_running name=%s',
+                           getattr(t, '_mychat_name', '?'))
+
+    # Step 6 — wait for in-flight short-lived tasks (webhook processors, broadcasts)
+    if _INFLIGHT_TASKS:
+        logger.info('shutdown_waiting_inflight count=%s', len(_INFLIGHT_TASKS))
+        remaining = list(_INFLIGHT_TASKS)
+        done, pending = await asyncio.wait(
+            remaining, timeout=SHUTDOWN_INFLIGHT_WAIT_SECONDS)
+        if pending:
+            logger.warning('shutdown_cancelling_overdue_inflight count=%s', len(pending))
+            for t in pending:
+                t.cancel()
+
+    # Step 7 — drain any tasks that were just cancelled
+    await asyncio.sleep(0)
+
+    # Step 8 — close WebSocket connections (best-effort)
+    try:
+        from websockets.exceptions import ConnectionClosed  # type: ignore
+    except ImportError:
+        pass
+
+    # Step 9 — close Mongo client AFTER all writes are done
+    try:
+        client.close()
+    except Exception:
+        logger.exception('shutdown_mongo_close_error')
+
+    # Step 10 — done
+    logger.info('shutdown_complete')
