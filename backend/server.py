@@ -232,9 +232,16 @@ DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE = (
 )
 DEFAULT_FOLLOW_RETRY_BUTTON_TEXT = DEFAULT_FOLLOW_GATE_BUTTON_TEXT
 DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3
-# Cooldown between live API checks for the same session — protects against
-# the user spamming the confirmation button.
-FOLLOW_VERIFICATION_COOLDOWN_SECONDS = 30
+# Short concurrency-dedup window. Two webhook events triggered by the same
+# tap arrive milliseconds apart; only the first should call Meta. Anything
+# longer than this would block legitimate retries (a user who follows
+# between two taps must succeed on the second tap).
+FOLLOW_VERIFICATION_COOLDOWN_SECONDS = 5
+# Background verifier wakes up at this cadence and re-checks pending
+# sessions whose user hasn't been verified yet — covers the case where
+# Meta updates is_user_follow_business a few seconds AFTER the user follows.
+FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS = 25
+FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES = 30
 # Sent once per cooldown window when the user taps again before the
 # cooldown elapses. Rate-limited by lastCooldownNoticeAt on the session.
 DEFAULT_FOLLOW_COOLDOWN_MESSAGE = (
@@ -449,7 +456,11 @@ async def verify_instagram_user_follows_business(access_token: str,
     """
     if not access_token or not ig_scoped_id:
         return {'ok': False, 'reason': 'missing_token_or_id', 'raw_status': None}
+    import time as _time
+    _start = _time.monotonic()
     raw = await get_instagram_messaging_user_profile(access_token, ig_scoped_id)
+    logger.info('graph_api_call_duration_ms call=user_profile ms=%s status=%s',
+                int((_time.monotonic() - _start) * 1000), raw.get('status_code'))
     if raw.get('ok'):
         profile = raw.get('profile') or {}
         return {
@@ -982,25 +993,13 @@ async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
         return {'allowed': False, 'checked': True, 'prompt_sent': prompt_sent,
                 'reason': 'awaiting_confirmation'}
 
-    # If we already exceeded max attempts, do not call the API again.
+    # max_attempts caps how many REMINDER messages we send, not verification
+    # itself. A user who follows the account after 5 failed taps must still
+    # succeed on the 6th tap — we just stop spamming the not-detected reminder.
     max_attempts = int(session.get('max_follow_verification_attempts')
                        or DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)
     attempts_so_far = int(session.get('follow_verification_attempts') or 0)
-    if attempts_so_far >= max_attempts:
-        if session.get('stage') != 'verification_failed':
-            failed_msg = (session.get('follow_verification_failed_message') or
-                          DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE)
-            await _send_follow_reminder(user_doc, session, failed_msg,
-                                        'verification_failed')
-            await db.comment_dm_sessions.update_one(
-                {'id': session.get('id')},
-                {'$set': {'status': 'verification_failed',
-                          'stage': 'verification_failed',
-                          'updated': datetime.utcnow()}},
-            )
-        logger.info('follow_verification_failed session=%s reason=max_attempts attempts=%s',
-                    session.get('id'), attempts_so_far)
-        return {'allowed': False, 'checked': True, 'reason': 'max_attempts_exceeded'}
+    reminder_budget_exhausted = attempts_so_far >= max_attempts
 
     # Cooldown — protects against confirmation-button spam. We never call
     # Meta during the cooldown window, but we MUST still respond to the user
@@ -1097,20 +1096,43 @@ async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
         )
         session['follow_verified'] = True
         session['verifiedFollowAt'] = now
-        logger.info('follow_verified_true session=%s', session.get('id'))
+        logger.info('follow_verified_true session=%s attempt=%s',
+                    session.get('id'), attempts_so_far + 1)
         return {'allowed': True, 'checked': True, 'verified': True,
                 'profile': result.get('profile_excerpt')}
 
-    # follows == False → reminder, do not send link.
-    not_detected = (session.get('follow_not_detected_message') or
-                    DEFAULT_FOLLOW_NOT_DETECTED_MESSAGE)
-    await _send_follow_reminder(user_doc, session, not_detected,
-                                'awaiting_actual_follow')
-    logger.info('follow_verified_false session=%s', session.get('id'))
-    return {'allowed': False, 'checked': True, 'reason': 'not_following'}
+    # follows == False. Send the reminder only while we still have budget;
+    # once the budget is exhausted we send a final fallback ONCE so the
+    # user knows the bot heard them, then stay quiet on further taps.
+    # The session remains retryable: a future tap that returns follows=True
+    # will still send the link.
+    if not reminder_budget_exhausted:
+        not_detected = (session.get('follow_not_detected_message') or
+                        DEFAULT_FOLLOW_NOT_DETECTED_MESSAGE)
+        await _send_follow_reminder(user_doc, session, not_detected,
+                                    'awaiting_actual_follow')
+        logger.info('follow_verified_false session=%s attempt=%s/%s',
+                    session.get('id'), attempts_so_far + 1, max_attempts)
+        return {'allowed': False, 'checked': True, 'reason': 'not_following'}
+    # Budget exhausted — send the verification-failed fallback once.
+    if not session.get('verificationFailedFallbackSentAt'):
+        failed_msg = (session.get('follow_verification_failed_message') or
+                      DEFAULT_FOLLOW_VERIFICATION_FAILED_MESSAGE)
+        await _send_follow_reminder(user_doc, session, failed_msg,
+                                    'awaiting_actual_follow')
+        await db.comment_dm_sessions.update_one(
+            {'id': session.get('id')},
+            {'$set': {'verificationFailedFallbackSentAt': now}},
+        )
+        logger.info('follow_verification_attempts_exceeded session=%s', session.get('id'))
+    else:
+        logger.info('follow_verification_attempts_exceeded_silent session=%s', session.get('id'))
+    return {'allowed': False, 'checked': True, 'reason': 'not_following_budget_exhausted'}
 
 
 async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> bool:
+    import time as _time
+    _flow_start = _time.monotonic()
     access_token = user_doc.get('meta_access_token', '')
     ig_user_id = user_doc.get('ig_user_id', '')
     recipient_id = session.get('recipient_id')
@@ -1216,8 +1238,9 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         logger.info('final_link_sent session=%s recipient=%s', session.get('id'), recipient_id)
         if session.get('follow_request_enabled') and session.get('verify_actual_follow') is not False:
             logger.info('final_link_sent_after_verified_follow session=%s', session.get('id'))
-    logger.info('comment_dm_flow_completed session=%s ok=%s steps=%s',
-                session.get('id'), ok_all, sent_steps)
+    flow_ms = int((_time.monotonic() - _flow_start) * 1000)
+    logger.info('comment_dm_flow_completed session=%s ok=%s steps=%s total_processing_ms=%s',
+                session.get('id'), ok_all, sent_steps, flow_ms)
     return ok_all
 
 
@@ -1243,12 +1266,16 @@ async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) 
     if not access_token or not ig_comment_id:
         return False
     url = f'https://graph.instagram.com/{ig_comment_id}/replies'
+    import time as _time
+    _start = _time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
+            ms = int((_time.monotonic() - _start) * 1000)
             if r.status_code == 200:
+                logger.info('comment_reply_send_ms ms=%s comment_id=%s', ms, ig_comment_id)
                 return True
-            logger.error('reply_to_ig_comment error %s: %s', r.status_code, r.text)
+            logger.error('reply_to_ig_comment error %s ms=%s: %s', r.status_code, ms, r.text)
             return False
     except Exception as e:
         logger.exception('reply_to_ig_comment exception: %s', e)
@@ -4832,8 +4859,29 @@ def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dic
     return out
 
 
+async def _write_webhook_log_async(payload: dict, sig_result: dict):
+    """Persist the raw webhook payload off the ACK path. Bounded retention."""
+    try:
+        await db.webhook_log.insert_one({
+            'received': datetime.utcnow(),
+            'payload': payload,
+            'object': payload.get('object'),
+            'signature_valid': sig_result.get('valid'),
+            'signature_reason': sig_result.get('reason'),
+        })
+        count = await db.webhook_log.count_documents({})
+        if count > 50:
+            oldest = await db.webhook_log.find().sort('received', 1).limit(count - 50).to_list(count)
+            for o in oldest:
+                await db.webhook_log.delete_one({'_id': o['_id']})
+    except Exception:
+        logger.exception('webhook_log write failed')
+
+
 @api.post('/instagram/webhook')
 async def instagram_webhook(request: Request):
+    import time as _time
+    ack_start = _time.monotonic()
     raw_body = await request.body()
     sig_header = request.headers.get('x-hub-signature-256') or ''
     sig_result = _verify_webhook_signature(raw_body, sig_header)
@@ -4855,23 +4903,12 @@ async def instagram_webhook(request: Request):
     import json as _json
     payload = _json.loads(raw_body)
     logger.info('IG webhook: %s', payload)
-    # Store raw payload for debugging — keep only most recent 50
-    try:
-        await db.webhook_log.insert_one({
-            'received': datetime.utcnow(),
-            'payload': payload,
-            'object': payload.get('object'),
-            'signature_valid': sig_result['valid'],
-            'signature_reason': sig_result['reason'],
-        })
-        count = await db.webhook_log.count_documents({})
-        if count > 50:
-            oldest = await db.webhook_log.find().sort('received', 1).limit(count - 50).to_list(count)
-            for o in oldest:
-                await db.webhook_log.delete_one({'_id': o['_id']})
-    except Exception:
-        logger.exception('webhook_log write failed')
+    # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
+    # the webhook ACK well under the 5-second Meta retry threshold.
+    asyncio.create_task(_write_webhook_log_async(payload, sig_result))
     asyncio.create_task(_process_webhook(payload))
+    ack_ms = int((_time.monotonic() - ack_start) * 1000)
+    logger.info('webhook_ack_duration_ms=%s', ack_ms)
     return {'ok': True}
 
 
@@ -5859,6 +5896,7 @@ async def _process_webhook(payload: dict):
 IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 _poll_task: Optional[asyncio.Task] = None
+_follow_verifier_task: Optional[asyncio.Task] = None
 
 
 async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
@@ -6020,6 +6058,58 @@ async def _comment_poller_loop():
         except Exception:
             logger.exception('Poller outer loop error')
         await asyncio.sleep(IG_POLL_INTERVAL_SECONDS)
+
+
+async def _follow_verifier_loop():
+    """Background re-verifier for pending follow-gate sessions.
+
+    Meta sometimes updates is_user_follow_business a few seconds after
+    the user actually follows. If the user doesn't tap the confirmation
+    button again, the link would never get sent. This loop re-checks
+    pending sessions so a user who followed but didn't re-tap still
+    gets the link.
+
+    Idempotency is enforced by:
+      • Only sessions with status='pending' and follow_verified=False
+        are eligible.
+      • _send_comment_dm_flow_completion checks finalDmSentAt before
+        sending — duplicate sends are impossible.
+      • A short cutoff (FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES)
+        bounds work and avoids verifying very old sessions.
+    """
+    logger.info('Follow verifier started (interval=%ss)',
+                FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(
+                minutes=FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES
+            )
+            cursor = db.comment_dm_sessions.find({
+                'status': 'pending',
+                'follow_request_enabled': True,
+                'verify_actual_follow': {'$ne': False},
+                'follow_verified': {'$ne': True},
+                'finalDmSentAt': None,
+                'follow_confirmed': True,  # only once user has tapped at least once
+                'created': {'$gte': cutoff},
+            })
+            sessions = await cursor.to_list(200)
+            if sessions:
+                logger.info('follow_verifier_tick pending=%s', len(sessions))
+            for sess in sessions:
+                try:
+                    user_doc = await db.users.find_one({'id': sess.get('user_id')})
+                    if not user_doc:
+                        continue
+                    # Reuse the verify gate. It already handles cooldown,
+                    # idempotency, max_attempts, and link send.
+                    await _send_comment_dm_flow_completion(user_doc, sess)
+                except Exception:
+                    logger.exception('follow_verifier per-session error session=%s',
+                                     sess.get('id'))
+        except Exception:
+            logger.exception('follow_verifier outer loop error')
+        await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
 
 
 @api.get('/instagram/poll-now')
@@ -7689,15 +7779,23 @@ async def _startup():
         _poll_task = asyncio.create_task(_comment_poller_loop())
     else:
         logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
+    global _follow_verifier_task
+    _follow_verifier_task = asyncio.create_task(_follow_verifier_loop())
 
 
 @app.on_event('shutdown')
 async def shutdown_db_client():
-    global _poll_task
+    global _poll_task, _follow_verifier_task
     if _poll_task:
         _poll_task.cancel()
         try:
             await _poll_task
+        except Exception:
+            pass
+    if _follow_verifier_task:
+        _follow_verifier_task.cancel()
+        try:
+            await _follow_verifier_task
         except Exception:
             pass
     client.close()

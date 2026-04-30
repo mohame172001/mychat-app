@@ -270,20 +270,34 @@ def test_duplicate_completion_does_not_resend_link(monkeypatch):
     assert calls['verify'] == []  # no API call when already final
 
 
-def test_max_attempts_exceeded_marks_verification_failed(monkeypatch):
-    sess = _session(follow_verification_attempts=3,
-                    max_follow_verification_attempts=3)
+def test_max_attempts_exhausted_first_hit_sends_fallback_once(monkeypatch):
+    """First time we cross max_attempts the user must get a clear fallback,
+    not silence. Verification still happens (budget caps reminders, not
+    Meta calls), and the fallback marker is stamped so future hits stay quiet."""
+    sess = _session(
+        follow_verification_attempts=3,
+        max_follow_verification_attempts=3,
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=30),
+        follow_confirmed=True,
+    )
     db = FakeDB(sessions=[sess])
     monkeypatch.setattr(server, 'db', db)
     calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
-    install_fakes(monkeypatch, [], calls)
+    install_fakes(
+        monkeypatch,
+        [{'ok': True, 'follows': False, 'raw_status': 200, 'profile_excerpt': {}}],
+        calls,
+    )
 
     _run(server._send_comment_dm_flow_completion(_user(), sess))
 
-    assert calls['verify'] == []
-    final = db.comment_dm_sessions.docs[0]
-    assert final['stage'] == 'verification_failed'
+    assert len(calls['verify']) == 1, 'Meta must still be called — budget caps reminders only'
     assert calls['url_button'] == []
+    # One fallback DM went out (verification-failed message).
+    assert any('cannot verify' in (c['text'] or '') for c in calls['quick_reply']), \
+        f'fallback not sent; calls={calls["quick_reply"]}'
+    final = db.comment_dm_sessions.docs[0]
+    assert final.get('verificationFailedFallbackSentAt') is not None
 
 
 def test_follow_gate_disabled_sends_link_directly(monkeypatch):
@@ -304,7 +318,7 @@ def test_cooldown_sends_notice_and_does_not_call_meta(monkeypatch):
     """Second tap inside cooldown must not call Meta but must answer."""
     sess = _session(
         follow_verification_attempts=1,
-        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=5),
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=2),
         follow_cooldown_message='wait a few seconds',
     )
     db = FakeDB(sessions=[sess])
@@ -328,8 +342,8 @@ def test_cooldown_notice_rate_limited_to_once_per_window(monkeypatch):
     now = datetime.utcnow()
     sess = _session(
         follow_verification_attempts=1,
-        followLastCheckedAt=now - timedelta(seconds=5),
-        lastCooldownNoticeAt=now - timedelta(seconds=2),
+        followLastCheckedAt=now - timedelta(seconds=2),
+        lastCooldownNoticeAt=now - timedelta(seconds=1),
         follow_cooldown_message='wait',
     )
     db = FakeDB(sessions=[sess])
@@ -344,6 +358,118 @@ def test_cooldown_notice_rate_limited_to_once_per_window(monkeypatch):
     assert calls['text_dm'] == []
     assert calls['url_button'] == []
     assert calls['verify'] == []
+
+
+def test_follow_false_then_true_sends_final_link(monkeypatch):
+    """The exact production flow:
+    1. User not following → tap → reminder, no link, retryable.
+    2. User actually follows the account.
+    3. User taps again after cooldown → verify true → link sent once.
+    """
+    sess = _session()
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(
+        monkeypatch,
+        [
+            {'ok': True, 'follows': False, 'raw_status': 200, 'profile_excerpt': {}},
+            {'ok': True, 'follows': True, 'raw_status': 200,
+             'profile_excerpt': {'username': 'u', 'is_user_follow_business': True}},
+        ],
+        calls,
+    )
+
+    # Step 1: not following.
+    _run(server._send_comment_dm_flow_completion(_user(), sess))
+    s1 = db.comment_dm_sessions.docs[0]
+    assert s1['follow_verified'] is False
+    assert s1['stage'] == 'awaiting_actual_follow'
+    assert calls['url_button'] == [], 'final link must NOT be sent yet'
+    assert any('still not detected' in (c['text'] or '')
+               for c in calls['quick_reply']), 'reminder must be sent'
+
+    # Simulate cooldown elapsing AND user follow + new tap.
+    s1['followLastCheckedAt'] = datetime.utcnow() - timedelta(seconds=10)
+    s1['follow_confirmed'] = True
+
+    # Step 2 & 3: user followed; verify true → final link.
+    ok = _run(server._send_comment_dm_flow_completion(_user(), s1))
+    assert ok is True
+
+    final = db.comment_dm_sessions.docs[0]
+    assert final['follow_verified'] is True, 'follow_verified must be set'
+    assert final['verifiedFollowAt'] is not None, 'verifiedFollowAt must be stamped'
+    assert final['stage'] == 'final_sent', f"stage={final.get('stage')}"
+    assert final['status'] == 'completed'
+    assert final['finalDmSentAt'] is not None
+    # Final link delivered exactly once.
+    final_button_calls = [c for c in calls['url_button']
+                          if c.get('url', '').endswith('/landing')
+                          or 'landing' in (c.get('url') or '')]
+    assert len(calls['url_button']) == 1, \
+        f"expected exactly 1 link send, got {len(calls['url_button'])}: {calls['url_button']}"
+    # Reminder count: only the first (false) attempt produced a reminder.
+    not_detected_calls = [c for c in calls['quick_reply']
+                          if 'still not detected' in (c.get('text') or '')]
+    assert len(not_detected_calls) == 1, \
+        f"reminder must not duplicate; got {len(not_detected_calls)}"
+
+
+def test_max_attempts_exhausted_then_real_follow_still_sends_link(monkeypatch):
+    """After max_follow_verification_attempts is exhausted with follows=false,
+    a later confirmation that returns follows=true MUST still deliver the link.
+    Reminder budget must not permanently block real success."""
+    sess = _session(
+        follow_verification_attempts=3,
+        max_follow_verification_attempts=3,
+        verificationFailedFallbackSentAt=datetime.utcnow() - timedelta(minutes=2),
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=30),
+        follow_confirmed=True,
+    )
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(
+        monkeypatch,
+        [{'ok': True, 'follows': True, 'raw_status': 200, 'profile_excerpt': {}}],
+        calls,
+    )
+
+    ok = _run(server._send_comment_dm_flow_completion(_user(), sess))
+
+    assert ok is True, 'flow must succeed even after budget was exhausted'
+    assert len(calls['verify']) == 1, 'Meta must still be called'
+    assert len(calls['url_button']) == 1, 'final link must be sent exactly once'
+    final = db.comment_dm_sessions.docs[0]
+    assert final['follow_verified'] is True
+    assert final['stage'] == 'final_sent'
+
+
+def test_max_attempts_exhausted_with_still_false_stays_silent_after_fallback(monkeypatch):
+    """Budget exhausted + Meta still says false + fallback already sent
+    → no duplicate fallback, no reminder spam, no link."""
+    sess = _session(
+        follow_verification_attempts=3,
+        max_follow_verification_attempts=3,
+        verificationFailedFallbackSentAt=datetime.utcnow() - timedelta(minutes=2),
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=30),
+        follow_confirmed=True,
+    )
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(
+        monkeypatch,
+        [{'ok': True, 'follows': False, 'raw_status': 200, 'profile_excerpt': {}}],
+        calls,
+    )
+
+    _run(server._send_comment_dm_flow_completion(_user(), sess))
+
+    assert calls['url_button'] == []
+    assert calls['quick_reply'] == [], \
+        f'no reminder spam after fallback; got {calls["quick_reply"]}'
 
 
 def test_legacy_click_only_when_verify_actual_follow_disabled(monkeypatch):
