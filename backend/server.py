@@ -1314,6 +1314,16 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
 
     access_token = user.get('meta_access_token', '')
     ig_user_id = user.get('ig_user_id', '')
+    flow_source = (comment_context or {}).get('source') if comment_context else None
+    flow_received_monotonic = (comment_context or {}).get('received_monotonic') if comment_context else None
+    flow_comment_id = (comment_context or {}).get('ig_comment_id') if comment_context else None
+
+    def webhook_elapsed_ms() -> Optional[int]:
+        if flow_source != 'webhook' or flow_received_monotonic is None:
+            return None
+        import time as _time
+        return int((_time.monotonic() - flow_received_monotonic) * 1000)
+
     current_ids = [start['id']]
     visited: set = set()
     action_attempted = False
@@ -1343,6 +1353,11 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 else:
                     ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
                     logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+                if flow_source == 'webhook':
+                    logger.info(
+                        'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s',
+                        webhook_elapsed_ms(), flow_comment_id, automation.get('id'), bool(ok)
+                    )
                 ok_all = ok_all and bool(ok)
         elif ntype == 'reply_comment':
             replies = data.get('replies')
@@ -1356,6 +1371,21 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
                 logger.info('Flow comment reply on %s: %s (ok=%s)',
                             comment_context['ig_comment_id'], msg_text[:40], ok)
+                if ok:
+                    logger.info(
+                        'comment_reply_sent source=%s ig_comment_id=%s rule_id=%s total_webhook_to_reply_ms=%s',
+                        flow_source or 'unknown',
+                        comment_context['ig_comment_id'],
+                        automation.get('id'),
+                        webhook_elapsed_ms(),
+                    )
+                elif flow_source == 'webhook':
+                    logger.warning(
+                        'comment_reply_failed source=webhook ig_comment_id=%s rule_id=%s total_webhook_to_reply_ms=%s',
+                        comment_context['ig_comment_id'],
+                        automation.get('id'),
+                        webhook_elapsed_ms(),
+                    )
                 ok_all = ok_all and bool(ok)
                 if ok and comment_context.get('comment_doc_id'):
                     await db.comments.update_one(
@@ -5027,7 +5057,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if IS_SHUTTING_DOWN:
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'shutting_down'}
+    import time as _time
     import uuid as _uuid
+    processing_started = _time.monotonic()
     user_id = user_doc['id']
     ig_account_id = user_doc.get('ig_user_id') or ''
     ig_comment_id = comment_data.get('ig_comment_id')
@@ -5063,8 +5095,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'webhook_comment_missing_timestamp_using_entry_time '
             'ig_comment_id=%s entry_time=%s effective_ts=%s',
             ig_comment_id, entry_time_iso, effective_ts.isoformat())
-        logger.info('webhook_comment_effective_timestamp ig_comment_id=%s ts=%s',
-                    ig_comment_id, effective_ts.isoformat())
+    if source == 'webhook':
+        timestamp_source = 'payload' if comment_ts else ('entry_time' if comment_data.get('entry_time') else 'now')
+        logger.info(
+            'webhook_comment_effective_timestamp ig_comment_id=%s source=webhook timestamp_source=%s ts=%s',
+            ig_comment_id,
+            timestamp_source,
+            effective_ts.isoformat() if effective_ts else None,
+        )
     retry_existing = False
     retry_reason = None
     existing_doc_id = None
@@ -5211,8 +5249,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
     matched = bool(matched_rule)
     if matched:
-        logger.info('rule_matched ig_comment_id=%s rule_id=%s user=%s',
-                    ig_comment_id, rule_id, user_doc.get('email'))
+        logger.info('rule_matched source=%s ig_comment_id=%s rule_id=%s user=%s',
+                    source, ig_comment_id, rule_id, user_doc.get('email'))
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
@@ -5286,6 +5324,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             ok = await _run_and_record_action(
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
+                source=source, received_monotonic=processing_started,
             )
             action_status = 'success' if ok else 'failed'
         except Exception as e:
@@ -5304,12 +5343,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
 
 async def _run_and_record_action(user_doc, automation, commenter_id, comment_text,
-                                 comment_doc_id: str, ig_comment_id: str):
+                                 comment_doc_id: str, ig_comment_id: str,
+                                 source: str = 'webhook',
+                                 received_monotonic: Optional[float] = None):
     """Wrap execute_flow so we record success/failure on the comment doc."""
     try:
         ok = await execute_flow(
             user_doc, automation, commenter_id, comment_text,
-            comment_context={'ig_comment_id': ig_comment_id, 'comment_doc_id': comment_doc_id}
+            comment_context={
+                'ig_comment_id': ig_comment_id,
+                'comment_doc_id': comment_doc_id,
+                'source': source,
+                'received_monotonic': received_monotonic,
+            }
         )
         if not ok:
             await db.comments.update_one(

@@ -11,8 +11,10 @@ activation cutoff comparison can proceed.  Polling is unchanged — a polling
 comment with no timestamp is still skipped.
 """
 import asyncio
+import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,11 +163,12 @@ async def _async_none(*_a, **_kw):
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
-def test_webhook_missing_timestamp_uses_entry_time(monkeypatch):
+def test_webhook_missing_timestamp_uses_entry_time(monkeypatch, caplog):
     """Webhook comment with no timestamp uses entry_time and is processed."""
     db = FakeDB(automations=[_rule_active_now()])
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
+    caplog.set_level(logging.INFO, logger=server.logger.name)
 
     # entry_time is 5 minutes ago — clearly after rule activation (1 h ago)
     entry_time = datetime.utcnow() - timedelta(minutes=5)
@@ -188,6 +191,9 @@ def test_webhook_missing_timestamp_uses_entry_time(monkeypatch):
     assert saved.get('skip_reason') != 'missing_comment_timestamp', \
         'must not be skipped for missing timestamp on webhook path'
     assert saved.get('timestamp_source') == 'entry_time'
+    assert 'webhook_comment_missing_timestamp_using_entry_time' in caplog.text
+    assert 'webhook_comment_effective_timestamp' in caplog.text
+    assert 'rule_matched source=webhook' in caplog.text
 
 
 def test_webhook_missing_timestamp_no_entry_time_uses_now(monkeypatch):
@@ -314,3 +320,53 @@ def test_polling_old_historical_comments_still_skipped(monkeypatch):
     assert ran['count'] == 0
     saved = db.comments.docs[0] if db.comments.docs else {}
     assert saved.get('skip_reason') == 'historical_before_rule_activation'
+
+
+def test_execute_flow_logs_webhook_reply_and_dm_timings(monkeypatch, caplog):
+    """Webhook comment processing emits immediate-path timing logs for reply and DM."""
+    db = FakeDB(comments=[{'id': 'comment_doc'}])
+    monkeypatch.setattr(server, 'db', db)
+
+    async def fake_reply(_access_token, _comment_id, _text):
+        return True
+
+    async def fake_dm(_access_token, _ig_user_id, _recipient_id, _text):
+        return True
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment', fake_reply)
+    monkeypatch.setattr(server, 'send_ig_dm', fake_dm)
+    caplog.set_level(logging.INFO, logger=server.logger.name)
+
+    automation = {
+        'id': 'r_timing',
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment',
+             'data': {'text': 'thanks!'}},
+            {'id': 'n_msg', 'type': 'message',
+             'data': {'text': 'check your link'}},
+        ],
+        'edges': [
+            {'id': 'e1', 'source': 'n_trigger', 'target': 'n_reply'},
+            {'id': 'e2', 'source': 'n_trigger', 'target': 'n_msg'},
+        ],
+    }
+    user = {'id': 'u1', 'ig_user_id': 'biz1', 'meta_access_token': 'tok'}
+
+    ok = _run(server.execute_flow(
+        user,
+        automation,
+        'fan1',
+        'Price',
+        comment_context={
+            'ig_comment_id': 'c_timing',
+            'comment_doc_id': 'comment_doc',
+            'source': 'webhook',
+            'received_monotonic': time.monotonic(),
+        },
+    ))
+
+    assert ok is True
+    assert 'comment_reply_sent source=webhook' in caplog.text
+    assert 'total_webhook_to_reply_ms=' in caplog.text
+    assert 'total_webhook_to_dm_ms=' in caplog.text
