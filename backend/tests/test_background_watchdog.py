@@ -298,9 +298,13 @@ def test_health_endpoint_returns_no_tokens_and_runs():
         comment_dm_sessions = _Coll()
 
     import server as srv
+    _orig_db = srv.db
     srv.db = _DB()
+    try:
+        out = asyncio.run(srv.instagram_automation_health(user_id='u1'))
+    finally:
+        srv.db = _orig_db  # restore so subsequent tests see the real Motor DB
 
-    out = asyncio.run(srv.instagram_automation_health(user_id='u1'))
     serialized = str(out)
     assert 'SECRET-TOKEN' not in serialized, 'token leaked into health response'
     assert 'tasks' in out
