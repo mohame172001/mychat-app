@@ -1,10 +1,10 @@
-"""Tests for safe processing of unreplied historical comments.
+"""Tests for safe handling of historical unreplied comments.
 
 Covers the bug where comments created before a rule's activation timestamp
-were skipped as historical_before_rule_activation even after the admin
-enabled process_existing_unreplied_comments. Also covers the dedup
-guarantee that an already-successfully-replied comment is never replied
-again, and the model-level acceptance of the new flag on PATCH.
+could be processed when unsafe legacy process-existing flags were enabled.
+The current product rule is stricter: no public automation should reply to
+comments older than activationStartedAt by default. Legacy flags remain
+accepted for compatibility but are ignored by runtime.
 """
 import asyncio
 import os
@@ -185,8 +185,8 @@ def test_default_skips_historical_comment(monkeypatch):
     assert saved['skip_reason'] == 'historical_before_rule_activation'
 
 
-def test_process_existing_unreplied_flag_allows_historical(monkeypatch):
-    """When the flag is on, an unreplied historical comment is processed."""
+def test_process_existing_unreplied_flag_is_ignored_for_historical(monkeypatch):
+    """Even with the legacy flag on, historical comments stay skipped."""
     rule = _rule(process_existing_unreplied=True)
     db = FakeDB(automations=[rule])
     monkeypatch.setattr(server, 'db', db)
@@ -196,10 +196,10 @@ def test_process_existing_unreplied_flag_allows_historical(monkeypatch):
     res = _run(server._handle_new_comment(_user(),
                                           _comment(historical_ts), source='polling'))
 
-    assert res.get('matched') is True, f'flag did not allow historical match; got {res}'
-    assert ran['count'] == 1, 'rule action should have fired'
+    assert res.get('matched') is False, f'historical comment must stay skipped; got {res}'
+    assert ran['count'] == 0, 'rule action must not fire for pre-rule comments'
     saved = db.comments.docs[0]
-    assert saved['skip_reason'] != 'historical_before_rule_activation'
+    assert saved['skip_reason'] == 'historical_before_rule_activation'
 
 
 def test_already_replied_historical_is_not_replied_again(monkeypatch):
@@ -229,10 +229,8 @@ def test_already_replied_historical_is_not_replied_again(monkeypatch):
     assert ran['count'] == 0, 'no second reply'
 
 
-def test_previously_skipped_historical_is_retried_when_flag_enabled(monkeypatch):
-    """Comment was skipped historically with the flag OFF. Admin enables
-    the flag. On the next poll, the dedup logic must allow re-evaluation
-    (historical_before_rule_activation is now in retryable_skip)."""
+def test_previously_skipped_historical_is_not_retried_when_flag_enabled(monkeypatch):
+    """A historical skip remains non-retryable even if old flags are present."""
     rule = _rule(process_existing_unreplied=True)
     historical_ts = datetime.utcnow() - timedelta(days=2)
     existing = {
@@ -253,9 +251,9 @@ def test_previously_skipped_historical_is_retried_when_flag_enabled(monkeypatch)
     res = _run(server._handle_new_comment(_user(),
                                           _comment(historical_ts), source='polling'))
 
-    assert res.get('reprocessed') is True, \
-        f'previously historical comment must be re-evaluated; got {res}'
-    assert ran['count'] == 1, 'reply should fire on the re-evaluation'
+    assert res.get('already_processed') is True, \
+        f'previously historical comment must not be re-evaluated; got {res}'
+    assert ran['count'] == 0, 'reply must not fire on a historical retry'
 
 
 def test_account_isolation_under_unreplied_flag(monkeypatch):

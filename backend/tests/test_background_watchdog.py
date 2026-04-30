@@ -56,6 +56,9 @@ def _run(coro):
 def _reset_bg_state():
     server._BG_TASKS.clear()
     server._BG_FACTORIES.clear()
+    server._INFLIGHT_TASKS.clear()
+    server.IS_SHUTTING_DOWN = False
+    server.SHUTDOWN_EVENT = asyncio.Event()
 
 
 def test_register_bg_task_starts_and_records_metadata():
@@ -117,6 +120,52 @@ def test_watchdog_restarts_crashed_loop(monkeypatch):
     crashy = server._BG_TASKS.get('crashy') or {}
     assert int(crashy.get('restarts') or 0) >= 2, \
         f'restarts not recorded; restarts={crashy.get("restarts")}'
+
+
+def test_watchdog_does_not_restart_during_shutdown(monkeypatch):
+    """During shutdown, the watchdog must not resurrect cancelled loops."""
+    _reset_bg_state()
+    monkeypatch.setattr(server, '_WATCHDOG_INTERVAL_SECONDS', 0.01)
+
+    runs = []
+
+    async def loop_once():
+        runs.append(1)
+        raise RuntimeError('boom')
+
+    async def harness():
+        server._register_bg_task('crashy', loop_once)
+        await asyncio.sleep(0.02)
+        server.IS_SHUTTING_DOWN = True
+        server.SHUTDOWN_EVENT.set()
+        await server._watchdog_loop()
+
+    _run(harness())
+    assert len(runs) == 1, 'watchdog restarted work after shutdown began'
+
+
+def test_shutdown_waits_for_inflight_before_closing_client(monkeypatch):
+    """Short-lived background tasks must finish/cancel before Mongo closes."""
+    _reset_bg_state()
+    order = []
+
+    class FakeClient:
+        def close(self):
+            order.append('mongo_closed')
+
+    monkeypatch.setattr(server, 'client', FakeClient())
+
+    async def inflight():
+        await server.SHUTDOWN_EVENT.wait()
+        order.append('inflight_finished')
+
+    async def harness():
+        server.create_tracked_task(inflight(), 'test_inflight')
+        await asyncio.sleep(0.01)
+        await server.shutdown_db_client()
+
+    _run(harness())
+    assert order == ['inflight_finished', 'mongo_closed']
 
 
 def test_bg_tick_records_success_and_failure():

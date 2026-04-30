@@ -1021,6 +1021,189 @@ def test_handle_new_comment_reply_all_replies_to_emoji_comment(monkeypatch):
     assert fake_db.comments.docs[0]['action_status'] == 'success'
 
 
+def test_pre_rule_comment_skipped_even_if_legacy_process_existing_true(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {
+                'id': 'autoAny',
+                'user_id': 'u1',
+                'status': 'active',
+                'trigger': 'comment:any',
+                'match': 'any',
+                'instagramAccountDbId': 'accA',
+                'instagramAccountId': 'igA',
+                'processExistingComments': True,
+                'process_existing_unreplied_comments': True,
+                'activationStartedAt': now,
+                'nodes': [
+                    {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                    {'id': 'n_reply', 'type': 'reply_comment',
+                     'data': {'text': 'Should not send'}},
+                ],
+                'edges': [{'source': 'n_trigger', 'target': 'n_reply'}],
+            }
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_args, **_kwargs: asyncio.sleep(0)))
+
+    async def fake_reply(*_args, **_kwargs):
+        raise AssertionError('pre-rule historical comments must not be replied to')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment', fake_reply)
+    user_doc = {
+        'id': 'u1',
+        'email': 'u1@example.com',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+        'instagramHandle': 'account_a',
+    }
+
+    result = _run(server._handle_new_comment(user_doc, {
+        'ig_comment_id': 'oldComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'commenter_username': 'contact',
+        'text': 'Link',
+        'timestamp': now - timedelta(minutes=10),
+    }, source='polling'))
+
+    assert result['matched'] is False
+    assert result['action_status'] == 'skipped'
+    assert result['rule_id'] == 'autoAny'
+    assert fake_db.comments.docs[0]['skipReason'] == 'historical_before_rule_activation'
+    assert fake_db.comments.docs[0]['processExistingComments'] is False
+    assert fake_db.comments.docs[0]['replied'] is False
+
+
+def test_post_activation_missed_comment_is_processed_with_legacy_flag_true(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {
+                'id': 'autoAny',
+                'user_id': 'u1',
+                'status': 'active',
+                'trigger': 'comment:any',
+                'match': 'any',
+                'instagramAccountDbId': 'accA',
+                'instagramAccountId': 'igA',
+                'processExistingComments': True,
+                'process_existing_unreplied_comments': True,
+                'activationStartedAt': now - timedelta(minutes=10),
+                'nodes': [
+                    {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                    {'id': 'n_reply', 'type': 'reply_comment',
+                     'data': {'text': 'Post activation reply'}},
+                ],
+                'edges': [{'source': 'n_trigger', 'target': 'n_reply'}],
+            }
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_args, **_kwargs: asyncio.sleep(0)))
+    replies = []
+
+    async def fake_reply(_token, ig_comment_id, text):
+        replies.append((ig_comment_id, text))
+        return True
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment', fake_reply)
+    user_doc = {
+        'id': 'u1',
+        'email': 'u1@example.com',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+        'instagramHandle': 'account_a',
+    }
+
+    result = _run(server._handle_new_comment(user_doc, {
+        'ig_comment_id': 'newMissedComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'commenter_username': 'contact',
+        'text': 'ðŸ”¥ðŸ‘',
+        'timestamp': now,
+    }, source='polling'))
+
+    assert result['matched'] is True
+    assert result['action_status'] == 'success'
+    assert replies == [('newMissedComment', 'Post activation reply')]
+    assert fake_db.comments.docs[0]['processExistingComments'] is False
+
+
+def test_polling_enforces_safe_reply_cap(monkeypatch):
+    now = datetime.utcnow()
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA',
+                 igUserId='igA', username='account_a', accessToken='token-a'),
+        _user(active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {
+                'id': 'autoAny',
+                'user_id': 'u1',
+                'status': 'active',
+                'trigger': 'comment:media1',
+                'match': 'any',
+                'instagramAccountDbId': 'accA',
+                'instagramAccountId': 'igA',
+                'activationStartedAt': now - timedelta(minutes=10),
+            }
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'IG_POLL_REPLY_CAP_PER_RUN', 3)
+    monkeypatch.setattr(server, 'IG_POLL_COMMENT_BATCH_LIMIT', 20)
+    handled = []
+
+    async def fake_handle(_user_doc, comment_data, source='polling'):
+        handled.append(comment_data['ig_comment_id'])
+        return {'processed': True, 'matched': True, 'action_status': 'success'}
+
+    class PollClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, _url, params=None):
+            comments = [
+                {
+                    'id': f'comment{i}',
+                    'text': 'Link',
+                    'timestamp': now.isoformat(),
+                    'from': {'id': f'contact{i}', 'username': f'contact{i}'},
+                }
+                for i in range(8)
+            ]
+            return FakeResponse(200, {'data': comments})
+
+    monkeypatch.setattr(server, '_handle_new_comment', fake_handle)
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: PollClient())
+
+    stats = _run(server._poll_user_comments({
+        'id': 'u1',
+        'email': 'u1@example.com',
+        'active_instagram_account_id': 'accA',
+        'ig_user_id': 'igA',
+        'meta_access_token': 'token-a',
+    }))
+
+    assert handled == ['comment0', 'comment1', 'comment2']
+    assert stats['actionsSucceeded'] == 3
+    assert 'reply_cap_reached' in stats['errors']
+
+
 def test_handle_new_comment_retries_existing_failed_unreplied_comment(monkeypatch):
     now = datetime.utcnow()
     fake_db = FakeDB(

@@ -1516,7 +1516,9 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
         automation_data['edges'] = []
     automation_data['createdAt'] = now
     automation_data['updatedAt'] = now
-    automation_data['processExistingComments'] = bool(automation_data.get('processExistingComments', False))
+    # Public automations must never process comments that predate activation.
+    automation_data['processExistingComments'] = False
+    automation_data['process_existing_unreplied_comments'] = False
     if _is_comment_automation_rule(automation_data):
         automation_data['activationStartedAt'] = now
     a = Automation(user_id=user_id, **automation_data)
@@ -1543,8 +1545,11 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'followGateConfirmationKeywords': 'follow_confirmation_keywords',
         'followGateExpiresAfterMinutes': 'follow_gate_expires_after_minutes',
         'followGateFallbackMessage': 'follow_gate_fallback_message',
-        'processExistingUnrepliedComments': 'process_existing_unreplied_comments',
     }
+    for legacy_process_key in ('processExistingComments', 'process_existing_unreplied_comments',
+                               'processExistingUnrepliedComments'):
+        if legacy_process_key in update:
+            update[legacy_process_key] = False
     for src, dest in camel_aliases.items():
         if src in update:
             update[dest] = update.pop(src)
@@ -1634,7 +1639,6 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_verification_failed_message', 'follow_retry_button_text',
         'follow_cooldown_message', 'max_follow_verification_attempts',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
-        'processExistingComments', 'process_existing_unreplied_comments',
     }
     status_reenabled = (
         update.get('status') == 'active' and existing.get('status') != 'active'
@@ -1787,11 +1791,10 @@ async def create_quick_comment_rule(
         ).strip()
     if mode == 'reply_and_dm' and has_dm_action and not dm_text:
         dm_text = 'Thanks for your comment.'
-    process_existing_comments = bool(data.get('processExistingComments', False))
-    process_existing_unreplied = bool(
-        data.get('process_existing_unreplied_comments',
-                 data.get('processExistingUnrepliedComments', False))
-    )
+    # Unsafe legacy catch-up flags are ignored; missed post-activation comments
+    # can still be caught up by polling/manual catch-up.
+    process_existing_comments = False
+    process_existing_unreplied = False
     if reply_under_post and not (comment_reply or comment_reply_2 or comment_reply_3):
         raise HTTPException(400, 'At least one comment reply is required')
     if mode == 'reply_and_dm' and not dm_text:
@@ -4959,7 +4962,8 @@ async def instagram_webhook(request: Request):
         logger.info('webhook_signature_valid prefix=%s', sig_result['computed_prefix'])
     import json as _json
     payload = _json.loads(raw_body)
-    logger.info('IG webhook: %s', payload)
+    logger.info('ig_webhook_payload_received object=%s entries=%s',
+                payload.get('object'), len(payload.get('entry') or []))
     # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
     # the webhook ACK well under the 5-second Meta retry threshold.
     global WEBHOOK_LAST_RECEIVED_AT
@@ -5078,16 +5082,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
         previous_status = str(existing.get('action_status') or existing.get('actionStatus') or '').lower()
         already_replied = bool(existing.get('replied')) or previous_status in ('success', 'replied')
-        retryable_status = previous_status in ('failed', 'skipped')
         retryable_skip = previous_skip in (
             'missing_comment_timestamp',
             'no_rule_match',
             'skipped_empty_comment',
-            # When admin enables process_existing_unreplied_comments
-            # AFTER comments were already classified as historical, those
-            # comments must be re-evaluated on the next poll/webhook —
-            # otherwise the toggle would only affect future comments.
-            'historical_before_rule_activation',
+        )
+        retryable_status = (
+            previous_status == 'failed'
+            or (previous_status == 'skipped' and retryable_skip)
         )
         if not already_replied and (
             (previous_skip == 'missing_comment_timestamp' and effective_ts)
@@ -5122,24 +5124,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         fire = False
 
         def apply_activation_cutoff() -> Optional[str]:
-            # Two opt-out paths:
-            #  (a) processExistingComments=True   — legacy blanket bypass.
-            #  (b) process_existing_unreplied_comments=True — safer: the
-            #      caller has opted in to processing OLD comments, but only
-            #      when they are unreplied. Dedup at the top of
-            #      _handle_new_comment already guarantees we only get here
-            #      for unreplied comments, so the cutoff is simply skipped.
             if auto.get('processExistingComments') is True:
-                return None
+                logger.info('process_existing_comments_ignored rule_id=%s comment=%s source=%s',
+                            auto.get('id'), ig_comment_id, source)
             if auto.get('process_existing_unreplied_comments') is True:
-                logger.info('historical_unreplied_allowed rule_id=%s comment=%s',
-                            auto.get('id'), ig_comment_id)
-                return None
+                logger.info('process_existing_unreplied_ignored rule_id=%s comment=%s source=%s',
+                            auto.get('id'), ig_comment_id, source)
             activation = _parse_graph_datetime(
                 auto.get('activationStartedAt') or auto.get('createdAt') or auto.get('created')
             ) or now
             logger.info('rule_activation_cutoff_applied rule_id=%s comment=%s activation=%s process_existing=%s',
-                        auto.get('id'), ig_comment_id, activation, bool(auto.get('processExistingComments')))
+                        auto.get('id'), ig_comment_id, activation, False)
             # For polling: no timestamp means we cannot safely determine
             # whether the comment predates the rule — skip it. The poller
             # will retry once timestamp becomes available via Graph API.
@@ -5158,9 +5153,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             if activation_floor and comment_floor < activation_floor:
                 logger.info('comment_skipped_historical ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
                             ig_comment_id, auto.get('id'), effective_ts, activation, source)
+                logger.info('skipped_pre_rule_comment ig_comment_id=%s rule_id=%s source=%s',
+                            ig_comment_id, auto.get('id'), source)
                 return 'historical_before_rule_activation'
             logger.info('comment_processed_after_activation ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
                         ig_comment_id, auto.get('id'), effective_ts, activation, source)
+            if source in ('polling', 'manual_catchup'):
+                logger.info('catchup_after_activation_only ig_comment_id=%s rule_id=%s source=%s',
+                            ig_comment_id, auto.get('id'), source)
             return None
 
         if trigger.startswith('keyword:'):
@@ -5225,10 +5225,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         cutoff_rule.get('activationStartedAt') if cutoff_rule else
         (matched_rule.get('activationStartedAt') if matched_rule else None)
     )
-    process_existing_comments = (
-        bool(cutoff_rule.get('processExistingComments')) if cutoff_rule else
-        (bool(matched_rule.get('processExistingComments')) if matched_rule else False)
-    )
+    process_existing_comments = False
     action_status = 'pending' if matched else 'skipped'
     doc = {
         'id': existing_doc_id or str(_uuid.uuid4()),
@@ -6024,6 +6021,8 @@ async def _process_webhook(payload: dict):
 # "Advanced Access is required to receive comments and live_comments webhook notifications."
 IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
+IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
+IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
 # Background tasks are tracked in _BG_TASKS (see _register_bg_task below).
 # These legacy globals stayed here only as fallbacks during the migration.
 _poll_task: Optional[asyncio.Task] = None
@@ -6083,6 +6082,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         'actionsFailed': 0,
         'media': {},
         'errors': [],
+        'replyCap': IG_POLL_REPLY_CAP_PER_RUN,
     }
 
     if not token or not ig_id:
@@ -6099,8 +6099,14 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     if not media_ids:
         return stats
 
+    reply_attempts = 0
     async with httpx.AsyncClient(timeout=20) as c:
         for mid in media_ids[:10]:  # cap per-user per-tick
+            if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN:
+                logger.info('catchup_reply_cap_reached user=%s cap=%s',
+                            user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
+                stats['errors'].append('reply_cap_reached')
+                return stats
             stats['mediaChecked'] += 1
             logger.info('media_comments_fetch_started user=%s media_id=%s',
                         user_doc.get('email'), mid)
@@ -6110,7 +6116,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     params={
                         'access_token': token,
                         'fields': 'id,text,username,timestamp,from',
-                        'limit': 25,
+                        'limit': IG_POLL_COMMENT_BATCH_LIMIT,
                     },
                 )
                 if r.status_code != 200:
@@ -6128,6 +6134,11 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 succeeded = 0
                 failed = 0
                 for cm in data:
+                    if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN:
+                        logger.info('catchup_reply_cap_reached user=%s cap=%s',
+                                    user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
+                        stats['errors'].append('reply_cap_reached')
+                        break
                     ig_comment_id = cm.get('id')
                     from_obj = cm.get('from') or {}
                     commenter_id = from_obj.get('id')
@@ -6152,8 +6163,10 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     st = res.get('action_status')
                     if st == 'success':
                         succeeded += 1
+                        reply_attempts += 1
                     elif st == 'failed':
                         failed += 1
+                        reply_attempts += 1
                 stats['newComments'] += new_count
                 stats['matched'] += matched_count
                 stats['actionsSucceeded'] += succeeded
@@ -6572,11 +6585,20 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
         # Only those where the action did not previously succeed.
         'replied': {'$ne': True},
         'action_status': {'$ne': 'success'},
-    }).sort('created', -1).limit(500)
-    docs = await cursor.to_list(500)
+    }).sort('created', -1).limit(IG_POLL_COMMENT_BATCH_LIMIT)
+    docs = await cursor.to_list(IG_POLL_COMMENT_BATCH_LIMIT)
     summary = {'checked': 0, 'matched': 0, 'replied': 0,
-               'skipped_historical': 0, 'skipped_duplicate': 0, 'failed': 0}
+               'skipped_historical': 0, 'skipped_duplicate': 0, 'failed': 0,
+               'reply_cap': IG_POLL_REPLY_CAP_PER_RUN,
+               'batch_limit': IG_POLL_COMMENT_BATCH_LIMIT}
+    logger.info('catchup_after_activation_only user_id=%s batch_limit=%s reply_cap=%s',
+                user_id, IG_POLL_COMMENT_BATCH_LIMIT, IG_POLL_REPLY_CAP_PER_RUN)
     for d in docs:
+        if summary['replied'] + summary['failed'] >= IG_POLL_REPLY_CAP_PER_RUN:
+            logger.info('catchup_reply_cap_reached user_id=%s cap=%s',
+                        user_id, IG_POLL_REPLY_CAP_PER_RUN)
+            summary['reply_cap_reached'] = True
+            break
         summary['checked'] += 1
         try:
             res = await _handle_new_comment(u, {
@@ -8259,6 +8281,14 @@ async def _startup():
         await db.automations.update_many(
             {**comment_rules, 'processExistingComments': {'$exists': False}},
             {'$set': {'processExistingComments': False}}
+        )
+        await db.automations.update_many(
+            {**comment_rules, 'processExistingComments': {'$ne': False}},
+            {'$set': {'processExistingComments': False}}
+        )
+        await db.automations.update_many(
+            {**comment_rules, 'process_existing_unreplied_comments': {'$ne': False}},
+            {'$set': {'process_existing_unreplied_comments': False}}
         )
         await db.automations.update_many(
             {**comment_rules, 'createdAt': {'$exists': False}},
