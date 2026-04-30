@@ -23,6 +23,7 @@ const DEFAULT_FOLLOW_KEYWORDS = 'Following, I followed, تمت المتابعة,
 const DEFAULT_FOLLOW_NOT_DETECTED = 'لسه مش ظاهر عندي إنك تابعت الحساب 😊\nتابع الحساب الأول وبعدها اضغط الزر تاني وهبعتلك الرابط فورًا.';
 const DEFAULT_FOLLOW_VERIFICATION_FAILED = 'مش قادر أتأكد من المتابعة دلوقتي. جرّب تتابع الحساب واضغط الزر مرة تانية.';
 const DEFAULT_FOLLOW_RETRY_BUTTON = DEFAULT_FOLLOW_BUTTON;
+const DEFAULT_FOLLOW_COOLDOWN = 'بحاول أتأكد من المتابعة 😊 جرّب تضغط الزر مرة تانية خلال ثواني.';
 const DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3;
 
 const TextArea = ({ className = '', ...props }) => (
@@ -86,6 +87,9 @@ const AutomationPhonePreview = ({
   followRequestButtonText,
   linkDmText,
   linkUrl,
+  linkButtonText,
+  followNotDetectedMessage,
+  followRetryButtonText,
   previewTab,
   setPreviewTab,
   accountName,
@@ -215,9 +219,48 @@ const AutomationPhonePreview = ({
                   </>
                 )}
                 {(linkDmText || linkUrl) && (
-                  <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(`${linkDmText} ${linkUrl}`)}>
-                    {linkDmText || 'Here is the link'}
-                    {linkUrl && <div className="mt-2 text-blue-300">{linkUrl}</div>}
+                  <>
+                    <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(linkDmText)}>
+                      {linkDmText || 'Here is the link'}
+                    </div>
+                    {linkUrl && (
+                      <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-center text-sm font-semibold">
+                        {linkButtonText || 'Open link ✅'}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {previewTab === 'Not following' && (
+              <div className="min-h-[360px] px-4 py-4" dir="auto">
+                <div className="mb-5 text-center font-bold">DM</div>
+                {followRequestEnabled && (
+                  <>
+                    <div className="max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followRequestMessage)}>
+                      {followRequestMessage}
+                    </div>
+                    <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
+                      {followRequestButtonText}
+                    </div>
+                    <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
+                      {followRequestButtonText}
+                    </div>
+                    <div className="mt-3 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followNotDetectedMessage || '')}>
+                      {followNotDetectedMessage || 'لسه مش ظاهر عندي إنك تابعت الحساب 😊'}
+                    </div>
+                    <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
+                      {followRetryButtonText || followRequestButtonText}
+                    </div>
+                    <div className="mt-3 px-3 py-1 text-center text-[11px] text-white/45">
+                      Final link is not sent until is_user_follow_business is true.
+                    </div>
+                  </>
+                )}
+                {!followRequestEnabled && (
+                  <div className="mt-6 text-center text-sm text-white/60">
+                    Enable the follow gate to preview this branch.
                   </div>
                 )}
               </div>
@@ -234,7 +277,7 @@ const AutomationPhonePreview = ({
       </div>
       <div className="pb-4 text-center">
         <div className="inline-flex rounded-full bg-slate-200 p-1">
-          {['Post', 'Comments', 'DM'].map(tab => (
+          {['Post', 'Comments', 'DM', 'Not following'].map(tab => (
             <button
               key={tab}
               type="button"
@@ -288,6 +331,7 @@ const Automations = () => {
   const [followNotDetectedMessage, setFollowNotDetectedMessage] = useState(DEFAULT_FOLLOW_NOT_DETECTED);
   const [followVerificationFailedMessage, setFollowVerificationFailedMessage] = useState(DEFAULT_FOLLOW_VERIFICATION_FAILED);
   const [followRetryButtonText, setFollowRetryButtonText] = useState(DEFAULT_FOLLOW_RETRY_BUTTON);
+  const [followCooldownMessage, setFollowCooldownMessage] = useState(DEFAULT_FOLLOW_COOLDOWN);
   const [maxFollowVerificationAttempts, setMaxFollowVerificationAttempts] = useState(DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS);
   const [emailRequestEnabled, setEmailRequestEnabled] = useState(false);
   const [linkDmText, setLinkDmText] = useState('');
@@ -371,6 +415,7 @@ const Automations = () => {
     setFollowNotDetectedMessage(DEFAULT_FOLLOW_NOT_DETECTED);
     setFollowVerificationFailedMessage(DEFAULT_FOLLOW_VERIFICATION_FAILED);
     setFollowRetryButtonText(DEFAULT_FOLLOW_RETRY_BUTTON);
+    setFollowCooldownMessage(DEFAULT_FOLLOW_COOLDOWN);
     setMaxFollowVerificationAttempts(DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS);
     setFollowGateFallbackMessage('');
     setEmailRequestEnabled(false);
@@ -446,6 +491,9 @@ const Automations = () => {
     );
     setFollowRetryButtonText(
       automation.follow_retry_button_text || automation.followRetryButtonText || automation.follow_request_button_text || DEFAULT_FOLLOW_RETRY_BUTTON
+    );
+    setFollowCooldownMessage(
+      automation.follow_cooldown_message || automation.followCooldownMessage || DEFAULT_FOLLOW_COOLDOWN
     );
     setMaxFollowVerificationAttempts(
       Number(automation.max_follow_verification_attempts || automation.maxFollowVerificationAttempts || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS)
@@ -616,6 +664,7 @@ const Automations = () => {
             follow_not_detected_message: followNotDetectedMessage.trim(),
             follow_verification_failed_message: followVerificationFailedMessage.trim(),
             follow_retry_button_text: followRetryButtonText.trim(),
+            follow_cooldown_message: followCooldownMessage.trim(),
             max_follow_verification_attempts: Number(maxFollowVerificationAttempts) || DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS,
             email_request_enabled: emailRequestEnabled,
             follow_up_enabled: followUpEnabled,
@@ -972,6 +1021,12 @@ const Automations = () => {
                           rows={2}
                           placeholder="Sent when verification fails because of permission/consent"
                         />
+                        <TextArea
+                          value={followCooldownMessage}
+                          onChange={e => setFollowCooldownMessage(e.target.value)}
+                          rows={2}
+                          placeholder="Sent if the user taps again during the 30s cooldown"
+                        />
                         <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-semibold text-slate-950">Max verification attempts</div>
@@ -1079,6 +1134,9 @@ const Automations = () => {
               followRequestButtonText={followRequestButtonText}
               linkDmText={linkDmText}
               linkUrl={linkUrl}
+              linkButtonText={linkButtonText}
+              followNotDetectedMessage={followNotDetectedMessage}
+              followRetryButtonText={followRetryButtonText}
               previewTab={previewTab}
               setPreviewTab={setPreviewTab}
               accountName={previewAccountName}

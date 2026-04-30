@@ -300,6 +300,52 @@ def test_follow_gate_disabled_sends_link_directly(monkeypatch):
     assert any(c['url'] == 'https://example.com/landing' for c in calls['url_button'])
 
 
+def test_cooldown_sends_notice_and_does_not_call_meta(monkeypatch):
+    """Second tap inside cooldown must not call Meta but must answer."""
+    sess = _session(
+        follow_verification_attempts=1,
+        followLastCheckedAt=datetime.utcnow() - timedelta(seconds=5),
+        follow_cooldown_message='wait a few seconds',
+    )
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(monkeypatch, [], calls)
+
+    _run(server._send_comment_dm_flow_completion(_user(), sess))
+
+    assert calls['verify'] == []  # Meta not called during cooldown
+    assert calls['url_button'] == []  # link withheld
+    assert any('wait a few seconds' in (c['text'] or '')
+               for c in calls['quick_reply']), \
+        f'cooldown notice not sent; calls={calls}'
+    persisted = db.comment_dm_sessions.docs[0]
+    assert persisted.get('lastCooldownNoticeAt') is not None
+
+
+def test_cooldown_notice_rate_limited_to_once_per_window(monkeypatch):
+    """Two rapid taps inside cooldown produce only one cooldown notice."""
+    now = datetime.utcnow()
+    sess = _session(
+        follow_verification_attempts=1,
+        followLastCheckedAt=now - timedelta(seconds=5),
+        lastCooldownNoticeAt=now - timedelta(seconds=2),
+        follow_cooldown_message='wait',
+    )
+    db = FakeDB(sessions=[sess])
+    monkeypatch.setattr(server, 'db', db)
+    calls = {'verify': [], 'quick_reply': [], 'url_button': [], 'text_dm': []}
+    install_fakes(monkeypatch, [], calls)
+
+    _run(server._send_comment_dm_flow_completion(_user(), sess))
+
+    # Already notified within the window — stay silent.
+    assert calls['quick_reply'] == []
+    assert calls['text_dm'] == []
+    assert calls['url_button'] == []
+    assert calls['verify'] == []
+
+
 def test_legacy_click_only_when_verify_actual_follow_disabled(monkeypatch):
     sess = _session(verify_actual_follow=False, follow_confirmed=True)
     db = FakeDB(sessions=[sess])

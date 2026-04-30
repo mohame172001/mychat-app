@@ -70,6 +70,7 @@ class AutomationIn(BaseModel):
     follow_not_detected_message: Optional[str] = None
     follow_verification_failed_message: Optional[str] = None
     follow_retry_button_text: Optional[str] = None
+    follow_cooldown_message: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
 
@@ -121,6 +122,8 @@ class AutomationPatch(BaseModel):
     followVerificationFailedMessage: Optional[str] = None
     follow_retry_button_text: Optional[str] = None
     followRetryButtonText: Optional[str] = None
+    follow_cooldown_message: Optional[str] = None
+    followCooldownMessage: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     maxFollowVerificationAttempts: Optional[int] = None
     email_request_enabled: Optional[bool] = None
@@ -160,6 +163,7 @@ class Automation(BaseModel):
     follow_not_detected_message: Optional[str] = None
     follow_verification_failed_message: Optional[str] = None
     follow_retry_button_text: Optional[str] = None
+    follow_cooldown_message: Optional[str] = None
     max_follow_verification_attempts: Optional[int] = None
     processExistingComments: bool = False
     activationStartedAt: Optional[datetime] = None

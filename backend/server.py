@@ -235,6 +235,11 @@ DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3
 # Cooldown between live API checks for the same session — protects against
 # the user spamming the confirmation button.
 FOLLOW_VERIFICATION_COOLDOWN_SECONDS = 30
+# Sent once per cooldown window when the user taps again before the
+# cooldown elapses. Rate-limited by lastCooldownNoticeAt on the session.
+DEFAULT_FOLLOW_COOLDOWN_MESSAGE = (
+    'بحاول أتأكد من المتابعة 😊 جرّب تضغط الزر مرة تانية خلال ثواني.'
+)
 
 
 def _split_follow_keywords(value) -> list:
@@ -318,6 +323,11 @@ def _normalize_follow_gate_config(data: dict) -> dict:
     except (TypeError, ValueError):
         max_attempts = DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS
     max_attempts = max(1, min(max_attempts, 10))
+    cooldown_message = (
+        data.get('follow_cooldown_message')
+        or data.get('followCooldownMessage')
+        or DEFAULT_FOLLOW_COOLDOWN_MESSAGE
+    )
     return {
         'follow_request_enabled': enabled,
         'follow_request_message': str(message or '').strip(),
@@ -329,6 +339,7 @@ def _normalize_follow_gate_config(data: dict) -> dict:
         'follow_not_detected_message': str(not_detected or '').strip(),
         'follow_verification_failed_message': str(verification_failed or '').strip(),
         'follow_retry_button_text': str(retry_button or '').strip(),
+        'follow_cooldown_message': str(cooldown_message or '').strip(),
         'max_follow_verification_attempts': max_attempts,
     }
 
@@ -991,14 +1002,35 @@ async def _verify_comment_dm_follow_gate(user_doc: dict, session: dict) -> dict:
                     session.get('id'), attempts_so_far)
         return {'allowed': False, 'checked': True, 'reason': 'max_attempts_exceeded'}
 
-    # Cooldown — protects against confirmation-button spam.
+    # Cooldown — protects against confirmation-button spam. We never call
+    # Meta during the cooldown window, but we MUST still respond to the user
+    # so the bot doesn't appear stuck. The notice is rate-limited to once
+    # per cooldown window via lastCooldownNoticeAt.
     last_check = session.get('followLastCheckedAt')
     if isinstance(last_check, datetime):
         elapsed = (datetime.utcnow() - last_check).total_seconds()
         if elapsed < FOLLOW_VERIFICATION_COOLDOWN_SECONDS:
             logger.info('follow_verification_cooldown session=%s elapsed=%ss',
                         session.get('id'), int(elapsed))
-            return {'allowed': False, 'checked': True, 'reason': 'cooldown'}
+            last_notice = session.get('lastCooldownNoticeAt')
+            should_notify = True
+            if isinstance(last_notice, datetime):
+                if (datetime.utcnow() - last_notice).total_seconds() < FOLLOW_VERIFICATION_COOLDOWN_SECONDS:
+                    should_notify = False
+            if should_notify:
+                cooldown_msg = (session.get('follow_cooldown_message') or
+                                DEFAULT_FOLLOW_COOLDOWN_MESSAGE)
+                sent = await _send_follow_reminder(user_doc, session, cooldown_msg,
+                                                   session.get('stage') or 'awaiting_actual_follow')
+                if sent and session.get('id'):
+                    await db.comment_dm_sessions.update_one(
+                        {'id': session['id']},
+                        {'$set': {'lastCooldownNoticeAt': datetime.utcnow()}},
+                    )
+                return {'allowed': False, 'checked': True, 'reason': 'cooldown',
+                        'prompt_sent': sent}
+            return {'allowed': False, 'checked': True, 'reason': 'cooldown',
+                    'prompt_sent': True}
 
     access_token = user_doc.get('meta_access_token', '')
     ig_scoped_id = session.get('recipient_id')
@@ -1489,6 +1521,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_not_detected_message',
         'follow_verification_failed_message',
         'follow_retry_button_text',
+        'follow_cooldown_message',
         'max_follow_verification_attempts',
     }
     if any(key in update for key in follow_keys):
@@ -1521,7 +1554,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_gate_expires_after_minutes', 'follow_gate_fallback_message',
         'verify_actual_follow', 'follow_not_detected_message',
         'follow_verification_failed_message', 'follow_retry_button_text',
-        'max_follow_verification_attempts',
+        'follow_cooldown_message', 'max_follow_verification_attempts',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
         'processExistingComments',
     }
@@ -1735,6 +1768,7 @@ async def create_quick_comment_rule(
             'follow_not_detected_message': follow_gate['follow_not_detected_message'],
             'follow_verification_failed_message': follow_gate['follow_verification_failed_message'],
             'follow_retry_button_text': follow_gate['follow_retry_button_text'],
+            'follow_cooldown_message': follow_gate['follow_cooldown_message'],
             'max_follow_verification_attempts': follow_gate['max_follow_verification_attempts'],
             'email_request_enabled': email_request_enabled,
             'follow_up_enabled': follow_up_enabled,
@@ -1777,6 +1811,7 @@ async def create_quick_comment_rule(
         'follow_not_detected_message': follow_gate['follow_not_detected_message'],
         'follow_verification_failed_message': follow_gate['follow_verification_failed_message'],
         'follow_retry_button_text': follow_gate['follow_retry_button_text'],
+        'follow_cooldown_message': follow_gate['follow_cooldown_message'],
         'max_follow_verification_attempts': follow_gate['max_follow_verification_attempts'],
         'email_request_enabled': email_request_enabled,
         'follow_up_enabled': follow_up_enabled,
