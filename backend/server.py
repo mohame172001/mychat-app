@@ -367,6 +367,61 @@ def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
     return 'failed'
 
 
+def _has_retryable_step_failure(doc: dict) -> bool:
+    return bool(doc.get('reply_failure_retryable') or doc.get('dm_failure_retryable'))
+
+
+def _failure_category_from_doc(doc: dict) -> Optional[str]:
+    return (
+        doc.get('reply_failure_reason')
+        or doc.get('dm_failure_reason')
+        or doc.get('skip_reason')
+        or doc.get('action_status')
+    )
+
+
+def _next_retry_time(attempts: int) -> datetime:
+    exponent = max(0, min(int(attempts or 0), 5))
+    delay = AUTOMATION_TEMP_RETRY_BASE_SECONDS * (2 ** exponent)
+    return datetime.utcnow() + timedelta(seconds=delay)
+
+
+async def _respect_account_send_spacing(user_id: str, instagram_account_id: str,
+                                        send_kind: str) -> Optional[str]:
+    """Apply small per-account send spacing without exposing or storing content."""
+    spacing = COMMENT_REPLY_MIN_SPACING_SECONDS if send_kind == 'comment_reply' else DM_SEND_MIN_SPACING_SECONDS
+    if spacing <= 0:
+        return None
+    collection = getattr(db, 'automation_rate_limits', None)
+    if collection is None:
+        return None
+    now = datetime.utcnow()
+    key = f'{user_id}:{instagram_account_id}:{send_kind}'
+    try:
+        current = await collection.find_one({'id': key})
+        last_sent = _parse_graph_datetime((current or {}).get('last_sent_at')) if current else None
+        if last_sent:
+            elapsed = (now - last_sent).total_seconds()
+            if elapsed < spacing:
+                return f'{send_kind}_spacing'
+        await collection.update_one(
+            {'id': key},
+            {'$set': {
+                'id': key,
+                'user_id': user_id,
+                'instagramAccountId': instagram_account_id,
+                'send_kind': send_kind,
+                'last_sent_at': now,
+                'updated': now,
+            }},
+            upsert=True,
+        )
+    except Exception:
+        logger.exception('automation_rate_limit_check_failed kind=%s user_id=%s account=%s',
+                         send_kind, user_id, instagram_account_id)
+    return None
+
+
 def _automation_has_node_type(automation: dict, node_type: str) -> bool:
     return any((node or {}).get('type') == node_type for node in automation.get('nodes') or [])
 
@@ -376,6 +431,14 @@ def _dm_failure_retryable_from_doc(doc: dict) -> bool:
         return bool(doc.get('dm_failure_retryable'))
     reason = doc.get('dm_failure_reason')
     return reason in ('rate_limited', 'temporary_graph_error')
+
+
+def _env_int_clamped(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
@@ -1552,19 +1615,54 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and sender_ig_id:
                 action_attempted = True
-                if _comment_dm_flow_enabled(automation):
-                    ok = await _send_comment_dm_flow_entry(
-                        user, automation, sender_ig_id, comment_context
+                existing_dm_success = False
+                if comment_context and comment_context.get('comment_doc_id'):
+                    existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
+                    existing_dm_success = bool(
+                        existing_comment
+                        and _status_is_success(existing_comment.get('dm_status') or existing_comment.get('dmStatus'))
                     )
-                    dm_result = {
-                        'ok': bool(ok),
-                        'failure_reason': None if ok else 'unknown_graph_error',
-                        'retryable': False,
-                    }
+                if existing_dm_success:
+                    ok = True
+                    dm_result = {'ok': True, 'failure_reason': None, 'retryable': False}
+                    logger.info('dm_duplicate_skipped comment_id=%s rule_id=%s',
+                                flow_comment_id, automation.get('id'))
+                elif _comment_dm_flow_enabled(automation):
+                    limit_reason = await _respect_account_send_spacing(
+                        user.get('id', ''), ig_user_id, 'dm'
+                    )
+                    if limit_reason:
+                        ok = False
+                        dm_result = {
+                            'ok': False,
+                            'failure_reason': 'rate_limited',
+                            'retryable': True,
+                            'safe_label': limit_reason,
+                        }
+                    else:
+                        ok = await _send_comment_dm_flow_entry(
+                            user, automation, sender_ig_id, comment_context
+                        )
+                        dm_result = {
+                            'ok': bool(ok),
+                            'failure_reason': None if ok else 'unknown_graph_error',
+                            'retryable': False,
+                        }
                     logger.info('Flow comment DM entry to %s rule=%s ok=%s',
                                 sender_ig_id, automation.get('id'), ok)
                 else:
-                    dm_result = await _call_send_ig_dm_detailed(access_token, ig_user_id, sender_ig_id, msg_text)
+                    limit_reason = await _respect_account_send_spacing(
+                        user.get('id', ''), ig_user_id, 'dm'
+                    )
+                    if limit_reason:
+                        dm_result = {
+                            'ok': False,
+                            'failure_reason': 'rate_limited',
+                            'retryable': True,
+                            'safe_label': limit_reason,
+                        }
+                    else:
+                        dm_result = await _call_send_ig_dm_detailed(access_token, ig_user_id, sender_ig_id, msg_text)
                     ok = bool(dm_result.get('ok'))
                     logger.info('Flow message to %s rule=%s ok=%s reason=%s',
                                 sender_ig_id, automation.get('id'), ok,
@@ -1617,9 +1715,20 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     logger.info('comment_reply_duplicate_skipped ig_comment_id=%s rule_id=%s',
                                 comment_context['ig_comment_id'], automation.get('id'))
                 else:
-                    reply_result = await _call_reply_to_ig_comment_detailed(
-                        access_token, comment_context['ig_comment_id'], msg_text
+                    limit_reason = await _respect_account_send_spacing(
+                        user.get('id', ''), ig_user_id, 'comment_reply'
                     )
+                    if limit_reason:
+                        reply_result = {
+                            'ok': False,
+                            'failure_reason': 'rate_limited',
+                            'retryable': True,
+                            'safe_label': limit_reason,
+                        }
+                    else:
+                        reply_result = await _call_reply_to_ig_comment_detailed(
+                            access_token, comment_context['ig_comment_id'], msg_text
+                        )
                     ok = bool(reply_result.get('ok'))
                 logger.info('Flow comment reply on %s rule=%s ok=%s reason=%s',
                             comment_context['ig_comment_id'], automation.get('id'), ok,
@@ -2559,6 +2668,57 @@ async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_curren
         'last_attempt_at': comment.get('last_attempt_at'),
         'replied_at': comment.get('replied_at') or comment.get('replySentAt'),
         'dm_sent_at': comment.get('dm_sent_at') or comment.get('dmSentAt'),
+    }
+
+
+@api.get('/comments/{comment_id}/why-not-replied')
+async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_current_user_id)):
+    """Explain why a comment has not been fully replied to, without exposing content."""
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
+    comment = None
+    for field in ('id', 'ig_comment_id', 'igCommentId'):
+        comment = await db.comments.find_one({**scoped, field: comment_id})
+        if comment:
+            break
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    action_status = comment.get('action_status') or comment.get('actionStatus')
+    reply_status = comment.get('reply_status') or comment.get('replyStatus')
+    dm_status = comment.get('dm_status') or comment.get('dmStatus')
+    queued = bool(
+        comment.get('queued')
+        or action_status in ('pending', 'failed_retryable', 'processing')
+        or (action_status == 'partial_success' and comment.get('dm_failure_retryable'))
+    )
+    retryable = bool(
+        action_status in ('pending', 'failed_retryable')
+        or comment.get('reply_failure_retryable')
+        or comment.get('dm_failure_retryable')
+    )
+    return {
+        'eligible': bool(comment.get('matched')) and action_status not in (
+            'skipped', 'skipped_ineligible', 'failed_permanent', 'failed_retry_exhausted'
+        ),
+        'action_status': action_status,
+        'reply_status': reply_status,
+        'dm_status': dm_status,
+        'skip_reason': comment.get('skip_reason') or comment.get('skipReason'),
+        'queued': queued,
+        'next_retry_at': comment.get('next_retry_at'),
+        'attempts': int(comment.get('attempts') or 0),
+        'retryable': retryable,
+        'rate_limit_reason': (
+            comment.get('skip_reason') if 'rate_limit' in str(comment.get('skip_reason') or '') else None
+        ),
+        'matched_rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'mediaId': comment.get('media_id') or comment.get('mediaId'),
+        'reply_failure_reason': comment.get('reply_failure_reason'),
+        'dm_failure_reason': comment.get('dm_failure_reason'),
+        'last_attempt_at': comment.get('last_attempt_at'),
+        'last_queue_attempt_at': comment.get('last_queue_attempt_at'),
+        'queue_lock_until': comment.get('queue_lock_until'),
+        'failure_category': _failure_category_from_doc(comment),
     }
 
 
@@ -5433,10 +5593,20 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     commenter_id = comment_data.get('commenter_id')
     media_id = comment_data.get('media_id')
     comment_text = _normalize_comment_text(comment_data.get('text'))
+    force_queue = bool(comment_data.get('force_queue'))
+    force_queue_reason = comment_data.get('queue_reason') or 'queued_rate_limit'
 
     # log: comment_seen (every comment we observe, before dedup)
     logger.info('comment_seen ig_comment_id=%s media=%s source=%s text_length=%s',
                 ig_comment_id, media_id, source, len(comment_text))
+    if source == 'webhook':
+        logger.info('webhook_comment_received comment_id=%s media_id=%s user_id=%s instagramAccountId=%s',
+                    ig_comment_id, media_id, user_id, ig_account_id)
+    elif source in ('polling', 'manual_catchup'):
+        logger.info('poller_comment_seen comment_id=%s media_id=%s user_id=%s instagramAccountId=%s source=%s',
+                    ig_comment_id, media_id, user_id, ig_account_id, source)
+    logger.info('comment_text_classified comment_id=%s source=%s text_length=%s non_empty=%s',
+                ig_comment_id, source, len(comment_text), bool(comment_text))
 
     if not ig_comment_id or not commenter_id:
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
@@ -5506,11 +5676,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             and previous_skip == 'historical_before_rule_activation'
         )
         retryable_status = (
-            previous_status == 'failed'
+            previous_status in ('failed', 'failed_retryable')
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
             or (already_replied and dm_retryable)
         )
+        if previous_status in ('pending', 'processing'):
+            logger.info('comment_already_pending_queue comment_id=%s user=%s next_retry_at=%s',
+                        ig_comment_id, user_doc.get('email'), existing.get('next_retry_at'))
+            return {'processed': False, 'already_processed': True, 'matched': True,
+                    'action_status': previous_status, 'queued': True,
+                    'reason': 'comment_already_pending_queue'}
         if already_replied and (previous_status in ('success', 'replied') or dm_succeeded_or_disabled):
             logger.info('comment_already_replied_success ig_comment_id=%s user=%s',
                         ig_comment_id, user_doc.get('email'))
@@ -5547,6 +5723,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
 
     # Match automations to determine rule_id BEFORE insert
+    logger.info('comment_rule_matching_started comment_id=%s media_id=%s source=%s user_id=%s instagramAccountId=%s',
+                ig_comment_id, media_id, source, user_id, ig_account_id)
+    if source in ('polling', 'manual_catchup'):
+        logger.info('poller_comment_rule_matching_started comment_id=%s media_id=%s source=%s',
+                    ig_comment_id, media_id, source)
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
@@ -5667,6 +5848,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if matched:
         logger.info('rule_matched source=%s ig_comment_id=%s rule_id=%s user=%s',
                     source, ig_comment_id, rule_id, user_doc.get('email'))
+        logger.info('comment_rule_matched comment_id=%s media_id=%s source=%s rule_id=%s user_id=%s instagramAccountId=%s',
+                    ig_comment_id, media_id, source, rule_id, user_id, ig_account_id)
+        if source in ('polling', 'manual_catchup'):
+            logger.info('poller_comment_rule_matched comment_id=%s media_id=%s rule_id=%s source=%s',
+                        ig_comment_id, media_id, rule_id, source)
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
@@ -5733,6 +5919,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'ruleActivationStartedAt': rule_activation_started_at,
         'processExistingComments': process_existing_comments,
         'processed_at': now,
+        'queued': bool(force_queue and matched),
+        'next_retry_at': now if force_queue and matched else None,
+        'attempts': int(existing.get('attempts') or 0) if retry_existing and existing else 0,
+        'last_queue_attempt_at': existing.get('last_queue_attempt_at') if retry_existing and existing else None,
+        'queue_lock_until': existing.get('queue_lock_until') if retry_existing and existing else None,
         'reprocessed_after_missing_timestamp': retry_reason == 'missing_comment_timestamp',
         'reprocessed_retryable': retry_existing,
         'reprocessed_reason': retry_reason,
@@ -5756,9 +5947,35 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
     if matched:
+        if force_queue:
+            await db.comments.update_one(
+                {'id': doc['id']},
+                {'$set': {
+                    'action_status': 'pending',
+                    'actionStatus': 'pending',
+                    'reply_status': reply_status,
+                    'replyStatus': reply_status,
+                    'dm_status': dm_status,
+                    'dmStatus': dm_status,
+                    'skip_reason': force_queue_reason,
+                    'skipReason': force_queue_reason,
+                    'queued': True,
+                    'next_retry_at': now,
+                    'updated': now,
+                }},
+            )
+            logger.info('comment_processing_rate_limited_queued comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s reason=%s next_retry_at=%s',
+                        ig_comment_id, media_id, user_id, ig_account_id, rule_id,
+                        force_queue_reason, now)
+            return {'processed': True, 'reprocessed': retry_existing,
+                    'matched': matched, 'action_status': 'pending',
+                    'rule_id': rule_id, 'comment_doc_id': doc['id'],
+                    'queued': True, 'reason': force_queue_reason}
         try:
             logger.info('action_execution_started ig_comment_id=%s rule_id=%s',
                         ig_comment_id, rule_id)
+            logger.info('comment_processing_immediate comment_id=%s media_id=%s source=%s rule_id=%s user_id=%s instagramAccountId=%s',
+                        ig_comment_id, media_id, source, rule_id, user_id, ig_account_id)
             ok = await _run_and_record_action(
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
@@ -5768,6 +5985,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 action_status = ok.get('action_status') or ('success' if ok.get('ok') else 'failed')
             else:
                 action_status = 'success' if ok else 'failed'
+            log_name = 'comment_processing_success'
+            if action_status == 'partial_success':
+                log_name = 'comment_processing_partial_success'
+            elif action_status == 'failed_retryable':
+                log_name = 'comment_processing_temporary_error_queued'
+            elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
+                log_name = 'comment_processing_failed_permanent'
+            logger.info('%s comment_id=%s media_id=%s source=%s rule_id=%s action_status=%s',
+                        log_name, ig_comment_id, media_id, source, rule_id, action_status)
         except Exception as e:
             logger.exception('action_execution_failed ig_comment_id=%s err=%s',
                              ig_comment_id, e)
@@ -5804,9 +6030,22 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
         action_status = _compute_comment_action_status(reply_status, dm_status)
         if action_status == 'failed' and ok:
             action_status = 'success'
+        saved_for_status = {**saved, 'reply_status': reply_status, 'dm_status': dm_status}
+        retryable_failure = _has_retryable_step_failure(saved_for_status)
+        attempts = int(saved.get('attempts') or 0)
+        permanent_failure = (
+            action_status == 'failed'
+            and not retryable_failure
+        )
+        retry_exhausted = retryable_failure and attempts >= AUTOMATION_QUEUE_MAX_ATTEMPTS
+        if action_status == 'failed':
+            action_status = 'failed_retry_exhausted' if retry_exhausted else (
+                'failed_retryable' if retryable_failure else 'failed_permanent'
+            )
         update = {
             'action_status': action_status,
             'actionStatus': action_status,
+            'last_attempt_at': datetime.utcnow(),
             'updated': datetime.utcnow(),
         }
         if action_status in ('success', 'partial_success'):
@@ -5814,16 +6053,19 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             update['error'] = None
         else:
             update['error'] = 'automation_action_send_failed'
+        if action_status == 'failed_retryable':
+            update['next_retry_at'] = _next_retry_time(attempts)
+            update['skip_reason'] = 'queued_retryable_failure'
+            update['skipReason'] = 'queued_retryable_failure'
+        elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
+            update['next_retry_at'] = None
+            update['skip_reason'] = _failure_category_from_doc(saved_for_status)
+            update['skipReason'] = update['skip_reason']
         await db.comments.update_one(
             {'id': comment_doc_id},
             {'$set': update},
         )
-        if action_status == 'failed':
-            await db.comments.update_one(
-                {'id': comment_doc_id},
-                {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
-                          'error': 'automation_action_send_failed'}}
-            )
+        if action_status in ('failed_retryable', 'failed_permanent', 'failed_retry_exhausted'):
             logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
                            ig_comment_id, automation.get('id'))
             return {'ok': False, 'action_status': action_status}
@@ -5832,14 +6074,22 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
         return {'ok': action_status in ('success', 'partial_success'),
                 'action_status': action_status}
     except Exception as e:
+        next_retry = _next_retry_time(0)
         await db.comments.update_one(
             {'id': comment_doc_id},
-            {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
-                      'error': str(e)[:500]}}
+            {'$set': {
+                'action_status': 'failed_retryable',
+                'actionStatus': 'failed_retryable',
+                'error': str(e)[:300],
+                'next_retry_at': next_retry,
+                'skip_reason': 'temporary_graph_error',
+                'skipReason': 'temporary_graph_error',
+                'updated': datetime.utcnow(),
+            }}
         )
         logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
                          ig_comment_id, automation.get('id'), e)
-        return False
+        return {'ok': False, 'action_status': 'failed_retryable'}
 
 
 # ---------------- DM Automation (independent from Comments) ----------------
@@ -6522,6 +6772,12 @@ IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
+AUTOMATION_QUEUE_INTERVAL_SECONDS = _env_int_clamped('AUTOMATION_QUEUE_INTERVAL_SECONDS', 5, 2, 60)
+COMMENT_REPLY_MIN_SPACING_SECONDS = _env_int_clamped('COMMENT_REPLY_MIN_SPACING_SECONDS', 2, 1, 30)
+DM_SEND_MIN_SPACING_SECONDS = _env_int_clamped('DM_SEND_MIN_SPACING_SECONDS', 2, 1, 30)
+AUTOMATION_QUEUE_BATCH_SIZE = _env_int_clamped('AUTOMATION_QUEUE_BATCH_SIZE', 10, 1, 50)
+AUTOMATION_QUEUE_MAX_ATTEMPTS = _env_int_clamped('AUTOMATION_QUEUE_MAX_ATTEMPTS', 5, 1, 20)
+AUTOMATION_TEMP_RETRY_BASE_SECONDS = _env_int_clamped('AUTOMATION_TEMP_RETRY_BASE_SECONDS', 30, 5, 3600)
 # Background tasks are tracked in _BG_TASKS (see _register_bg_task below).
 # These legacy globals stayed here only as fallbacks during the migration.
 _poll_task: Optional[asyncio.Task] = None
@@ -6633,11 +6889,6 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 succeeded = 0
                 failed = 0
                 for cm in data:
-                    if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN:
-                        logger.info('catchup_reply_cap_reached user=%s cap=%s',
-                                    user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
-                        stats['errors'].append('reply_cap_reached')
-                        break
                     ig_comment_id = cm.get('id')
                     from_obj = cm.get('from') or {}
                     commenter_id = from_obj.get('id')
@@ -6654,18 +6905,27 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         'commenter_username': commenter_username,
                         'text': cm.get('text') or '',
                         'timestamp': cm.get('timestamp'),
+                        'force_queue': reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN,
+                        'queue_reason': 'queued_rate_limit',
                     }, source='polling') or {}
+                    if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN and res.get('queued'):
+                        logger.info('poller_comment_queued comment_id=%s media_id=%s reason=reply_cap_reached',
+                                    ig_comment_id, mid)
                     if res.get('processed'):
                         new_count += 1
                     if res.get('matched'):
                         matched_count += 1
                     st = res.get('action_status')
-                    if st == 'success':
+                    if st in ('success', 'partial_success'):
                         succeeded += 1
                         reply_attempts += 1
-                    elif st == 'failed':
+                        logger.info('poller_comment_processed comment_id=%s media_id=%s action_status=%s',
+                                    ig_comment_id, mid, st)
+                    elif st in ('failed_retryable', 'failed_permanent', 'failed_retry_exhausted', 'failed'):
                         failed += 1
                         reply_attempts += 1
+                    elif st == 'pending' and res.get('queued'):
+                        stats['errors'].append('reply_cap_reached')
                 stats['newComments'] += new_count
                 stats['matched'] += matched_count
                 stats['actionsSucceeded'] += succeeded
@@ -6844,6 +7104,224 @@ def _classify_meta_error(exc: BaseException, status: Optional[int] = None) -> st
                 'ConnectError', 'NetworkError'):
         return 'network_timeout'
     return 'unknown'
+
+
+def _automation_queue_due_query(now: datetime) -> dict:
+    return {
+        '$or': [
+            {
+                'matched': True,
+                'action_status': {'$in': ['pending', 'failed_retryable']},
+                'next_retry_at': {'$lte': now},
+            },
+            {
+                'matched': True,
+                'action_status': 'partial_success',
+                'dm_status': 'failed',
+                'dm_failure_retryable': True,
+                'next_retry_at': {'$lte': now},
+            },
+        ],
+    }
+
+
+async def _automation_queue_tick() -> dict:
+    now = datetime.utcnow()
+    summary = {'checked': 0, 'processed': 0, 'success': 0, 'partial_success': 0,
+               'failed_retryable': 0, 'failed_permanent': 0}
+    cursor = db.comments.find(_automation_queue_due_query(now)).sort('next_retry_at', 1).limit(
+        AUTOMATION_QUEUE_BATCH_SIZE
+    )
+    due = await cursor.to_list(AUTOMATION_QUEUE_BATCH_SIZE)
+    if not due:
+        logger.info('automation_queue_no_due_items')
+        return summary
+
+    for item in due:
+        if IS_SHUTTING_DOWN:
+            break
+        summary['checked'] += 1
+        comment_id = item.get('ig_comment_id') or item.get('igCommentId') or item.get('id')
+        media_id = item.get('media_id') or item.get('mediaId')
+        user_id = item.get('user_id')
+        instagram_account_id = item.get('instagramAccountId') or item.get('igUserId')
+        rule_id = item.get('rule_id') or item.get('ruleId')
+        attempts = int(item.get('attempts') or 0)
+        lock_until = datetime.utcnow() + timedelta(minutes=5)
+        try:
+            claimed = await db.comments.find_one_and_update(
+                {
+                    'id': item.get('id'),
+                    '$or': [
+                        {'queue_lock_until': {'$exists': False}},
+                        {'queue_lock_until': None},
+                        {'queue_lock_until': {'$lte': datetime.utcnow()}},
+                    ],
+                },
+                {'$set': {
+                    'action_status': 'processing',
+                    'actionStatus': 'processing',
+                    'queue_lock_until': lock_until,
+                    'last_queue_attempt_at': datetime.utcnow(),
+                    'updated': datetime.utcnow(),
+                }, '$inc': {'attempts': 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+        except TypeError:
+            claimed = await db.comments.find_one_and_update(
+                {'id': item.get('id')},
+                {'$set': {
+                    'action_status': 'processing',
+                    'actionStatus': 'processing',
+                    'queue_lock_until': lock_until,
+                    'last_queue_attempt_at': datetime.utcnow(),
+                    'updated': datetime.utcnow(),
+                }, '$inc': {'attempts': 1}},
+            )
+        if not claimed:
+            continue
+        logger.info('automation_queue_item_claimed comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
+                    comment_id, media_id, user_id, instagram_account_id, rule_id,
+                    item.get('action_status'), item.get('reply_status'), item.get('dm_status'),
+                    attempts + 1, item.get('next_retry_at'), item.get('skip_reason'))
+        try:
+            user_doc = await db.users.find_one({'id': user_id})
+            automation = await db.automations.find_one({'id': rule_id, 'user_id': user_id})
+            if not user_doc or not automation:
+                await db.comments.update_one(
+                    {'id': item.get('id')},
+                    {'$set': {
+                        'action_status': 'failed_permanent',
+                        'actionStatus': 'failed_permanent',
+                        'skip_reason': 'missing_user_or_rule',
+                        'skipReason': 'missing_user_or_rule',
+                        'queue_lock_until': None,
+                        'updated': datetime.utcnow(),
+                    }},
+                )
+                logger.info('automation_queue_item_failed_permanent comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s reason=missing_user_or_rule',
+                            comment_id, media_id, user_id, instagram_account_id, rule_id)
+                summary['failed_permanent'] += 1
+                continue
+            account_doc = await db.instagram_accounts.find_one({
+                'userId': user_id,
+                '$or': [
+                    {'id': item.get('instagramAccountDbId') or item.get('instagram_account_id')},
+                    {'instagramAccountId': instagram_account_id},
+                    {'igUserId': instagram_account_id},
+                ],
+            })
+            if account_doc:
+                user_doc = _with_instagram_account_context(user_doc, account_doc)
+            logger.info('automation_queue_item_processing_started comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s attempt=%s',
+                        comment_id, media_id, user_id, instagram_account_id, rule_id, attempts + 1)
+            result = await _run_and_record_action(
+                user_doc,
+                automation,
+                item.get('commenter_id'),
+                item.get('text') or '',
+                comment_doc_id=item.get('id'),
+                ig_comment_id=comment_id,
+                source='automation_queue',
+            )
+            action_status = (result or {}).get('action_status') if isinstance(result, dict) else None
+            saved = await db.comments.find_one({'id': item.get('id')}) or {}
+            action_status = action_status or saved.get('action_status') or 'failed_retryable'
+            update = {'queue_lock_until': None, 'updated': datetime.utcnow()}
+            if action_status == 'failed_retryable':
+                if attempts + 1 >= AUTOMATION_QUEUE_MAX_ATTEMPTS:
+                    action_status = 'failed_retry_exhausted'
+                    update.update({
+                        'action_status': action_status,
+                        'actionStatus': action_status,
+                        'next_retry_at': None,
+                        'skip_reason': 'max_attempts_reached',
+                        'skipReason': 'max_attempts_reached',
+                    })
+                    logger.info('automation_queue_item_failed_permanent comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s attempt=%s reason=max_attempts_reached',
+                                comment_id, media_id, user_id, instagram_account_id, rule_id,
+                                action_status, attempts + 1)
+                else:
+                    next_retry = _next_retry_time(attempts + 1)
+                    update.update({'next_retry_at': next_retry, 'queued': True})
+                    logger.info('automation_queue_item_rescheduled comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
+                                comment_id, media_id, user_id, instagram_account_id, rule_id,
+                                action_status, saved.get('reply_status'), saved.get('dm_status'),
+                                attempts + 1, next_retry, _failure_category_from_doc(saved))
+            elif action_status in ('success', 'partial_success'):
+                update.update({'queued': False, 'next_retry_at': None})
+            elif action_status == 'failed_permanent':
+                update.update({'queued': False, 'next_retry_at': None})
+            await db.comments.update_one({'id': item.get('id')}, {'$set': update})
+            logger.info('automation_queue_item_lock_released comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
+                        comment_id, media_id, user_id, instagram_account_id, rule_id,
+                        action_status, saved.get('reply_status'), saved.get('dm_status'),
+                        attempts + 1, update.get('next_retry_at'), _failure_category_from_doc(saved))
+            if action_status == 'success':
+                summary['success'] += 1
+                logger.info('automation_queue_item_processing_success comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s',
+                            comment_id, media_id, user_id, instagram_account_id, rule_id, action_status)
+            elif action_status == 'partial_success':
+                summary['partial_success'] += 1
+                logger.info('automation_queue_item_processing_partial_success comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s',
+                            comment_id, media_id, user_id, instagram_account_id, rule_id, action_status)
+            elif action_status == 'failed_retryable':
+                summary['failed_retryable'] += 1
+                logger.info('automation_queue_item_failed_retryable comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s reason=%s',
+                            comment_id, media_id, user_id, instagram_account_id, rule_id,
+                            _failure_category_from_doc(saved))
+            else:
+                summary['failed_permanent'] += 1
+            summary['processed'] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            next_retry = _next_retry_time(attempts + 1)
+            await db.comments.update_one(
+                {'id': item.get('id')},
+                {'$set': {
+                    'action_status': 'failed_retryable',
+                    'actionStatus': 'failed_retryable',
+                    'next_retry_at': next_retry,
+                    'queue_lock_until': None,
+                    'skip_reason': 'queue_processing_exception',
+                    'skipReason': 'queue_processing_exception',
+                    'updated': datetime.utcnow(),
+                }},
+            )
+            logger.exception('automation_queue_item_failed_retryable comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s next_retry_at=%s reason=queue_processing_exception',
+                             comment_id, media_id, user_id, instagram_account_id, rule_id, next_retry)
+            summary['failed_retryable'] += 1
+    return summary
+
+
+async def _automation_queue_loop():
+    logger.info('automation_queue_started interval=%s batch_size=%s max_attempts=%s',
+                AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE,
+                AUTOMATION_QUEUE_MAX_ATTEMPTS)
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
+        cycle_ok = True
+        cycle_err: Optional[BaseException] = None
+        try:
+            logger.info('automation_queue_tick_started')
+            summary = await _automation_queue_tick()
+            logger.info('automation_queue_tick_finished checked=%s processed=%s success=%s partial_success=%s failed_retryable=%s failed_permanent=%s',
+                        summary.get('checked'), summary.get('processed'),
+                        summary.get('success'), summary.get('partial_success'),
+                        summary.get('failed_retryable'), summary.get('failed_permanent'))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            cycle_ok = False
+            cycle_err = exc
+            logger.exception('automation_queue_tick_failed')
+        _bg_tick('automation_queue', success=cycle_ok, error=cycle_err)
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=AUTOMATION_QUEUE_INTERVAL_SECONDS)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(AUTOMATION_QUEUE_INTERVAL_SECONDS)
 
 
 async def _comment_poller_loop():
@@ -7034,6 +7512,9 @@ async def instagram_automation_health(user_id: str = Depends(get_current_user_id
         'config': {
             'comment_poller_interval_seconds': IG_POLL_INTERVAL_SECONDS,
             'comment_poller_enabled': IG_POLL_ENABLED,
+            'automation_queue_interval_seconds': AUTOMATION_QUEUE_INTERVAL_SECONDS,
+            'automation_queue_batch_size': AUTOMATION_QUEUE_BATCH_SIZE,
+            'automation_queue_max_attempts': AUTOMATION_QUEUE_MAX_ATTEMPTS,
             'follow_verifier_interval_seconds': FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS,
             'watchdog_interval_seconds': _WATCHDOG_INTERVAL_SECONDS,
         },
@@ -7111,11 +7592,11 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
             if summary['checked'] >= IG_POLL_COMMENT_BATCH_LIMIT:
                 summary['batch_limit_reached'] = True
                 break
-            if summary['replied'] + summary['failed'] >= IG_POLL_REPLY_CAP_PER_RUN:
-                logger.info('catchup_reply_cap_reached user_id=%s cap=%s',
+            cap_already_reached = summary['replied'] + summary['failed'] >= IG_POLL_REPLY_CAP_PER_RUN
+            if cap_already_reached:
+                logger.info('catchup_reply_cap_reached user_id=%s cap=%s; fetched comments will be queued only',
                             user_id, IG_POLL_REPLY_CAP_PER_RUN)
                 summary['reply_cap_reached'] = True
-                break
             try:
                 remaining = max(1, IG_POLL_COMMENT_BATCH_LIMIT - summary['checked'])
                 r = await c.get(
@@ -7135,9 +7616,9 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                     if summary['checked'] >= IG_POLL_COMMENT_BATCH_LIMIT:
                         summary['batch_limit_reached'] = True
                         break
-                    if summary['replied'] + summary['failed'] >= IG_POLL_REPLY_CAP_PER_RUN:
+                    queue_only = summary['replied'] + summary['failed'] >= IG_POLL_REPLY_CAP_PER_RUN
+                    if queue_only:
                         summary['reply_cap_reached'] = True
-                        break
                     commenter = cm.get('from') or {}
                     commenter_id = (
                         commenter.get('id') or cm.get('user_id') or cm.get('owner_id') or
@@ -7153,6 +7634,8 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                         'commenter_username': cm.get('username') or commenter.get('username') or commenter.get('name'),
                         'text': cm.get('text') or '',
                         'timestamp': cm.get('timestamp') or cm.get('created_time'),
+                        'force_queue': queue_only,
+                        'queue_reason': 'queued_rate_limit',
                     }, source='manual_catchup') or {}
                     reason = res.get('reason') or res.get('skip_reason')
                     if res.get('already_processed'):
@@ -7163,8 +7646,11 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                         summary['matched'] += 1
                         if res.get('action_status') in ('success', 'partial_success'):
                             summary['replied'] += 1
-                        elif res.get('action_status') == 'failed':
+                        elif res.get('action_status') in ('failed', 'failed_retryable', 'failed_permanent', 'failed_retry_exhausted'):
                             summary['failed'] += 1
+                        elif res.get('queued'):
+                            summary.setdefault('queued', 0)
+                            summary['queued'] += 1
             except Exception:
                 logger.exception('process_unreplied_comments per-media error media_id=%s', media_id)
                 summary['failed'] += 1
@@ -8718,6 +9204,10 @@ async def _startup():
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='comments_user_ig_created',
         )
+        await db.comments.create_index(
+            [('action_status', 1), ('next_retry_at', 1), ('queue_lock_until', 1)],
+            name='comments_automation_queue_due',
+        )
         await db.conversations.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='conversations_user_ig_created',
@@ -8851,6 +9341,7 @@ async def _startup():
         _register_bg_task('comment_poller', _comment_poller_loop)
     else:
         logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
+    _register_bg_task('automation_queue', _automation_queue_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
     # Watchdog last so it can supervise the others.
     _register_bg_task('watchdog', _watchdog_loop)

@@ -186,8 +186,8 @@ def test_reply_disabled_dm_unavailable_records_failed(monkeypatch):
 
     assert saved['reply_status'] == 'disabled'
     assert saved['dm_status'] == 'failed'
-    assert saved['action_status'] == 'failed'
-    assert result['action_status'] == 'failed'
+    assert saved['action_status'] == 'failed_permanent'
+    assert result['action_status'] == 'failed_permanent'
 
 
 def test_reply_enabled_dm_disabled_records_success(monkeypatch):
@@ -270,3 +270,159 @@ def test_comment_diagnostics_is_scoped_and_redacted(monkeypatch):
     assert 'private full comment text' not in str(result)
     assert 'accessToken' not in str(result)
     assert result['dm_failure_reason'] == 'recipient_unavailable'
+
+
+def test_pending_comment_is_processed_by_queue_tick(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Thanks'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+    )], comments=[{
+        'id': 'queued1',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'queuedComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': '🔥👏',
+        'matched': True,
+        'rule_id': 'auto1',
+        'reply_status': 'pending',
+        'dm_status': 'disabled',
+        'action_status': 'pending',
+        'next_retry_at': now - timedelta(seconds=1),
+        'attempts': 0,
+    }])
+
+    async def reply_ok(*_args):
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['processed'] == 1
+    assert saved['reply_status'] == 'success'
+    assert saved['action_status'] == 'success'
+    assert saved['attempts'] == 1
+    assert saved['queue_lock_until'] is None
+
+
+def test_retryable_queue_failure_is_rescheduled(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Link'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_dm'}],
+    )], comments=[{
+        'id': 'queued2',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'queuedDm',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'reply_status': 'disabled',
+        'dm_status': 'pending',
+        'action_status': 'pending',
+        'next_retry_at': now - timedelta(seconds=1),
+        'attempts': 0,
+    }])
+
+    async def dm_temp(*_args):
+        return {'ok': False, 'failure_reason': 'temporary_graph_error', 'retryable': True}
+
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_temp)
+
+    summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['failed_retryable'] == 1
+    assert saved['dm_status'] == 'failed'
+    assert saved['action_status'] == 'failed_retryable'
+    assert saved['next_retry_at'] is not None
+    assert saved['attempts'] == 1
+
+
+def test_queue_does_not_duplicate_successful_public_reply(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_reply_and_dm_automation()], comments=[{
+        'id': 'queued3',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'partialRetry',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'dm_status': 'failed',
+        'dm_failure_retryable': True,
+        'dm_failure_reason': 'temporary_graph_error',
+        'action_status': 'partial_success',
+        'next_retry_at': now - timedelta(seconds=1),
+        'attempts': 0,
+    }])
+    calls = []
+
+    async def reply_ok(*_args):
+        calls.append('reply')
+        return {'ok': True}
+
+    async def dm_ok(*_args):
+        calls.append('dm')
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_ok)
+
+    summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['success'] == 1
+    assert calls == ['dm']
+    assert saved['reply_status'] == 'success'
+    assert saved['dm_status'] == 'success'
+    assert saved['action_status'] == 'success'
+
+
+def test_why_not_replied_explains_queued_comment(monkeypatch):
+    now = datetime.utcnow()
+    _install_db(monkeypatch, [], comments=[{
+        'id': 'queuedWhy',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'ig_comment_id': 'whyComment',
+        'media_id': 'media1',
+        'text': 'private body',
+        'matched': True,
+        'rule_id': 'auto1',
+        'reply_status': 'pending',
+        'dm_status': 'disabled',
+        'action_status': 'pending',
+        'skip_reason': 'queued_rate_limit',
+        'next_retry_at': now,
+        'attempts': 2,
+        'queued': True,
+    }])
+
+    result = _run(server.comment_why_not_replied('whyComment', user_id='u1'))
+
+    assert result['eligible'] is True
+    assert result['queued'] is True
+    assert result['skip_reason'] == 'queued_rate_limit'
+    assert result['attempts'] == 2
+    assert 'private body' not in str(result)
