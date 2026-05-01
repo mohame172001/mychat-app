@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
 os.environ.setdefault('BACKEND_PUBLIC_URL', 'https://example.com')
@@ -59,6 +61,16 @@ def _user_doc():
     }
 
 
+def _reply_provider_ok(reply_id='reply1'):
+    return {
+        'ok': True,
+        'status_code': 200,
+        'provider_response_ok': True,
+        'provider_comment_id': reply_id,
+        'body': {'id': reply_id},
+    }
+
+
 def _install_db(monkeypatch, automations, comments=None):
     fake_db = FakeDB(
         _account(id='accA', userId='u1', instagramAccountId='igA',
@@ -96,7 +108,7 @@ def test_reply_enabled_dm_success_records_success(monkeypatch):
 
     async def reply_ok(*_args):
         calls.append('reply')
-        return {'ok': True}
+        return _reply_provider_ok()
 
     async def dm_ok(*_args):
         calls.append('dm')
@@ -110,6 +122,81 @@ def test_reply_enabled_dm_success_records_success(monkeypatch):
 
     assert calls == ['reply', 'dm']
     assert saved['reply_status'] == 'success'
+    assert saved['reply_provider_response_ok'] is True
+    assert saved['reply_provider_comment_id'] == 'reply1'
+    assert saved['dm_status'] == 'success'
+    assert saved['action_status'] == 'success'
+    assert result['action_status'] == 'success'
+
+
+def test_reply_ok_without_provider_proof_does_not_mark_success(monkeypatch):
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Thanks'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+    )])
+
+    async def reply_without_proof(*_args):
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_without_proof)
+
+    result = _run(server._handle_new_comment(_user_doc(), _comment_payload(), source='webhook'))
+    saved = db.comments.docs[0]
+
+    assert saved['reply_status'] == 'failed'
+    assert saved['reply_provider_response_ok'] is False
+    assert saved['reply_failure_reason'] == 'missing_provider_confirmation'
+    assert saved['action_status'] == 'failed_retryable'
+    assert result['action_status'] == 'failed_retryable'
+
+
+def test_reply_api_failure_does_not_set_reply_success(monkeypatch):
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Thanks'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+    )])
+
+    async def reply_failed(*_args):
+        return {'ok': False, 'status_code': 400, 'failure_reason': 'permission_error', 'retryable': False}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_failed)
+
+    result = _run(server._handle_new_comment(_user_doc(), _comment_payload(), source='webhook'))
+    saved = db.comments.docs[0]
+
+    assert saved.get('replied') is False
+    assert saved['reply_status'] == 'failed'
+    assert saved['reply_provider_response_ok'] is False
+    assert saved['reply_failure_reason'] == 'permission_error'
+    assert saved['action_status'] == 'failed_permanent'
+    assert result['action_status'] == 'failed_permanent'
+
+
+def test_dm_success_alone_does_not_set_reply_success(monkeypatch):
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Here is the link'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_dm'}],
+    )])
+
+    async def dm_ok(*_args):
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_ok)
+
+    result = _run(server._handle_new_comment(_user_doc(), _comment_payload(), source='webhook'))
+    saved = db.comments.docs[0]
+
+    assert saved['reply_status'] == 'disabled'
+    assert saved.get('reply_provider_response_ok') is not True
     assert saved['dm_status'] == 'success'
     assert saved['action_status'] == 'success'
     assert result['action_status'] == 'success'
@@ -135,7 +222,7 @@ def test_dm_recipient_unavailable_does_not_block_public_reply(monkeypatch):
 
     async def reply_ok(*_args):
         calls.append('reply')
-        return {'ok': True}
+        return _reply_provider_ok()
 
     async def dm_unavailable(*_args):
         calls.append('dm')
@@ -156,6 +243,7 @@ def test_dm_recipient_unavailable_does_not_block_public_reply(monkeypatch):
     assert calls == ['reply', 'dm']
     assert saved['replied'] is True
     assert saved['reply_status'] == 'success'
+    assert saved['reply_provider_response_ok'] is True
     assert saved['dm_status'] == 'failed'
     assert saved['dm_failure_reason'] == 'recipient_unavailable'
     assert saved['action_status'] == 'partial_success'
@@ -200,7 +288,7 @@ def test_reply_enabled_dm_disabled_records_success(monkeypatch):
     )])
 
     async def reply_ok(*_args):
-        return {'ok': True}
+        return _reply_provider_ok()
 
     monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
 
@@ -219,7 +307,7 @@ def test_temporary_dm_error_retries_dm_without_duplicate_reply(monkeypatch):
 
     async def reply_ok(*_args):
         calls.append('reply')
-        return {'ok': True}
+        return _reply_provider_ok()
 
     dm_results = [
         {'ok': False, 'failure_reason': 'temporary_graph_error', 'retryable': True},
@@ -247,6 +335,54 @@ def test_temporary_dm_error_retries_dm_without_duplicate_reply(monkeypatch):
     assert saved['action_status'] == 'success'
 
 
+def test_legacy_success_without_provider_proof_retries_public_reply(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Thanks'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+    )], comments=[{
+        'id': 'legacy1',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'legacyComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+        'timestamp': now,
+    }])
+    calls = []
+
+    async def reply_ok(*_args):
+        calls.append('reply')
+        return _reply_provider_ok('reply_after_legacy')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(),
+        _comment_payload(comment_id='legacyComment', text='PDF'),
+        source='polling',
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['reprocessed'] is True
+    assert calls == ['reply']
+    assert saved['reply_status'] == 'success'
+    assert saved['reply_provider_response_ok'] is True
+    assert saved['reply_provider_comment_id'] == 'reply_after_legacy'
+    assert saved['action_status'] == 'success'
+
+
 def test_comment_diagnostics_is_scoped_and_redacted(monkeypatch):
     db = _install_db(monkeypatch, [], comments=[{
         'id': 'doc1',
@@ -256,6 +392,8 @@ def test_comment_diagnostics_is_scoped_and_redacted(monkeypatch):
         'media_id': 'media1',
         'text': 'private full comment text',
         'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'replyDiag',
         'dm_status': 'failed',
         'action_status': 'partial_success',
         'dm_failure_reason': 'recipient_unavailable',
@@ -270,6 +408,145 @@ def test_comment_diagnostics_is_scoped_and_redacted(monkeypatch):
     assert 'private full comment text' not in str(result)
     assert 'accessToken' not in str(result)
     assert result['dm_failure_reason'] == 'recipient_unavailable'
+    assert result['reply_provider_confirmation_exists'] is True
+    assert result['reply_provider_comment_id_exists'] is True
+
+
+def test_why_not_replied_exposes_legacy_provider_proof_state(monkeypatch):
+    _install_db(monkeypatch, [], comments=[{
+        'id': 'legacyWhy',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'ig_comment_id': 'legacyWhyComment',
+        'media_id': 'media1',
+        'text': 'private body',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+    }])
+
+    result = _run(server.comment_why_not_replied('legacyWhyComment', user_id='u1'))
+
+    assert result['reply_provider_confirmation_exists'] is False
+    assert result['reply_provider_comment_id_exists'] is False
+    assert result['legacy_reply_success_without_provider_confirmation'] is True
+    assert result['manual_retry_allowed'] is True
+    assert result['thinks_replied_reason'] == 'legacy_success_without_provider_confirmation'
+
+
+def test_retry_reply_endpoint_enqueues_legacy_false_success(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_reply_and_dm_automation()], comments=[{
+        'id': 'legacyRetry',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'legacyRetryComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+        'timestamp': now,
+    }])
+
+    result = _run(server.comment_retry_reply('legacyRetryComment', user_id='u1'))
+    saved = db.comments.docs[0]
+
+    assert result['ok'] is True
+    assert saved['reply_status'] == 'pending'
+    assert saved['action_status'] == 'pending'
+    assert saved['queued'] is True
+    assert saved['next_retry_at'] is not None
+    assert saved['reply_provider_response_ok'] is False
+
+
+def test_retry_reply_endpoint_refuses_provider_confirmed_reply(monkeypatch):
+    _install_db(monkeypatch, [_reply_and_dm_automation()], comments=[{
+        'id': 'proofedRetry',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'ig_comment_id': 'proofedRetryComment',
+        'media_id': 'media1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'replyProof',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+    }])
+
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.comment_retry_reply('proofedRetryComment', user_id='u1'))
+
+    assert exc.value.status_code == 409
+
+
+def test_legacy_repair_moves_false_success_to_retry_queue(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Thanks'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+        activationStartedAt=now - timedelta(minutes=5),
+    )], comments=[{
+        'id': 'legacyRepair',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'legacyRepairComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+        'effective_timestamp': now,
+    }, {
+        'id': 'proofRepair',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'ig_comment_id': 'proofRepairComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'replyProof',
+        'dm_status': 'disabled',
+        'action_status': 'success',
+        'effective_timestamp': now,
+    }])
+
+    summary = _run(server._repair_legacy_reply_success_without_provider_proof())
+    legacy = next(doc for doc in db.comments.docs if doc['id'] == 'legacyRepair')
+    proofed = next(doc for doc in db.comments.docs if doc['id'] == 'proofRepair')
+
+    assert summary['repaired'] == 1
+    assert legacy['reply_status'] == 'pending'
+    assert legacy['action_status'] == 'failed_retryable'
+    assert legacy['skip_reason'] == 'legacy_success_without_provider_confirmation'
+    assert legacy['next_retry_at'] is not None
+    assert proofed['reply_status'] == 'success'
+    assert proofed['reply_provider_response_ok'] is True
 
 
 def test_pending_comment_is_processed_by_queue_tick(monkeypatch):
@@ -299,7 +576,7 @@ def test_pending_comment_is_processed_by_queue_tick(monkeypatch):
     }])
 
     async def reply_ok(*_args):
-        return {'ok': True}
+        return _reply_provider_ok()
 
     monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
 
@@ -369,6 +646,10 @@ def test_queue_does_not_duplicate_successful_public_reply(monkeypatch):
         'rule_id': 'auto1',
         'replied': True,
         'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply_partial',
+        'reply_success_source': 'webhook',
+        'replied_at': now - timedelta(seconds=10),
         'dm_status': 'failed',
         'dm_failure_retryable': True,
         'dm_failure_reason': 'temporary_graph_error',
@@ -380,7 +661,7 @@ def test_queue_does_not_duplicate_successful_public_reply(monkeypatch):
 
     async def reply_ok(*_args):
         calls.append('reply')
-        return {'ok': True}
+        return _reply_provider_ok()
 
     async def dm_ok(*_args):
         calls.append('dm')

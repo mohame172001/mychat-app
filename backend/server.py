@@ -433,6 +433,46 @@ def _dm_failure_retryable_from_doc(doc: dict) -> bool:
     return reason in ('rate_limited', 'temporary_graph_error')
 
 
+def _reply_provider_proof_exists(doc: Optional[dict]) -> bool:
+    doc = doc or {}
+    return bool(doc.get('reply_provider_response_ok') is True)
+
+
+def _reply_provider_comment_id_exists(doc: Optional[dict]) -> bool:
+    doc = doc or {}
+    return bool(doc.get('reply_provider_comment_id') or doc.get('reply_id'))
+
+
+def _reply_marked_success_without_provider_proof(doc: Optional[dict]) -> bool:
+    doc = doc or {}
+    reply_status = doc.get('reply_status') or doc.get('replyStatus')
+    return bool(
+        (doc.get('replied') or _status_is_success(reply_status))
+        and not _reply_provider_proof_exists(doc)
+    )
+
+
+def _reply_result_has_provider_proof(result: Optional[dict]) -> bool:
+    result = result or {}
+    return bool(result.get('ok') and result.get('provider_response_ok') is True)
+
+
+def _normalize_reply_result_for_provider_proof(result: Optional[dict]) -> dict:
+    result = dict(result or {})
+    if _reply_result_has_provider_proof(result):
+        return result
+    if result.get('ok'):
+        # The public comment reply path must only be treated as success after
+        # Meta confirms the /replies request. Older wrappers and tests returned
+        # ok=True without provider proof; keep that retryable instead of
+        # creating another false success.
+        result['ok'] = False
+        result.setdefault('failure_reason', 'missing_provider_confirmation')
+        result.setdefault('retryable', True)
+        result.setdefault('safe_label', 'Missing public reply provider confirmation')
+    return result
+
+
 def _env_int_clamped(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
@@ -1530,7 +1570,10 @@ async def reply_to_ig_comment_detailed(access_token: str, ig_comment_id: str, te
                     body = r.json()
                 except Exception:
                     body = {}
-                return _detailed_send_result(True, r.status_code, body=body)
+                result = _detailed_send_result(True, r.status_code, body=body)
+                result['provider_response_ok'] = True
+                result['provider_comment_id'] = body.get('id') or body.get('comment_id')
+                return result
             safe_error = _safe_provider_error_payload(r.text[:500])
             classified = classify_instagram_send_error(safe_error, r.status_code)
             logger.error('reply_to_ig_comment_failed status=%s ms=%s reason=%s retryable=%s',
@@ -1558,8 +1601,11 @@ async def _call_reply_to_ig_comment_detailed(access_token: str, ig_comment_id: s
         return await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
     if reply_to_ig_comment is not _ORIGINAL_REPLY_TO_IG_COMMENT:
         ok = await reply_to_ig_comment(access_token, ig_comment_id, text)
-        return _detailed_send_result(bool(ok), 200 if ok else None,
-                                     error={'message': 'patched_reply_to_ig_comment_failed'})
+        result = _detailed_send_result(bool(ok), 200 if ok else None,
+                                       error={'message': 'patched_reply_to_ig_comment_failed'})
+        if ok:
+            result['provider_response_ok'] = True
+        return result
     return await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
 
 
@@ -1703,15 +1749,12 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
                     already_replied = bool(
                         existing_comment
-                        and (
-                            existing_comment.get('replied')
-                            or _status_is_success(existing_comment.get('reply_status'))
-                            or _status_is_success(existing_comment.get('replyStatus'))
-                        )
+                        and _reply_provider_proof_exists(existing_comment)
                     )
                 if already_replied:
                     ok = True
-                    reply_result = {'ok': True, 'failure_reason': None, 'retryable': False}
+                    reply_result = {'ok': True, 'provider_response_ok': True,
+                                    'failure_reason': None, 'retryable': False}
                     logger.info('comment_reply_duplicate_skipped ig_comment_id=%s rule_id=%s',
                                 comment_context['ig_comment_id'], automation.get('id'))
                 else:
@@ -1729,6 +1772,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         reply_result = await _call_reply_to_ig_comment_detailed(
                             access_token, comment_context['ig_comment_id'], msg_text
                         )
+                        reply_result = _normalize_reply_result_for_provider_proof(reply_result)
                     ok = bool(reply_result.get('ok'))
                 logger.info('Flow comment reply on %s rule=%s ok=%s reason=%s',
                             comment_context['ig_comment_id'], automation.get('id'), ok,
@@ -1751,14 +1795,20 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 ok_all = ok_all and bool(ok)
                 if comment_context.get('comment_doc_id'):
                     now = datetime.utcnow()
+                    provider_ok = _reply_result_has_provider_proof(reply_result)
                     update = {
-                        'reply_status': 'success' if ok else 'failed',
-                        'replyStatus': 'success' if ok else 'failed',
+                        'reply_status': 'success' if provider_ok else 'failed',
+                        'replyStatus': 'success' if provider_ok else 'failed',
+                        'reply_attempted_at': now,
+                        'reply_provider_status': reply_result.get('status_code'),
+                        'reply_provider_response_ok': bool(provider_ok),
+                        'reply_provider_comment_id': reply_result.get('provider_comment_id'),
+                        'reply_success_source': (flow_source or 'runtime') if provider_ok else None,
                         'last_attempt_at': now,
                         'updated': now,
                         **_send_failure_fields('reply', reply_result),
                     }
-                    if ok:
+                    if provider_ok:
                         update.update({
                             'replied': True,
                             'reply_text': msg_text,
@@ -2618,22 +2668,46 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     text = (data.text or '').strip()
     if not text:
         raise HTTPException(400, 'Empty reply')
-    url = f'https://graph.instagram.com/{ig_comment_id}/replies'
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(url, data={'message': text, 'access_token': access_token})
-            if r.status_code != 200:
-                logger.error('Comment reply error %s: %s', r.status_code, _redact_secrets(r.text[:500]))
-                raise HTTPException(r.status_code, f'Graph API error: {r.text}')
-            body = r.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception('Comment reply failed')
-        raise HTTPException(500, str(e))
+    attempted_at = datetime.utcnow()
+    result = _normalize_reply_result_for_provider_proof(
+        await _call_reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
+    )
+    if not _reply_result_has_provider_proof(result):
+        await db.comments.update_one(
+            {'id': cid},
+            {'$set': {
+                'reply_status': 'failed',
+                'replyStatus': 'failed',
+                'reply_attempted_at': attempted_at,
+                'reply_provider_status': result.get('status_code'),
+                'reply_provider_response_ok': False,
+                'reply_failure_reason': result.get('failure_reason') or 'comment_reply_failed',
+                'reply_failure_retryable': bool(result.get('retryable')),
+                'last_attempt_at': datetime.utcnow(),
+                'updated': datetime.utcnow(),
+            }}
+        )
+        raise HTTPException(
+            502,
+            f"Graph API reply failed: {result.get('failure_reason') or 'provider_error'}"
+        )
+    body = result.get('body') or {}
     await db.comments.update_one(
         {'id': cid},
-        {'$set': {'replied': True, 'reply_text': text, 'reply_id': body.get('id')}}
+        {'$set': {
+            'replied': True,
+            'reply_text': text,
+            'reply_id': body.get('id'),
+            'reply_status': 'success',
+            'replyStatus': 'success',
+            'reply_provider_status': result.get('status_code'),
+            'reply_provider_response_ok': True,
+            'reply_provider_comment_id': result.get('provider_comment_id') or body.get('id') or body.get('comment_id'),
+            'reply_success_source': 'manual_reply',
+            'reply_attempted_at': attempted_at,
+            'replied_at': datetime.utcnow(),
+            'replySentAt': datetime.utcnow(),
+        }}
     )
     return {'ok': True, 'graph_reply_id': body.get('id')}
 
@@ -2668,6 +2742,12 @@ async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_curren
         'last_attempt_at': comment.get('last_attempt_at'),
         'replied_at': comment.get('replied_at') or comment.get('replySentAt'),
         'dm_sent_at': comment.get('dm_sent_at') or comment.get('dmSentAt'),
+        'reply_attempted_at': comment.get('reply_attempted_at'),
+        'reply_provider_status': comment.get('reply_provider_status'),
+        'reply_provider_response_ok': bool(comment.get('reply_provider_response_ok') is True),
+        'reply_provider_confirmation_exists': _reply_provider_proof_exists(comment),
+        'reply_provider_comment_id_exists': _reply_provider_comment_id_exists(comment),
+        'legacy_reply_success_without_provider_confirmation': _reply_marked_success_without_provider_proof(comment),
     }
 
 
@@ -2696,6 +2776,18 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
         or comment.get('reply_failure_retryable')
         or comment.get('dm_failure_retryable')
     )
+    provider_confirmation_exists = _reply_provider_proof_exists(comment)
+    legacy_reply_success = _reply_marked_success_without_provider_proof(comment)
+    thinks_replied_reason = None
+    if provider_confirmation_exists:
+        thinks_replied_reason = 'provider_confirmed_public_reply'
+    elif legacy_reply_success:
+        thinks_replied_reason = 'legacy_success_without_provider_confirmation'
+    elif comment.get('replied') is True:
+        thinks_replied_reason = 'legacy_replied_flag_without_provider_confirmation'
+    manual_retry_allowed = bool(legacy_reply_success or (
+        reply_status in ('failed', 'pending') and not provider_confirmation_exists
+    ))
     return {
         'eligible': bool(comment.get('matched')) and action_status not in (
             'skipped', 'skipped_ineligible', 'failed_permanent', 'failed_retry_exhausted'
@@ -2719,6 +2811,73 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
         'last_queue_attempt_at': comment.get('last_queue_attempt_at'),
         'queue_lock_until': comment.get('queue_lock_until'),
         'failure_category': _failure_category_from_doc(comment),
+        'replied_at': comment.get('replied_at') or comment.get('replySentAt'),
+        'reply_attempted_at': comment.get('reply_attempted_at'),
+        'reply_provider_status': comment.get('reply_provider_status'),
+        'reply_provider_confirmation_exists': provider_confirmation_exists,
+        'reply_provider_response_ok': bool(comment.get('reply_provider_response_ok') is True),
+        'reply_provider_comment_id_exists': _reply_provider_comment_id_exists(comment),
+        'legacy_reply_success_without_provider_confirmation': legacy_reply_success,
+        'thinks_replied_reason': thinks_replied_reason,
+        'manual_retry_allowed': manual_retry_allowed,
+    }
+
+
+@api.post('/comments/{comment_id}/retry-reply')
+async def comment_retry_reply(comment_id: str, user_id: str = Depends(get_current_user_id)):
+    """Safely enqueue a public reply retry for a comment without provider proof."""
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
+    comment = None
+    for field in ('id', 'ig_comment_id', 'igCommentId'):
+        comment = await db.comments.find_one({**scoped, field: comment_id})
+        if comment:
+            break
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    if _reply_provider_proof_exists(comment):
+        raise HTTPException(409, 'Public reply already has provider confirmation')
+    rule_id = comment.get('rule_id') or comment.get('ruleId')
+    if not rule_id or not comment.get('matched'):
+        raise HTTPException(400, 'Comment is not eligible for automation reply retry')
+    now = datetime.utcnow()
+    await db.comments.update_one(
+        {'id': comment.get('id')},
+        {'$set': {
+            'replied': False,
+            'reply_status': 'pending',
+            'replyStatus': 'pending',
+            'reply_failure_reason': 'manual_retry_requested',
+            'reply_failure_retryable': True,
+            'reply_provider_response_ok': False,
+            'reply_provider_comment_id': None,
+            'reply_success_source': None,
+            'action_status': 'pending',
+            'actionStatus': 'pending',
+            'skip_reason': 'manual_retry_requested',
+            'skipReason': 'manual_retry_requested',
+            'queued': True,
+            'next_retry_at': now,
+            'queue_lock_until': None,
+            'updated': now,
+        }}
+    )
+    logger.info(
+        'manual_retry_reply_enqueued comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s',
+        comment.get('ig_comment_id') or comment.get('igCommentId') or comment.get('id'),
+        comment.get('media_id') or comment.get('mediaId'),
+        user_id,
+        account.get('instagramAccountId') or account.get('igUserId') or account.get('id'),
+        rule_id,
+    )
+    return {
+        'ok': True,
+        'commentId': comment.get('ig_comment_id') or comment.get('igCommentId') or comment.get('id'),
+        'action_status': 'pending',
+        'reply_status': 'pending',
+        'queued': True,
+        'next_retry_at': now,
+        'reason': 'manual_retry_requested',
     }
 
 
@@ -5662,7 +5821,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             or ('success' if existing.get('replied') else None)
         )
         previous_dm_status = existing.get('dm_status') or existing.get('dmStatus')
-        already_replied = bool(existing.get('replied')) or _status_is_success(previous_reply_status)
+        already_replied = _reply_provider_proof_exists(existing)
+        legacy_reply_success_without_proof = _reply_marked_success_without_provider_proof(existing)
         dm_succeeded_or_disabled = _status_is_success(previous_dm_status) or _status_is_disabled(previous_dm_status)
         dm_failed = str(previous_dm_status or '').lower() == 'failed'
         dm_retryable = dm_failed and _dm_failure_retryable_from_doc(existing)
@@ -5680,6 +5840,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
             or (already_replied and dm_retryable)
+            or legacy_reply_success_without_proof
         )
         if previous_status in ('pending', 'processing'):
             logger.info('comment_already_pending_queue comment_id=%s user=%s next_retry_at=%s',
@@ -5688,10 +5849,35 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     'action_status': previous_status, 'queued': True,
                     'reason': 'comment_already_pending_queue'}
         if already_replied and (previous_status in ('success', 'replied') or dm_succeeded_or_disabled):
-            logger.info('comment_already_replied_success ig_comment_id=%s user=%s',
-                        ig_comment_id, user_doc.get('email'))
+            logger.info(
+                'comment_already_replied_success ig_comment_id=%s user=%s '
+                'reply_status=%s action_status=%s replied_at=%s '
+                'reply_provider_response_ok=%s reply_provider_comment_id_exists=%s '
+                'reply_success_source=%s',
+                ig_comment_id,
+                user_doc.get('email'),
+                previous_reply_status,
+                previous_status,
+                existing.get('replied_at') or existing.get('replySentAt'),
+                bool(existing.get('reply_provider_response_ok') is True),
+                _reply_provider_comment_id_exists(existing),
+                existing.get('reply_success_source') or existing.get('source') or 'legacy_migration',
+            )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': 'skipped', 'reason': 'comment_already_replied_success'}
+        if legacy_reply_success_without_proof:
+            retry_existing = True
+            retry_reason = 'legacy_success_without_provider_confirmation'
+            existing_doc_id = existing.get('id')
+            existing_created = existing.get('created')
+            logger.warning(
+                'comment_retryable_failed_before ig_comment_id=%s user=%s source=%s reason=%s '
+                'reply_status=%s action_status=%s replied_at=%s reply_provider_response_ok=%s',
+                ig_comment_id, user_doc.get('email'), source, retry_reason,
+                previous_reply_status, previous_status,
+                existing.get('replied_at') or existing.get('replySentAt'),
+                bool(existing.get('reply_provider_response_ok') is True),
+            )
         if already_replied and dm_failed and not dm_retryable:
             logger.info('comment_already_partial_success ig_comment_id=%s user=%s dm_reason=%s',
                         ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
@@ -5702,7 +5888,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': previous_status or 'failed', 'reason': 'comment_already_dm_failed'}
-        if (
+        if retry_existing:
+            pass
+        elif (
             (previous_skip == 'missing_comment_timestamp' and effective_ts)
             or retryable_status
             or retryable_skip
@@ -5870,7 +6058,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         media_id,
     )
     action_status = 'pending' if matched else 'skipped'
-    existing_reply_status = existing.get('reply_status') if retry_existing and existing else None
+    legacy_reply_repair = retry_reason == 'legacy_success_without_provider_confirmation'
+    existing_reply_status = (
+        None if legacy_reply_repair else (existing.get('reply_status') if retry_existing and existing else None)
+    )
     existing_dm_status = existing.get('dm_status') if retry_existing and existing else None
     reply_status = existing_reply_status or (
         'pending' if matched and _automation_has_node_type(matched_rule, 'reply_comment') else 'disabled'
@@ -5891,7 +6082,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'commenter_id': commenter_id,
         'commenter_username': commenter_username,
         'text': comment_text,
-        'replied': bool(existing.get('replied')) if retry_existing and existing else False,
+        'replied': False if legacy_reply_repair else (
+            bool(existing.get('replied')) if retry_existing and existing else False
+        ),
         'source': source,                # 'webhook' or 'polling'
         'rule_id': rule_id,
         'ruleId': rule_id,
@@ -5902,11 +6095,18 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'replyStatus': reply_status,
         'dm_status': dm_status,
         'dmStatus': dm_status,
-        'reply_failure_reason': existing.get('reply_failure_reason') if retry_existing and existing else None,
+        'reply_failure_reason': (
+            'legacy_success_without_provider_confirmation'
+            if legacy_reply_repair else (existing.get('reply_failure_reason') if retry_existing and existing else None)
+        ),
         'dm_failure_reason': existing.get('dm_failure_reason') if retry_existing and existing else None,
-        'reply_failure_retryable': existing.get('reply_failure_retryable') if retry_existing and existing else False,
+        'reply_failure_retryable': True if legacy_reply_repair else (
+            existing.get('reply_failure_retryable') if retry_existing and existing else False
+        ),
         'dm_failure_retryable': existing.get('dm_failure_retryable') if retry_existing and existing else False,
-        'replied_at': existing.get('replied_at') if retry_existing and existing else None,
+        'replied_at': None if legacy_reply_repair else (
+            existing.get('replied_at') if retry_existing and existing else None
+        ),
         'dm_sent_at': existing.get('dm_sent_at') if retry_existing and existing else None,
         'last_attempt_at': now if matched else None,
         'skip_reason': cutoff_skip_reason,
@@ -5930,6 +6130,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'updated': now,
         'created': existing_created or now,
     }
+    if legacy_reply_repair:
+        doc.update({
+            'reply_provider_status': None,
+            'reply_provider_response_ok': False,
+            'reply_provider_comment_id': None,
+            'reply_success_source': None,
+            'skip_reason': 'legacy_success_without_provider_confirmation',
+            'skipReason': 'legacy_success_without_provider_confirmation',
+            'queued': True,
+            'next_retry_at': now,
+        })
     if retry_existing:
         await db.comments.update_one(
             {'id': doc['id'], 'user_id': user_id},
@@ -7028,6 +7239,7 @@ def _register_bg_task(name: str, factory):
         'restarts': prior_restarts,
         'consecutive_failures': 0,
     }
+    logger.info('background_task_registered name=%s running=%s', name, not task.done())
     return _BG_TASKS[name]
 
 
@@ -7292,6 +7504,87 @@ async def _automation_queue_tick() -> dict:
             logger.exception('automation_queue_item_failed_retryable comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s next_retry_at=%s reason=queue_processing_exception',
                              comment_id, media_id, user_id, instagram_account_id, rule_id, next_retry)
             summary['failed_retryable'] += 1
+    return summary
+
+
+async def _repair_legacy_reply_success_without_provider_proof(limit: int = 500) -> dict:
+    """Move legacy false public-reply successes back into the retry queue.
+
+    Older records could have replied=True/reply_status=success without any
+    Meta /replies confirmation. Only repair comments that still look eligible;
+    proofed replies, bot-owned comments, and historical ineligible comments are
+    left untouched.
+    """
+    now = datetime.utcnow()
+    summary = {'checked': 0, 'repaired': 0, 'skipped': 0}
+    query = {
+        'reply_provider_response_ok': {'$ne': True},
+        '$or': [
+            {'replied': True},
+            {'reply_status': {'$in': ['success', 'sent', 'replied']}},
+            {'replyStatus': {'$in': ['success', 'sent', 'replied']}},
+        ],
+    }
+    try:
+        docs = await db.comments.find(query).limit(limit).to_list(limit)
+    except Exception as exc:
+        logger.warning('legacy_reply_success_repair_load_failed err=%s', type(exc).__name__)
+        return {**summary, 'error': type(exc).__name__}
+    for comment in docs:
+        summary['checked'] += 1
+        if _reply_provider_proof_exists(comment):
+            summary['skipped'] += 1
+            continue
+        rule_id = comment.get('rule_id') or comment.get('ruleId')
+        user_id = comment.get('user_id')
+        media_id = comment.get('media_id') or comment.get('mediaId')
+        commenter_id = comment.get('commenter_id') or comment.get('instagramUserId')
+        ig_account_id = comment.get('instagramAccountId') or comment.get('igUserId')
+        if not rule_id or not user_id or not ig_account_id:
+            summary['skipped'] += 1
+            continue
+        if commenter_id and commenter_id == ig_account_id:
+            summary['skipped'] += 1
+            continue
+        rule = await db.automations.find_one({'id': rule_id, 'user_id': user_id})
+        if not rule:
+            summary['skipped'] += 1
+            continue
+        comment_ts = _parse_graph_datetime(
+            comment.get('effective_timestamp')
+            or comment.get('commentTimestamp')
+            or comment.get('timestamp')
+        )
+        activation_ts = _parse_graph_datetime(rule.get('activationStartedAt') or rule.get('createdAt'))
+        historical_allowed = _historical_catchup_enabled_for_media(rule, media_id)
+        if activation_ts and comment_ts and comment_ts <= activation_ts and not historical_allowed:
+            summary['skipped'] += 1
+            continue
+        await db.comments.update_one(
+            {'id': comment.get('id'), 'user_id': user_id},
+            {'$set': {
+                'replied': False,
+                'reply_status': 'pending',
+                'replyStatus': 'pending',
+                'reply_failure_reason': 'legacy_success_without_provider_confirmation',
+                'reply_failure_retryable': True,
+                'reply_provider_response_ok': False,
+                'reply_provider_comment_id': None,
+                'reply_success_source': None,
+                'action_status': 'failed_retryable',
+                'actionStatus': 'failed_retryable',
+                'skip_reason': 'legacy_success_without_provider_confirmation',
+                'skipReason': 'legacy_success_without_provider_confirmation',
+                'queued': True,
+                'next_retry_at': now,
+                'queue_lock_until': None,
+                'updated': now,
+            }}
+        )
+        summary['repaired'] += 1
+    if summary['checked']:
+        logger.info('legacy_reply_success_repair checked=%s repaired=%s skipped=%s',
+                    summary['checked'], summary['repaired'], summary['skipped'])
     return summary
 
 
@@ -9337,10 +9630,16 @@ async def _startup():
         )
     except Exception as e:
         logger.warning('comment rule activation migration: %s', e)
+    try:
+        await _repair_legacy_reply_success_without_provider_proof()
+    except Exception as e:
+        logger.warning('legacy reply provider-proof repair: %s', e)
     if IG_POLL_ENABLED:
         _register_bg_task('comment_poller', _comment_poller_loop)
     else:
         logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
+    logger.info('automation_queue_registering interval=%s batch_size=%s',
+                AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE)
     _register_bg_task('automation_queue', _automation_queue_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
     # Watchdog last so it can supervise the others.

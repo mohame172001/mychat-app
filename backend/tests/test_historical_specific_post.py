@@ -302,6 +302,10 @@ def test_already_replied_not_duplicated(monkeypatch):
         'igUserId': 'biz1',
         'ig_comment_id': 'c_already',
         'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply_c_already',
+        'replied_at': datetime.utcnow() - timedelta(minutes=4),
         'action_status': 'success',
         'created': datetime.utcnow() - timedelta(minutes=5),
     }

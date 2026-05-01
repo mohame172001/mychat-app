@@ -274,6 +274,10 @@ def test_polling_dedup_after_webhook_success(monkeypatch):
         'igUserId': 'biz1',
         'ig_comment_id': 'c_dedup',
         'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply_dedup',
+        'replied_at': historical_ts,
         'action_status': 'success',
         'created': historical_ts,
     }

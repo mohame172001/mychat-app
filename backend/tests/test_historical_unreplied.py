@@ -267,6 +267,10 @@ def test_already_replied_historical_is_not_replied_again(monkeypatch):
         'igUserId': 'biz1',
         'ig_comment_id': 'c1',
         'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply_c1',
+        'replied_at': historical_ts,
         'action_status': 'success',
         'created': historical_ts,
     }
