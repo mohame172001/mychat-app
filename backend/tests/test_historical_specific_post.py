@@ -1,16 +1,17 @@
-"""Tests verifying that historical comment processing is always blocked.
+"""Tests for selected-post historical comment catch-up safety.
 
-Both legacy (processExistingComments) and newer (process_existing_unreplied_comments)
-flags are accepted at model level but IGNORED at runtime. No automation should
-reply to comments older than activationStartedAt regardless of flag values.
+Historical processing is allowed only for one explicitly selected media/post.
+Broad rules must never reply to pre-rule historical comments, even if a legacy
+flag is present.
 
 Coverage:
-1. Broad rule flag is always ignored.
-2. Specific-post rule flag is also always ignored.
-3. Already replied comment is not duplicated (dedup layer).
-4. Catch-up endpoint uses stored comment docs (not Graph API).
-5. Historical docs are still skipped even when catch-up runs.
-6. Recently matched comment (after activation) is processed normally.
+1. Broad rule flag is ignored.
+2. Specific-post rule flag is honored for that selected media.
+3. Specific-post rule does not process comments from other media.
+4. Already replied comments are not duplicated.
+5. Catch-up endpoint fetches only selected media comments from Graph.
+6. Catch-up endpoint ignores broad flagged rules.
+7. Fresh comments after activation are processed normally.
 """
 import asyncio
 import os
@@ -34,8 +35,6 @@ import server  # noqa: E402
 def _run(coro):
     return asyncio.run(coro)
 
-
-# ── Minimal fakes ─────────────────────────────────────────────────────────────
 
 def _match(doc, query):
     for key, expected in query.items():
@@ -106,8 +105,37 @@ class FakeDB:
         self.automations = FakeCollection(automations or [])
         self.comments = FakeCollection(comments or [])
         self.users = FakeCollection(users or [])
+        self.instagram_accounts = FakeCollection([])
         self.tracked_links = FakeCollection([])
         self.comment_dm_sessions = FakeCollection([])
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = str(self._payload)
+
+    def json(self):
+        return self._payload
+
+
+class FakeAsyncClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.get_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def get(self, *args, **kwargs):
+        self.get_calls.append((args, kwargs))
+        if self.responses:
+            return self.responses.pop(0)
+        return FakeResponse(200, {'data': []})
 
 
 def _user():
@@ -120,6 +148,16 @@ def _user():
     }
 
 
+def _active_account():
+    return {
+        'id': 'acc1',
+        'instagramAccountId': 'biz1',
+        'igUserId': 'biz1',
+        'accessToken': 'tok',
+        'username': 'biz',
+    }
+
+
 def _broad_rule():
     return {
         'id': 'r_broad',
@@ -128,13 +166,14 @@ def _broad_rule():
         'igUserId': 'biz1',
         'status': 'active',
         'trigger': 'comment:any',
+        'post_scope': 'any',
         'media_id': '',
         'match': 'any',
         'mode': 'reply_only',
         'activationStartedAt': datetime.utcnow() - timedelta(minutes=10),
         'createdAt': datetime.utcnow() - timedelta(minutes=10),
         'processExistingComments': True,
-        'process_existing_unreplied_comments': True,  # ignored — broad
+        'process_existing_unreplied_comments': True,
         'comment_reply': 'hi!',
         'nodes': [
             {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
@@ -153,13 +192,14 @@ def _specific_rule(media_id='m111'):
         'igUserId': 'biz1',
         'status': 'active',
         'trigger': f'comment:{media_id}',
+        'post_scope': 'specific',
         'media_id': media_id,
         'match': 'any',
         'mode': 'reply_only',
         'activationStartedAt': datetime.utcnow() - timedelta(minutes=10),
         'createdAt': datetime.utcnow() - timedelta(minutes=10),
         'processExistingComments': True,
-        'process_existing_unreplied_comments': True,  # ignored — cutoff always applies
+        'process_existing_unreplied_comments': True,
         'comment_reply': 'thanks!',
         'nodes': [
             {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
@@ -172,6 +212,14 @@ def _specific_rule(media_id='m111'):
 
 def _old_ts():
     return (datetime.utcnow() - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%S+0000')
+
+
+async def _async_none(*_a, **_kw):
+    return None
+
+
+async def _async_value(value):
+    return value
 
 
 def _stub_run(monkeypatch):
@@ -192,57 +240,61 @@ def _stub_run(monkeypatch):
     return ran
 
 
-async def _async_none(*_a, **_kw):
-    return None
-
-
-# ── apply_activation_cutoff tests ─────────────────────────────────────────────
-
-def test_broad_rule_flag_always_ignored_for_historical(monkeypatch):
-    """process_existing_unreplied_comments=True on a broad rule never bypasses cutoff."""
+def test_broad_rule_flag_ignored_for_historical(monkeypatch):
     db = FakeDB(automations=[_broad_rule()])
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
 
-    comment = {
+    res = _run(server._handle_new_comment(_user(), {
         'ig_comment_id': 'c_broad_old',
         'commenter_id': 'fan1',
         'text': 'hello',
         'media_id': 'm999',
         'timestamp': _old_ts(),
-    }
-
-    res = _run(server._handle_new_comment(_user(), comment, source='polling'))
+    }, source='polling'))
 
     assert res.get('matched') is not True, \
         f'broad rule must not process historical comment; got {res}'
     assert ran['count'] == 0
 
 
-def test_specific_rule_flag_also_ignored_for_historical(monkeypatch):
-    """Even a specific-post rule with flag=True does NOT bypass the activation cutoff.
-    Historical comments are always blocked regardless of flag values."""
+def test_specific_rule_flag_processes_historical_on_selected_media(monkeypatch):
     db = FakeDB(automations=[_specific_rule('m111')])
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
 
-    comment = {
+    res = _run(server._handle_new_comment(_user(), {
         'ig_comment_id': 'c_specific_old',
         'commenter_id': 'fan2',
         'text': 'hello',
         'media_id': 'm111',
-        'timestamp': _old_ts(),  # before rule activation — always blocked
-    }
+        'timestamp': _old_ts(),
+    }, source='polling'))
 
-    res = _run(server._handle_new_comment(_user(), comment, source='polling'))
+    assert res.get('matched') is True, \
+        f'specific-post catch-up should process selected historical comment; got {res}'
+    assert ran['count'] == 1
+
+
+def test_specific_rule_flag_skips_historical_from_other_media(monkeypatch):
+    db = FakeDB(automations=[_specific_rule('m111')])
+    monkeypatch.setattr(server, 'db', db)
+    ran = _stub_run(monkeypatch)
+
+    res = _run(server._handle_new_comment(_user(), {
+        'ig_comment_id': 'c_specific_other_old',
+        'commenter_id': 'fan2',
+        'text': 'hello',
+        'media_id': 'm222',
+        'timestamp': _old_ts(),
+    }, source='polling'))
 
     assert res.get('matched') is not True, \
-        f'specific-post rule must not bypass activation cutoff; got {res}'
+        f'specific-post catch-up must ignore other media; got {res}'
     assert ran['count'] == 0
 
 
 def test_already_replied_not_duplicated(monkeypatch):
-    """Dedup layer still fires for already-replied comments regardless of flags."""
     existing = {
         'id': 'cdoc1',
         'user_id': 'u1',
@@ -257,15 +309,13 @@ def test_already_replied_not_duplicated(monkeypatch):
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
 
-    comment = {
+    res = _run(server._handle_new_comment(_user(), {
         'ig_comment_id': 'c_already',
         'commenter_id': 'fan3',
         'text': 'hello again',
         'media_id': 'm111',
         'timestamp': _old_ts(),
-    }
-
-    res = _run(server._handle_new_comment(_user(), comment, source='polling'))
+    }, source='polling'))
 
     assert res.get('already_processed') is True, \
         f'already-replied comment must be deduped; got {res}'
@@ -273,110 +323,71 @@ def test_already_replied_not_duplicated(monkeypatch):
 
 
 def test_fresh_comment_after_activation_is_processed(monkeypatch):
-    """A comment with timestamp AFTER rule activation is processed normally."""
     db = FakeDB(automations=[_specific_rule('m111')])
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
 
     fresh_ts = (datetime.utcnow() - timedelta(seconds=30)).strftime('%Y-%m-%dT%H:%M:%S+0000')
-    comment = {
+    res = _run(server._handle_new_comment(_user(), {
         'ig_comment_id': 'c_fresh',
         'commenter_id': 'fan4',
         'text': 'hi',
         'media_id': 'm111',
         'timestamp': fresh_ts,
-    }
-
-    res = _run(server._handle_new_comment(_user(), comment, source='polling'))
+    }, source='polling'))
 
     assert res.get('matched') is True, \
         f'fresh comment after activation must be processed; got {res}'
     assert ran['count'] == 1
 
 
-# ── Catch-up endpoint tests ───────────────────────────────────────────────────
-
-def test_catchup_endpoint_uses_stored_comment_docs(monkeypatch):
-    """The catch-up endpoint queries db.comments, not the Graph API."""
+def test_catchup_endpoint_fetches_selected_media_from_graph(monkeypatch):
     user = {**_user(), 'id': 'u1'}
-    # One unreplied comment doc in the DB.
-    stored_comment = {
-        'id': 'cdoc_unreplied',
-        'user_id': 'u1',
-        'instagramAccountId': 'biz1',
-        'ig_comment_id': 'c_unreplied',
-        'media_id': 'm111',
-        'text': 'test',
-        'commenter_id': 'fan5',
-        'timestamp': (datetime.utcnow() - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
-        'replied': False,
-        'action_status': 'skipped',
-    }
-    db = FakeDB(
-        automations=[_specific_rule('m111')],
-        comments=[stored_comment],
-        users=[user],
-    )
+    db = FakeDB(automations=[_specific_rule('m111')], users=[user])
     monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(server, 'getActiveInstagramAccount',
+                        lambda _user_id: _async_value(_active_account()))
 
     handle_calls = []
 
-    async def fake_handle(u, comment, source='polling'):
-        handle_calls.append(comment['ig_comment_id'])
+    async def fake_handle(u, comment, source='manual_catchup'):
+        handle_calls.append((comment['media_id'], comment['ig_comment_id'], source))
         return {'matched': True, 'action_status': 'success'}
 
     monkeypatch.setattr(server, '_handle_new_comment', fake_handle)
+    client = FakeAsyncClient([
+        FakeResponse(200, {'data': [{
+            'id': 'c_unreplied',
+            'text': 'test',
+            'username': 'fan5',
+            'from': {'id': 'fan5', 'username': 'fan5'},
+            'timestamp': (datetime.utcnow() - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        }]}),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda **_kwargs: client)
 
     result = _run(server.instagram_process_unreplied_comments(user_id='u1'))
 
-    # Endpoint must have processed from stored docs (not calling Graph API)
-    assert result['checked'] >= 1, f'must check stored docs; got {result}'
-    assert 'c_unreplied' in handle_calls
+    assert result['media_ids'] == ['m111']
+    assert result['checked'] == 1, f'must check selected Graph comments; got {result}'
+    assert result['replied'] == 1
+    assert handle_calls == [('m111', 'c_unreplied', 'manual_catchup')]
+    assert client.get_calls[0][0][0].endswith('/m111/comments')
 
 
-def test_catchup_endpoint_historical_still_skipped(monkeypatch):
-    """Catch-up endpoint skips docs whose activation cutoff returns historical."""
+def test_catchup_endpoint_ignores_broad_rule_with_flag(monkeypatch):
     user = {**_user(), 'id': 'u1'}
-    old_stored = {
-        'id': 'cdoc_old',
-        'user_id': 'u1',
-        'instagramAccountId': 'biz1',
-        'ig_comment_id': 'c_old_stored',
-        'media_id': 'm111',
-        'text': 'old comment',
-        'commenter_id': 'fan6',
-        'timestamp': _old_ts(),  # before rule activation
-        'replied': False,
-        'action_status': 'skipped',
-        'skip_reason': 'historical_before_rule_activation',
-    }
-    db = FakeDB(
-        automations=[_specific_rule('m111')],
-        comments=[old_stored],
-        users=[user],
-    )
+    db = FakeDB(automations=[_broad_rule()], users=[user])
     monkeypatch.setattr(server, 'db', db)
-    monkeypatch.setattr(server, '_account_scoped_query',
-                        lambda _u, _ig: {'user_id': 'u1'})
-    monkeypatch.setattr(server, 'matchesAutomationRule',
-                        lambda auto, text, ctx: {'matches': True})
-    monkeypatch.setattr(server, '_fetch_latest_media_id',
-                        lambda *a, **k: _async_none())
-    monkeypatch.setattr(server, 'ws_manager',
-                        SimpleNamespace(send=lambda *a, **k: _async_none()))
-    ran = {'count': 0}
-
-    async def fake_run(user_doc, automation, *a, **kw):
-        ran['count'] += 1
-
-    monkeypatch.setattr(server, '_run_and_record_action', fake_run)
+    monkeypatch.setattr(server, 'getActiveInstagramAccount',
+                        lambda _user_id: _async_value(_active_account()))
+    client = FakeAsyncClient([FakeResponse(200, {'data': [{'id': 'should_not_fetch'}]})])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda **_kwargs: client)
 
     result = _run(server.instagram_process_unreplied_comments(user_id='u1'))
 
-    # The historical doc is blocked at dedup (historical_before_rule_activation is
-    # not in retryable_skip, so it returns already_processed → skipped_duplicate).
-    not_replied = result['replied'] == 0
-    blocked = result['skipped_historical'] >= 1 or result['skipped_duplicate'] >= 1
-    assert blocked and not_replied, \
-        f'old stored doc must not be replied to; got {result}'
-    assert ran['count'] == 0, 'no reply must fire for historical comment'
+    assert result['media_ids'] == []
+    assert result['skipped_broad_scope'] == 1
+    assert result['checked'] == 0
+    assert result['replied'] == 0
+    assert client.get_calls == []

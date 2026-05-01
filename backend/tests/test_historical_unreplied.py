@@ -1,10 +1,8 @@
 """Tests for safe handling of historical unreplied comments.
 
-Covers the bug where comments created before a rule's activation timestamp
-could be processed when unsafe legacy process-existing flags were enabled.
-The current product rule is stricter: no public automation should reply to
-comments older than activationStartedAt by default. Legacy flags remain
-accepted for compatibility but are ignored by runtime.
+Covers historical comment catch-up safety. Broad automations must never process
+pre-rule comments, while an explicit single-post automation may catch up old
+unreplied comments only for its selected media id.
 """
 import asyncio
 import os
@@ -107,7 +105,8 @@ def _user():
             'instagramConnected': True, 'instagramHandle': '@biz'}
 
 
-def _rule(*, process_existing_unreplied=False, process_existing=False):
+def _rule(*, process_existing_unreplied=False, process_existing=False,
+          trigger='keyword:any', post_scope='any', media_id=None):
     """A simple keyword-match rule activated yesterday."""
     return {
         'id': 'r1',
@@ -115,7 +114,9 @@ def _rule(*, process_existing_unreplied=False, process_existing=False):
         'instagramAccountId': 'biz1',
         'igUserId': 'biz1',
         'status': 'active',
-        'trigger': 'keyword:any',
+        'trigger': trigger,
+        'post_scope': post_scope,
+        'media_id': media_id,
         'match': 'any',
         'mode': 'reply_only',
         'activationStartedAt': datetime.utcnow() - timedelta(hours=1),
@@ -185,8 +186,8 @@ def test_default_skips_historical_comment(monkeypatch):
     assert saved['skip_reason'] == 'historical_before_rule_activation'
 
 
-def test_process_existing_unreplied_flag_is_ignored_for_historical(monkeypatch):
-    """Even with the legacy flag on, historical comments stay skipped."""
+def test_broad_process_existing_unreplied_flag_is_ignored_for_historical(monkeypatch):
+    """Broad rules with the flag on still skip historical comments."""
     rule = _rule(process_existing_unreplied=True)
     db = FakeDB(automations=[rule])
     monkeypatch.setattr(server, 'db', db)
@@ -202,10 +203,62 @@ def test_process_existing_unreplied_flag_is_ignored_for_historical(monkeypatch):
     assert saved['skip_reason'] == 'historical_before_rule_activation'
 
 
+def test_specific_media_flag_processes_historical_comment_on_selected_media(monkeypatch):
+    """A single selected post may process old unreplied comments when enabled."""
+    rule = _rule(
+        process_existing_unreplied=True,
+        process_existing=True,
+        trigger='comment:m1',
+        post_scope='specific',
+        media_id='m1',
+    )
+    db = FakeDB(automations=[rule])
+    monkeypatch.setattr(server, 'db', db)
+    ran = _stub_helpers(monkeypatch)
+    historical_ts = datetime.utcnow() - timedelta(days=2)
+
+    res = _run(server._handle_new_comment(_user(),
+                                          _comment(historical_ts), source='manual_catchup'))
+
+    assert res.get('matched') is True, f'selected media historical comment should match; got {res}'
+    assert ran['count'] == 1
+    saved = db.comments.docs[0]
+    assert saved['media_id'] == 'm1'
+    assert saved['processExistingComments'] is True
+
+
+def test_specific_media_flag_skips_historical_comment_from_other_media(monkeypatch):
+    """The selected-post flag must not process comments from a different post."""
+    rule = _rule(
+        process_existing_unreplied=True,
+        trigger='comment:m1',
+        post_scope='specific',
+        media_id='m1',
+    )
+    db = FakeDB(automations=[rule])
+    monkeypatch.setattr(server, 'db', db)
+    ran = _stub_helpers(monkeypatch)
+    historical_ts = datetime.utcnow() - timedelta(days=2)
+
+    res = _run(server._handle_new_comment(_user(),
+                                          _comment(historical_ts, media_id='m2'),
+                                          source='manual_catchup'))
+
+    assert res.get('matched') is False
+    assert ran['count'] == 0
+    saved = db.comments.docs[0]
+    assert saved['skip_reason'] in ('no_rule_match', 'historical_before_rule_activation')
+
+
 def test_already_replied_historical_is_not_replied_again(monkeypatch):
     """Even with the flag on, a previously successfully-replied comment
     must be detected by dedup and skipped (no second reply)."""
-    rule = _rule(process_existing_unreplied=True)
+    rule = _rule(
+        process_existing_unreplied=True,
+        trigger='comment:m1',
+        post_scope='specific',
+        media_id='m1',
+    )
     historical_ts = datetime.utcnow() - timedelta(days=2)
     existing = {
         'id': 'cdoc1',
@@ -230,7 +283,7 @@ def test_already_replied_historical_is_not_replied_again(monkeypatch):
 
 
 def test_previously_skipped_historical_is_not_retried_when_flag_enabled(monkeypatch):
-    """A historical skip remains non-retryable even if old flags are present."""
+    """A broad historical skip remains non-retryable during normal polling."""
     rule = _rule(process_existing_unreplied=True)
     historical_ts = datetime.utcnow() - timedelta(days=2)
     existing = {

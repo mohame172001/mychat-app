@@ -313,6 +313,7 @@ const Automations = () => {
   const [selectedMedia, setSelectedMedia] = useState(null);
   const [showAllMedia, setShowAllMedia] = useState(false);
   const [postScope, setPostScope] = useState('specific');
+  const [processExistingUnreplied, setProcessExistingUnreplied] = useState(false);
   const [match, setMatch] = useState('keyword');
   const [keyword, setKeyword] = useState('');
   const [replyUnderPost, setReplyUnderPost] = useState(false);
@@ -387,6 +388,7 @@ const Automations = () => {
   );
   const previewAccountName = instagramAccount?.username || user?.instagramHandle || user?.username || 'instagram_account';
   const previewAccountAvatar = instagramAccount?.profilePictureUrl || user?.instagramProfilePictureUrl || user?.avatar || '';
+  const canProcessExistingOnSelectedPost = postScope === 'specific' && Boolean(selectedMedia?.id);
 
   const filtered = list.filter(a =>
     (filter === 'all' || a.status === filter) &&
@@ -397,6 +399,7 @@ const Automations = () => {
     setSelectedMedia(null);
     setShowAllMedia(false);
     setPostScope('specific');
+    setProcessExistingUnreplied(false);
     setMatch('keyword');
     setKeyword('');
     setReplyUnderPost(false);
@@ -504,7 +507,17 @@ const Automations = () => {
     setFollowUpText(automation.follow_up_text || '');
     setPreviewTab('Post');
     setSelectedMedia(scope === 'specific' ? mediaPreviewToItem(automation) : null);
+    setProcessExistingUnreplied(
+      scope === 'specific' && Boolean(automation.media_id) &&
+      Boolean(automation.process_existing_unreplied_comments || automation.processExistingComments)
+    );
   };
+
+  useEffect(() => {
+    if (!canProcessExistingOnSelectedPost && processExistingUnreplied) {
+      setProcessExistingUnreplied(false);
+    }
+  }, [canProcessExistingOnSelectedPost, processExistingUnreplied]);
 
   const loadMediaForBuilder = async ({ preferredMediaId = '', pickFirst = true } = {}) => {
     setMedia([]);
@@ -714,6 +727,8 @@ const Automations = () => {
         email_request_enabled: emailRequestEnabled,
         follow_up_enabled: followUpEnabled,
         follow_up_text: followUpText.trim(),
+        process_existing_unreplied_comments: canProcessExistingOnSelectedPost ? processExistingUnreplied : false,
+        processExistingComments: canProcessExistingOnSelectedPost ? processExistingUnreplied : false,
       };
 
       if (postScope === 'specific' && selectedMedia) {
@@ -856,10 +871,36 @@ const Automations = () => {
                   </div>
                 </OptionRow>
 
-                <OptionRow active={postScope === 'any'} title="any post or reel" onClick={() => setPostScope('any')} />
-                <OptionRow active={postScope === 'next'} title="next post or reel" onClick={() => setPostScope('next')} />
+                <OptionRow active={postScope === 'any'} title="any post or reel" onClick={() => {
+                  setPostScope('any');
+                  setProcessExistingUnreplied(false);
+                }} />
+                <OptionRow active={postScope === 'next'} title="next post or reel" onClick={() => {
+                  setPostScope('next');
+                  setProcessExistingUnreplied(false);
+                }} />
               </div>
             </section>
+
+            {canProcessExistingOnSelectedPost && (
+              <section className="mt-5">
+                <ToggleCard
+                  title="Reply to existing unreplied comments on this post"
+                  checked={processExistingUnreplied}
+                  onChange={setProcessExistingUnreplied}
+                  icon={MessageCircle}
+                >
+                  <div className="space-y-2 text-xs leading-relaxed text-slate-600">
+                    <p>
+                      When enabled, this automation can reply to old unreplied comments only on the selected post. It will not scan all posts.
+                    </p>
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-blue-800">
+                      Selected post: {selectedMedia?.caption?.slice(0, 80) || selectedMedia?.id}
+                    </div>
+                  </div>
+                </ToggleCard>
+              </section>
+            )}
 
             <section className="mt-5">
               <h2 className="text-lg font-extrabold tracking-tight">And this comment has</h2>
