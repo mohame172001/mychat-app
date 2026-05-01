@@ -63,9 +63,21 @@ IG_APP_SECRET = INSTAGRAM_APP_SECRET
 # Webhook GET verification token.
 META_VERIFY_TOKEN, META_VERIFY_TOKEN_SOURCE = _resolve_env(
     'META_WEBHOOK_VERIFY_TOKEN', 'META_VERIFY_TOKEN')
+# Hardcoded fallback is allowed ONLY outside production. Production must
+# fail fast if no verify token is set so a public webhook URL can never
+# be subscribed by a third party that knows the default value.
 if not META_VERIFY_TOKEN:
-    META_VERIFY_TOKEN = 'mychat_verify_123'
-    META_VERIFY_TOKEN_SOURCE = 'default'
+    _is_prod_for_token = (
+        os.environ.get('APP_ENV') or os.environ.get('ENV')
+        or os.environ.get('RAILWAY_ENVIRONMENT') or ''
+    ).strip().lower() in ('production', 'prod')
+    if _is_prod_for_token:
+        raise RuntimeError(
+            'META_WEBHOOK_VERIFY_TOKEN is required in production. '
+            'Set it in the deployment environment before starting the server.'
+        )
+    META_VERIFY_TOKEN = 'mychat_verify_dev_only'
+    META_VERIFY_TOKEN_SOURCE = 'default_dev_only'
 
 # Webhook X-Hub-Signature-256 secret. If META_WEBHOOK_APP_SECRET is set we use
 # it; otherwise we fall back to META_APP_SECRET.
@@ -79,6 +91,66 @@ META_WEBHOOK_HMAC_ENFORCE = os.environ.get('META_WEBHOOK_HMAC_ENFORCE', '0') == 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
 CRON_SECRET = os.environ.get('CRON_SECRET', '')
+
+# Production hardening config -----------------------------------------------
+# IS_PRODUCTION is true when ENV is one of the standard production names.
+# Some Railway-style providers set RAILWAY_ENVIRONMENT=production instead.
+ENV_NAME = (
+    os.environ.get('APP_ENV')
+    or os.environ.get('ENV')
+    or os.environ.get('RAILWAY_ENVIRONMENT')
+    or 'development'
+).strip().lower()
+IS_PRODUCTION = ENV_NAME in ('production', 'prod')
+
+# Comma-separated list of explicit allowed origins. In production we ALSO
+# always include FRONTEND_URL (and any RAILWAY_PUBLIC_DOMAIN values) so the
+# main frontend cannot be accidentally locked out by a bad env value.
+def _split_origins(raw: str):
+    return [o.strip().rstrip('/') for o in (raw or '').split(',') if o.strip()]
+
+CORS_ALLOWED_ORIGINS_ENV = _split_origins(os.environ.get('CORS_ALLOWED_ORIGINS', ''))
+RAILWAY_PUBLIC_DOMAINS = _split_origins(os.environ.get('RAILWAY_PUBLIC_DOMAINS', ''))
+
+
+def _resolved_cors_origins():
+    """Decide the final allowed-origins list at startup.
+
+    In production: only the explicit allowlist (env + FRONTEND_URL +
+    Railway public domains). No wildcard, no localhost.
+    Outside production: the env list plus a localhost dev set, so
+    contributors don't need to configure anything.
+    """
+    explicit = list(CORS_ALLOWED_ORIGINS_ENV)
+    if FRONTEND_URL and FRONTEND_URL.rstrip('/') not in explicit:
+        explicit.append(FRONTEND_URL.rstrip('/'))
+    for d in RAILWAY_PUBLIC_DOMAINS:
+        if d not in explicit:
+            explicit.append(d)
+    if IS_PRODUCTION:
+        return [o for o in explicit if o] or [FRONTEND_URL.rstrip('/')]
+    dev_default = [
+        'http://localhost:3000', 'http://127.0.0.1:3000',
+        'http://localhost:5173', 'http://127.0.0.1:5173',
+    ]
+    return explicit + [o for o in dev_default if o not in explicit]
+
+
+# Rate-limit thresholds. Env-tunable so ops can dial them in production.
+def _rl_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+RATE_LIMIT_LOGIN_PER_MIN = _rl_int('RATE_LIMIT_LOGIN_PER_MIN', 10)
+RATE_LIMIT_SIGNUP_PER_HOUR = _rl_int('RATE_LIMIT_SIGNUP_PER_HOUR', 5)
+RATE_LIMIT_POLL_NOW_PER_MIN = _rl_int('RATE_LIMIT_POLL_NOW_PER_MIN', 5)
+RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN = _rl_int('RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN', 5)
+
+# Admin allowlist for ops-only endpoints (webhook-log etc.). Comma-separated
+# emails. In production this MUST be set or those endpoints stay locked.
+ADMIN_EMAILS = {e.strip().lower() for e in (os.environ.get('ADMIN_EMAILS') or '').split(',') if e.strip()}
 TOKEN_REFRESH_LOOKAHEAD_DAYS = int(os.environ.get('IG_TOKEN_REFRESH_LOOKAHEAD_DAYS', '15'))
 TOKEN_REFRESH_MIN_AGE_HOURS = int(os.environ.get('IG_TOKEN_REFRESH_MIN_AGE_HOURS', '24'))
 TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES', '5'))
@@ -86,7 +158,13 @@ TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES',
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title='mychat API')
+_FASTAPI_KW = {'title': 'mychat API'}
+if IS_PRODUCTION:
+    # Disable interactive docs and OpenAPI spec in production. Anyone who
+    # actually needs them in prod can flip an env flag temporarily.
+    if os.environ.get('ENABLE_DOCS_IN_PRODUCTION', '').lower() not in ('1', 'true', 'yes'):
+        _FASTAPI_KW.update(docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(**_FASTAPI_KW)
 api = APIRouter(prefix='/api')
 
 logger = logging.getLogger('mychat')
@@ -115,6 +193,62 @@ def _redact_secrets(value):
 
 TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
 _HTTP_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
+
+
+# ---- In-memory rate limiter --------------------------------------------------
+# Simple sliding-window counter keyed by (bucket, key). Sufficient for a
+# single-replica deployment; multi-replica deployments should layer Redis
+# in front of these endpoints. No external dependency.
+import collections as _collections
+import threading as _threading
+
+_RATE_LIMIT_LOCK = _threading.Lock()
+_RATE_LIMIT_HITS: dict = _collections.defaultdict(_collections.deque)
+
+
+def _rate_limited(bucket: str, key: str, *, limit: int, window_seconds: int) -> bool:
+    """Return True if (bucket,key) has exceeded ``limit`` hits in the
+    current sliding window of ``window_seconds`` seconds."""
+    if not key:
+        return False
+    import time as _t
+    now = _t.monotonic()
+    cutoff = now - window_seconds
+    with _RATE_LIMIT_LOCK:
+        dq = _RATE_LIMIT_HITS[(bucket, key)]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return True
+        dq.append(now)
+        return False
+
+
+def _client_ip(request) -> str:
+    """Best-effort client IP for rate-limit keying. Trusts the leftmost
+    X-Forwarded-For entry when present (Railway/CDN setups)."""
+    try:
+        xff = request.headers.get('x-forwarded-for') or ''
+        if xff:
+            return xff.split(',')[0].strip() or 'unknown'
+        return getattr(request.client, 'host', 'unknown') or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def _rate_limit_response(retry_after_seconds: int = 60):
+    return JSONResponse(
+        status_code=429,
+        content={'error': 'rate_limited',
+                 'retry_after_seconds': retry_after_seconds},
+        headers={'Retry-After': str(retry_after_seconds)},
+    )
+
+
+def _hash_text(text: str) -> str:
+    """Stable short hash for safe-to-log text fingerprints — never the text itself."""
+    import hashlib
+    return hashlib.sha256((text or '').encode('utf-8', errors='ignore')).hexdigest()[:12]
 
 
 def _is_valid_original_url(url: str) -> bool:
@@ -168,11 +302,88 @@ ws_manager = ConnectionManager()
 
 
 # ---------------- Meta messaging helper ----------------
+# Permanent DM/reply failures: do NOT retry on a later poll/webhook.
+PERMANENT_GRAPH_FAILURE_REASONS = frozenset({
+    'recipient_unavailable',
+    'messaging_not_allowed',
+    'user_blocked_messages',
+    'permission_error',
+})
+
+# Transient failures: safe to retry the next time the same comment is observed.
+TRANSIENT_GRAPH_FAILURE_REASONS = frozenset({
+    'rate_limited',
+    'temporary_graph_error',
+})
+
+
+def _classify_graph_send_error(status_code, body_text):
+    """Classify an Instagram Graph send-error into a stable, low-cardinality
+    reason string for action_status decisions and dashboards.
+
+    Never logs or returns the raw body. Inspects only normalized substrings.
+    Returns one of the values in PERMANENT/TRANSIENT_GRAPH_FAILURE_REASONS,
+    or 'unknown_graph_error' as a safe default.
+    """
+    if status_code is None:
+        return 'temporary_graph_error'
+    if status_code == 200:
+        return None
+    text = (body_text or '').lower()
+    if status_code in (401, 403):
+        return 'permission_error'
+    if status_code == 429:
+        return 'rate_limited'
+    if 500 <= status_code < 600:
+        return 'temporary_graph_error'
+    # Pattern match on known Graph API error phrases. Order matters — the
+    # first match wins, so put the most specific phrases first.
+    if 'has blocked' in text or 'user has blocked' in text:
+        return 'user_blocked_messages'
+    if (
+        'messaging is disabled' in text
+        or 'cannot message users' in text
+        or 'messages must be initiated' in text
+        or '"code":10' in text
+        or 'not authorized' in text
+        or 'permission' in text
+    ):
+        return 'messaging_not_allowed'
+    if (
+        'no message thread' in text
+        or 'outside the messaging window' in text
+        or 'cannot reply' in text
+        or '"code":551' in text
+        or 'recipient' in text
+    ):
+        return 'recipient_unavailable'
+    return 'unknown_graph_error'
+
+
+from contextvars import ContextVar as _DMContextVar  # used by both send paths below
+
+# Out-of-band channel for the classified Graph error reason of the most
+# recent DM send. EVERY downstream send-ish helper (send_ig_dm,
+# send_ig_quick_reply, send_ig_url_button, _send_comment_dm_flow_entry,
+# _send_text_dm_with_optional_tracking, _send_comment_dm_flow_completion)
+# ultimately routes through send_ig_message, so the contextvar is set
+# in one place and the comment-DM-flow-entry path no longer loses
+# classification compared to the simple message-node path.
+_LAST_DM_FAILURE: _DMContextVar = _DMContextVar('_LAST_DM_FAILURE', default={})
+
+
 async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: str,
                           message: dict) -> dict:
-    """Send a raw Instagram message object. Tokens are never returned."""
+    """Send a raw Instagram message object. Tokens are never returned.
+
+    On failure, writes the classified Graph error reason to
+    _LAST_DM_FAILURE so any caller (simple DM path or comment-DM flow
+    path) can read the reason without changing function signatures.
+    """
     if not access_token or not ig_user_id:
         logger.warning('send_ig_message: missing access_token or ig_user_id')
+        _LAST_DM_FAILURE.set({'failure_reason': 'missing_access_token_or_ig_user_id',
+                              'status_code': None})
         return {'ok': False, 'status_code': None, 'error': 'missing_access_token_or_ig_user_id'}
     url = f'https://graph.instagram.com/{ig_user_id}/messages'
     payload = {
@@ -187,18 +398,62 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                     body = r.json()
                 except Exception:
                     body = {}
+                # Reset failure on success so a stale value from a prior
+                # send earlier in the same task can't bleed through.
+                _LAST_DM_FAILURE.set({})
                 return {'ok': True, 'status_code': r.status_code, 'body': _redact_secrets(body)}
-            logger.error('send_ig_message error %s: %s', r.status_code, _redact_secrets(r.text))
-            return {'ok': False, 'status_code': r.status_code, 'error': _redact_secrets(r.text[:500])}
+            classified = _classify_graph_send_error(r.status_code, r.text)
+            # Never log the raw Graph response body — it can contain
+            # token fragments, recipient IDs, or other PII. Log only
+            # the classified reason and the short hash.
+            logger.error('send_ig_message error status=%s reason=%s body_hash=%s',
+                         r.status_code, classified, _hash_text(r.text or ''))
+            _LAST_DM_FAILURE.set({'failure_reason': classified or 'unknown_graph_error',
+                                  'status_code': r.status_code})
+            return {'ok': False, 'status_code': r.status_code,
+                    'error': classified or 'unknown_graph_error'}
     except Exception as e:
         logger.exception('send_ig_message exception: %s', e)
-        return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+        _LAST_DM_FAILURE.set({'failure_reason': 'temporary_graph_error',
+                              'status_code': None})
+        return {'ok': False, 'status_code': None, 'error': 'temporary_graph_error'}
 
 
 async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> bool:
-    """Send a text DM via Instagram Graph API. Returns True on success."""
+    """Send a text DM via Instagram Graph API. Returns True on success.
+
+    The classified failure reason is written to _LAST_DM_FAILURE inside
+    send_ig_message, so callers that need it (e.g. execute_flow) just
+    read the contextvar after this returns.
+    """
     result = await send_ig_message(access_token, ig_user_id, recipient_ig_id, {'text': text})
     return bool(result.get('ok'))
+
+
+async def send_ig_dm_detailed(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> dict:
+    """Send a text DM and return a classified result.
+
+    Returns:
+        {
+          'ok': bool,
+          'failure_reason': None | one of PERMANENT_/TRANSIENT_GRAPH_FAILURE_REASONS
+                            | 'unknown_graph_error' | 'missing_access_token_or_ig_user_id',
+          'status_code': int | None,
+        }
+
+    Never returns the access token or raw error body. Wraps send_ig_dm
+    so a test that monkey-patches the bool wrapper still works.
+    """
+    _LAST_DM_FAILURE.set({})
+    ok = await send_ig_dm(access_token, ig_user_id, recipient_ig_id, text)
+    if ok:
+        return {'ok': True, 'failure_reason': None, 'status_code': 200}
+    last = _LAST_DM_FAILURE.get() or {}
+    return {
+        'ok': False,
+        'failure_reason': last.get('failure_reason') or 'unknown_graph_error',
+        'status_code': last.get('status_code'),
+    }
 
 
 def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
@@ -1271,9 +1526,27 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
 
 
 # ---------------- Comment reply helper ----------------
+from contextvars import ContextVar
+
+# Per-call channel for surfacing the classified failure reason of the
+# last reply_to_ig_comment call. Used by reply_to_ig_comment_detailed
+# below; staying out-of-band lets tests monkey-patch the simple bool
+# wrapper without needing to know about the classification.
+_LAST_REPLY_FAILURE: ContextVar[dict] = ContextVar('_LAST_REPLY_FAILURE', default={})
+
+
 async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) -> bool:
-    """Reply to an Instagram comment via Graph API."""
+    """Reply to an Instagram comment via Graph API. Returns True on success.
+
+    On failure, records the classified Graph error reason on the
+    _LAST_REPLY_FAILURE contextvar so callers that need it can read it
+    via reply_to_ig_comment_detailed without changing this signature
+    (keeping test stubs that target only this function untouched).
+    """
+    _LAST_REPLY_FAILURE.set({})
     if not access_token or not ig_comment_id:
+        _LAST_REPLY_FAILURE.set({'failure_reason': 'missing_access_token_or_comment_id',
+                                 'status_code': None})
         return False
     url = f'https://graph.instagram.com/{ig_comment_id}/replies'
     import time as _time
@@ -1285,21 +1558,78 @@ async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) 
             if r.status_code == 200:
                 logger.info('comment_reply_send_ms ms=%s comment_id=%s', ms, ig_comment_id)
                 return True
-            logger.error('reply_to_ig_comment error %s ms=%s: %s', r.status_code, ms, r.text)
+            reason = _classify_graph_send_error(r.status_code, r.text)
+            logger.warning(
+                'reply_to_ig_comment_failed status=%s ms=%s comment_id=%s reason=%s',
+                r.status_code, ms, ig_comment_id, reason,
+            )
+            _LAST_REPLY_FAILURE.set({'failure_reason': reason, 'status_code': r.status_code})
             return False
     except Exception as e:
         logger.exception('reply_to_ig_comment exception: %s', e)
+        _LAST_REPLY_FAILURE.set({'failure_reason': 'temporary_graph_error',
+                                 'status_code': None})
         return False
+
+
+async def reply_to_ig_comment_detailed(access_token: str, ig_comment_id: str, text: str) -> dict:
+    """Post a public reply and return a classified result.
+
+    Returns:
+        {
+          'ok': bool,
+          'failure_reason': None | classified reason string,
+          'status_code': int | None,
+        }
+
+    Implemented as a thin wrapper around reply_to_ig_comment so existing
+    tests that monkey-patch only the bool function continue to work.
+    Never logs the raw body and never returns the access token.
+    """
+    _LAST_REPLY_FAILURE.set({})
+    ok = await reply_to_ig_comment(access_token, ig_comment_id, text)
+    if ok:
+        return {'ok': True, 'failure_reason': None, 'status_code': 200}
+    last = _LAST_REPLY_FAILURE.get() or {}
+    return {
+        'ok': False,
+        'failure_reason': last.get('failure_reason') or 'unknown_graph_error',
+        'status_code': last.get('status_code'),
+    }
 
 
 # ---------------- Automation engine ----------------
 async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
-                       trigger_text: str = '', comment_context: Optional[dict] = None):
+                       trigger_text: str = '', comment_context: Optional[dict] = None,
+                       flow_results: Optional[dict] = None):
     """Walk the flow graph and execute each node in order.
+
     comment_context: when the trigger was an Instagram comment, holds
-        {'ig_comment_id': ..., 'comment_doc_id': ...} so reply_comment nodes work."""
+        {'ig_comment_id': ..., 'comment_doc_id': ...} so reply_comment nodes work.
+
+    flow_results: optional dict the caller provides to capture per-step
+        outcomes. Mutated during the walk:
+          {
+            'reply_status': 'success' | 'failed' | 'skipped' | 'disabled',
+            'reply_failure_reason': str | None,
+            'replied_at': datetime | None,
+            'dm_status':    'success' | 'failed' | 'skipped' | 'disabled',
+            'dm_failure_reason': str | None,
+            'dm_sent_at': datetime | None,
+          }
+        Defaults are 'disabled' so a node-type that never appeared stays
+        distinguishable from a node that ran but failed.
+    """
     nodes = automation.get('nodes', [])
     edges = automation.get('edges', [])
+    if flow_results is None:
+        flow_results = {}
+    flow_results.setdefault('reply_status', 'disabled')
+    flow_results.setdefault('reply_failure_reason', None)
+    flow_results.setdefault('replied_at', None)
+    flow_results.setdefault('dm_status', 'disabled')
+    flow_results.setdefault('dm_failure_reason', None)
+    flow_results.setdefault('dm_sent_at', None)
     if not nodes:
         return False
 
@@ -1324,12 +1654,24 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         import time as _time
         return int((_time.monotonic() - flow_received_monotonic) * 1000)
 
+    # Process reply_comment nodes before message/DM nodes so a public
+    # comment reply is always attempted (and persisted) BEFORE the DM
+    # step has a chance to fail. This is the key invariant that lets us
+    # report partial_success cleanly when DM is unavailable.
+    REPLY_NODE_TYPES = {'reply_comment'}
+
+    def _node_priority(_id):
+        n = node_map.get(_id) or {}
+        return 0 if n.get('type') in REPLY_NODE_TYPES else 1
+
     current_ids = [start['id']]
     visited: set = set()
     action_attempted = False
     ok_all = True
 
     while current_ids:
+        # Always pull the highest-priority node next (reply_comment wins).
+        current_ids.sort(key=_node_priority)
         nid = current_ids.pop(0)
         if nid in visited:
             continue
@@ -1344,6 +1686,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and sender_ig_id:
                 action_attempted = True
+                dm_failure_reason = None
+                # Reset the contextvar so we read THIS send's reason, not
+                # a stale value from an earlier send in the same task.
+                _LAST_DM_FAILURE.set({})
                 if _comment_dm_flow_enabled(automation):
                     ok = await _send_comment_dm_flow_entry(
                         user, automation, sender_ig_id, comment_context
@@ -1351,12 +1697,41 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     logger.info('Flow comment DM entry to %s rule=%s ok=%s',
                                 sender_ig_id, automation.get('id'), ok)
                 else:
-                    ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
-                    logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+                    ok = await send_ig_dm(
+                        access_token, ig_user_id, sender_ig_id, msg_text
+                    )
+                    # Never log the DM body — only length and a short hash.
+                    logger.info('Flow message to %s len=%s hash=%s ok=%s',
+                                sender_ig_id, len(msg_text), _hash_text(msg_text), ok)
+                if not ok:
+                    # Both the simple path and the flow-entry path now
+                    # write to _LAST_DM_FAILURE inside send_ig_message.
+                    last = _LAST_DM_FAILURE.get() or {}
+                    dm_failure_reason = last.get('failure_reason') or 'unknown_graph_error'
                 if flow_source == 'webhook':
                     logger.info(
-                        'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s',
-                        webhook_elapsed_ms(), flow_comment_id, automation.get('id'), bool(ok)
+                        'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s reason=%s',
+                        webhook_elapsed_ms(), flow_comment_id, automation.get('id'),
+                        bool(ok), dm_failure_reason,
+                    )
+                # Record per-step outcome so callers can compute action_status
+                # without conflating reply success with DM failure.
+                if ok:
+                    flow_results['dm_status'] = 'success'
+                    flow_results['dm_failure_reason'] = None
+                    flow_results['dm_sent_at'] = datetime.utcnow()
+                else:
+                    flow_results['dm_status'] = 'failed'
+                    flow_results['dm_failure_reason'] = dm_failure_reason
+                if comment_context and comment_context.get('comment_doc_id'):
+                    await db.comments.update_one(
+                        {'id': comment_context['comment_doc_id']},
+                        {'$set': {
+                            'dm_status': flow_results['dm_status'],
+                            'dm_failure_reason': flow_results['dm_failure_reason'],
+                            'dm_sent_at': flow_results['dm_sent_at'],
+                            'updated': datetime.utcnow(),
+                        }},
                     )
                 ok_all = ok_all and bool(ok)
         elif ntype == 'reply_comment':
@@ -1368,7 +1743,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
                 action_attempted = True
-                ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
+                reply_result = await reply_to_ig_comment_detailed(
+                    access_token, comment_context['ig_comment_id'], msg_text,
+                )
+                ok = bool(reply_result.get('ok'))
                 logger.info('Flow comment reply on %s: %s (ok=%s)',
                             comment_context['ig_comment_id'], msg_text[:40], ok)
                 if ok:
@@ -1379,25 +1757,42 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         automation.get('id'),
                         webhook_elapsed_ms(),
                     )
-                elif flow_source == 'webhook':
+                else:
                     logger.warning(
-                        'comment_reply_failed source=webhook ig_comment_id=%s rule_id=%s total_webhook_to_reply_ms=%s',
+                        'comment_reply_failed source=%s ig_comment_id=%s rule_id=%s '
+                        'reason=%s total_webhook_to_reply_ms=%s',
+                        flow_source or 'unknown',
                         comment_context['ig_comment_id'],
                         automation.get('id'),
+                        reply_result.get('failure_reason'),
                         webhook_elapsed_ms(),
                     )
                 ok_all = ok_all and bool(ok)
-                if ok and comment_context.get('comment_doc_id'):
-                    await db.comments.update_one(
-                        {'id': comment_context['comment_doc_id']},
-                        {'$set': {
+                now_ts = datetime.utcnow()
+                if ok:
+                    flow_results['reply_status'] = 'success'
+                    flow_results['reply_failure_reason'] = None
+                    flow_results['replied_at'] = now_ts
+                else:
+                    flow_results['reply_status'] = 'failed'
+                    flow_results['reply_failure_reason'] = reply_result.get('failure_reason')
+                if comment_context.get('comment_doc_id'):
+                    update_doc = {
+                        'reply_status': flow_results['reply_status'],
+                        'reply_failure_reason': flow_results['reply_failure_reason'],
+                        'updated': now_ts,
+                    }
+                    if ok:
+                        update_doc.update({
                             'replied': True,
                             'reply_text': msg_text,
-                            'reply_status': 'sent',
                             'replyStatus': 'sent',
-                            'replySentAt': datetime.utcnow(),
-                            'updated': datetime.utcnow(),
-                        }}
+                            'replied_at': now_ts,
+                            'replySentAt': now_ts,
+                        })
+                    await db.comments.update_one(
+                        {'id': comment_context['comment_doc_id']},
+                        {'$set': update_doc},
                     )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
@@ -1482,7 +1877,12 @@ async def _seed_user(user_id: str):
 
 # ---------------- auth ----------------
 @api.post('/auth/signup', response_model=AuthOut)
-async def signup(data: SignupIn):
+async def signup(data: SignupIn, request: Request):
+    ip = _client_ip(request)
+    if _rate_limited('signup', ip,
+                     limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
+        logger.warning('rate_limit_hit bucket=signup ip=%s', ip)
+        raise HTTPException(429, 'Too many signups from this IP. Try again later.')
     if await db.users.find_one({'username': data.username}):
         raise HTTPException(400, 'Username already taken')
     if await db.users.find_one({'email': data.email}):
@@ -1503,7 +1903,12 @@ async def signup(data: SignupIn):
 
 
 @api.post('/auth/login', response_model=AuthOut)
-async def login(data: LoginIn):
+async def login(data: LoginIn, request: Request):
+    ip = _client_ip(request)
+    if _rate_limited('login', ip,
+                     limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=login ip=%s', ip)
+        raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
     u = await db.users.find_one({'username': data.username})
     if not u or not verify_password(data.password, u['password_hash']):
         raise HTTPException(401, 'Invalid username or password')
@@ -2263,6 +2668,54 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
         {'$set': {'replied': True, 'reply_text': text, 'reply_id': body.get('id')}}
     )
     return {'ok': True, 'graph_reply_id': body.get('id')}
+
+
+@api.get('/comments/{cid}/diagnostics')
+async def comment_diagnostics(cid: str, user_id: str = Depends(get_current_user_id)):
+    """Return safe processing diagnostics for one comment.
+
+    Account-scoped to the calling user's active Instagram account. Does
+    NOT return access tokens, raw Graph error bodies, full comment text,
+    full reply text, or full DM text — only lengths and classified
+    status fields the support team needs to debug a 'comment_already_processed'
+    in the logs.
+    """
+    account = await getActiveInstagramAccount(user_id)
+    comment = await db.comments.find_one({'id': cid, **_account_scoped_query(user_id, account)})
+    if not comment:
+        # Also accept lookup by ig_comment_id (the value that appears in logs).
+        comment = await db.comments.find_one({
+            'ig_comment_id': cid,
+            **_account_scoped_query(user_id, account),
+        })
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+
+    def _iso(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    return {
+        'commentId': comment.get('id'),
+        'igCommentId': comment.get('ig_comment_id') or comment.get('igCommentId'),
+        'mediaId': comment.get('media_id') or comment.get('mediaId'),
+        'text_length': len(comment.get('text') or ''),
+        'replied': bool(comment.get('replied')),
+        'reply_status': comment.get('reply_status'),
+        'dm_status': comment.get('dm_status'),
+        'action_status': comment.get('action_status') or comment.get('actionStatus'),
+        'skip_reason': comment.get('skip_reason') or comment.get('skipReason'),
+        'reply_failure_reason': comment.get('reply_failure_reason'),
+        'dm_failure_reason': comment.get('dm_failure_reason'),
+        'rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'source': comment.get('source'),
+        'last_attempt_at': _iso(comment.get('last_attempt_at')),
+        'replied_at': _iso(comment.get('replied_at') or comment.get('replySentAt')),
+        'dm_sent_at': _iso(comment.get('dm_sent_at')),
+        'created': _iso(comment.get('created')),
+        'updated': _iso(comment.get('updated')),
+    }
 
 
 # ---------------- dashboard ----------------
@@ -5052,16 +5505,38 @@ async def instagram_webhook(request: Request):
                        sig_result.get('received_prefix'),
                        sig_result.get('computed_prefix'),
                        META_WEBHOOK_HMAC_ENFORCE)
-        if META_WEBHOOK_HMAC_ENFORCE and sig_result['secret_configured']:
+        if META_WEBHOOK_HMAC_ENFORCE:
+            # Reject bad/missing signatures regardless of whether a secret
+            # is configured. If HMAC enforcement is on, we never want to
+            # accept an unsigned webhook — that would defeat the point.
             return JSONResponse(
                 status_code=403,
                 content={'error': 'invalid_signature',
                          'reason': sig_result['reason']},
             )
+        # Warn-only mode: log a one-line marker so ops can grep for it.
+        if not sig_result['secret_configured']:
+            logger.warning('webhook_hmac_not_enforced reason=secret_not_configured')
+        else:
+            logger.warning('webhook_hmac_not_enforced reason=%s', sig_result['reason'])
     else:
         logger.info('webhook_signature_valid prefix=%s', sig_result['computed_prefix'])
     import json as _json
-    payload = _json.loads(raw_body)
+    try:
+        payload = _json.loads(raw_body)
+        if not isinstance(payload, dict):
+            raise ValueError('payload_not_object')
+    except (_json.JSONDecodeError, ValueError, TypeError):
+        # Bad JSON: respond 400 immediately and DO NOT spawn any
+        # background processing task — the body is untrusted/garbage.
+        logger.warning(
+            'webhook_invalid_json size=%s sig_valid=%s enforce=%s',
+            len(raw_body or b''), sig_result.get('valid'), META_WEBHOOK_HMAC_ENFORCE,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'invalid_json'},
+        )
     logger.info('ig_webhook_payload_received object=%s entries=%s',
                 payload.get('object'), len(payload.get('entry') or []))
     # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
@@ -5089,29 +5564,46 @@ async def _supervised_process_webhook(payload: dict):
         logger.exception('webhook_processor_failed')
 
 
+def _webhook_log_safe_summary(doc: dict) -> dict:
+    """Return a redacted summary of a stored webhook log entry.
+
+    Strips raw payload, full text fields, and any potential secrets.
+    Only metadata that is safe to surface to support staff is returned.
+    """
+    payload = doc.get('payload') or {}
+    entries = payload.get('entry') or []
+    object_kind = payload.get('object')
+    return {
+        'id': str(doc.get('_id') or ''),
+        'received': doc.get('received').isoformat() if isinstance(doc.get('received'), datetime) else doc.get('received'),
+        'object': object_kind,
+        'entry_count': len(entries) if isinstance(entries, list) else 0,
+        'signature_valid': doc.get('signature_valid'),
+        'signature_reason': doc.get('signature_reason'),
+        'enforce_mode': doc.get('enforce_mode'),
+    }
+
+
 @api.get('/instagram/webhook-log')
-async def instagram_webhook_log(request: Request, limit: int = 20, token: Optional[str] = None):
-    """Return the most recent raw webhook payloads — for debugging deliveries.
-    Accepts JWT via Authorization header OR ?token=... query for easy browser debug."""
-    # Accept either Authorization header or ?token= query
-    auth = request.headers.get('authorization') or request.headers.get('Authorization') or ''
-    jwt_token = None
-    if auth.lower().startswith('bearer '):
-        jwt_token = auth.split(' ', 1)[1]
-    elif token:
-        jwt_token = token
-    if not jwt_token:
-        raise HTTPException(401, 'Provide JWT via Authorization header or ?token=')
-    try:
-        decode_token(jwt_token)
-    except Exception:
-        raise HTTPException(401, 'Invalid token')
+async def instagram_webhook_log(
+    request: Request,
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Return a SAFE summary of recent webhook deliveries for ops debugging.
+
+    Admin-only. Requires JWT via Authorization header — the legacy ?token=
+    query parameter is no longer accepted because it leaks credentials in
+    server logs and browser history. Raw payloads, full comment/DM text,
+    and any token-like fields are NEVER returned.
+    """
+    u = await db.users.find_one({'id': user_id})
+    email = (u or {}).get('email', '').lower()
+    if not email or email not in ADMIN_EMAILS:
+        raise HTTPException(403, 'Admin access required')
     docs = await db.webhook_log.find().sort('received', -1).limit(max(1, min(limit, 50))).to_list(50)
-    for d in docs:
-        d.pop('_id', None)
-        if isinstance(d.get('received'), datetime):
-            d['received'] = d['received'].isoformat()
-    return {'items': docs, 'count': await db.webhook_log.count_documents({})}
+    items = [_webhook_log_safe_summary(d) for d in docs]
+    return {'items': items, 'count': await db.webhook_log.count_documents({})}
 
 
 async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 'webhook'):
@@ -5138,15 +5630,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     comment_text = _normalize_comment_text(comment_data.get('text'))
 
     # log: comment_seen (every comment we observe, before dedup)
-    logger.info('comment_seen ig_comment_id=%s media=%s source=%s text=%r',
-                ig_comment_id, media_id, source, comment_text[:80])
+    # Never log raw comment text — Railway log retention may keep it for
+    # weeks. Log only length and a stable short fingerprint hash.
+    logger.info('comment_seen ig_comment_id=%s media=%s source=%s text_length=%s text_hash=%s',
+                ig_comment_id, media_id, source, len(comment_text or ''), _hash_text(comment_text or ''))
 
     if not ig_comment_id or not commenter_id:
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'missing_id'}
     if commenter_id == ig_account_id:
+        logger.info('comment_skipped_bot_own_reply ig_comment_id=%s user=%s source=%s',
+                    ig_comment_id, user_doc.get('email'), source)
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
-                'reason': 'self_comment'}
+                'reason': 'bot_own_reply'}
 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
@@ -5189,7 +5685,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if existing:
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
         previous_status = str(existing.get('action_status') or existing.get('actionStatus') or '').lower()
-        already_replied = bool(existing.get('replied')) or previous_status in ('success', 'replied')
+        previous_reply_status = str(existing.get('reply_status') or '').lower()
+        previous_dm_status = str(existing.get('dm_status') or '').lower()
+        previous_dm_failure_reason = existing.get('dm_failure_reason')
+        already_replied = (
+            bool(existing.get('replied'))
+            or previous_status in ('success', 'replied', 'partial_success')
+            or previous_reply_status == 'success'
+        )
         retryable_skip = previous_skip in (
             'missing_comment_timestamp',
             'no_rule_match',
@@ -5199,8 +5702,27 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             source == 'manual_catchup'
             and previous_skip == 'historical_before_rule_activation'
         )
+        # A failed action is retryable EXCEPT when the only failure was a
+        # permanent DM error and the public reply already succeeded — in
+        # that case the comment is in partial_success and should not
+        # retry the reply (it would duplicate) nor retry the DM (it's
+        # permanently undeliverable).
+        partial_success_with_permanent_dm_failure = (
+            previous_reply_status == 'success'
+            and previous_dm_status == 'failed'
+            and previous_dm_failure_reason in PERMANENT_GRAPH_FAILURE_REASONS
+        )
+        # Transient DM failure on an otherwise-successful reply is NOT
+        # retryable from the public-reply path either — duplicating the
+        # public reply is worse than failing to retry the DM. Only the
+        # /dm-retry path (out of scope here) should re-send the DM.
+        partial_success_with_transient_dm_failure = (
+            previous_reply_status == 'success'
+            and previous_dm_status == 'failed'
+            and previous_dm_failure_reason in TRANSIENT_GRAPH_FAILURE_REASONS
+        )
         retryable_status = (
-            previous_status == 'failed'
+            (previous_status == 'failed' and not already_replied)
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
         )
@@ -5213,13 +5735,54 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             retry_reason = previous_skip or previous_status or 'unreplied_existing'
             existing_doc_id = existing.get('id')
             existing_created = existing.get('created')
-            logger.info('comment_reprocessing_retryable ig_comment_id=%s user=%s source=%s reason=%s',
-                        ig_comment_id, user_doc.get('email'), source, retry_reason)
+            logger.info(
+                'comment_retryable_failed_before ig_comment_id=%s user=%s source=%s reason=%s '
+                'previous_status=%s reply_status=%s dm_status=%s',
+                ig_comment_id, user_doc.get('email'), source, retry_reason,
+                previous_status, previous_reply_status, previous_dm_status,
+            )
         else:
-            logger.info('comment_already_processed ig_comment_id=%s user=%s',
-                        ig_comment_id, user_doc.get('email'))
+            # Classify the exact reason this comment is being skipped now
+            # — the legacy comment_already_processed line was vague and
+            # masked partial_success / DM-failed states.
+            exact_reason = 'comment_processed_unknown_state'
+            return_reason = 'unknown_state'
+            if previous_skip == 'historical_before_rule_activation':
+                exact_reason = 'comment_skipped_historical'
+                return_reason = 'historical'
+            elif (
+                partial_success_with_permanent_dm_failure
+                or partial_success_with_transient_dm_failure
+            ):
+                exact_reason = 'comment_already_partial_success'
+                return_reason = 'already_partial_success'
+            elif (
+                previous_reply_status == 'success'
+                and previous_dm_status in ('success', 'disabled', '')
+            ):
+                exact_reason = 'comment_already_replied_success'
+                return_reason = 'already_replied_success'
+            elif (
+                previous_reply_status in ('disabled', '')
+                and previous_dm_status == 'failed'
+            ):
+                exact_reason = 'comment_already_dm_failed'
+                return_reason = 'already_dm_failed'
+            elif already_replied:
+                # replied=True / action_status=success but no reply_status
+                # field (legacy doc written before this refactor).
+                exact_reason = 'comment_already_replied_success'
+                return_reason = 'already_replied_success'
+            logger.info(
+                '%s ig_comment_id=%s user=%s source=%s previous_status=%s '
+                'reply_status=%s dm_status=%s dm_failure_reason=%s',
+                exact_reason, ig_comment_id, user_doc.get('email'), source,
+                previous_status, previous_reply_status, previous_dm_status,
+                previous_dm_failure_reason,
+            )
             return {'processed': False, 'already_processed': True, 'matched': False,
-                    'action_status': 'skipped', 'reason': 'duplicate'}
+                    'action_status': 'skipped', 'reason': return_reason,
+                    'classified_reason': exact_reason}
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
 
@@ -5381,6 +5944,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'matched': matched,
         'action_status': action_status,
         'actionStatus': action_status,
+        'reply_status': 'disabled',
+        'reply_failure_reason': None,
+        'replied_at': None,
+        'dm_status': 'disabled',
+        'dm_failure_reason': None,
+        'dm_sent_at': None,
+        'last_attempt_at': None,
         'skip_reason': cutoff_skip_reason,
         'skipReason': cutoff_skip_reason,
         'error': None,
@@ -5438,51 +6008,116 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'rule_id': rule_id, 'comment_doc_id': doc['id']}
 
 
+def _compute_action_status(flow_results: dict) -> str:
+    """Combine per-step results into a single dashboard-facing action_status.
+
+    Rules (in priority order):
+      • reply ran and FAILED               -> 'failed'
+      • reply succeeded, DM failed         -> 'partial_success'
+      • reply succeeded (DM disabled / OK) -> 'success'
+      • only DM ran and succeeded          -> 'success'
+      • only DM ran and failed             -> 'failed'
+      • neither ran                        -> 'skipped'
+    """
+    rs = flow_results.get('reply_status') or 'disabled'
+    ds = flow_results.get('dm_status') or 'disabled'
+    if rs == 'failed':
+        return 'failed'
+    if rs == 'success':
+        if ds == 'failed':
+            return 'partial_success'
+        return 'success'
+    # reply was disabled or skipped — outcome is determined by DM alone.
+    if ds == 'success':
+        return 'success'
+    if ds == 'failed':
+        return 'failed'
+    return 'skipped'
+
+
 async def _run_and_record_action(user_doc, automation, commenter_id, comment_text,
                                  comment_doc_id: str, ig_comment_id: str,
                                  source: str = 'webhook',
                                  received_monotonic: Optional[float] = None):
-    """Wrap execute_flow so we record success/failure on the comment doc."""
+    """Wrap execute_flow so we record success/failure on the comment doc.
+
+    Persists per-step outcomes (reply_status, dm_status, action_status,
+    failure reasons, last_attempt_at) so dedup on a later poll can decide
+    whether the comment is truly done or still retryable, and so the
+    dashboard can show partial_success when only the DM step failed.
+    """
+    flow_results: dict = {}
+    now = datetime.utcnow()
     try:
-        ok = await execute_flow(
+        await execute_flow(
             user_doc, automation, commenter_id, comment_text,
             comment_context={
                 'ig_comment_id': ig_comment_id,
                 'comment_doc_id': comment_doc_id,
                 'source': source,
                 'received_monotonic': received_monotonic,
-            }
+            },
+            flow_results=flow_results,
         )
-        if not ok:
-            await db.comments.update_one(
-                {'id': comment_doc_id},
-                {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
-                          'error': 'automation_action_send_failed'}}
-            )
-            logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
-                           ig_comment_id, automation.get('id'))
-            return False
+    except Exception as e:
+        # Whatever the per-step results captured before the exception
+        # remain useful, but force action_status=failed.
+        flow_results['action_status'] = 'failed'
+        flow_results.setdefault('reply_failure_reason', 'temporary_graph_error')
         await db.comments.update_one(
             {'id': comment_doc_id},
             {'$set': {
-                'action_status': 'success',
-                'actionStatus': 'success',
-                'actionSentAt': datetime.utcnow(),
-                'updated': datetime.utcnow(),
-            }}
-        )
-        logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
-                    ig_comment_id, automation.get('id'))
-        return True
-    except Exception as e:
-        await db.comments.update_one(
-            {'id': comment_doc_id},
-            {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
-                      'error': str(e)[:500]}}
+                'action_status': 'failed',
+                'actionStatus': 'failed',
+                'reply_status': flow_results.get('reply_status') or 'disabled',
+                'dm_status': flow_results.get('dm_status') or 'disabled',
+                'reply_failure_reason': flow_results.get('reply_failure_reason'),
+                'dm_failure_reason': flow_results.get('dm_failure_reason'),
+                'error': str(e)[:500],
+                'last_attempt_at': now,
+                'updated': now,
+            }},
         )
         logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
                          ig_comment_id, automation.get('id'), e)
         return False
+
+    action_status = _compute_action_status(flow_results)
+    update_set = {
+        'action_status': action_status,
+        'actionStatus': action_status,
+        'reply_status': flow_results.get('reply_status') or 'disabled',
+        'dm_status': flow_results.get('dm_status') or 'disabled',
+        'reply_failure_reason': flow_results.get('reply_failure_reason'),
+        'dm_failure_reason': flow_results.get('dm_failure_reason'),
+        'last_attempt_at': now,
+        'updated': now,
+    }
+    if action_status in ('success', 'partial_success'):
+        update_set['actionSentAt'] = now
+    await db.comments.update_one({'id': comment_doc_id}, {'$set': update_set})
+
+    if action_status == 'success':
+        logger.info('action_execution_success ig_comment_id=%s rule_id=%s reply=%s dm=%s',
+                    ig_comment_id, automation.get('id'),
+                    flow_results.get('reply_status'), flow_results.get('dm_status'))
+        return True
+    if action_status == 'partial_success':
+        logger.warning(
+            'action_execution_partial_success ig_comment_id=%s rule_id=%s '
+            'reply=success dm=failed dm_failure_reason=%s',
+            ig_comment_id, automation.get('id'),
+            flow_results.get('dm_failure_reason'),
+        )
+        return True
+    logger.warning(
+        'action_execution_send_failed ig_comment_id=%s rule_id=%s reply=%s dm=%s '
+        'reply_failure_reason=%s dm_failure_reason=%s',
+        ig_comment_id, automation.get('id'),
+        flow_results.get('reply_status'), flow_results.get('dm_status'),
+        flow_results.get('reply_failure_reason'), flow_results.get('dm_failure_reason'),
+    )
+    return False
 
 
 # ---------------- DM Automation (independent from Comments) ----------------
@@ -5887,7 +6522,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 'event_kind': event_kind}
 
     logger.info('dm_sender_extracted sender=%s', sender_id)
-    logger.info('dm_text_extracted len=%s preview=%r', len(text), text[:80])
+    logger.info('dm_text_extracted len=%s text_hash=%s', len(text), _hash_text(text))
 
     session = await _find_pending_comment_dm_session(
         user_doc, sender_id, payload=quick_reply_payload or postback_payload
@@ -6692,6 +7327,10 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
     media id. Broad rules are ignored, and _handle_new_comment still performs
     matching, activation-cutoff checks, rate caps, and duplicate protection.
     """
+    if _rate_limited('process_unreplied', user_id,
+                     limit=RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=process_unreplied user_id=%s', user_id)
+        raise HTTPException(429, 'Too many catch-up requests. Try again in a minute.')
     user_doc = await db.users.find_one({'id': user_id})
     if not user_doc:
         raise HTTPException(404, 'user not found')
@@ -6831,6 +7470,10 @@ async def instagram_poll_now(email: str = '', key: str = ''):
 async def instagram_comments_poll_now(user_id: str = Depends(get_current_user_id)):
     """Authenticated trigger: poll comments for the calling user right now.
     Returns a summary in the documented shape."""
+    if _rate_limited('poll_now', user_id,
+                     limit=RATE_LIMIT_POLL_NOW_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=poll_now user_id=%s', user_id)
+        raise HTTPException(429, 'Too many poll-now requests. Try again in a minute.')
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'user not found')
@@ -8301,13 +8944,49 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...
 
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id)
+_RESOLVED_CORS_ORIGINS = _resolved_cors_origins()
+logger.info('cors_origins_configured production=%s count=%s sample=%s',
+            IS_PRODUCTION, len(_RESOLVED_CORS_ORIGINS),
+            ','.join(_RESOLVED_CORS_ORIGINS[:3]))
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=['*'],
+    allow_origins=_RESOLVED_CORS_ORIGINS,
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+@app.middleware('http')
+async def security_headers_middleware(request, call_next):
+    """Apply baseline security headers to every response.
+
+    HSTS is only sent on HTTPS in production to avoid breaking localhost
+    HTTP development. CSP is conservative: allow same-origin + the API's
+    own resources. Tighten via CONTENT_SECURITY_POLICY env if desired.
+    """
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault('X-Content-Type-Options', 'nosniff')
+    headers.setdefault('X-Frame-Options', 'DENY')
+    headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    headers.setdefault(
+        'Permissions-Policy',
+        'camera=(), microphone=(), geolocation=(), payment=()',
+    )
+    csp_override = os.environ.get('CONTENT_SECURITY_POLICY')
+    if csp_override:
+        headers.setdefault('Content-Security-Policy', csp_override)
+    if IS_PRODUCTION:
+        # HSTS only when we know we're on HTTPS. The X-Forwarded-Proto
+        # header is what Railway / most reverse proxies set.
+        proto = (request.headers.get('x-forwarded-proto') or request.url.scheme).lower()
+        if proto == 'https':
+            headers.setdefault(
+                'Strict-Transport-Security',
+                'max-age=31536000; includeSubDomains',
+            )
+    return response
 
 
 @app.on_event('startup')

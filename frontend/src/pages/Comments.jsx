@@ -1,12 +1,81 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter } from 'lucide-react';
+import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
+
+// Permanent DM/reply failures: do not show a Retry button; doing so would
+// hit the same Graph error or, worse, duplicate a successful public reply.
+const PERMANENT_FAILURE_REASONS = new Set([
+  'recipient_unavailable',
+  'messaging_not_allowed',
+  'user_blocked_messages',
+  'permission_error',
+]);
+
+const STATUS_FILTERS = [
+  { id: 'all',              label: 'All' },
+  { id: 'success',          label: 'Success' },
+  { id: 'partial_success',  label: 'Partial (DM failed)' },
+  { id: 'pending',          label: 'Pending / queued' },
+  { id: 'retryable_failed', label: 'Retryable failed' },
+  { id: 'permanent_failed', label: 'Permanent failed' },
+  { id: 'skipped',          label: 'Skipped' },
+];
+
+function classifyComment(c) {
+  // Returns one of the STATUS_FILTERS ids.
+  const action = String(c.action_status || c.actionStatus || '').toLowerCase();
+  const reply = String(c.reply_status || '').toLowerCase();
+  const dm = String(c.dm_status || '').toLowerCase();
+  const dmReason = c.dm_failure_reason;
+  const replyReason = c.reply_failure_reason;
+  if (action === 'success' || reply === 'success' && dm !== 'failed') return 'success';
+  if (action === 'partial_success' || (reply === 'success' && dm === 'failed')) return 'partial_success';
+  if (action === 'pending') return 'pending';
+  if (action === 'failed') {
+    const permanent = (
+      PERMANENT_FAILURE_REASONS.has(dmReason)
+      || PERMANENT_FAILURE_REASONS.has(replyReason)
+    );
+    return permanent ? 'permanent_failed' : 'retryable_failed';
+  }
+  if (action === 'skipped') return 'skipped';
+  return 'pending';
+}
+
+function statusBadge(c) {
+  const cls = classifyComment(c);
+  switch (cls) {
+    case 'success':
+      return { label: 'Replied', cn: 'bg-emerald-100 text-emerald-700', Icon: CheckCircle2 };
+    case 'partial_success':
+      return { label: 'Reply OK • DM failed', cn: 'bg-amber-100 text-amber-800', Icon: AlertTriangle };
+    case 'pending':
+      return { label: 'Queued', cn: 'bg-blue-100 text-blue-700', Icon: Clock };
+    case 'retryable_failed':
+      return { label: 'Retryable failed', cn: 'bg-orange-100 text-orange-700', Icon: Repeat };
+    case 'permanent_failed':
+      return { label: 'Permanent failed', cn: 'bg-rose-100 text-rose-700', Icon: ShieldX };
+    case 'skipped':
+      return { label: 'Skipped', cn: 'bg-slate-100 text-slate-600', Icon: Filter };
+    default:
+      return { label: '—', cn: 'bg-slate-100 text-slate-600', Icon: Filter };
+  }
+}
+
+function canRetryReply(c) {
+  // Only safe when no provider-proven public reply exists AND the reply
+  // step is in a state we can re-try (failed transiently or pending).
+  if (c.replied === true) return false;
+  if (String(c.reply_status || '').toLowerCase() === 'success') return false;
+  if (PERMANENT_FAILURE_REASONS.has(c.reply_failure_reason)) return false;
+  return true;
+}
 
 const Comments = () => {
   const [comments, setComments] = useState([]);
@@ -18,6 +87,7 @@ const Comments = () => {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [unrepliedOnly, setUnrepliedOnly] = useState(true); // Default to unreplied
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -96,6 +166,14 @@ const Comments = () => {
     fetchComments(1, true);
   }, [fetchComments]);
 
+  // Apply the status filter on the client. Backend pagination still drives
+  // what's loaded; this is a UI-only refinement so support can quickly
+  // narrow the page to "partial success" / "permanent failed" etc.
+  const filteredComments = useMemo(() => {
+    if (statusFilter === 'all') return comments;
+    return comments.filter(c => classifyComment(c) === statusFilter);
+  }, [comments, statusFilter]);
+
   useEffect(() => {
     connectWs();
     return () => {
@@ -151,6 +229,27 @@ const Comments = () => {
         </div>
       </div>
 
+      {/* Status filter bar — operations visibility per Phase 1 spec.
+          Filters work client-side over the current page, so the data model
+          remains the existing /comments endpoint without new params. */}
+      <div className="mb-4 flex flex-wrap gap-2">
+        {STATUS_FILTERS.map(f => (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => setStatusFilter(f.id)}
+            className={
+              'rounded-full border px-3 py-1 text-xs font-medium transition '
+              + (statusFilter === f.id
+                ? 'border-blue-500 bg-blue-50 text-blue-700'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50')
+            }
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {loading && comments.length === 0 && (
         <div className="text-center py-20 text-slate-500">Loading…</div>
       )}
@@ -171,22 +270,42 @@ const Comments = () => {
       )}
 
       <div className="space-y-4">
-        {comments.map(c => (
+        {filteredComments.map(c => {
+          const badge = statusBadge(c);
+          const BadgeIcon = badge.Icon;
+          return (
           <div key={c.id} className="bg-white rounded-2xl border border-slate-100 p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="font-semibold">@{c.commenter_username}</div>
-                  {c.replied && (
-                    <Badge className="bg-emerald-100 text-emerald-700 border-0">
-                      <CheckCircle2 className="w-3 h-3 mr-1" /> Replied
-                    </Badge>
+                  <Badge className={`${badge.cn} border-0`}>
+                    <BadgeIcon className="w-3 h-3 mr-1" /> {badge.label}
+                  </Badge>
+                  {/* Surface classified failure reasons so support staff
+                      can see WHY a DM failed without opening the diagnostics
+                      endpoint. Never leak raw Graph error bodies. */}
+                  {c.dm_failure_reason && (
+                    <span className="text-xs text-amber-700">
+                      DM: <span className="font-mono">{c.dm_failure_reason}</span>
+                    </span>
+                  )}
+                  {c.reply_failure_reason && (
+                    <span className="text-xs text-rose-700">
+                      Reply: <span className="font-mono">{c.reply_failure_reason}</span>
+                    </span>
                   )}
                 </div>
                 <div className="text-slate-700 mt-1">{c.text}</div>
                 <div className="text-xs text-slate-400 mt-1">
                   {c.created && new Date(c.created).toLocaleString()}
                   {c.media_id && <> • on media <span className="font-mono">{c.media_id}</span></>}
+                  {typeof c.attempts === 'number' && c.attempts > 1 && (
+                    <> • {c.attempts} attempts</>
+                  )}
+                  {c.next_retry_at && (
+                    <> • next retry {new Date(c.next_retry_at).toLocaleString()}</>
+                  )}
                 </div>
               </div>
             </div>
@@ -213,10 +332,29 @@ const Comments = () => {
                   <Send className="w-4 h-4 mr-2" />
                   {sending[c.id] ? 'Sending…' : 'Reply'}
                 </Button>
+                {/* Safe Retry Reply: only shown when there is no provider-
+                    proven reply yet AND the failure isn't permanent. */}
+                {canRetryReply(c) && (replyText[c.id] || '').trim() === '' && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setReplyText(prev => ({
+                        ...prev,
+                        [c.id]: prev[c.id] || c.reply_text || '',
+                      }));
+                      toast.info('Type a reply, then send. Retry will not duplicate a successful reply.');
+                    }}
+                    className="sm:w-auto"
+                  >
+                    <Repeat className="w-4 h-4 mr-2" /> Retry reply
+                  </Button>
+                )}
               </form>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {hasMore && (

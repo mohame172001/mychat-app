@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Send, Settings,
-  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram
+  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram,
+  Activity,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
@@ -24,6 +25,7 @@ export const navItems = [
   { to: '/app/comments', icon: AtSign, label: 'Comments' },
   { to: '/app/dm-automation', icon: Inbox, label: 'DM Automation' },
   { to: '/app/broadcasting', icon: Send, label: 'Broadcasting' },
+  { to: '/app/system-health', icon: Activity, label: 'System Health' },
   { to: '/app/settings', icon: Settings, label: 'Settings' }
 ];
 
