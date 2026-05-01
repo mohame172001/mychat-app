@@ -168,12 +168,108 @@ ws_manager = ConnectionManager()
 
 
 # ---------------- Meta messaging helper ----------------
+def _safe_provider_error_payload(error: Any) -> dict:
+    if isinstance(error, dict):
+        payload = error
+    else:
+        try:
+            payload = json.loads(str(error or '{}'))
+        except Exception:
+            payload = {'message': str(error or '')[:300]}
+    if isinstance(payload, dict) and isinstance(payload.get('error'), dict):
+        payload = payload['error']
+    if not isinstance(payload, dict):
+        payload = {'message': str(payload)[:300]}
+    return _redact_secrets(payload)
+
+
+def classify_instagram_send_error(error: Any, status_code: Optional[int] = None) -> dict:
+    """Classify Graph send failures without exposing raw provider payloads."""
+    payload = _safe_provider_error_payload(error)
+    message = str(
+        payload.get('message')
+        or payload.get('error_user_msg')
+        or payload.get('error_user_title')
+        or error
+        or ''
+    ).lower()
+    code = payload.get('code')
+    subcode = payload.get('error_subcode') or payload.get('subcode')
+
+    reason = 'unknown_graph_error'
+    retryable = False
+    if status_code in (429,) or code in (4, 17, 32, 613) or 'rate limit' in message or 'too many' in message:
+        reason = 'rate_limited'
+        retryable = True
+    elif status_code and status_code >= 500:
+        reason = 'temporary_graph_error'
+        retryable = True
+    elif any(term in message for term in (
+        'cannot receive',
+        "can't receive",
+        'recipient is unavailable',
+        'recipient unavailable',
+        'not available',
+        'unavailable recipient',
+    )):
+        reason = 'recipient_unavailable'
+    elif any(term in message for term in (
+        'messaging not allowed',
+        'cannot send',
+        'not allowed to message',
+        'outside allowed window',
+        'recipient has not',
+    )):
+        reason = 'messaging_not_allowed'
+    elif any(term in message for term in ('blocked', 'block messages', 'privacy')):
+        reason = 'user_blocked_messages'
+    elif code in (10, 190, 200):
+        reason = 'permission_error'
+    elif status_code in (408, 409, 425, 502, 503, 504) or 'timeout' in message or 'temporar' in message:
+        reason = 'temporary_graph_error'
+        retryable = True
+
+    if reason in {'recipient_unavailable', 'messaging_not_allowed', 'user_blocked_messages', 'permission_error'}:
+        retryable = False
+    return {
+        'failure_reason': reason,
+        'retryable': retryable,
+        'provider_code': code,
+        'provider_subcode': subcode,
+        'status_code': status_code,
+        'safe_label': reason,
+    }
+
+
+def _detailed_send_result(ok: bool, status_code: Optional[int] = None,
+                          body: Optional[dict] = None, error: Any = None) -> dict:
+    if ok:
+        return {
+            'ok': True,
+            'status': 'success',
+            'status_code': status_code,
+            'body': _redact_secrets(body or {}),
+            'failure_reason': None,
+            'retryable': False,
+        }
+    classified = classify_instagram_send_error(error or body or {}, status_code)
+    return {
+        'ok': False,
+        'status': 'failed',
+        'status_code': status_code,
+        'error': _redact_secrets(_safe_provider_error_payload(error or body or {})),
+        **classified,
+    }
+
+
 async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: str,
                           message: dict) -> dict:
     """Send a raw Instagram message object. Tokens are never returned."""
     if not access_token or not ig_user_id:
         logger.warning('send_ig_message: missing access_token or ig_user_id')
-        return {'ok': False, 'status_code': None, 'error': 'missing_access_token_or_ig_user_id'}
+        return _detailed_send_result(
+            False, None, error={'message': 'missing_access_token_or_ig_user_id'}
+        )
     url = f'https://graph.instagram.com/{ig_user_id}/messages'
     payload = {
         'recipient': {'id': recipient_ig_id},
@@ -187,18 +283,99 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                     body = r.json()
                 except Exception:
                     body = {}
-                return {'ok': True, 'status_code': r.status_code, 'body': _redact_secrets(body)}
-            logger.error('send_ig_message error %s: %s', r.status_code, _redact_secrets(r.text))
-            return {'ok': False, 'status_code': r.status_code, 'error': _redact_secrets(r.text[:500])}
+                return _detailed_send_result(True, r.status_code, body=body)
+            safe_error = _safe_provider_error_payload(r.text[:500])
+            classified = classify_instagram_send_error(safe_error, r.status_code)
+            logger.error('send_ig_message_failed status=%s reason=%s retryable=%s',
+                         r.status_code, classified['failure_reason'], classified['retryable'])
+            return _detailed_send_result(False, r.status_code, error=safe_error)
     except Exception as e:
         logger.exception('send_ig_message exception: %s', e)
-        return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+        return _detailed_send_result(False, None, error={'message': str(e)[:300]})
+
+
+async def send_ig_dm_detailed(access_token: str, ig_user_id: str,
+                              recipient_ig_id: str, text: str) -> dict:
+    """Send a text DM and return a safe detailed result."""
+    return await send_ig_message(access_token, ig_user_id, recipient_ig_id, {'text': text})
 
 
 async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> bool:
     """Send a text DM via Instagram Graph API. Returns True on success."""
-    result = await send_ig_message(access_token, ig_user_id, recipient_ig_id, {'text': text})
+    result = await send_ig_dm_detailed(access_token, ig_user_id, recipient_ig_id, text)
     return bool(result.get('ok'))
+
+
+_ORIGINAL_SEND_IG_DM_DETAILED = send_ig_dm_detailed
+_ORIGINAL_SEND_IG_DM = send_ig_dm
+
+
+async def _call_send_ig_dm_detailed(access_token: str, ig_user_id: str,
+                                    recipient_ig_id: str, text: str) -> dict:
+    """Call detailed DM helper, while preserving old tests that patch send_ig_dm."""
+    if send_ig_dm_detailed is not _ORIGINAL_SEND_IG_DM_DETAILED:
+        return await send_ig_dm_detailed(access_token, ig_user_id, recipient_ig_id, text)
+    if send_ig_dm is not _ORIGINAL_SEND_IG_DM:
+        ok = await send_ig_dm(access_token, ig_user_id, recipient_ig_id, text)
+        return _detailed_send_result(bool(ok), 200 if ok else None,
+                                     error={'message': 'patched_send_ig_dm_failed'})
+    return await send_ig_dm_detailed(access_token, ig_user_id, recipient_ig_id, text)
+
+
+def _send_failure_fields(prefix: str, result: dict) -> dict:
+    """Return safe failure fields for a comment/DM send result."""
+    if result.get('ok'):
+        return {
+            f'{prefix}_failure_reason': None,
+            f'{prefix}_failure_retryable': False,
+            f'{prefix}_provider_code': None,
+            f'{prefix}_provider_subcode': None,
+        }
+    return {
+        f'{prefix}_failure_reason': result.get('failure_reason') or 'unknown_graph_error',
+        f'{prefix}_failure_retryable': bool(result.get('retryable')),
+        f'{prefix}_provider_code': result.get('provider_code'),
+        f'{prefix}_provider_subcode': result.get('provider_subcode'),
+    }
+
+
+def _status_is_success(value: Any) -> bool:
+    return str(value or '').lower() in ('success', 'sent', 'replied')
+
+
+def _status_is_disabled(value: Any) -> bool:
+    return str(value or '').lower() in ('disabled', 'skipped', 'not_applicable', 'na')
+
+
+def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
+    """Compute the overall action status from independent reply/DM statuses."""
+    statuses = [
+        str(reply_status or 'disabled').lower(),
+        str(dm_status or 'disabled').lower(),
+    ]
+    enabled_statuses = [s for s in statuses if not _status_is_disabled(s)]
+    if not enabled_statuses:
+        return 'skipped'
+    has_success = any(_status_is_success(s) for s in enabled_statuses)
+    has_failed = any(s == 'failed' for s in enabled_statuses)
+    if has_success and has_failed:
+        return 'partial_success'
+    if has_failed:
+        return 'failed'
+    if all(_status_is_success(s) for s in enabled_statuses):
+        return 'success'
+    return 'failed'
+
+
+def _automation_has_node_type(automation: dict, node_type: str) -> bool:
+    return any((node or {}).get('type') == node_type for node in automation.get('nodes') or [])
+
+
+def _dm_failure_retryable_from_doc(doc: dict) -> bool:
+    if 'dm_failure_retryable' in doc:
+        return bool(doc.get('dm_failure_retryable'))
+    reason = doc.get('dm_failure_reason')
+    return reason in ('rate_limited', 'temporary_graph_error')
 
 
 def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
@@ -1271,10 +1448,12 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
 
 
 # ---------------- Comment reply helper ----------------
-async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) -> bool:
-    """Reply to an Instagram comment via Graph API."""
+async def reply_to_ig_comment_detailed(access_token: str, ig_comment_id: str, text: str) -> dict:
+    """Reply to an Instagram comment via Graph API and return a safe detailed result."""
     if not access_token or not ig_comment_id:
-        return False
+        return _detailed_send_result(
+            False, None, error={'message': 'missing_access_token_or_comment_id'}
+        )
     url = f'https://graph.instagram.com/{ig_comment_id}/replies'
     import time as _time
     _start = _time.monotonic()
@@ -1284,12 +1463,41 @@ async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) 
             ms = int((_time.monotonic() - _start) * 1000)
             if r.status_code == 200:
                 logger.info('comment_reply_send_ms ms=%s comment_id=%s', ms, ig_comment_id)
-                return True
-            logger.error('reply_to_ig_comment error %s ms=%s: %s', r.status_code, ms, r.text)
-            return False
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+                return _detailed_send_result(True, r.status_code, body=body)
+            safe_error = _safe_provider_error_payload(r.text[:500])
+            classified = classify_instagram_send_error(safe_error, r.status_code)
+            logger.error('reply_to_ig_comment_failed status=%s ms=%s reason=%s retryable=%s',
+                         r.status_code, ms, classified['failure_reason'], classified['retryable'])
+            return _detailed_send_result(False, r.status_code, error=safe_error)
     except Exception as e:
         logger.exception('reply_to_ig_comment exception: %s', e)
-        return False
+        return _detailed_send_result(False, None, error={'message': str(e)[:300]})
+
+
+async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) -> bool:
+    """Reply to an Instagram comment via Graph API."""
+    result = await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
+    return bool(result.get('ok'))
+
+
+_ORIGINAL_REPLY_TO_IG_COMMENT_DETAILED = reply_to_ig_comment_detailed
+_ORIGINAL_REPLY_TO_IG_COMMENT = reply_to_ig_comment
+
+
+async def _call_reply_to_ig_comment_detailed(access_token: str, ig_comment_id: str,
+                                             text: str) -> dict:
+    """Call detailed reply helper, while preserving old tests that patch the bool wrapper."""
+    if reply_to_ig_comment_detailed is not _ORIGINAL_REPLY_TO_IG_COMMENT_DETAILED:
+        return await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
+    if reply_to_ig_comment is not _ORIGINAL_REPLY_TO_IG_COMMENT:
+        ok = await reply_to_ig_comment(access_token, ig_comment_id, text)
+        return _detailed_send_result(bool(ok), 200 if ok else None,
+                                     error={'message': 'patched_reply_to_ig_comment_failed'})
+    return await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
 
 
 # ---------------- Automation engine ----------------
@@ -1348,11 +1556,35 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     ok = await _send_comment_dm_flow_entry(
                         user, automation, sender_ig_id, comment_context
                     )
+                    dm_result = {
+                        'ok': bool(ok),
+                        'failure_reason': None if ok else 'unknown_graph_error',
+                        'retryable': False,
+                    }
                     logger.info('Flow comment DM entry to %s rule=%s ok=%s',
                                 sender_ig_id, automation.get('id'), ok)
                 else:
-                    ok = await send_ig_dm(access_token, ig_user_id, sender_ig_id, msg_text)
-                    logger.info('Flow message to %s: %s (ok=%s)', sender_ig_id, msg_text[:40], ok)
+                    dm_result = await _call_send_ig_dm_detailed(access_token, ig_user_id, sender_ig_id, msg_text)
+                    ok = bool(dm_result.get('ok'))
+                    logger.info('Flow message to %s rule=%s ok=%s reason=%s',
+                                sender_ig_id, automation.get('id'), ok,
+                                dm_result.get('failure_reason'))
+                if comment_context and comment_context.get('comment_doc_id'):
+                    now = datetime.utcnow()
+                    update = {
+                        'dm_status': 'success' if ok else 'failed',
+                        'dmStatus': 'success' if ok else 'failed',
+                        'last_attempt_at': now,
+                        'updated': now,
+                        **_send_failure_fields('dm', dm_result),
+                    }
+                    if ok:
+                        update['dm_sent_at'] = now
+                        update['dmSentAt'] = now
+                    await db.comments.update_one(
+                        {'id': comment_context['comment_doc_id']},
+                        {'$set': update},
+                    )
                 if flow_source == 'webhook':
                     logger.info(
                         'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s',
@@ -1368,9 +1600,30 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
                 action_attempted = True
-                ok = await reply_to_ig_comment(access_token, comment_context['ig_comment_id'], msg_text)
-                logger.info('Flow comment reply on %s: %s (ok=%s)',
-                            comment_context['ig_comment_id'], msg_text[:40], ok)
+                already_replied = False
+                if comment_context.get('comment_doc_id'):
+                    existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
+                    already_replied = bool(
+                        existing_comment
+                        and (
+                            existing_comment.get('replied')
+                            or _status_is_success(existing_comment.get('reply_status'))
+                            or _status_is_success(existing_comment.get('replyStatus'))
+                        )
+                    )
+                if already_replied:
+                    ok = True
+                    reply_result = {'ok': True, 'failure_reason': None, 'retryable': False}
+                    logger.info('comment_reply_duplicate_skipped ig_comment_id=%s rule_id=%s',
+                                comment_context['ig_comment_id'], automation.get('id'))
+                else:
+                    reply_result = await _call_reply_to_ig_comment_detailed(
+                        access_token, comment_context['ig_comment_id'], msg_text
+                    )
+                    ok = bool(reply_result.get('ok'))
+                logger.info('Flow comment reply on %s rule=%s ok=%s reason=%s',
+                            comment_context['ig_comment_id'], automation.get('id'), ok,
+                            reply_result.get('failure_reason'))
                 if ok:
                     logger.info(
                         'comment_reply_sent source=%s ig_comment_id=%s rule_id=%s total_webhook_to_reply_ms=%s',
@@ -1387,17 +1640,25 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         webhook_elapsed_ms(),
                     )
                 ok_all = ok_all and bool(ok)
-                if ok and comment_context.get('comment_doc_id'):
-                    await db.comments.update_one(
-                        {'id': comment_context['comment_doc_id']},
-                        {'$set': {
+                if comment_context.get('comment_doc_id'):
+                    now = datetime.utcnow()
+                    update = {
+                        'reply_status': 'success' if ok else 'failed',
+                        'replyStatus': 'success' if ok else 'failed',
+                        'last_attempt_at': now,
+                        'updated': now,
+                        **_send_failure_fields('reply', reply_result),
+                    }
+                    if ok:
+                        update.update({
                             'replied': True,
                             'reply_text': msg_text,
-                            'reply_status': 'sent',
-                            'replyStatus': 'sent',
-                            'replySentAt': datetime.utcnow(),
-                            'updated': datetime.utcnow(),
-                        }}
+                            'replySentAt': now,
+                            'replied_at': now,
+                        })
+                    await db.comments.update_one(
+                        {'id': comment_context['comment_doc_id']},
+                        {'$set': update}
                     )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
@@ -1416,7 +1677,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         current_ids.append(edge['target'])
             continue
 
-        for next_id in edge_map.get(nid, []):
+        next_ids = list(edge_map.get(nid, []))
+        if comment_context:
+            next_ids.sort(key=lambda next_id: 0 if (node_map.get(next_id) or {}).get('type') == 'reply_comment' else 1)
+        for next_id in next_ids:
             current_ids.append(next_id)
 
     if action_attempted and ok_all:
@@ -2250,7 +2514,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(url, data={'message': text, 'access_token': access_token})
             if r.status_code != 200:
-                logger.error('Comment reply error %s: %s', r.status_code, r.text)
+                logger.error('Comment reply error %s: %s', r.status_code, _redact_secrets(r.text[:500]))
                 raise HTTPException(r.status_code, f'Graph API error: {r.text}')
             body = r.json()
     except HTTPException:
@@ -2263,6 +2527,39 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
         {'$set': {'replied': True, 'reply_text': text, 'reply_id': body.get('id')}}
     )
     return {'ok': True, 'graph_reply_id': body.get('id')}
+
+
+@api.get('/comments/{comment_id}/diagnostics')
+async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_current_user_id)):
+    """Safe per-comment automation status diagnostics for the active IG account."""
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
+    comment = None
+    for field in ('id', 'ig_comment_id', 'igCommentId'):
+        comment = await db.comments.find_one({**scoped, field: comment_id})
+        if comment:
+            break
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+    text = comment.get('text') or ''
+    return {
+        'commentId': comment.get('ig_comment_id') or comment.get('igCommentId') or comment.get('id'),
+        'mediaId': comment.get('media_id') or comment.get('mediaId'),
+        'text_length': len(str(text)),
+        'reply_status': comment.get('reply_status') or comment.get('replyStatus') or (
+            'success' if comment.get('replied') else None
+        ),
+        'dm_status': comment.get('dm_status') or comment.get('dmStatus'),
+        'action_status': comment.get('action_status') or comment.get('actionStatus'),
+        'skip_reason': comment.get('skip_reason') or comment.get('skipReason'),
+        'reply_failure_reason': comment.get('reply_failure_reason'),
+        'dm_failure_reason': comment.get('dm_failure_reason'),
+        'rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'source': comment.get('source'),
+        'last_attempt_at': comment.get('last_attempt_at'),
+        'replied_at': comment.get('replied_at') or comment.get('replySentAt'),
+        'dm_sent_at': comment.get('dm_sent_at') or comment.get('dmSentAt'),
+    }
 
 
 # ---------------- dashboard ----------------
@@ -5138,8 +5435,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     comment_text = _normalize_comment_text(comment_data.get('text'))
 
     # log: comment_seen (every comment we observe, before dedup)
-    logger.info('comment_seen ig_comment_id=%s media=%s source=%s text=%r',
-                ig_comment_id, media_id, source, comment_text[:80])
+    logger.info('comment_seen ig_comment_id=%s media=%s source=%s text_length=%s',
+                ig_comment_id, media_id, source, len(comment_text))
 
     if not ig_comment_id or not commenter_id:
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
@@ -5189,7 +5486,16 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if existing:
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
         previous_status = str(existing.get('action_status') or existing.get('actionStatus') or '').lower()
-        already_replied = bool(existing.get('replied')) or previous_status in ('success', 'replied')
+        previous_reply_status = (
+            existing.get('reply_status')
+            or existing.get('replyStatus')
+            or ('success' if existing.get('replied') else None)
+        )
+        previous_dm_status = existing.get('dm_status') or existing.get('dmStatus')
+        already_replied = bool(existing.get('replied')) or _status_is_success(previous_reply_status)
+        dm_succeeded_or_disabled = _status_is_success(previous_dm_status) or _status_is_disabled(previous_dm_status)
+        dm_failed = str(previous_dm_status or '').lower() == 'failed'
+        dm_retryable = dm_failed and _dm_failure_retryable_from_doc(existing)
         retryable_skip = previous_skip in (
             'missing_comment_timestamp',
             'no_rule_match',
@@ -5203,8 +5509,24 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             previous_status == 'failed'
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
+            or (already_replied and dm_retryable)
         )
-        if not already_replied and (
+        if already_replied and (previous_status in ('success', 'replied') or dm_succeeded_or_disabled):
+            logger.info('comment_already_replied_success ig_comment_id=%s user=%s',
+                        ig_comment_id, user_doc.get('email'))
+            return {'processed': False, 'already_processed': True, 'matched': False,
+                    'action_status': 'skipped', 'reason': 'comment_already_replied_success'}
+        if already_replied and dm_failed and not dm_retryable:
+            logger.info('comment_already_partial_success ig_comment_id=%s user=%s dm_reason=%s',
+                        ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
+            return {'processed': False, 'already_processed': True, 'matched': False,
+                    'action_status': 'partial_success', 'reason': 'comment_already_partial_success'}
+        if dm_failed and not dm_retryable:
+            logger.info('comment_already_dm_failed ig_comment_id=%s user=%s dm_reason=%s',
+                        ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
+            return {'processed': False, 'already_processed': True, 'matched': False,
+                    'action_status': previous_status or 'failed', 'reason': 'comment_already_dm_failed'}
+        if (
             (previous_skip == 'missing_comment_timestamp' and effective_ts)
             or retryable_status
             or retryable_skip
@@ -5213,13 +5535,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             retry_reason = previous_skip or previous_status or 'unreplied_existing'
             existing_doc_id = existing.get('id')
             existing_created = existing.get('created')
-            logger.info('comment_reprocessing_retryable ig_comment_id=%s user=%s source=%s reason=%s',
+            logger.info('comment_retryable_failed_before ig_comment_id=%s user=%s source=%s reason=%s',
                         ig_comment_id, user_doc.get('email'), source, retry_reason)
         else:
-            logger.info('comment_already_processed ig_comment_id=%s user=%s',
-                        ig_comment_id, user_doc.get('email'))
+            logger.warning('comment_processed_unknown_state ig_comment_id=%s user=%s action_status=%s reply_status=%s dm_status=%s',
+                           ig_comment_id, user_doc.get('email'), previous_status,
+                           previous_reply_status, previous_dm_status)
             return {'processed': False, 'already_processed': True, 'matched': False,
-                    'action_status': 'skipped', 'reason': 'duplicate'}
+                    'action_status': 'skipped', 'reason': 'comment_processed_unknown_state'}
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
 
@@ -5361,6 +5684,14 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         media_id,
     )
     action_status = 'pending' if matched else 'skipped'
+    existing_reply_status = existing.get('reply_status') if retry_existing and existing else None
+    existing_dm_status = existing.get('dm_status') if retry_existing and existing else None
+    reply_status = existing_reply_status or (
+        'pending' if matched and _automation_has_node_type(matched_rule, 'reply_comment') else 'disabled'
+    )
+    dm_status = existing_dm_status or (
+        'pending' if matched and _automation_has_node_type(matched_rule, 'message') else 'disabled'
+    )
     doc = {
         'id': existing_doc_id or str(_uuid.uuid4()),
         'user_id': user_id,
@@ -5374,13 +5705,24 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'commenter_id': commenter_id,
         'commenter_username': commenter_username,
         'text': comment_text,
-        'replied': False,
+        'replied': bool(existing.get('replied')) if retry_existing and existing else False,
         'source': source,                # 'webhook' or 'polling'
         'rule_id': rule_id,
         'ruleId': rule_id,
         'matched': matched,
         'action_status': action_status,
         'actionStatus': action_status,
+        'reply_status': reply_status,
+        'replyStatus': reply_status,
+        'dm_status': dm_status,
+        'dmStatus': dm_status,
+        'reply_failure_reason': existing.get('reply_failure_reason') if retry_existing and existing else None,
+        'dm_failure_reason': existing.get('dm_failure_reason') if retry_existing and existing else None,
+        'reply_failure_retryable': existing.get('reply_failure_retryable') if retry_existing and existing else False,
+        'dm_failure_retryable': existing.get('dm_failure_retryable') if retry_existing and existing else False,
+        'replied_at': existing.get('replied_at') if retry_existing and existing else None,
+        'dm_sent_at': existing.get('dm_sent_at') if retry_existing and existing else None,
+        'last_attempt_at': now if matched else None,
         'skip_reason': cutoff_skip_reason,
         'skipReason': cutoff_skip_reason,
         'error': None,
@@ -5422,7 +5764,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
                 source=source, received_monotonic=processing_started,
             )
-            action_status = 'success' if ok else 'failed'
+            if isinstance(ok, dict):
+                action_status = ok.get('action_status') or ('success' if ok.get('ok') else 'failed')
+            else:
+                action_status = 'success' if ok else 'failed'
         except Exception as e:
             logger.exception('action_execution_failed ig_comment_id=%s err=%s',
                              ig_comment_id, e)
@@ -5453,7 +5798,27 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                 'received_monotonic': received_monotonic,
             }
         )
-        if not ok:
+        saved = await db.comments.find_one({'id': comment_doc_id}) or {}
+        reply_status = saved.get('reply_status') or saved.get('replyStatus') or 'disabled'
+        dm_status = saved.get('dm_status') or saved.get('dmStatus') or 'disabled'
+        action_status = _compute_comment_action_status(reply_status, dm_status)
+        if action_status == 'failed' and ok:
+            action_status = 'success'
+        update = {
+            'action_status': action_status,
+            'actionStatus': action_status,
+            'updated': datetime.utcnow(),
+        }
+        if action_status in ('success', 'partial_success'):
+            update['actionSentAt'] = datetime.utcnow()
+            update['error'] = None
+        else:
+            update['error'] = 'automation_action_send_failed'
+        await db.comments.update_one(
+            {'id': comment_doc_id},
+            {'$set': update},
+        )
+        if action_status == 'failed':
             await db.comments.update_one(
                 {'id': comment_doc_id},
                 {'$set': {'action_status': 'failed', 'actionStatus': 'failed',
@@ -5461,19 +5826,11 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             )
             logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
                            ig_comment_id, automation.get('id'))
-            return False
-        await db.comments.update_one(
-            {'id': comment_doc_id},
-            {'$set': {
-                'action_status': 'success',
-                'actionStatus': 'success',
-                'actionSentAt': datetime.utcnow(),
-                'updated': datetime.utcnow(),
-            }}
-        )
-        logger.info('action_execution_success ig_comment_id=%s rule_id=%s',
-                    ig_comment_id, automation.get('id'))
-        return True
+            return {'ok': False, 'action_status': action_status}
+        logger.info('action_execution_%s ig_comment_id=%s rule_id=%s reply_status=%s dm_status=%s',
+                    action_status, ig_comment_id, automation.get('id'), reply_status, dm_status)
+        return {'ok': action_status in ('success', 'partial_success'),
+                'action_status': action_status}
     except Exception as e:
         await db.comments.update_one(
             {'id': comment_doc_id},
@@ -6804,7 +7161,7 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                         summary['skipped_historical'] += 1
                     elif res.get('matched'):
                         summary['matched'] += 1
-                        if res.get('action_status') == 'success':
+                        if res.get('action_status') in ('success', 'partial_success'):
                             summary['replied'] += 1
                         elif res.get('action_status') == 'failed':
                             summary['failed'] += 1
