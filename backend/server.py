@@ -1789,6 +1789,11 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'replyStatus': 'sent',
                             'replied_at': now_ts,
                             'replySentAt': now_ts,
+                            # Canonical "provider proof" — set ONLY after
+                            # Graph confirms the reply landed. /retry-reply
+                            # uses this flag (not the legacy `replied`) to
+                            # decide if the comment is permanently done.
+                            'reply_provider_response_ok': True,
                         })
                     await db.comments.update_one(
                         {'id': comment_context['comment_doc_id']},
@@ -2715,6 +2720,201 @@ async def comment_diagnostics(cid: str, user_id: str = Depends(get_current_user_
         'dm_sent_at': _iso(comment.get('dm_sent_at')),
         'created': _iso(comment.get('created')),
         'updated': _iso(comment.get('updated')),
+    }
+
+
+@api.post('/comments/{cid}/retry-reply')
+async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_user_id)):
+    """Safely retry the PUBLIC comment reply for one comment.
+
+    Distinct from POST /comments/{cid}/reply (a manual operator-typed
+    reply): this endpoint re-runs the rule's own reply step, with
+    explicit guardrails that prevent duplicating a provider-proven
+    successful reply.
+
+    Allowed only when:
+      • the comment is owned by the caller's user_id AND active IG
+        account (account-scoped to prevent cross-tenant retry);
+      • reply_provider_response_ok is NOT True (the canonical "Graph
+        confirmed delivery" flag);
+      • reply_status is one of: pending, failed, disabled, or empty
+        (legacy doc with no proof);
+      • reply_failure_reason is not a PERMANENT_GRAPH_FAILURE_REASONS
+        value — those would deterministically fail again.
+
+    Returns a SAFE summary:
+      action_status, reply_status, dm_status, queued, next_retry_at,
+      attempts, reason. Never includes the reply text, access token,
+      or raw Graph error body.
+    """
+    account = await getActiveInstagramAccount(user_id)
+    comment = await db.comments.find_one({
+        'id': cid, **_account_scoped_query(user_id, account),
+    })
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+
+    # Guard 1: provider proof exists → never retry.
+    if comment.get('reply_provider_response_ok') is True:
+        return {
+            'queued': False,
+            'action_status': comment.get('action_status'),
+            'reply_status': comment.get('reply_status') or 'success',
+            'dm_status': comment.get('dm_status'),
+            'attempts': int(comment.get('attempts') or 0),
+            'next_retry_at': None,
+            'reason': 'reply_already_proven',
+        }
+
+    # Guard 2: only certain prior reply states are retryable. Success
+    # without proof (legacy) is allowed because there is no Graph
+    # confirmation; we will set the proof flag if this attempt lands.
+    prior_reply_status = (comment.get('reply_status') or '').lower()
+    legacy_unproven_success = (
+        prior_reply_status == 'success' and not comment.get('reply_provider_response_ok')
+    )
+    if prior_reply_status not in ('', 'pending', 'failed', 'disabled', 'failed_retryable') \
+            and not legacy_unproven_success:
+        raise HTTPException(409, f'Reply is not retryable from state={prior_reply_status}')
+
+    # Guard 3: permanent failure reasons are not retried.
+    prior_reason = comment.get('reply_failure_reason')
+    if prior_reason in PERMANENT_GRAPH_FAILURE_REASONS:
+        return {
+            'queued': False,
+            'action_status': comment.get('action_status'),
+            'reply_status': prior_reply_status or 'failed',
+            'dm_status': comment.get('dm_status'),
+            'attempts': int(comment.get('attempts') or 0),
+            'next_retry_at': None,
+            'reason': f'permanent_failure:{prior_reason}',
+        }
+
+    # Resolve the reply text the rule wants to send. Prefer the text we
+    # already chose on a prior attempt (so the same comment doesn't get
+    # different worded replies on retry). Fall back to the rule's
+    # n_reply node.replies list.
+    reply_text = (comment.get('reply_text') or '').strip()
+    if not reply_text:
+        rule_id = comment.get('rule_id') or comment.get('ruleId')
+        if rule_id:
+            rule = await db.automations.find_one({
+                'id': rule_id, **_account_scoped_query(user_id, account),
+            })
+            if rule:
+                for node in (rule.get('nodes') or []):
+                    if node.get('type') == 'reply_comment':
+                        replies = (node.get('data') or {}).get('replies') or []
+                        replies = [r for r in replies if r]
+                        if replies:
+                            import random as _random
+                            reply_text = _random.choice(replies).strip()
+                            break
+                        legacy = (node.get('data') or {}).get('text') or ''
+                        if legacy.strip():
+                            reply_text = legacy.strip()
+                            break
+    if not reply_text:
+        raise HTTPException(400, 'No reply text available for this comment')
+
+    ig_comment_id = comment.get('ig_comment_id') or comment.get('igCommentId')
+    if not ig_comment_id:
+        raise HTTPException(400, 'Comment has no Instagram ID (seed data cannot be replied to)')
+
+    user_doc = await db.users.find_one({'id': user_id}) or {}
+    access_token = user_doc.get('meta_access_token') or ''
+    if not access_token:
+        raise HTTPException(400, 'Instagram not connected')
+
+    attempts = int(comment.get('attempts') or 0) + 1
+    now = datetime.utcnow()
+
+    # Mark as in-flight pending BEFORE the network call so concurrent
+    # retries see the elevated attempt count and the pending state.
+    await db.comments.update_one(
+        {'id': cid},
+        {'$set': {
+            'reply_status': 'pending',
+            'attempts': attempts,
+            'last_attempt_at': now,
+            'updated': now,
+        }},
+    )
+
+    result = await reply_to_ig_comment_detailed(access_token, ig_comment_id, reply_text)
+    classified_reason = result.get('failure_reason')
+    final_now = datetime.utcnow()
+
+    if result.get('ok'):
+        # Persist provider-proven success — including the proof flag
+        # that future retries will check FIRST.
+        await db.comments.update_one(
+            {'id': cid},
+            {'$set': {
+                'replied': True,
+                'reply_text': reply_text,
+                'reply_status': 'success',
+                'replyStatus': 'sent',
+                'replied_at': final_now,
+                'replySentAt': final_now,
+                'reply_provider_response_ok': True,
+                'reply_failure_reason': None,
+                'next_retry_at': None,
+                # Recompute action_status from per-step results.
+                'action_status': 'partial_success' if (
+                    str(comment.get('dm_status') or '').lower() == 'failed'
+                ) else 'success',
+                'updated': final_now,
+            }},
+        )
+        logger.info(
+            'comment_retry_reply_success comment_id=%s ig_comment_id=%s attempts=%s',
+            cid, ig_comment_id, attempts,
+        )
+        return {
+            'queued': False,
+            'action_status': 'partial_success' if (
+                str(comment.get('dm_status') or '').lower() == 'failed'
+            ) else 'success',
+            'reply_status': 'success',
+            'dm_status': comment.get('dm_status'),
+            'attempts': attempts,
+            'next_retry_at': None,
+            'reason': 'reply_sent',
+        }
+
+    # Failure path. If the failure is permanent we lock the doc; if
+    # transient we schedule a next_retry_at on a small backoff so
+    # repeated user clicks don't hammer Graph.
+    permanent = classified_reason in PERMANENT_GRAPH_FAILURE_REASONS
+    next_retry_at = None
+    if not permanent:
+        # Exponential-ish backoff: 60s * 2^(attempts-1), capped at 30 min.
+        delay_seconds = min(60 * (2 ** max(0, attempts - 1)), 1800)
+        next_retry_at = final_now + timedelta(seconds=delay_seconds)
+    new_reply_status = 'failed'
+    await db.comments.update_one(
+        {'id': cid},
+        {'$set': {
+            'reply_status': new_reply_status,
+            'reply_failure_reason': classified_reason or 'unknown_graph_error',
+            'next_retry_at': next_retry_at,
+            'action_status': 'failed' if not comment.get('replied') else comment.get('action_status'),
+            'updated': final_now,
+        }},
+    )
+    logger.warning(
+        'comment_retry_reply_failed comment_id=%s ig_comment_id=%s attempts=%s reason=%s permanent=%s',
+        cid, ig_comment_id, attempts, classified_reason, permanent,
+    )
+    return {
+        'queued': False,
+        'action_status': 'failed',
+        'reply_status': new_reply_status,
+        'dm_status': comment.get('dm_status'),
+        'attempts': attempts,
+        'next_retry_at': next_retry_at.isoformat() if next_retry_at else None,
+        'reason': classified_reason or 'unknown_graph_error',
     }
 
 
@@ -5947,6 +6147,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'reply_status': 'disabled',
         'reply_failure_reason': None,
         'replied_at': None,
+        'reply_provider_response_ok': False,
+        'attempts': 0,
+        'next_retry_at': None,
         'dm_status': 'disabled',
         'dm_failure_reason': None,
         'dm_sent_at': None,

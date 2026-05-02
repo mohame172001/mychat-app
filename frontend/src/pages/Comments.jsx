@@ -191,10 +191,54 @@ const Comments = () => {
       toast.success('Reply sent to Instagram');
       setReplyText(prev => ({ ...prev, [comment.id]: '' }));
       setComments(prev => prev.map(c => c.id === comment.id
-        ? { ...c, replied: true, reply_text: text } : c));
+        ? { ...c, replied: true, reply_text: text, reply_status: 'success',
+            reply_provider_response_ok: true } : c));
     } catch (err) {
       console.error('[Comments] reply failed', err);
       const msg = err?.response?.data?.detail || 'Reply failed';
+      toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    } finally {
+      setSending(prev => ({ ...prev, [comment.id]: false }));
+    }
+  };
+
+  const handleRetryReply = async (comment) => {
+    // Calls the dedicated /retry-reply endpoint which enforces:
+    //   • account scope
+    //   • provider-proof check (reply_provider_response_ok=true → reject)
+    //   • permanent-failure-reason rejection
+    //   • backoff via next_retry_at on transient failure.
+    // The button is gated client-side too via canRetryReply.
+    setSending(prev => ({ ...prev, [comment.id]: true }));
+    try {
+      const { data } = await api.post(`/comments/${comment.id}/retry-reply`);
+      const status = data?.reply_status || data?.action_status || 'queued';
+      const reason = data?.reason || '';
+      if (data?.reason === 'reply_already_proven') {
+        toast.info('Reply was already confirmed by Instagram. No retry sent.');
+      } else if (status === 'success') {
+        toast.success('Reply sent to Instagram');
+      } else if (data?.next_retry_at) {
+        toast.warning(`Retry failed (${reason}). Next retry at ${new Date(data.next_retry_at).toLocaleTimeString()}`);
+      } else {
+        toast.error(`Retry failed (${reason})`);
+      }
+      // Merge the safe summary back into the row.
+      setComments(prev => prev.map(c => c.id === comment.id
+        ? {
+            ...c,
+            replied: status === 'success' ? true : c.replied,
+            reply_status: data?.reply_status ?? c.reply_status,
+            reply_provider_response_ok: status === 'success' ? true : c.reply_provider_response_ok,
+            action_status: data?.action_status ?? c.action_status,
+            attempts: data?.attempts ?? c.attempts,
+            next_retry_at: data?.next_retry_at ?? c.next_retry_at,
+            reply_failure_reason: status === 'success' ? null : (data?.reason || c.reply_failure_reason),
+          }
+        : c));
+    } catch (err) {
+      console.error('[Comments] retry-reply failed', err);
+      const msg = err?.response?.data?.detail || 'Retry failed';
       toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
       setSending(prev => ({ ...prev, [comment.id]: false }));
@@ -332,22 +376,20 @@ const Comments = () => {
                   <Send className="w-4 h-4 mr-2" />
                   {sending[c.id] ? 'Sending…' : 'Reply'}
                 </Button>
-                {/* Safe Retry Reply: only shown when there is no provider-
-                    proven reply yet AND the failure isn't permanent. */}
+                {/* Safe Retry Reply: hits the dedicated /retry-reply
+                    endpoint, which enforces account scope + provider-
+                    proof + permanent-failure rejection on the server.
+                    Hidden client-side too when canRetryReply is false. */}
                 {canRetryReply(c) && (replyText[c.id] || '').trim() === '' && (
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => {
-                      setReplyText(prev => ({
-                        ...prev,
-                        [c.id]: prev[c.id] || c.reply_text || '',
-                      }));
-                      toast.info('Type a reply, then send. Retry will not duplicate a successful reply.');
-                    }}
+                    onClick={() => handleRetryReply(c)}
+                    disabled={!!sending[c.id]}
                     className="sm:w-auto"
                   >
-                    <Repeat className="w-4 h-4 mr-2" /> Retry reply
+                    <Repeat className="w-4 h-4 mr-2" />
+                    {sending[c.id] ? 'Retrying…' : 'Retry reply'}
                   </Button>
                 )}
               </form>
