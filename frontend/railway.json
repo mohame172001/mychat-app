@@ -2,7 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "yarn install && yarn build"
+    "buildCommand": "REACT_APP_GIT_SHA=$RAILWAY_GIT_COMMIT_SHA yarn install && REACT_APP_GIT_SHA=$RAILWAY_GIT_COMMIT_SHA yarn build"
   },
   "deploy": {
     "restartPolicyType": "ON_FAILURE"
