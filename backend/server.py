@@ -113,6 +113,190 @@ def _redact_secrets(value):
     return value
 
 
+USAGE_EVENT_TYPES = {
+    'comment_processed',
+    'public_reply_sent',
+    'dm_sent',
+    'link_clicked',
+    'queue_job_processed',
+    'retryable_failure',
+    'permanent_failure',
+    'automation_created',
+    'automation_activated',
+    'instagram_account_connected',
+}
+
+USAGE_COUNTER_BY_EVENT = {
+    'comment_processed': 'comments_processed',
+    'public_reply_sent': 'public_replies_sent',
+    'dm_sent': 'dms_sent',
+    'link_clicked': 'links_clicked',
+    'queue_job_processed': 'queue_jobs_processed',
+    'retryable_failure': 'retryable_failures',
+    'permanent_failure': 'permanent_failures',
+}
+
+USAGE_COUNTER_FIELDS = (
+    'comments_processed',
+    'public_replies_sent',
+    'dms_sent',
+    'links_clicked',
+    'queue_jobs_processed',
+    'retryable_failures',
+    'permanent_failures',
+)
+
+_USAGE_UNSAFE_METADATA_KEYS = {
+    'access_token', 'accesstoken', 'meta_access_token', 'token', 'authorization',
+    'client_secret', 'app_secret', 'secret', 'jwt', 'code', 'raw', 'body',
+    'payload', 'headers', 'graph_error', 'error_body', 'comment_text',
+    'dm_text', 'message_text', 'text', 'message', 'private_message',
+}
+
+
+def _usage_month(dt: datetime) -> str:
+    return dt.strftime('%Y-%m')
+
+
+def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
+    """Keep usage metadata useful without storing tokens or message content."""
+    if not isinstance(metadata, dict):
+        return {}
+
+    def sanitize(value, depth: int = 0):
+        if depth > 2:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, str):
+            return value[:160]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, child in value.items():
+                key_s = str(key)
+                if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+                    continue
+                cleaned[key_s[:80]] = sanitize(child, depth + 1)
+            return cleaned
+        if isinstance(value, (list, tuple)):
+            return [sanitize(item, depth + 1) for item in list(value)[:10]]
+        return str(value)[:160]
+
+    cleaned = {}
+    for key, value in metadata.items():
+        key_s = str(key)
+        if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+            continue
+        cleaned[key_s[:80]] = sanitize(value)
+    return cleaned
+
+
+async def _usage_snapshots_for_user(user_id: str) -> dict:
+    snapshots = {}
+    try:
+        snapshots['instagram_accounts_connected_snapshot'] = await db.instagram_accounts.count_documents({
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
+            'connectionValid': True,
+        })
+    except Exception:
+        pass
+    try:
+        snapshots['active_automations_snapshot'] = await db.automations.count_documents({
+            'user_id': user_id,
+            'status': 'active',
+        })
+    except Exception:
+        pass
+    return snapshots
+
+
+async def record_usage_event(
+    user_id,
+    event_type,
+    instagram_account_id=None,
+    automation_id=None,
+    comment_id=None,
+    queue_job_id=None,
+    metadata=None,
+    event_date=None,
+):
+    """Persist a sanitized usage event and atomically update monthly counters."""
+    if event_type not in USAGE_EVENT_TYPES:
+        raise ValueError(f'Invalid usage event type: {event_type}')
+    if not user_id:
+        raise ValueError('user_id is required')
+
+    now = datetime.utcnow()
+    event_dt = event_date if isinstance(event_date, datetime) else now
+    event_month = _usage_month(event_dt)
+    event = {
+        '_id': secrets.token_urlsafe(12),
+        'id': secrets.token_urlsafe(12),
+        'user_id': str(user_id),
+        'instagram_account_id': str(instagram_account_id) if instagram_account_id else None,
+        'automation_id': str(automation_id) if automation_id else None,
+        'comment_id': str(comment_id) if comment_id else None,
+        'queue_job_id': str(queue_job_id) if queue_job_id else None,
+        'event_type': event_type,
+        'event_month': event_month,
+        'event_date': event_dt,
+        'metadata': _sanitize_usage_metadata(metadata),
+        'created_at': now,
+    }
+    await db.usage_events.insert_one(event)
+
+    set_on_insert = {
+        '_id': secrets.token_urlsafe(12),
+        'id': secrets.token_urlsafe(12),
+        'user_id': str(user_id),
+        'event_month': event_month,
+        'created_at': now,
+    }
+    for field in USAGE_COUNTER_FIELDS:
+        set_on_insert[field] = 0
+    update = {
+        '$setOnInsert': set_on_insert,
+        '$set': {'updated_at': now, **await _usage_snapshots_for_user(str(user_id))},
+    }
+    counter = USAGE_COUNTER_BY_EVENT.get(event_type)
+    if counter:
+        update['$inc'] = {counter: 1}
+    await db.monthly_usage.update_one(
+        {'user_id': str(user_id), 'event_month': event_month},
+        update,
+        upsert=True,
+    )
+    return event
+
+
+async def _safe_record_usage_event(*args, **kwargs) -> bool:
+    try:
+        await record_usage_event(*args, **kwargs)
+        return True
+    except Exception as e:
+        event_type = kwargs.get('event_type') if kwargs else (args[1] if len(args) > 1 else None)
+        user_id = kwargs.get('user_id') if kwargs else (args[0] if args else None)
+        logger.warning('usage_event_record_failed event_type=%s user_id=%s reason=%s',
+                       event_type, user_id, str(e)[:120])
+        return False
+
+
+async def _record_comment_usage_once(comment_doc_id: str, marker_field: str, **usage_kwargs) -> None:
+    if not comment_doc_id:
+        return
+    comment = await db.comments.find_one({'id': comment_doc_id})
+    if not comment or comment.get(marker_field):
+        return
+    recorded = await _safe_record_usage_event(**usage_kwargs)
+    if recorded:
+        await db.comments.update_one(
+            {'id': comment_doc_id},
+            {'$set': {marker_field: True, f'{marker_field}_at': datetime.utcnow()}},
+        )
+
+
 TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
 _HTTP_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 
@@ -1729,6 +1913,20 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'id': comment_context['comment_doc_id']},
                         {'$set': update},
                     )
+                    if ok and not existing_dm_success:
+                        await _record_comment_usage_once(
+                            comment_context['comment_doc_id'],
+                            'usage_dm_sent_recorded',
+                            user_id=user.get('id', ''),
+                            event_type='dm_sent',
+                            instagram_account_id=ig_user_id,
+                            automation_id=automation.get('id'),
+                            comment_id=comment_context['comment_doc_id'],
+                            metadata={
+                                'source': flow_source or 'runtime',
+                                'ig_comment_id': flow_comment_id,
+                            },
+                        )
                 if flow_source == 'webhook':
                     logger.info(
                         'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s',
@@ -1819,6 +2017,21 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'id': comment_context['comment_doc_id']},
                         {'$set': update}
                     )
+                    if provider_ok and not already_replied:
+                        await _record_comment_usage_once(
+                            comment_context['comment_doc_id'],
+                            'usage_public_reply_sent_recorded',
+                            user_id=user.get('id', ''),
+                            event_type='public_reply_sent',
+                            instagram_account_id=ig_user_id,
+                            automation_id=automation.get('id'),
+                            comment_id=comment_context['comment_doc_id'],
+                            metadata={
+                                'source': flow_source or 'runtime',
+                                'provider_status': reply_result.get('status_code'),
+                                'provider_comment_id_exists': bool(reply_result.get('provider_comment_id')),
+                            },
+                        )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
             if secs > 0:
@@ -1983,6 +2196,21 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
         automation_data['activationStartedAt'] = now
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=automation_data.get('instagramAccountId') or ctx.get('instagramAccountId'),
+        automation_id=a.id,
+        metadata={'status': automation_data.get('status') or 'draft'},
+    )
+    if (automation_data.get('status') or '').lower() == 'active':
+        await _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_activated',
+            instagram_account_id=automation_data.get('instagramAccountId') or ctx.get('instagramAccountId'),
+            automation_id=a.id,
+            metadata={'source': 'create_automation'},
+        )
     return a.model_dump()
 
 
@@ -2118,6 +2346,14 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     res = await db.automations.update_one({'id': aid, **scoped}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
+    if status_reenabled:
+        await _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_activated',
+            instagram_account_id=existing.get('instagramAccountId') or account.get('instagramAccountId'),
+            automation_id=aid,
+            metadata={'source': 'patch_automation'},
+        )
     d = await db.automations.find_one({'id': aid})
     return _strip_mongo(d)
 
@@ -2154,6 +2390,13 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
     if _is_comment_automation_rule(copy):
         copy['activationStartedAt'] = now
     await db.automations.insert_one(copy)
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=copy.get('instagramAccountId') or account.get('instagramAccountId'),
+        automation_id=copy.get('id'),
+        metadata={'status': copy.get('status') or 'draft', 'source': 'duplicate'},
+    )
     return _strip_mongo(copy)
 
 
@@ -2394,6 +2637,20 @@ async def create_quick_comment_rule(
         'updated': now,
     }
     await db.automations.insert_one(doc)
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=doc.get('instagramAccountId'),
+        automation_id=doc.get('id'),
+        metadata={'status': doc.get('status'), 'source': 'quick_comment_rule'},
+    )
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_activated',
+        instagram_account_id=doc.get('instagramAccountId'),
+        automation_id=doc.get('id'),
+        metadata={'source': 'quick_comment_rule'},
+    )
     return _strip_mongo({**doc})
 
 
@@ -3196,6 +3453,24 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'comments_logged': len(comments),
     }
     return response
+
+
+@api.get('/usage/current')
+async def current_usage(user_id: str = Depends(get_current_user_id)):
+    event_month = _usage_month(datetime.utcnow())
+    usage = await db.monthly_usage.find_one({'user_id': user_id, 'event_month': event_month}) or {}
+    counters = {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
+    snapshots = await _usage_snapshots_for_user(user_id)
+    return {
+        'event_month': event_month,
+        'counters': counters,
+        'connectedInstagramAccountsCount': int(
+            snapshots.get('instagram_accounts_connected_snapshot') or 0
+        ),
+        'activeAutomationsCount': int(snapshots.get('active_automations_snapshot') or 0),
+        'plan': 'free',
+        'billing_enabled': False,
+    }
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -4624,6 +4899,16 @@ async def instagram_callback(request: Request,
                     {'$set': {'ig_oauth_last_audit': _redact_secrets(audit)}},
                 )
                 await instagram_account_activate(connected_account_id, user_id=user_id)
+                await _safe_record_usage_event(
+                    user_id=user_id,
+                    event_type='instagram_account_connected',
+                    instagram_account_id=(account_doc or {}).get('instagramAccountId') or final_me['canonicalIgUserId'],
+                    metadata={
+                        'account_db_id': connected_account_id,
+                        'token_source': final_token_source,
+                        'mode': oauth_mode,
+                    },
+                )
             logger.info('IG connected (Business Login) for user %s via %s',
                         user_id, audit['whichMeVariantWorks'])
             return RedirectResponse(_frontend_redirect_url(
@@ -6245,6 +6530,21 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
     if matched:
+        await _record_comment_usage_once(
+            doc['id'],
+            'usage_comment_processed_recorded',
+            user_id=user_id,
+            event_type='comment_processed',
+            instagram_account_id=ig_account_id,
+            automation_id=rule_id,
+            comment_id=doc['id'],
+            metadata={
+                'source': source,
+                'media_id': media_id,
+                'matched_rule_priority': matched_rule_priority,
+                'matched_rule_scope': matched_rule_scope,
+            },
+        )
         if force_queue:
             await db.comments.update_one(
                 {'id': doc['id']},
@@ -6363,6 +6663,37 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             {'id': comment_doc_id},
             {'$set': update},
         )
+        if action_status == 'failed_retryable':
+            await _record_comment_usage_once(
+                comment_doc_id,
+                'usage_retryable_failure_recorded',
+                user_id=user_doc.get('id', ''),
+                event_type='retryable_failure',
+                instagram_account_id=user_doc.get('ig_user_id') or '',
+                automation_id=automation.get('id'),
+                comment_id=comment_doc_id,
+                metadata={
+                    'source': source,
+                    'failure_category': _failure_category_from_doc(saved_for_status),
+                    'attempts': attempts,
+                },
+            )
+        elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
+            await _record_comment_usage_once(
+                comment_doc_id,
+                'usage_permanent_failure_recorded',
+                user_id=user_doc.get('id', ''),
+                event_type='permanent_failure',
+                instagram_account_id=user_doc.get('ig_user_id') or '',
+                automation_id=automation.get('id'),
+                comment_id=comment_doc_id,
+                metadata={
+                    'source': source,
+                    'failure_category': _failure_category_from_doc(saved_for_status),
+                    'attempts': attempts,
+                    'status': action_status,
+                },
+            )
         if action_status in ('failed_retryable', 'failed_permanent', 'failed_retry_exhausted'):
             logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
                            ig_comment_id, automation.get('id'))
@@ -6384,6 +6715,16 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                 'skipReason': 'temporary_graph_error',
                 'updated': datetime.utcnow(),
             }}
+        )
+        await _record_comment_usage_once(
+            comment_doc_id,
+            'usage_retryable_failure_recorded',
+            user_id=user_doc.get('id', ''),
+            event_type='retryable_failure',
+            instagram_account_id=user_doc.get('ig_user_id') or '',
+            automation_id=automation.get('id'),
+            comment_id=comment_doc_id,
+            metadata={'source': source, 'failure_category': 'action_execution_exception'},
         )
         logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
                          ig_comment_id, automation.get('id'), e)
@@ -7572,6 +7913,20 @@ async def _automation_queue_tick() -> dict:
             else:
                 summary['failed_permanent'] += 1
             summary['processed'] += 1
+            await _safe_record_usage_event(
+                user_id=user_id,
+                event_type='queue_job_processed',
+                instagram_account_id=instagram_account_id,
+                automation_id=rule_id,
+                comment_id=item.get('id'),
+                queue_job_id=item.get('id'),
+                metadata={
+                    'action_status': action_status,
+                    'reply_status': saved.get('reply_status'),
+                    'dm_status': saved.get('dm_status'),
+                    'attempt': attempts + 1,
+                },
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -9466,6 +9821,17 @@ async def tracked_link_redirect(short_code: str, request: Request):
         {'shortCode': short_code},
         {'$inc': {'clicksCount': 1}, '$set': update},
     )
+    await _safe_record_usage_event(
+        user_id=event.get('user_id'),
+        event_type='link_clicked',
+        instagram_account_id=event.get('instagramAccountId'),
+        automation_id=event.get('automation_id') or event.get('ruleId'),
+        comment_id=event.get('relatedCommentId'),
+        metadata={
+            'short_code': short_code,
+            'tracked_link_id': event.get('trackedLinkId'),
+        },
+    )
     return RedirectResponse(original_url, status_code=302)
 
 
@@ -9641,6 +10007,31 @@ async def _startup():
         await db.link_click_events.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
             name='link_click_events_user_ig_contact',
+        )
+        await db.usage_events.create_index(
+            [('user_id', 1), ('event_month', 1)],
+            name='usage_events_user_month',
+        )
+        await db.usage_events.create_index(
+            [('user_id', 1), ('event_type', 1), ('event_month', 1)],
+            name='usage_events_user_type_month',
+        )
+        await db.usage_events.create_index(
+            [('instagram_account_id', 1), ('event_month', 1)],
+            name='usage_events_instagram_account_month',
+        )
+        await db.usage_events.create_index(
+            [('automation_id', 1), ('event_month', 1)],
+            name='usage_events_automation_month',
+        )
+        await db.usage_events.create_index(
+            [('created_at', -1)],
+            name='usage_events_created_at',
+        )
+        await db.monthly_usage.create_index(
+            [('user_id', 1), ('event_month', 1)],
+            unique=True,
+            name='monthly_usage_user_month_unique',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)
