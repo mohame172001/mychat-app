@@ -2738,6 +2738,10 @@ async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_curren
         'reply_failure_reason': comment.get('reply_failure_reason'),
         'dm_failure_reason': comment.get('dm_failure_reason'),
         'rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_id': comment.get('matched_rule_id') or comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_priority': comment.get('matched_rule_priority'),
+        'matched_rule_scope': comment.get('matched_rule_scope'),
+        'broad_rules_skipped_due_specific_match': bool(comment.get('broad_rules_skipped_due_specific_match')),
         'source': comment.get('source'),
         'last_attempt_at': comment.get('last_attempt_at'),
         'replied_at': comment.get('replied_at') or comment.get('replySentAt'),
@@ -2803,7 +2807,10 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
         'rate_limit_reason': (
             comment.get('skip_reason') if 'rate_limit' in str(comment.get('skip_reason') or '') else None
         ),
-        'matched_rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_id': comment.get('matched_rule_id') or comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_priority': comment.get('matched_rule_priority'),
+        'matched_rule_scope': comment.get('matched_rule_scope'),
+        'broad_rules_skipped_due_specific_match': bool(comment.get('broad_rules_skipped_due_specific_match')),
         'mediaId': comment.get('media_id') or comment.get('mediaId'),
         'reply_failure_reason': comment.get('reply_failure_reason'),
         'dm_failure_reason': comment.get('dm_failure_reason'),
@@ -4073,6 +4080,38 @@ def _historical_catchup_enabled_for_media(rule: dict, media_id: Optional[str]) -
         and media_id
         and selected_media_id == media_id
     )
+
+
+def _comment_rule_scope(rule: dict, media_id: Optional[str] = None) -> str:
+    selected_media_id = _selected_specific_media_id(rule)
+    if selected_media_id:
+        return 'specific_post_exact' if media_id and selected_media_id == media_id else 'specific_post_other'
+    trigger = _comment_rule_trigger_value(rule).strip().lower()
+    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
+    if trigger in ('comment:any', 'comment:all') or post_scope in ('any', 'all'):
+        return 'broad'
+    if post_scope in ('latest', 'next') or trigger in ('comment:latest', 'comment:next'):
+        return 'scoped'
+    return 'broad'
+
+
+def _comment_rule_priority(rule: dict, media_id: Optional[str] = None) -> int:
+    scope = _comment_rule_scope(rule, media_id)
+    if scope == 'specific_post_exact':
+        return 1
+    if scope in ('specific_post_other', 'scoped'):
+        return 2
+    return 3
+
+
+def _sort_comment_rules_by_priority(rules: list, media_id: Optional[str] = None) -> list:
+    def key(rule: dict):
+        return (
+            _comment_rule_priority(rule, media_id),
+            str(rule.get('createdAt') or rule.get('created') or ''),
+            str(rule.get('id') or ''),
+        )
+    return sorted(list(rules or []), key=key)
 
 
 async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
@@ -5919,11 +5958,31 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
+    automations = _sort_comment_rules_by_priority(automations, media_id)
+    logger.info(
+        'rule_priority_sorted comment_id=%s media_id=%s count=%s order=%s',
+        ig_comment_id,
+        media_id,
+        len(automations),
+        ','.join(
+            f"{a.get('id')}:{_comment_rule_priority(a, media_id)}:{_comment_rule_scope(a, media_id)}"
+            for a in automations[:20]
+        ),
+    )
     latest_media_id = None
     matched_rule = None
+    matched_rule_priority = None
+    matched_rule_scope = None
+    broad_rules_skipped_due_specific_match = False
     cutoff_rule = None
     cutoff_skip_reason = None
     for auto in automations:
+        rule_priority = _comment_rule_priority(auto, media_id)
+        rule_scope = _comment_rule_scope(auto, media_id)
+        logger.info(
+            'rule_candidate_evaluated comment_id=%s media_id=%s rule_id=%s rule_scope=%s priority=%s',
+            ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+        )
         raw_trigger = auto.get('trigger') or ''
         trigger = raw_trigger.lower()
         fire = False
@@ -6029,6 +6088,30 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
         if fire:
             matched_rule = auto
+            matched_rule_priority = rule_priority
+            matched_rule_scope = rule_scope
+            broad_rules_skipped_due_specific_match = bool(
+                rule_priority < 3
+                and any(_comment_rule_priority(candidate, media_id) == 3 for candidate in automations)
+            )
+            if rule_scope == 'specific_post_exact':
+                logger.info(
+                    'rule_specific_post_matched comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                    ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+                )
+            if broad_rules_skipped_due_specific_match:
+                logger.info(
+                    'rule_broad_skipped_due_specific_match comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                    ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+                )
+            logger.info(
+                'rule_selected_for_comment comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+            )
+            logger.info(
+                'rule_evaluation_stopped_after_match comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+            )
             break
 
     rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
@@ -6088,6 +6171,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'source': source,                # 'webhook' or 'polling'
         'rule_id': rule_id,
         'ruleId': rule_id,
+        'matched_rule_id': rule_id,
+        'matched_rule_priority': matched_rule_priority,
+        'matched_rule_scope': matched_rule_scope,
+        'broad_rules_skipped_due_specific_match': broad_rules_skipped_due_specific_match,
         'matched': matched,
         'action_status': action_status,
         'actionStatus': action_status,

@@ -102,6 +102,38 @@ def _reply_and_dm_automation():
     )
 
 
+def _specific_reply_automation(rule_id='specific1', media_id='media1', with_dm=False):
+    nodes = [
+        {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+        {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Specific reply'}},
+    ]
+    edges = [{'source': 'n_trigger', 'target': 'n_reply'}]
+    if with_dm:
+        nodes.append({'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}})
+        edges.append({'source': 'n_trigger', 'target': 'n_dm'})
+    return _automation(
+        nodes,
+        edges,
+        id=rule_id,
+        trigger=f'comment:{media_id}',
+        post_scope='specific',
+        media_id=media_id,
+    )
+
+
+def _broad_reply_automation(rule_id='broad1'):
+    return _automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Broad reply'}},
+        ],
+        [{'source': 'n_trigger', 'target': 'n_reply'}],
+        id=rule_id,
+        trigger='comment:any',
+        post_scope='any',
+    )
+
+
 def test_reply_enabled_dm_success_records_success(monkeypatch):
     db = _install_db(monkeypatch, [_reply_and_dm_automation()])
     calls = []
@@ -547,6 +579,194 @@ def test_legacy_repair_moves_false_success_to_retry_queue(monkeypatch):
     assert legacy['next_retry_at'] is not None
     assert proofed['reply_status'] == 'success'
     assert proofed['reply_provider_response_ok'] is True
+
+
+def test_specific_post_rule_wins_over_broad_rule(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_first'),
+        _specific_reply_automation('specific_media1', 'media1'),
+    ])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(text)
+        return _reply_provider_ok('reply_specific')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='priority1', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['rule_id'] == 'specific_media1'
+    assert saved['matched_rule_id'] == 'specific_media1'
+    assert saved['matched_rule_priority'] == 1
+    assert saved['matched_rule_scope'] == 'specific_post_exact'
+    assert saved['broad_rules_skipped_due_specific_match'] is True
+    assert calls == ['Specific reply']
+
+
+def test_broad_rule_handles_comment_when_no_specific_media_matches(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _specific_reply_automation('specific_other', 'otherMedia'),
+        _broad_reply_automation('broad_any'),
+    ])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(text)
+        return _reply_provider_ok('reply_broad')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='priority2', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['rule_id'] == 'broad_any'
+    assert saved['matched_rule_id'] == 'broad_any'
+    assert saved['matched_rule_priority'] == 3
+    assert saved['matched_rule_scope'] == 'broad'
+    assert calls == ['Broad reply']
+
+
+def test_queued_specific_rule_blocks_broad_rule(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_queue'),
+        _specific_reply_automation('specific_queue', 'media1'),
+    ])
+
+    result = _run(server._handle_new_comment(
+        _user_doc(),
+        {**_comment_payload(comment_id='priority3', text='hello'), 'force_queue': True},
+        source='webhook',
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['queued'] is True
+    assert result['rule_id'] == 'specific_queue'
+    assert saved['matched_rule_id'] == 'specific_queue'
+    assert saved['action_status'] == 'pending'
+    assert saved['broad_rules_skipped_due_specific_match'] is True
+
+
+def test_specific_partial_success_blocks_broad_rule(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_partial'),
+        _specific_reply_automation('specific_partial', 'media1', with_dm=True),
+    ])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(('reply', text))
+        return _reply_provider_ok('reply_partial_specific')
+
+    async def dm_unavailable(*_args):
+        calls.append(('dm', 'specific'))
+        return {'ok': False, 'failure_reason': 'recipient_unavailable', 'retryable': False}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_unavailable)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='priority4', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['rule_id'] == 'specific_partial'
+    assert saved['action_status'] == 'partial_success'
+    assert saved['matched_rule_id'] == 'specific_partial'
+    assert calls == [('reply', 'Specific reply'), ('dm', 'specific')]
+
+
+def test_specific_permanent_failure_does_not_fallback_to_broad_rule(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_after_failure'),
+        _specific_reply_automation('specific_failure', 'media1'),
+    ])
+    calls = []
+
+    async def reply_failed(_token, _comment_id, text):
+        calls.append(text)
+        return {'ok': False, 'status_code': 400, 'failure_reason': 'permission_error', 'retryable': False}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_failed)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='priority5', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['rule_id'] == 'specific_failure'
+    assert saved['action_status'] == 'failed_permanent'
+    assert saved['matched_rule_id'] == 'specific_failure'
+    assert calls == ['Specific reply']
+
+
+def test_queue_processes_original_specific_matched_rule(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_queue_tick'),
+        _specific_reply_automation('specific_queue_tick', 'media1'),
+    ], comments=[{
+        'id': 'queuedPriority',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'queuedPriorityComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'hello',
+        'matched': True,
+        'rule_id': 'specific_queue_tick',
+        'matched_rule_id': 'specific_queue_tick',
+        'matched_rule_priority': 1,
+        'matched_rule_scope': 'specific_post_exact',
+        'reply_status': 'pending',
+        'dm_status': 'disabled',
+        'action_status': 'pending',
+        'next_retry_at': now - timedelta(seconds=1),
+        'attempts': 0,
+    }])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(text)
+        return _reply_provider_ok('reply_queue_priority')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['success'] == 1
+    assert saved['rule_id'] == 'specific_queue_tick'
+    assert saved['reply_status'] == 'success'
+    assert calls == ['Specific reply']
+
+
+def test_priority_diagnostics_show_specific_match(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_diag'),
+        _specific_reply_automation('specific_diag', 'media1'),
+    ])
+
+    async def reply_ok(*_args):
+        return _reply_provider_ok('reply_diag_priority')
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+
+    _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='priorityDiag', text='hello'), source='webhook'
+    ))
+    result = _run(server.comment_why_not_replied('priorityDiag', user_id='u1'))
+
+    assert result['matched_rule_id'] == 'specific_diag'
+    assert result['matched_rule_priority'] == 1
+    assert result['matched_rule_scope'] == 'specific_post_exact'
+    assert result['broad_rules_skipped_due_specific_match'] is True
 
 
 def test_pending_comment_is_processed_by_queue_tick(monkeypatch):
