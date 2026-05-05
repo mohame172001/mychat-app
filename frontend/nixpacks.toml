@@ -8,4 +8,4 @@ cmds = ["yarn install --frozen-lockfile"]
 cmds = ["yarn build"]
 
 [start]
-cmd = "npx serve -s build -l ${PORT:-3000}"
+cmd = "./node_modules/.bin/serve -s build -l ${PORT:-3000}"
