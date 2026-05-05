@@ -2,11 +2,38 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter } from 'lucide-react';
+import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, RotateCcw } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
+
+const STATUS_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'retryable', label: 'Retryable failed' },
+  { key: 'permanent', label: 'Permanent failed' },
+  { key: 'partial', label: 'Partial success' },
+  { key: 'success', label: 'Success' },
+  { key: 'skipped', label: 'Skipped' },
+];
+
+const normalizeStatus = (comment) => {
+  const action = String(comment.action_status || comment.actionStatus || '').toLowerCase();
+  const reply = String(comment.reply_status || comment.replyStatus || '').toLowerCase();
+  const dm = String(comment.dm_status || comment.dmStatus || '').toLowerCase();
+  const skip = comment.skip_reason || comment.skipReason;
+
+  if (action === 'partial_success' || (reply === 'success' && dm === 'failed')) return 'partial';
+  if (action === 'pending' || action === 'processing' || reply === 'pending' || dm === 'pending') return 'pending';
+  if (action === 'failed_retryable' || comment.reply_failure_retryable || comment.dm_failure_retryable) return 'retryable';
+  if (action === 'failed_permanent' || action === 'failed_retry_exhausted') return 'permanent';
+  if (action === 'skipped' || action === 'skipped_ineligible' || skip) return 'skipped';
+  if (action === 'success' || reply === 'success' || comment.replied) return 'success';
+  return 'pending';
+};
+
+const statusLabel = (status) => STATUS_FILTERS.find(item => item.key === status)?.label || status;
 
 const Comments = () => {
   const [comments, setComments] = useState([]);
@@ -17,7 +44,8 @@ const Comments = () => {
   const [wsReady, setWsReady] = useState(false);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
-  const [unrepliedOnly, setUnrepliedOnly] = useState(true); // Default to unreplied
+  const [unrepliedOnly, setUnrepliedOnly] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('all');
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -48,6 +76,11 @@ const Comments = () => {
       setLoadingMore(false);
     }
   }, [unrepliedOnly]);
+
+  const visibleComments = comments.filter(comment => {
+    if (statusFilter === 'all') return true;
+    return normalizeStatus(comment) === statusFilter;
+  });
 
   const connectWs = useCallback(() => {
     if (wsGaveUp.current) return;
@@ -123,6 +156,22 @@ const Comments = () => {
     }
   };
 
+  const handleRetryReply = async (comment) => {
+    const commentId = comment.ig_comment_id || comment.igCommentId || comment.id;
+    if (!commentId) return;
+    setSending(prev => ({ ...prev, [`retry:${comment.id}`]: true }));
+    try {
+      await api.post(`/comments/${encodeURIComponent(commentId)}/retry-reply`);
+      toast.success('Reply retry queued');
+      await fetchComments(1, true);
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to queue reply retry';
+      toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    } finally {
+      setSending(prev => ({ ...prev, [`retry:${comment.id}`]: false }));
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 max-w-4xl mx-auto">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
@@ -135,8 +184,8 @@ const Comments = () => {
             ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3 h-3" /> Live</span>
             : <span className="flex items-center gap-1 text-xs text-slate-400"><WifiOff className="w-3 h-3" /> Offline</span>}
           
-          <Button 
-            variant={unrepliedOnly ? "default" : "outline"} 
+          <Button
+            variant={unrepliedOnly ? "default" : "outline"}
             size="sm" 
             onClick={() => setUnrepliedOnly(!unrepliedOnly)}
             className="rounded-full"
@@ -151,14 +200,31 @@ const Comments = () => {
         </div>
       </div>
 
+      <div className="mb-5 flex flex-wrap gap-2 rounded-2xl border border-slate-100 bg-white p-2">
+        {STATUS_FILTERS.map(filter => (
+          <Button
+            key={filter.key}
+            type="button"
+            variant={statusFilter === filter.key ? 'default' : 'ghost'}
+            size="sm"
+            className="rounded-full"
+            onClick={() => setStatusFilter(filter.key)}
+          >
+            {filter.label}
+          </Button>
+        ))}
+      </div>
+
       {loading && comments.length === 0 && (
         <div className="text-center py-20 text-slate-500">Loading…</div>
       )}
 
-      {!loading && comments.length === 0 && (
+      {!loading && visibleComments.length === 0 && (
         <div className="text-center py-20 bg-white rounded-2xl border border-slate-100">
           <AtSign className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold">{unrepliedOnly ? 'No unreplied comments' : 'No comments yet'}</h3>
+          <h3 className="text-lg font-semibold">
+            {comments.length === 0 ? (unrepliedOnly ? 'No unreplied comments' : 'No comments yet') : `No ${statusLabel(statusFilter).toLowerCase()} comments`}
+          </h3>
           <p className="text-sm text-slate-500 mt-1">
             {unrepliedOnly ? "You're all caught up! Great job." : "Comments on your Instagram posts will appear here in real time."}
           </p>
@@ -171,7 +237,12 @@ const Comments = () => {
       )}
 
       <div className="space-y-4">
-        {comments.map(c => (
+        {visibleComments.map(c => {
+          const status = normalizeStatus(c);
+          const canRetry = status === 'retryable' || (
+            c.legacy_reply_success_without_provider_confirmation && !c.reply_provider_response_ok
+          );
+          return (
           <div key={c.id} className="bg-white rounded-2xl border border-slate-100 p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1">
@@ -182,6 +253,9 @@ const Comments = () => {
                       <CheckCircle2 className="w-3 h-3 mr-1" /> Replied
                     </Badge>
                   )}
+                  <Badge variant="outline" className="capitalize">
+                    {statusLabel(status)}
+                  </Badge>
                 </div>
                 <div className="text-slate-700 mt-1">{c.text}</div>
                 <div className="text-xs text-slate-400 mt-1">
@@ -215,8 +289,22 @@ const Comments = () => {
                 </Button>
               </form>
             )}
+            {canRetry && (
+              <div className="mt-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleRetryReply(c)}
+                  disabled={!!sending[`retry:${c.id}`]}
+                >
+                  <RotateCcw className={`w-4 h-4 mr-2 ${sending[`retry:${c.id}`] ? 'animate-spin' : ''}`} />
+                  Retry Reply
+                </Button>
+              </div>
+            )}
           </div>
-        ))}
+        );})}
       </div>
 
       {hasMore && (

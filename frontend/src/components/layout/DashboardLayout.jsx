@@ -5,6 +5,7 @@ import Sidebar, { navItems } from './Sidebar';
 import Topbar from './Topbar';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
+import { BUILD_SHA } from '../../buildInfo.generated';
 
 const DashboardLayout = () => {
   const { logout } = useAuth();
@@ -46,7 +47,7 @@ const DashboardLayout = () => {
           <Outlet />
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
-          <span>© 2026 mychat</span>
+          <span>© 2026 mychat · Build: {BUILD_SHA}</span>
           <div className="flex gap-4 md:gap-5">
             <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">Privacy</Link>
             <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noreferrer">Terms</Link>
