@@ -681,6 +681,159 @@ def test_specific_partial_success_blocks_broad_rule(monkeypatch):
     assert calls == [('reply', 'Specific reply'), ('dm', 'specific')]
 
 
+def test_specific_rule_top_level_reply_is_attempted_when_reply_node_missing(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _broad_reply_automation('broad_missing_node'),
+        _automation(
+            [
+                {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}},
+            ],
+            [{'source': 'n_trigger', 'target': 'n_dm'}],
+            id='specific_missing_reply_node',
+            trigger='comment:media1',
+            post_scope='specific',
+            media_id='media1',
+            reply_under_post=True,
+            comment_reply='Specific top-level reply',
+        ),
+    ])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(('reply', text))
+        return _reply_provider_ok('reply_specific_top_level')
+
+    async def dm_ok(*_args):
+        calls.append(('dm', 'specific'))
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_ok)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='specificMissingReplyNode', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['rule_id'] == 'specific_missing_reply_node'
+    assert saved['matched_rule_scope'] == 'specific_post_exact'
+    assert saved['reply_status'] == 'success'
+    assert saved['reply_provider_response_ok'] is True
+    assert saved['dm_status'] == 'success'
+    assert saved['action_status'] == 'success'
+    assert calls == [('reply', 'Specific top-level reply'), ('dm', 'specific')]
+
+
+def test_specific_rule_top_level_reply_success_dm_permanent_failure_is_partial(monkeypatch):
+    db = _install_db(monkeypatch, [
+        _automation(
+            [
+                {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}},
+            ],
+            [{'source': 'n_trigger', 'target': 'n_dm'}],
+            id='specific_top_reply_dm_fail',
+            trigger='comment:media1',
+            post_scope='specific',
+            media_id='media1',
+            reply_under_post=True,
+            comment_reply='Specific public reply',
+        ),
+    ])
+    calls = []
+
+    async def reply_ok(_token, _comment_id, text):
+        calls.append(('reply', text))
+        return _reply_provider_ok('reply_specific_partial')
+
+    async def dm_unavailable(*_args):
+        calls.append(('dm', 'specific'))
+        return {'ok': False, 'failure_reason': 'recipient_unavailable', 'retryable': False}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_unavailable)
+
+    result = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='specificTopReplyDmFail', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert result['action_status'] == 'partial_success'
+    assert saved['reply_status'] == 'success'
+    assert saved['reply_provider_response_ok'] is True
+    assert saved['dm_status'] == 'failed'
+    assert saved['dm_failure_reason'] == 'recipient_unavailable'
+    assert calls == [('reply', 'Specific public reply'), ('dm', 'specific')]
+
+    calls.clear()
+    duplicate = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='specificTopReplyDmFail', text='hello'), source='polling'
+    ))
+    assert duplicate['reason'] == 'comment_already_partial_success'
+    assert calls == []
+
+
+def test_specific_rule_dm_success_reply_retryable_failure_retries_reply_only(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [
+        _automation(
+            [
+                {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+                {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}},
+            ],
+            [{'source': 'n_trigger', 'target': 'n_dm'}],
+            id='specific_reply_retry_only',
+            trigger='comment:media1',
+            post_scope='specific',
+            media_id='media1',
+            reply_under_post=True,
+            comment_reply='Specific retry reply',
+        ),
+    ])
+    calls = []
+    reply_results = [
+        {'ok': False, 'status_code': 500, 'failure_reason': 'temporary_graph_error', 'retryable': True},
+        _reply_provider_ok('reply_after_retry'),
+    ]
+
+    async def reply_flaky(_token, _comment_id, text):
+        calls.append(('reply', text))
+        return reply_results.pop(0)
+
+    async def dm_ok(*_args):
+        calls.append(('dm', 'specific'))
+        return {'ok': True}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_flaky)
+    monkeypatch.setattr(server, 'send_ig_dm_detailed', dm_ok)
+
+    first = _run(server._handle_new_comment(
+        _user_doc(), _comment_payload(comment_id='specificRetryReplyOnly', text='hello'), source='webhook'
+    ))
+    saved = db.comments.docs[0]
+
+    assert first['action_status'] == 'partial_success'
+    assert saved['dm_status'] == 'success'
+    assert saved['reply_status'] == 'failed'
+    assert saved['reply_failure_retryable'] is True
+    assert saved['queued'] is True
+    assert calls == [('reply', 'Specific retry reply'), ('dm', 'specific')]
+
+    saved['next_retry_at'] = now - timedelta(seconds=1)
+    summary = _run(server._automation_queue_tick())
+
+    assert summary['success'] == 1
+    assert calls == [
+        ('reply', 'Specific retry reply'),
+        ('dm', 'specific'),
+        ('reply', 'Specific retry reply'),
+    ]
+    assert saved['reply_status'] == 'success'
+    assert saved['dm_status'] == 'success'
+    assert saved['action_status'] == 'success'
+
+
 def test_specific_permanent_failure_does_not_fallback_to_broad_rule(monkeypatch):
     db = _install_db(monkeypatch, [
         _broad_reply_automation('broad_after_failure'),

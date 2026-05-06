@@ -607,7 +607,110 @@ async def _respect_account_send_spacing(user_id: str, instagram_account_id: str,
 
 
 def _automation_has_node_type(automation: dict, node_type: str) -> bool:
+    if node_type == 'reply_comment' and _automation_public_reply_texts(automation):
+        return True
     return any((node or {}).get('type') == node_type for node in automation.get('nodes') or [])
+
+
+def _automation_public_reply_texts(automation: dict) -> List[str]:
+    replies: List[str] = []
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') != 'reply_comment':
+            continue
+        data = node.get('data') or {}
+        node_replies = data.get('replies')
+        if isinstance(node_replies, list):
+            replies.extend(str(item or '').strip() for item in node_replies)
+        replies.append(str(data.get('text') or data.get('message') or '').strip())
+    replies = [reply for reply in replies if reply]
+    if replies:
+        return replies
+    if automation.get('reply_under_post') is False:
+        return []
+    top_level = [
+        automation.get('comment_reply'),
+        automation.get('comment_reply_2'),
+        automation.get('comment_reply_3'),
+    ]
+    return [str(reply or '').strip() for reply in top_level if str(reply or '').strip()]
+
+
+def _automation_dm_text_for_diagnostics(automation: dict) -> str:
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') == 'message':
+            data = node.get('data') or {}
+            return str(
+                data.get('text')
+                or data.get('message')
+                or data.get('opening_dm_text')
+                or data.get('link_dm_text')
+                or automation.get('dm_text')
+                or ''
+            ).strip()
+    return str(
+        automation.get('opening_dm_text')
+        or automation.get('link_dm_text')
+        or automation.get('dm_text')
+        or ''
+    ).strip()
+
+
+def _safe_text_hash(text: str) -> str:
+    value = str(text or '')
+    if not value:
+        return ''
+    return hashlib.sha256(value.encode('utf-8', errors='ignore')).hexdigest()[:12]
+
+
+def _ensure_public_reply_node(automation: dict) -> dict:
+    replies = _automation_public_reply_texts(automation)
+    if not replies:
+        return automation
+    nodes = [dict(node or {}) for node in automation.get('nodes') or []]
+    if not nodes:
+        return automation
+    trigger = next((node for node in nodes if node.get('type') == 'trigger'), None)
+    if not trigger:
+        return automation
+    reply_nodes = [node for node in nodes if node.get('type') == 'reply_comment']
+    if reply_nodes:
+        changed = False
+        for node in reply_nodes:
+            data = dict(node.get('data') or {})
+            existing = data.get('replies')
+            existing_replies = [str(item or '').strip() for item in existing] if isinstance(existing, list) else []
+            if not any(existing_replies) and not str(data.get('text') or data.get('message') or '').strip():
+                data['text'] = replies[0]
+                data['replies'] = replies
+                node['data'] = data
+                changed = True
+        if not changed:
+            return automation
+        updated = dict(automation)
+        updated['nodes'] = nodes
+        return updated
+    reply_node_id = 'n_reply'
+    existing_ids = {str(node.get('id')) for node in nodes}
+    if reply_node_id in existing_ids:
+        suffix = 1
+        while f'n_reply_synth_{suffix}' in existing_ids:
+            suffix += 1
+        reply_node_id = f'n_reply_synth_{suffix}'
+    nodes.append({
+        'id': reply_node_id,
+        'type': 'reply_comment',
+        'data': {'text': replies[0], 'replies': replies, 'source': 'top_level_comment_reply'},
+    })
+    edges = [dict(edge or {}) for edge in automation.get('edges') or []]
+    edges.append({
+        'id': f'e_public_reply_synth_{reply_node_id}',
+        'source': trigger.get('id'),
+        'target': reply_node_id,
+    })
+    updated = dict(automation)
+    updated['nodes'] = nodes
+    updated['edges'] = edges
+    return updated
 
 
 def _dm_failure_retryable_from_doc(doc: dict) -> bool:
@@ -1799,6 +1902,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     """Walk the flow graph and execute each node in order.
     comment_context: when the trigger was an Instagram comment, holds
         {'ig_comment_id': ..., 'comment_doc_id': ...} so reply_comment nodes work."""
+    automation = _ensure_public_reply_node(automation)
     nodes = automation.get('nodes', [])
     edges = automation.get('edges', [])
     if not nodes:
@@ -1818,6 +1922,38 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     flow_source = (comment_context or {}).get('source') if comment_context else None
     flow_received_monotonic = (comment_context or {}).get('received_monotonic') if comment_context else None
     flow_comment_id = (comment_context or {}).get('ig_comment_id') if comment_context else None
+    flow_comment_doc_id = (comment_context or {}).get('comment_doc_id') if comment_context else None
+    public_replies = _automation_public_reply_texts(automation)
+    public_reply_text = public_replies[0] if public_replies else ''
+    dm_diag_text = _automation_dm_text_for_diagnostics(automation)
+    before_status_doc = {}
+    if flow_comment_doc_id:
+        before_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
+    logger.info(
+        'automation_action_plan comment_id=%s user_id=%s instagram_account_id=%s media_id=%s '
+        'matched_rule_id=%s matched_rule_scope=%s matched_rule_priority=%s '
+        'broad_rules_skipped_due_specific_match=%s rule_has_public_reply=%s '
+        'public_reply_text_length=%s public_reply_text_hash=%s rule_has_dm=%s '
+        'dm_text_length=%s dm_text_hash=%s reply_status_before=%s dm_status_before=%s '
+        'action_status_before=%s',
+        flow_comment_id,
+        user.get('id'),
+        ig_user_id,
+        before_status_doc.get('media_id') or before_status_doc.get('mediaId'),
+        automation.get('id'),
+        before_status_doc.get('matched_rule_scope'),
+        before_status_doc.get('matched_rule_priority'),
+        before_status_doc.get('broad_rules_skipped_due_specific_match'),
+        bool(public_reply_text),
+        len(public_reply_text),
+        _safe_text_hash(public_reply_text),
+        _automation_has_node_type(automation, 'message'),
+        len(dm_diag_text),
+        _safe_text_hash(dm_diag_text),
+        before_status_doc.get('reply_status') or before_status_doc.get('replyStatus'),
+        before_status_doc.get('dm_status') or before_status_doc.get('dmStatus'),
+        before_status_doc.get('action_status') or before_status_doc.get('actionStatus'),
+    )
 
     def webhook_elapsed_ms() -> Optional[int]:
         if flow_source != 'webhook' or flow_received_monotonic is None:
@@ -1855,6 +1991,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 if existing_dm_success:
                     ok = True
                     dm_result = {'ok': True, 'failure_reason': None, 'retryable': False}
+                    logger.info(
+                        'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                        flow_comment_id, automation.get('id'), False, 'already_dm_success'
+                    )
                     logger.info('dm_duplicate_skipped comment_id=%s rule_id=%s',
                                 flow_comment_id, automation.get('id'))
                 elif _comment_dm_flow_enabled(automation):
@@ -1869,7 +2009,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         ok = await _send_comment_dm_flow_entry(
                             user, automation, sender_ig_id, comment_context
                         )
@@ -1891,7 +2039,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         dm_result = await _call_send_ig_dm_detailed(access_token, ig_user_id, sender_ig_id, msg_text)
                     ok = bool(dm_result.get('ok'))
                     logger.info('Flow message to %s rule=%s ok=%s reason=%s',
@@ -1953,6 +2109,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     ok = True
                     reply_result = {'ok': True, 'provider_response_ok': True,
                                     'failure_reason': None, 'retryable': False}
+                    logger.info(
+                        'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                        flow_comment_id, automation.get('id'), False, 'already_provider_confirmed'
+                    )
                     logger.info('comment_reply_duplicate_skipped ig_comment_id=%s rule_id=%s',
                                 comment_context['ig_comment_id'], automation.get('id'))
                 else:
@@ -1966,7 +2126,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         reply_result = await _call_reply_to_ig_comment_detailed(
                             access_token, comment_context['ig_comment_id'], msg_text
                         )
@@ -2064,6 +2232,17 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         await db.automations.update_one(
             {'id': automation['id']},
             {'$set': {'updated': datetime.utcnow()}}
+        )
+    if flow_comment_doc_id:
+        after_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
+        logger.info(
+            'automation_action_result comment_id=%s matched_rule_id=%s reply_status_after=%s '
+            'dm_status_after=%s action_status_after=%s',
+            flow_comment_id,
+            automation.get('id'),
+            after_status_doc.get('reply_status') or after_status_doc.get('replyStatus'),
+            after_status_doc.get('dm_status') or after_status_doc.get('dmStatus'),
+            after_status_doc.get('action_status') or after_status_doc.get('actionStatus'),
         )
     return bool(action_attempted and ok_all)
 
@@ -6161,6 +6340,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         )
         retryable_status = (
             previous_status in ('failed', 'failed_retryable')
+            or (previous_status == 'partial_success' and _has_retryable_step_failure(existing))
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
             or (already_replied and dm_retryable)
@@ -6655,6 +6835,11 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             update['next_retry_at'] = _next_retry_time(attempts)
             update['skip_reason'] = 'queued_retryable_failure'
             update['skipReason'] = 'queued_retryable_failure'
+        elif action_status == 'partial_success' and retryable_failure:
+            update['next_retry_at'] = _next_retry_time(attempts)
+            update['skip_reason'] = 'queued_retryable_failure'
+            update['skipReason'] = 'queued_retryable_failure'
+            update['queued'] = True
         elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
             update['next_retry_at'] = None
             update['skip_reason'] = _failure_category_from_doc(saved_for_status)
@@ -7757,8 +7942,10 @@ def _automation_queue_due_query(now: datetime) -> dict:
             {
                 'matched': True,
                 'action_status': 'partial_success',
-                'dm_status': 'failed',
-                'dm_failure_retryable': True,
+                '$or': [
+                    {'dm_status': 'failed', 'dm_failure_retryable': True},
+                    {'reply_status': 'failed', 'reply_failure_retryable': True},
+                ],
                 'next_retry_at': {'$lte': now},
             },
         ],
