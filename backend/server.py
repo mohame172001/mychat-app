@@ -635,6 +635,22 @@ def _automation_public_reply_texts(automation: dict) -> List[str]:
     return [str(reply or '').strip() for reply in top_level if str(reply or '').strip()]
 
 
+def _automation_public_reply_source(automation: dict) -> str:
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') != 'reply_comment':
+            continue
+        data = node.get('data') or {}
+        node_replies = data.get('replies')
+        if isinstance(node_replies, list) and any(str(item or '').strip() for item in node_replies):
+            return 'graph_node'
+        if str(data.get('text') or data.get('message') or '').strip():
+            return 'graph_node'
+    for key in ('comment_reply', 'comment_reply_2', 'comment_reply_3'):
+        if str(automation.get(key) or '').strip():
+            return key
+    return 'none'
+
+
 def _automation_dm_text_for_diagnostics(automation: dict) -> str:
     for node in automation.get('nodes') or []:
         if (node or {}).get('type') == 'message':
@@ -660,6 +676,73 @@ def _safe_text_hash(text: str) -> str:
     if not value:
         return ''
     return hashlib.sha256(value.encode('utf-8', errors='ignore')).hexdigest()[:12]
+
+
+def _normalize_public_reply_for_persistence(update: dict, existing: Optional[dict] = None) -> dict:
+    """Keep top-level reply fields and reply_comment graph nodes in sync.
+
+    The UI and older rules may store public replies either in top-level
+    comment_reply fields or in a graph node. Normalizing before persistence
+    prevents specific-post rules from becoming DM-only when one shape is absent.
+    """
+    normalized = dict(update or {})
+    existing = existing or {}
+
+    explicit_disable = normalized.get('reply_under_post') is False
+    update_has_reply_keys = any(
+        key in normalized for key in ('comment_reply', 'comment_reply_2', 'comment_reply_3')
+    )
+    update_reply_values = [
+        str(normalized.get('comment_reply') or '').strip(),
+        str(normalized.get('comment_reply_2') or '').strip(),
+        str(normalized.get('comment_reply_3') or '').strip(),
+    ]
+    update_reply_values = [value for value in update_reply_values if value]
+    update_nodes_replies = _automation_public_reply_texts({'nodes': normalized.get('nodes') or []})
+    existing_replies = _automation_public_reply_texts(existing)
+
+    # If an older graph-only rule is edited for DM settings, preserve its
+    # public reply unless the payload includes a non-empty replacement.
+    if explicit_disable and not update_reply_values and not update_nodes_replies and existing_replies:
+        dm_related_update = any(key in normalized for key in (
+            'dm_text', 'opening_dm_enabled', 'opening_dm_text',
+            'opening_dm_button_text', 'link_dm_text', 'link_button_text',
+            'link_url', 'follow_request_enabled', 'follow_request_message',
+            'follow_request_button_text', 'follow_confirmation_keywords',
+            'follow_gate_fallback_message', 'verify_actual_follow',
+            'follow_not_detected_message', 'follow_verification_failed_message',
+            'follow_retry_button_text', 'follow_cooldown_message',
+            'max_follow_verification_attempts', 'email_request_enabled',
+            'follow_up_enabled', 'follow_up_text', 'nodes', 'edges',
+        ))
+        if dm_related_update:
+            normalized['reply_under_post'] = True
+            update_reply_values = existing_replies
+
+    replies = update_reply_values or update_nodes_replies
+    if not replies and not explicit_disable:
+        replies = existing_replies if existing and not update_has_reply_keys else []
+    if replies:
+        normalized['reply_under_post'] = True
+        normalized['comment_reply'] = replies[0]
+        normalized['comment_reply_2'] = replies[1] if len(replies) > 1 else ''
+        normalized['comment_reply_3'] = replies[2] if len(replies) > 2 else ''
+        normalized = _ensure_public_reply_node(normalized)
+    elif explicit_disable:
+        normalized['comment_reply'] = ''
+        normalized['comment_reply_2'] = ''
+        normalized['comment_reply_3'] = ''
+        nodes = [
+            node for node in (normalized.get('nodes') or [])
+            if (node or {}).get('type') != 'reply_comment'
+        ]
+        if 'nodes' in normalized:
+            normalized['nodes'] = nodes
+            normalized['edges'] = [
+                edge for edge in (normalized.get('edges') or [])
+                if (edge or {}).get('target') not in {'n_reply'}
+            ]
+    return normalized
 
 
 def _ensure_public_reply_node(automation: dict) -> dict:
@@ -1926,6 +2009,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     public_replies = _automation_public_reply_texts(automation)
     public_reply_text = public_replies[0] if public_replies else ''
     dm_diag_text = _automation_dm_text_for_diagnostics(automation)
+    public_reply_source = _automation_public_reply_source(automation)
     before_status_doc = {}
     if flow_comment_doc_id:
         before_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
@@ -1933,7 +2017,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         'automation_action_plan comment_id=%s user_id=%s instagram_account_id=%s media_id=%s '
         'matched_rule_id=%s matched_rule_scope=%s matched_rule_priority=%s '
         'broad_rules_skipped_due_specific_match=%s rule_has_public_reply=%s '
-        'public_reply_text_length=%s public_reply_text_hash=%s rule_has_dm=%s '
+        'public_reply_text_length=%s public_reply_text_hash=%s public_reply_source=%s rule_has_dm=%s '
         'dm_text_length=%s dm_text_hash=%s reply_status_before=%s dm_status_before=%s '
         'action_status_before=%s',
         flow_comment_id,
@@ -1947,6 +2031,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         bool(public_reply_text),
         len(public_reply_text),
         _safe_text_hash(public_reply_text),
+        public_reply_source,
         _automation_has_node_type(automation, 'message'),
         len(dm_diag_text),
         _safe_text_hash(dm_diag_text),
@@ -2237,12 +2322,13 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         after_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
         logger.info(
             'automation_action_result comment_id=%s matched_rule_id=%s reply_status_after=%s '
-            'dm_status_after=%s action_status_after=%s',
+            'dm_status_after=%s action_status_after=%s reply_provider_response_ok=%s',
             flow_comment_id,
             automation.get('id'),
             after_status_doc.get('reply_status') or after_status_doc.get('replyStatus'),
             after_status_doc.get('dm_status') or after_status_doc.get('dmStatus'),
             after_status_doc.get('action_status') or after_status_doc.get('actionStatus'),
+            bool(after_status_doc.get('reply_provider_response_ok') is True),
         )
     return bool(action_attempted and ok_all)
 
@@ -2372,6 +2458,7 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
     automation_data['processExistingComments'] = historical_catchup
     automation_data['process_existing_unreplied_comments'] = historical_catchup
     if _is_comment_automation_rule(automation_data):
+        automation_data = _normalize_public_reply_for_persistence(automation_data)
         automation_data['activationStartedAt'] = now
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
@@ -2448,6 +2535,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     if not existing:
         raise HTTPException(404, 'Not found')
     now = datetime.utcnow()
+    update = _normalize_public_reply_for_persistence(update, existing)
     update['updated'] = now
     update['updatedAt'] = now
     # If any of the comment reply variations changed, rebuild the n_reply
@@ -2489,6 +2577,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         # nodes/edges in the same patch, prefer their version.
         if 'nodes' not in update:
             update['nodes'] = rebuilt_nodes
+    if update.get('reply_under_post') and _automation_public_reply_texts(update):
+        update = _ensure_public_reply_node(update)
     prospective = {**existing, **update}
     historical_catchup = _normalize_historical_catchup_flag(prospective)
     if not historical_catchup and (
@@ -2815,6 +2905,7 @@ async def create_quick_comment_rule(
         'created': now,
         'updated': now,
     }
+    doc = _normalize_public_reply_for_persistence(doc)
     await db.automations.insert_one(doc)
     await _safe_record_usage_event(
         user_id=user_id,

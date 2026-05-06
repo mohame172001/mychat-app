@@ -725,6 +725,88 @@ def test_specific_rule_top_level_reply_is_attempted_when_reply_node_missing(monk
     assert calls == [('reply', 'Specific top-level reply'), ('dm', 'specific')]
 
 
+def test_persistence_normalizes_graph_reply_node_to_top_level_fields():
+    normalized = server._normalize_public_reply_for_persistence({
+        'id': 'specific_graph',
+        'trigger': 'comment:media1',
+        'post_scope': 'specific',
+        'media_id': 'media1',
+        'reply_under_post': True,
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {
+                'text': 'Graph reply',
+                'replies': ['Graph reply', 'Graph reply 2'],
+            }},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}},
+        ],
+        'edges': [
+            {'source': 'n_trigger', 'target': 'n_reply'},
+            {'source': 'n_reply', 'target': 'n_dm'},
+        ],
+    })
+
+    assert normalized['reply_under_post'] is True
+    assert normalized['comment_reply'] == 'Graph reply'
+    assert normalized['comment_reply_2'] == 'Graph reply 2'
+    assert server._automation_public_reply_source(normalized) == 'graph_node'
+
+
+def test_persistence_injects_reply_node_from_top_level_fields():
+    normalized = server._normalize_public_reply_for_persistence({
+        'id': 'specific_top',
+        'trigger': 'comment:media1',
+        'post_scope': 'specific',
+        'media_id': 'media1',
+        'reply_under_post': True,
+        'comment_reply': 'Top level reply',
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Specific DM'}},
+        ],
+        'edges': [{'source': 'n_trigger', 'target': 'n_dm'}],
+    })
+
+    assert normalized['reply_under_post'] is True
+    assert normalized['comment_reply'] == 'Top level reply'
+    assert any(node.get('type') == 'reply_comment' for node in normalized['nodes'])
+    assert server._automation_public_reply_source(normalized) == 'graph_node'
+
+
+def test_dm_edit_payload_preserves_existing_public_reply():
+    existing = _automation(
+        [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_reply', 'type': 'reply_comment', 'data': {'text': 'Existing reply'}},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Old DM'}},
+        ],
+        [
+            {'source': 'n_trigger', 'target': 'n_reply'},
+            {'source': 'n_reply', 'target': 'n_dm'},
+        ],
+        id='specific_edit',
+        trigger='comment:media1',
+        post_scope='specific',
+        media_id='media1',
+    )
+    normalized = server._normalize_public_reply_for_persistence({
+        'reply_under_post': False,
+        'comment_reply': '',
+        'comment_reply_2': '',
+        'comment_reply_3': '',
+        'dm_text': 'Edited DM',
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {'id': 'n_dm', 'type': 'message', 'data': {'text': 'Edited DM'}},
+        ],
+        'edges': [{'source': 'n_trigger', 'target': 'n_dm'}],
+    }, existing)
+
+    assert normalized['reply_under_post'] is True
+    assert normalized['comment_reply'] == 'Existing reply'
+    assert any(node.get('type') == 'reply_comment' for node in normalized['nodes'])
+
+
 def test_specific_rule_top_level_reply_success_dm_permanent_failure_is_partial(monkeypatch):
     db = _install_db(monkeypatch, [
         _automation(
