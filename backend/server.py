@@ -4747,6 +4747,51 @@ async def current_usage(user_id: str = Depends(get_current_user_id)):
     }
 
 
+@api.get('/admin/usage/{target_user_id}')
+async def admin_user_usage(
+    target_user_id: str,
+    month: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Admin-only: return monthly usage counters for any user.
+
+    Auth: caller's email MUST be in ADMIN_EMAILS. Unlike the repair tools,
+    this endpoint is NOT gated by ENABLE_ADMIN_REPAIR_TOOLS — read-only
+    usage stats are safe enough for an admin to inspect at any time.
+    """
+    caller = await db.users.find_one({'id': user_id})
+    email = ((caller or {}).get('email') or '').lower()
+    if not email or email not in ADMIN_EMAILS:
+        raise HTTPException(403, 'Admin access required')
+
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', event_month):
+        raise HTTPException(400, 'month must be YYYY-MM')
+
+    usage = await db.monthly_usage.find_one(
+        {'user_id': target_user_id, 'event_month': event_month}
+    ) or {}
+    counters = {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
+    snapshots = await _usage_snapshots_for_user(target_user_id)
+    return {
+        'user_id': target_user_id,
+        'event_month': event_month,
+        'counters': counters,
+        'connectedInstagramAccountsCount': int(
+            usage.get('instagram_accounts_connected_snapshot')
+            or snapshots.get('instagram_accounts_connected_snapshot')
+            or 0
+        ),
+        'activeAutomationsCount': int(
+            usage.get('active_automations_snapshot')
+            or snapshots.get('active_automations_snapshot')
+            or 0
+        ),
+        'plan': 'free',
+        'billing_enabled': False,
+    }
+
+
 # ---------------- Instagram OAuth (Business Login) ----------------
 # Uses Instagram API with Business Login flow — required for the
 # /{ig_user_id}/subscribed_apps endpoint to accept our access token.
