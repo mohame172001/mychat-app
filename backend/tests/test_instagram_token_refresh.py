@@ -167,6 +167,7 @@ class FakeDB:
         self.link_click_events = FakeCollection(collections.get('link_click_events', []))
         self.usage_events = FakeCollection(collections.get('usage_events', []))
         self.monthly_usage = FakeCollection(collections.get('monthly_usage', []))
+        self.user_plans = FakeCollection(collections.get('user_plans', []))
 
 
 def _account(**overrides):

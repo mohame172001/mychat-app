@@ -381,6 +381,139 @@ async def _record_comment_usage_once(comment_doc_id: str, marker_field: str, **u
         )
 
 
+# ---- Phase 2.2: plans + limits ----------------------------------------------
+# Plan definitions live in backend/plans.py. This block adds DB helpers and
+# enforcement helpers. NO BILLING. NO STRIPE. All assignments are manual.
+import plans as _plans  # noqa: E402
+
+
+async def get_user_plan(user_id: str) -> dict:
+    """Return the user's plan definition. Missing row -> free plan."""
+    if not user_id:
+        return _plans.get_plan_limits(_plans.DEFAULT_PLAN_KEY)
+    try:
+        row = await db.user_plans.find_one({'user_id': str(user_id)})
+    except Exception:
+        row = None
+    plan_key = (row or {}).get('plan_key')
+    if not _plans.is_valid_plan_key(plan_key):
+        plan_key = _plans.DEFAULT_PLAN_KEY
+    plan = _plans.get_plan_limits(plan_key)
+    plan['_assignment'] = {
+        'assigned_by': (row or {}).get('assigned_by'),
+        'assignment_reason': (row or {}).get('assignment_reason'),
+        'billing_status': (row or {}).get('billing_status') or 'manual',
+        'billing_enabled': False,
+        'updated_at': (row or {}).get('updated_at'),
+    }
+    return plan
+
+
+async def assign_user_plan(
+    user_id: str,
+    plan_key: str,
+    assigned_by: str,
+    reason: Optional[str] = None,
+) -> dict:
+    """Manually assign a plan to a user. Idempotent upsert."""
+    if not _plans.is_valid_plan_key(plan_key):
+        raise HTTPException(400, f'Invalid plan_key: {plan_key}')
+    if not user_id:
+        raise HTTPException(400, 'user_id is required')
+    now = datetime.utcnow()
+    await db.user_plans.update_one(
+        {'user_id': str(user_id)},
+        {
+            '$set': {
+                'user_id': str(user_id),
+                'plan_key': plan_key,
+                'assigned_by': str(assigned_by) if assigned_by else None,
+                'assignment_reason': (reason or '')[:200] or None,
+                'billing_status': 'manual',
+                'billing_enabled': False,
+                'updated_at': now,
+            },
+            '$setOnInsert': {
+                'id': secrets.token_urlsafe(12),
+                'created_at': now,
+            },
+        },
+        upsert=True,
+    )
+    return await get_user_plan(user_id)
+
+
+async def _user_monthly_counters(user_id: str, month: Optional[str] = None) -> dict:
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    usage = await db.monthly_usage.find_one(
+        {'user_id': str(user_id), 'event_month': event_month}
+    ) or {}
+    return {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
+
+
+async def get_current_usage_with_limits(user_id: str, month: Optional[str] = None) -> dict:
+    """Return the user's current-month usage, plan limits, and remaining."""
+    plan = await get_user_plan(user_id)
+    counters = await _user_monthly_counters(user_id, month)
+    snapshots = await _usage_snapshots_for_user(str(user_id))
+    limits = {key: plan.get(key) for key in _plans.LIMIT_COUNTER_KEYS}
+    remaining_map = {}
+    exceeded = {}
+    for limit_key, counter_field in _plans.LIMIT_TO_COUNTER_FIELD.items():
+        used = int(counters.get(counter_field) or 0)
+        limit_value = plan.get(limit_key)
+        remaining_map[limit_key] = _plans.remaining(limit_value, used)
+        exceeded[limit_key] = _plans.is_exceeded(limit_value, used, increment=0) or (
+            limit_value is not None and used >= int(limit_value)
+        )
+    return {
+        'plan_key': plan['plan_key'],
+        'display_name': plan['display_name'],
+        'billing_enabled': False,
+        'limits': limits,
+        'counters': counters,
+        'remaining': remaining_map,
+        'exceeded': exceeded,
+        'connectedInstagramAccountsCount': int(snapshots.get('instagram_accounts_connected_snapshot') or 0),
+        'activeAutomationsCount': int(snapshots.get('active_automations_snapshot') or 0),
+        'max_instagram_accounts': plan.get('max_instagram_accounts'),
+        'max_active_automations': plan.get('max_active_automations'),
+        'event_month': month or _usage_month(datetime.utcnow()),
+    }
+
+
+async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> dict:
+    """Return {exceeded, remaining, limit, used, plan_key}. Never raises.
+
+    Used by enforcement points (comment processing, public reply send,
+    DM send) to short-circuit before calling Meta. Errors fail OPEN so a
+    monitoring blip on monthly_usage never blocks the automation flow —
+    we'd rather over-deliver by a tiny amount than silently drop messages.
+    """
+    try:
+        plan = await get_user_plan(user_id)
+        counter_field = _plans.LIMIT_TO_COUNTER_FIELD.get(limit_key)
+        if not counter_field:
+            return {'exceeded': False, 'remaining': None, 'limit': None,
+                    'used': 0, 'plan_key': plan['plan_key'], 'fail_open': True}
+        counters = await _user_monthly_counters(user_id)
+        used = int(counters.get(counter_field) or 0)
+        limit_value = plan.get(limit_key)
+        return {
+            'exceeded': _plans.is_exceeded(limit_value, used, increment),
+            'remaining': _plans.remaining(limit_value, used),
+            'limit': limit_value,
+            'used': used,
+            'plan_key': plan['plan_key'],
+            'fail_open': False,
+        }
+    except Exception as e:
+        logger.warning('plan_limit_check_failed user_id=%s limit_key=%s reason=%s',
+                       user_id, limit_key, str(e)[:120])
+        return {'exceeded': False, 'remaining': None, 'limit': None,
+                'used': 0, 'plan_key': _plans.DEFAULT_PLAN_KEY, 'fail_open': True}
+
+
 TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
 _HTTP_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 
@@ -797,12 +930,21 @@ def _status_is_failed_like(value: Any) -> bool:
     return str(value or '').lower() in _FAILED_LIKE_STATUSES
 
 
+def _status_is_plan_limited(value: Any) -> bool:
+    return str(value or '').lower() == 'plan_limited'
+
+
 def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
     """Compute the overall action status from independent reply/DM statuses.
 
     failed_retryable / failed_permanent are treated like failed for the
     success/partial_success math, so a 'failed_retryable' reply alongside
     a 'success' DM correctly reports 'partial_success'.
+
+    plan_limited is a third category (Phase 2.2): the step was deliberately
+    not attempted because the user's plan limit is exceeded. plan_limited
+    + success on the other step -> partial_success. plan_limited alone (or
+    with disabled) -> 'plan_limited'.
     """
     statuses = [
         str(reply_status or 'disabled').lower(),
@@ -813,10 +955,13 @@ def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
         return 'skipped'
     has_success = any(_status_is_success(s) for s in enabled_statuses)
     has_failed = any(_status_is_failed_like(s) for s in enabled_statuses)
-    if has_success and has_failed:
+    has_plan_limited = any(_status_is_plan_limited(s) for s in enabled_statuses)
+    if has_success and (has_failed or has_plan_limited):
         return 'partial_success'
     if has_failed:
         return 'failed'
+    if has_plan_limited:
+        return 'plan_limited'
     if all(_status_is_success(s) for s in enabled_statuses):
         return 'success'
     return 'failed'
@@ -2416,6 +2561,38 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 # Reset the contextvar so we read THIS send's reason, not
                 # a stale value from an earlier send in the same task.
                 _LAST_DM_FAILURE.set({})
+                # Phase 2.2 plan enforcement: skip the DM step BEFORE we
+                # touch Meta when the monthly DM limit is exceeded. The
+                # public reply (if any) is unaffected.
+                dm_limit_check = await check_plan_limit(
+                    user.get('id', ''), 'monthly_dms_sent_limit', increment=1,
+                )
+                if dm_limit_check.get('exceeded') and not dm_limit_check.get('fail_open'):
+                    flow_results['dm_status'] = 'plan_limited'
+                    flow_results['dm_failure_reason'] = 'plan_limit_exceeded'
+                    if comment_context and comment_context.get('comment_doc_id'):
+                        now_dl = datetime.utcnow()
+                        await db.comments.update_one(
+                            {'id': comment_context['comment_doc_id']},
+                            {'$set': {
+                                'dm_status': 'plan_limited',
+                                'dmStatus': 'plan_limited',
+                                'dm_failure_reason': 'plan_limit_exceeded',
+                                'dm_failure_retryable': False,
+                                'last_attempt_at': now_dl,
+                                'updated': now_dl,
+                            }},
+                        )
+                    logger.warning(
+                        'dm_skipped_plan_limit ig_comment_id=%s rule_id=%s '
+                        'plan_key=%s used=%s limit=%s',
+                        flow_comment_id, automation.get('id'),
+                        dm_limit_check.get('plan_key'),
+                        dm_limit_check.get('used'),
+                        dm_limit_check.get('limit'),
+                    )
+                    ok_all = False
+                    continue
                 existing_dm_success = False
                 if comment_context and comment_context.get('comment_doc_id'):
                     existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
@@ -2569,6 +2746,38 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
                 action_attempted = True
+                # Phase 2.2 plan enforcement: skip the public reply step
+                # BEFORE we touch Meta when the monthly public-reply limit
+                # is exceeded. The DM step (if any) runs normally.
+                reply_limit_check = await check_plan_limit(
+                    user.get('id', ''), 'monthly_public_replies_sent_limit', increment=1,
+                )
+                if reply_limit_check.get('exceeded') and not reply_limit_check.get('fail_open'):
+                    flow_results['reply_status'] = 'plan_limited'
+                    flow_results['reply_failure_reason'] = 'plan_limit_exceeded'
+                    if comment_context.get('comment_doc_id'):
+                        now_rl = datetime.utcnow()
+                        await db.comments.update_one(
+                            {'id': comment_context['comment_doc_id']},
+                            {'$set': {
+                                'reply_status': 'plan_limited',
+                                'replyStatus': 'plan_limited',
+                                'reply_failure_reason': 'plan_limit_exceeded',
+                                'reply_failure_retryable': False,
+                                'last_attempt_at': now_rl,
+                                'updated': now_rl,
+                            }},
+                        )
+                    logger.warning(
+                        'public_reply_skipped_plan_limit ig_comment_id=%s rule_id=%s '
+                        'plan_key=%s used=%s limit=%s',
+                        comment_context['ig_comment_id'], automation.get('id'),
+                        reply_limit_check.get('plan_key'),
+                        reply_limit_check.get('used'),
+                        reply_limit_check.get('limit'),
+                    )
+                    ok_all = False
+                    continue
                 already_replied = False
                 if comment_context.get('comment_doc_id'):
                     existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
@@ -2868,6 +3077,20 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
     if _is_comment_automation_rule(automation_data):
         automation_data = _normalize_public_reply_for_persistence(automation_data)
         automation_data['activationStartedAt'] = now
+    # Phase 2.2 plan enforcement: if creating directly as active, count it.
+    if (automation_data.get('status') or '').lower() == 'active':
+        plan = await get_user_plan(user_id)
+        max_active = plan.get('max_active_automations')
+        if max_active is not None:
+            active_count = await db.automations.count_documents({
+                'user_id': user_id, 'status': 'active',
+            })
+            if active_count >= int(max_active):
+                raise HTTPException(
+                    402,
+                    f'Plan {plan["plan_key"]} allows {max_active} active '
+                    f'automation(s); save as draft or upgrade.',
+                )
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
     await _safe_record_usage_event(
@@ -3015,6 +3238,20 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     status_reenabled = (
         update.get('status') == 'active' and existing.get('status') != 'active'
     )
+    # Phase 2.2 plan enforcement: block activation if at active-automation cap.
+    if status_reenabled:
+        plan = await get_user_plan(user_id)
+        max_active = plan.get('max_active_automations')
+        if max_active is not None:
+            active_count = await db.automations.count_documents({
+                'user_id': user_id, 'status': 'active',
+            })
+            if active_count >= int(max_active):
+                raise HTTPException(
+                    402,
+                    f'Plan {plan["plan_key"]} allows {max_active} active '
+                    f'automation(s); deactivate one or upgrade.',
+                )
     rule_shape_changed = any(field in update for field in reset_fields)
     if _is_comment_automation_rule(prospective) and (status_reenabled or rule_shape_changed):
         update['activationStartedAt'] = now
@@ -3257,6 +3494,20 @@ async def create_quick_comment_rule(
             'follow_up_text': follow_up_text,
         }})
         edges.append({'id': f'e{len(edges)+1}', 'source': prev, 'target': 'n_dm'})
+
+    # Phase 2.2 plan enforcement: this endpoint always creates active rules.
+    plan = await get_user_plan(user_id)
+    max_active = plan.get('max_active_automations')
+    if max_active is not None:
+        active_count = await db.automations.count_documents({
+            'user_id': user_id, 'status': 'active',
+        })
+        if active_count >= int(max_active):
+            raise HTTPException(
+                402,
+                f'Plan {plan["plan_key"]} allows {max_active} active '
+                f'automation(s); deactivate one or upgrade.',
+            )
 
     now = datetime.utcnow()
     doc = {
@@ -4731,20 +4982,83 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
 
 @api.get('/usage/current')
 async def current_usage(user_id: str = Depends(get_current_user_id)):
-    event_month = _usage_month(datetime.utcnow())
-    usage = await db.monthly_usage.find_one({'user_id': user_id, 'event_month': event_month}) or {}
-    counters = {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
-    snapshots = await _usage_snapshots_for_user(user_id)
+    """Phase 2.1 + 2.2: monthly usage for the current user PLUS the plan
+    limits and remaining counters. billing_enabled stays False until
+    Phase 3 lands real billing."""
+    summary = await get_current_usage_with_limits(user_id)
+    # Backward-compatible top-level fields older frontend bundles may read.
     return {
-        'event_month': event_month,
-        'counters': counters,
-        'connectedInstagramAccountsCount': int(
-            snapshots.get('instagram_accounts_connected_snapshot') or 0
-        ),
-        'activeAutomationsCount': int(snapshots.get('active_automations_snapshot') or 0),
-        'plan': 'free',
+        'event_month': summary['event_month'],
+        'counters': summary['counters'],
+        'connectedInstagramAccountsCount': summary['connectedInstagramAccountsCount'],
+        'activeAutomationsCount': summary['activeAutomationsCount'],
+        'plan': summary['plan_key'],
+        'plan_key': summary['plan_key'],
+        'display_name': summary['display_name'],
+        'limits': summary['limits'],
+        'remaining': summary['remaining'],
+        'exceeded': summary['exceeded'],
+        'max_instagram_accounts': summary['max_instagram_accounts'],
+        'max_active_automations': summary['max_active_automations'],
         'billing_enabled': False,
     }
+
+
+@api.get('/plans')
+async def list_plans():
+    """Public list of plan tiers. No auth required: prices and limits are
+    not secret. billing_enabled is False on every entry."""
+    return {'plans': _plans.all_plan_summaries(), 'billing_enabled': False}
+
+
+@api.get('/plan/current')
+async def current_plan(user_id: str = Depends(get_current_user_id)):
+    """The caller's current plan + its limits + this month's usage."""
+    summary = await get_current_usage_with_limits(user_id)
+    return summary
+
+
+@api.post('/admin/users/{target_user_id}/plan')
+async def admin_assign_user_plan(
+    target_user_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Manually assign a plan to a user. Admin-only via ADMIN_EMAILS.
+    Independent of ENABLE_ADMIN_REPAIR_TOOLS. No Stripe."""
+    caller = await db.users.find_one({'id': user_id})
+    email = ((caller or {}).get('email') or '').lower()
+    if not email or email not in ADMIN_EMAILS:
+        raise HTTPException(403, 'Admin access required')
+    plan_key = (body or {}).get('plan_key')
+    reason = (body or {}).get('reason') or 'manual_admin_assignment'
+    if not _plans.is_valid_plan_key(plan_key):
+        raise HTTPException(400, f'plan_key must be one of: {", ".join(_plans.PLAN_KEYS)}')
+    plan = await assign_user_plan(target_user_id, plan_key, assigned_by=user_id, reason=reason)
+    logger.info(
+        'admin_plan_assigned target_user_id=%s plan_key=%s assigned_by=%s',
+        target_user_id, plan_key, user_id,
+    )
+    return {
+        'ok': True,
+        'user_id': target_user_id,
+        'plan_key': plan['plan_key'],
+        'display_name': plan['display_name'],
+        'billing_enabled': False,
+    }
+
+
+@api.get('/admin/users/{target_user_id}/plan')
+async def admin_get_user_plan(
+    target_user_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    caller = await db.users.find_one({'id': user_id})
+    email = ((caller or {}).get('email') or '').lower()
+    if not email or email not in ADMIN_EMAILS:
+        raise HTTPException(403, 'Admin access required')
+    summary = await get_current_usage_with_limits(target_user_id)
+    return {**summary, 'user_id': target_user_id}
 
 
 @api.get('/admin/usage/{target_user_id}')
@@ -5917,6 +6231,20 @@ async def instagram_auth_url(
         raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
     oauth_mode = mode if mode in {'connect', 'add_account', 'reconnect'} else 'connect'
+    # Phase 2.2 plan enforcement: block adding a NEW account if at cap.
+    # 'reconnect' is always allowed (it replaces an existing connection,
+    # not adding a new one).
+    if oauth_mode == 'add_account':
+        plan = await get_user_plan(user_id)
+        snapshots = await _usage_snapshots_for_user(user_id)
+        connected = int(snapshots.get('instagram_accounts_connected_snapshot') or 0)
+        max_accounts = plan.get('max_instagram_accounts')
+        if max_accounts is not None and connected >= int(max_accounts):
+            raise HTTPException(
+                402,
+                f'Plan {plan["plan_key"]} allows {max_accounts} Instagram '
+                f'account(s); upgrade to connect more.',
+            )
     return_to = _safe_return_to(returnTo)
     state = _sign_instagram_oauth_state({
         'userId': user_id,
@@ -8076,6 +8404,48 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         ig_comment_id, rule_id)
             logger.info('comment_processing_immediate comment_id=%s media_id=%s source=%s rule_id=%s user_id=%s instagramAccountId=%s',
                         ig_comment_id, media_id, source, rule_id, user_id, ig_account_id)
+            # Phase 2.2 plan enforcement: stop the action chain BEFORE
+            # any Meta call when the monthly comment-processed limit is
+            # exceeded. The comment doc stays so we don't lose it; the
+            # queue does NOT auto-retry — the user must upgrade or wait
+            # for next month's reset.
+            comment_limit_check = await check_plan_limit(
+                user_id, 'monthly_comments_processed_limit', increment=1,
+            )
+            if comment_limit_check.get('exceeded') and not comment_limit_check.get('fail_open'):
+                now_pl = datetime.utcnow()
+                await db.comments.update_one(
+                    {'id': doc['id']},
+                    {'$set': {
+                        'action_status': 'plan_limited',
+                        'actionStatus': 'plan_limited',
+                        'reply_status': 'plan_limited',
+                        'replyStatus': 'plan_limited',
+                        'dm_status': 'plan_limited',
+                        'dmStatus': 'plan_limited',
+                        'skip_reason': 'skipped_plan_limit',
+                        'skipReason': 'skipped_plan_limit',
+                        'reply_failure_reason': 'plan_limit_exceeded',
+                        'reply_failure_retryable': False,
+                        'next_retry_at': None,
+                        'queued': False,
+                        'plan_key_at_skip': comment_limit_check.get('plan_key'),
+                        'updated': now_pl,
+                    }},
+                )
+                logger.warning(
+                    'comment_skipped_plan_limit ig_comment_id=%s user_id=%s rule_id=%s '
+                    'plan_key=%s used=%s limit=%s',
+                    ig_comment_id, user_id, rule_id,
+                    comment_limit_check.get('plan_key'),
+                    comment_limit_check.get('used'),
+                    comment_limit_check.get('limit'),
+                )
+                return {'processed': True, 'matched': True,
+                        'action_status': 'plan_limited',
+                        'rule_id': rule_id, 'comment_doc_id': doc['id'],
+                        'reason': 'skipped_plan_limit',
+                        'plan_key': comment_limit_check.get('plan_key')}
             ok = await _run_and_record_action(
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
@@ -11693,6 +12063,10 @@ async def _startup():
             [('user_id', 1), ('event_month', 1)],
             unique=True,
             name='monthly_usage_user_month_unique',
+        )
+        # Phase 2.2: user_plans — one row per user.
+        await db.user_plans.create_index(
+            [('user_id', 1)], unique=True, name='user_plans_user_unique',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)
