@@ -10,24 +10,28 @@ import { toast } from 'sonner';
 import { diagnosisPassFail } from '../../lib/specificReplyDiagnosis';
 
 /**
- * Phase 1.4H admin debug page.
+ * Phase 1.4H admin debug page — TEMPORARY support tool.
  *
- * Authenticated tooling to diagnose / repair / re-run a single comment's
- * specific-post-rule public-reply state — no Railway shell required.
- *
- * Visibility:
- *   The page itself is reachable to anyone authenticated, but every
- *   button calls /api/admin/* endpoints that return 404 unless the
- *   caller is in ADMIN_EMAILS or ENABLE_ADMIN_REPAIR_TOOLS=true on the
- *   server. We probe /api/admin/tools-enabled to decide whether to
- *   render the buttons at all.
+ * Not a product feature, not advertised in the sidebar, and reachable
+ * only by typing the URL. The page first probes /api/admin/tools-enabled
+ * and renders a clear "disabled" state when the backend has
+ * ENABLE_ADMIN_REPAIR_TOOLS=false (the default in production). This
+ * page should NOT be linked from anywhere user-facing.
  *
  * Privacy:
  *   The backend never returns raw comment / reply / DM text. This UI
  *   only renders length/hash/booleans.
+ *
+ * PASS labels here describe internal consistency of one comment's
+ * state vs. its rule's saved configuration. PASS does NOT mean
+ * "automation healthy overall" or "Phase 1.4 closed".
  */
 
+// Debug-only convenience: the original failed id from the Phase 1.4
+// investigation. Hidden in production builds so end-operators don't see
+// project-internal ids.
 const FAILED_COMMENT_ID = '18004285310876247';
+const IS_DEV_BUILD = process.env.NODE_ENV !== 'production';
 
 function StatusPill({ ok, label }) {
   const cls = ok
@@ -68,8 +72,8 @@ function DiagnosisCard({ data }) {
         </div>
         <div data-testid="diagnosis-pass-fail">
           {allPass
-            ? <StatusPill ok label="PASS" />
-            : <StatusPill ok={false} label={anyForbidden ? 'FAIL — forbidden state' : `FAIL — ${verdict.reason}`} />}
+            ? <StatusPill ok label={verdict.label || 'Consistent'} />
+            : <StatusPill ok={false} label={anyForbidden ? 'FAIL — forbidden state' : `FAIL — ${verdict.label || verdict.reason}`} />}
         </div>
       </div>
 
@@ -220,11 +224,12 @@ export default function SpecificReplyDebug() {
         <div className="bg-white rounded-2xl border border-slate-100 p-6">
           <div className="flex items-center gap-2 text-rose-600 mb-2">
             <ShieldAlert className="w-5 h-5" />
-            <h1 className="text-lg font-semibold">Admin tools disabled</h1>
+            <h1 className="text-lg font-semibold">Not available</h1>
           </div>
           <p className="text-sm text-slate-600">
-            Set <span className="font-mono">ENABLE_ADMIN_REPAIR_TOOLS=true</span> on the
-            backend service, or sign in with an account in <span className="font-mono">ADMIN_EMAILS</span>.
+            This page is internal support tooling and is disabled by default.
+            If you are a user looking for your comments or automations,
+            please go back to the Comments page.
           </p>
         </div>
       </div>
@@ -259,15 +264,18 @@ export default function SpecificReplyDebug() {
             data-testid="ig-comment-id-input"
             className="font-mono"
           />
-          <Button
-            onClick={() => setIgCommentId(FAILED_COMMENT_ID)}
-            variant="ghost"
-            size="sm"
-            className="rounded-full"
-            type="button"
-          >
-            Paste known failed id
-          </Button>
+          {IS_DEV_BUILD && (
+            <Button
+              onClick={() => setIgCommentId(FAILED_COMMENT_ID)}
+              variant="ghost"
+              size="sm"
+              className="rounded-full"
+              type="button"
+              title="Dev-only shortcut for the Phase 1.4 investigation comment"
+            >
+              Paste dev test id
+            </Button>
+          )}
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button

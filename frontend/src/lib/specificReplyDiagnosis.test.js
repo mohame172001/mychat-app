@@ -14,9 +14,25 @@ const fullPass = {
 };
 
 describe('diagnosisPassFail', () => {
-  test('full success returns PASS', () => {
+  test('full success returns PASS with reply_and_dm_succeeded reason', () => {
     const r = diagnosisPassFail(fullPass);
     expect(r.pass).toBe(true);
+    expect(r.reason).toBe('reply_and_dm_succeeded');
+    expect(r.label).toMatch(/Reply \+ DM/);
+  });
+
+  test('DM-only rule with DM success is consistent (not a misleading PASS)', () => {
+    const r = diagnosisPassFail({
+      public_reply_required: false,
+      reply_status: 'disabled',
+      dm_required: true,
+      dm_status: 'success',
+      forbidden_state_detected: false,
+    });
+    expect(r.pass).toBe(true);
+    expect(r.reason).toBe('dm_only_rule_consistent');
+    // Label must clearly state this is DM-only, not "all green".
+    expect(r.label).toMatch(/DM-only/);
   });
 
   test('forbidden state (disabled+success+required) is FAIL — production bug case', () => {
@@ -59,20 +75,11 @@ describe('diagnosisPassFail', () => {
     expect(r.reason).toBe('dm_required_but_dm_not_success');
   });
 
-  test('truly DM-only rule passes when DM succeeds and reply not required', () => {
-    const r = diagnosisPassFail({
-      public_reply_required: false,
-      reply_status: 'disabled',
-      dm_required: true,
-      dm_status: 'success',
-      forbidden_state_detected: false,
-    });
-    expect(r.pass).toBe(true);
-  });
-
   test('null payload is FAIL with reason no_data', () => {
-    expect(diagnosisPassFail(null)).toEqual({ pass: false, reason: 'no_data' });
-    expect(diagnosisPassFail(undefined)).toEqual({ pass: false, reason: 'no_data' });
+    const r = diagnosisPassFail(null);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toBe('no_data');
+    expect(diagnosisPassFail(undefined).reason).toBe('no_data');
   });
 });
 

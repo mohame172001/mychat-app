@@ -6,47 +6,80 @@
  */
 
 /**
- * Decide PASS/FAIL for a diagnosis payload returned by
+ * Classify a diagnosis payload returned by
  * GET /api/admin/comments/{ig_comment_id}/specific-reply-diagnosis.
  *
- * PASS criteria (all must hold):
- *   - public_reply_required === true
- *   - reply_status === 'success'
- *   - reply_provider_response_ok === true
- *   - if dm_required is true, dm_status === 'success'
- *   - forbidden_state_detected === false
+ * Returns { pass: boolean, reason: string, label: string }.
  *
- * FAIL is the negation. The most common forbidden state from the
- * production bug — public_reply_required=true + reply_status='disabled' +
- * dm_status='success' — is captured by forbidden_state_detected.
+ * IMPORTANT: `pass` here means "the per-comment state is internally
+ * consistent with the rule's saved configuration" — NOT "Phase 1.4 is
+ * closed", NOT "automation is healthy overall". The admin page is a
+ * support tool, not a product KPI.
+ *
+ * Verdicts:
+ *   - public_reply_required=true + reply success + provider proof + DM ok
+ *       → pass=true, reason=reply_and_dm_succeeded
+ *   - public_reply_required=false + dm_status=success
+ *       → pass=true, reason=dm_only_rule_consistent (LABEL: DM-only rule)
+ *   - forbidden_state_detected=true (the original bug shape)
+ *       → pass=false, reason=forbidden_state_detected
+ *   - any other combination → pass=false with a specific reason
  */
 export function diagnosisPassFail(diag) {
   if (!diag || typeof diag !== 'object') {
-    return { pass: false, reason: 'no_data' };
+    return { pass: false, reason: 'no_data', label: 'No data' };
   }
   const reply = String(diag.reply_status || '').toLowerCase();
   const dm = String(diag.dm_status || '').toLowerCase();
 
   if (diag.forbidden_state_detected === true) {
-    return { pass: false, reason: 'forbidden_state_detected' };
+    return {
+      pass: false,
+      reason: 'forbidden_state_detected',
+      label: 'Forbidden state — public reply required but disabled',
+    };
   }
   if (diag.public_reply_required !== true) {
-    // Truly DM-only rules are valid as PASS only when DM succeeded.
+    // Truly DM-only rule. Disabled reply_status is the correct outcome.
     if (diag.dm_required && dm !== 'success') {
-      return { pass: false, reason: 'dm_required_but_dm_not_success' };
+      return {
+        pass: false,
+        reason: 'dm_required_but_dm_not_success',
+        label: 'DM-only rule but DM step did not succeed',
+      };
     }
-    return { pass: true, reason: 'dm_only_rule_passed' };
+    return {
+      pass: true,
+      reason: 'dm_only_rule_consistent',
+      label: 'DM-only rule: public reply not configured',
+    };
   }
   if (reply !== 'success') {
-    return { pass: false, reason: `reply_status_not_success:${reply || 'empty'}` };
+    return {
+      pass: false,
+      reason: `reply_status_not_success:${reply || 'empty'}`,
+      label: `Reply status is ${reply || 'empty'}, not success`,
+    };
   }
   if (diag.reply_provider_response_ok !== true) {
-    return { pass: false, reason: 'reply_provider_response_ok_false' };
+    return {
+      pass: false,
+      reason: 'reply_provider_response_ok_false',
+      label: 'Reply marked success but no Instagram provider proof',
+    };
   }
   if (diag.dm_required && dm !== 'success') {
-    return { pass: false, reason: 'dm_required_but_dm_not_success' };
+    return {
+      pass: false,
+      reason: 'dm_required_but_dm_not_success',
+      label: 'Reply succeeded but DM step did not succeed',
+    };
   }
-  return { pass: true, reason: 'all_checks_passed' };
+  return {
+    pass: true,
+    reason: 'reply_and_dm_succeeded',
+    label: 'Reply + DM both succeeded with provider proof',
+  };
 }
 
 /**

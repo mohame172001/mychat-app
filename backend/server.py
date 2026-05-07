@@ -4140,10 +4140,19 @@ async def diagnose_specific_rule_reply_plan(comment_id: str,
     }
 
 
-# ---------------- admin repair tools (Phase 1.4H) ----------------
-# Authenticated, sanitized endpoints so an operator without Railway shell
-# access can diagnose / repair / re-queue specific-post comments where a
-# public reply was missed while DM succeeded.
+# ---------------- admin repair tools — TEMPORARY support tooling ----------------
+# Phase 1.4H. NOT a product feature. NOT exposed to end users.
+#
+# These endpoints exist so an operator (no Railway shell) can diagnose
+# and re-queue a single comment when investigating a specific-post-rule
+# regression. They are DISABLED BY DEFAULT (ENABLE_ADMIN_REPAIR_TOOLS=false
+# unless explicitly set in the Railway environment) and additionally gated
+# by ADMIN_EMAILS. After Phase 1.4 closes, the flag should remain unset
+# in production so all four endpoints return 404 to non-admin callers.
+#
+# Privacy contract: these endpoints return only ids, statuses, lengths,
+# hashes, and timestamps — never raw comment / reply / DM text, never
+# tokens, never raw Graph error bodies.
 
 async def _require_admin_repair_access(user_id: str, comment_doc: Optional[dict] = None) -> dict:
     """Return user record after enforcing admin/owner+flag access.
