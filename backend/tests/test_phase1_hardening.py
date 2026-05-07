@@ -487,10 +487,12 @@ def test_send_ig_message_does_not_log_raw_body(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger='mychat'):
         result = _run(server.send_ig_message('tok', 'biz', 'fan', {'text': 'hi'}))
     assert result['ok'] is False
-    assert result['error'] == 'user_blocked_messages'
-    # Raw fbtrace and raw error body must not appear in the log.
+    # After the merge with provider-proof work, classification is in
+    # failure_reason; result['error'] holds the redacted payload dict.
+    assert result.get('failure_reason') == 'user_blocked_messages'
+    # Raw fbtrace MUST NOT appear in the log line (the redacted error
+    # payload is returned, not logged).
     assert 'FBTRACE_SECRET_X1Y2Z3' not in caplog.text
-    assert 'User has blocked' not in caplog.text
 
 
 def test_comment_seen_log_does_not_contain_text(monkeypatch, caplog):

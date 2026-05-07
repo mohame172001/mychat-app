@@ -229,6 +229,10 @@ def test_poller_skips_already_replied_webhook_comment(monkeypatch):
         'igUserId': 'biz1',
         'ig_comment_id': 'c_dup_check',
         'replied': True,
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply_dup_check',
+        'replied_at': datetime.utcnow() - timedelta(minutes=1),
         'action_status': 'success',
         'created': datetime.utcnow() - timedelta(minutes=1),
     }
@@ -295,6 +299,10 @@ def test_no_duplicate_reply_on_concurrent_webhook_and_poll(monkeypatch):
         # Simulate the webhook reply succeeding
         if db.comments.docs:
             db.comments.docs[0]['replied'] = True
+            db.comments.docs[0]['reply_status'] = 'success'
+            db.comments.docs[0]['reply_provider_response_ok'] = True
+            db.comments.docs[0]['reply_provider_comment_id'] = 'reply_race'
+            db.comments.docs[0]['replied_at'] = datetime.utcnow()
             db.comments.docs[0]['action_status'] = 'success'
         r2 = await server._handle_new_comment(_user(), comment_poll, source='polling')
         return r1, r2

@@ -67,6 +67,10 @@ def _match(doc, query):
                 return False
             if '$lte' in expected and not (value is not None and value <= expected['$lte']):
                 return False
+            if '$gte' in expected and not (value is not None and value >= expected['$gte']):
+                return False
+            if '$in' in expected and value not in expected['$in']:
+                return False
             if '$nin' in expected and value in expected['$nin']:
                 return False
             if '$ne' in expected and value == expected['$ne']:
@@ -1226,9 +1230,13 @@ def test_polling_enforces_safe_reply_cap(monkeypatch):
     monkeypatch.setattr(server, 'IG_POLL_REPLY_CAP_PER_RUN', 3)
     monkeypatch.setattr(server, 'IG_POLL_COMMENT_BATCH_LIMIT', 20)
     handled = []
+    queued = []
 
     async def fake_handle(_user_doc, comment_data, source='polling'):
         handled.append(comment_data['ig_comment_id'])
+        if comment_data.get('force_queue'):
+            queued.append(comment_data['ig_comment_id'])
+            return {'processed': True, 'matched': True, 'action_status': 'pending', 'queued': True}
         return {'processed': True, 'matched': True, 'action_status': 'success'}
 
     class PollClient:
@@ -1261,7 +1269,8 @@ def test_polling_enforces_safe_reply_cap(monkeypatch):
         'meta_access_token': 'token-a',
     }))
 
-    assert handled == ['comment0', 'comment1', 'comment2']
+    assert handled == [f'comment{i}' for i in range(8)]
+    assert queued == ['comment3', 'comment4', 'comment5', 'comment6', 'comment7']
     assert stats['actionsSucceeded'] == 3
     assert 'reply_cap_reached' in stats['errors']
 
