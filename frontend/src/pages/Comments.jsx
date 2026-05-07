@@ -8,42 +8,15 @@ import { toast } from 'sonner';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
 
-// Permanent DM/reply failures: do not show a Retry button; doing so would
-// hit the same Graph error or, worse, duplicate a successful public reply.
-const PERMANENT_FAILURE_REASONS = new Set([
-  'recipient_unavailable',
-  'messaging_not_allowed',
-  'user_blocked_messages',
-  'permission_error',
-]);
-
-// Filter keys aligned with normalizeStatus output.
-const STATUS_FILTERS = [
-  { key: 'all',       label: 'All' },
-  { key: 'pending',   label: 'Pending / queued' },
-  { key: 'retryable', label: 'Retryable failed' },
-  { key: 'permanent', label: 'Permanent failed' },
-  { key: 'partial',   label: 'Partial (DM failed)' },
-  { key: 'success',   label: 'Success' },
-  { key: 'skipped',   label: 'Skipped' },
-];
-
-const normalizeStatus = (comment) => {
-  const action = String(comment.action_status || comment.actionStatus || '').toLowerCase();
-  const reply = String(comment.reply_status || comment.replyStatus || '').toLowerCase();
-  const dm = String(comment.dm_status || comment.dmStatus || '').toLowerCase();
-  const skip = comment.skip_reason || comment.skipReason;
-
-  if (action === 'partial_success' || (reply === 'success' && dm === 'failed')) return 'partial';
-  if (action === 'pending' || action === 'processing' || reply === 'pending' || dm === 'pending') return 'pending';
-  if (action === 'failed_retryable' || comment.reply_failure_retryable || comment.dm_failure_retryable) return 'retryable';
-  if (action === 'failed_permanent' || action === 'failed_retry_exhausted') return 'permanent';
-  if (action === 'skipped' || action === 'skipped_ineligible' || skip) return 'skipped';
-  if (action === 'success' || reply === 'success' || comment.replied) return 'success';
-  return 'pending';
-};
-
-const statusLabel = (status) => STATUS_FILTERS.find(item => item.key === status)?.label || status;
+// Pure logic moved to lib/commentStatus.js so tests can import it
+// without pulling axios / sonner / browser-only deps.
+import {
+  STATUS_FILTERS,
+  PERMANENT_FAILURE_REASONS,
+  normalizeStatus,
+  statusLabel,
+  canRetryReply,
+} from '../lib/commentStatus';
 
 function statusBadge(c) {
   const cls = normalizeStatus(c);
@@ -58,20 +31,13 @@ function statusBadge(c) {
       return { label: 'Retryable failed', cn: 'bg-orange-100 text-orange-700', Icon: Repeat };
     case 'permanent':
       return { label: 'Permanent failed', cn: 'bg-rose-100 text-rose-700', Icon: ShieldX };
+    case 'plan_limited':
+      return { label: 'Plan limited', cn: 'bg-violet-100 text-violet-700', Icon: ShieldX };
     case 'skipped':
       return { label: 'Skipped', cn: 'bg-slate-100 text-slate-600', Icon: Filter };
     default:
       return { label: '—', cn: 'bg-slate-100 text-slate-600', Icon: Filter };
   }
-}
-
-function canRetryReply(c) {
-  // Only safe when no provider-proven public reply exists AND the reply
-  // step is in a state we can re-try (failed transiently or pending).
-  if (c.reply_provider_response_ok === true) return false;
-  if (String(c.reply_status || '').toLowerCase() === 'success' && c.replied === true) return false;
-  if (PERMANENT_FAILURE_REASONS.has(c.reply_failure_reason)) return false;
-  return true;
 }
 
 const Comments = () => {

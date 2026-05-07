@@ -19,6 +19,7 @@ const DmAutomation = lazy(() => import('./pages/DmAutomation'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
 const Terms = lazy(() => import('./pages/Terms'));
 const SystemHealth = lazy(() => import('./pages/SystemHealth'));
+const Billing = lazy(() => import('./pages/Billing'));
 const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
 
 const PageLoading = () => (
@@ -54,6 +55,7 @@ function App() {
                 <Route path="dm-automation" element={<DmAutomation />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="system-health" element={<SystemHealth />} />
+                <Route path="billing" element={<Billing />} />
                 <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
               </Route>
             </Routes>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -191,21 +191,31 @@ const Settings = () => {
           )}
 
           {tab === 'billing' && (
-            <Card className="p-6 rounded-2xl border-slate-100">
+            <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-billing-summary">
               <h3 className="font-display font-bold text-lg">Billing</h3>
-              <div className="mt-4 p-5 rounded-2xl bg-slate-900 text-white">
+              <p className="mt-2 text-sm text-slate-500">
+                Billing is not enabled yet. Plan upgrades with payment will be
+                available later — during beta, contact support to change your plan.
+              </p>
+              <div className="mt-4 p-5 rounded-2xl bg-slate-50 border border-slate-100">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm opacity-80">Current plan</div>
-                    <div className="mt-1 font-display text-2xl font-bold">Pro Plan</div>
+                    <div className="text-xs uppercase tracking-wide font-semibold text-slate-500">
+                      Status
+                    </div>
+                    <div className="mt-1 font-display text-base font-semibold text-slate-800">
+                      Beta — billing disabled
+                    </div>
                   </div>
-                  <Badge className="bg-white/10 text-white border-0 rounded-full">$15/mo</Badge>
+                  <Badge className="bg-amber-100 text-amber-800 border-0 rounded-full">
+                    No payment required
+                  </Badge>
                 </div>
-                <div className="mt-4 text-sm opacity-80">Next billing date: December 24, 2025</div>
               </div>
-              <div className="mt-6 flex gap-3">
-                <Button className="bg-slate-900 text-white rounded-xl">Upgrade plan</Button>
-                <Button variant="outline" className="rounded-xl">View invoices</Button>
+              <div className="mt-6">
+                <Button asChild className="bg-slate-900 text-white rounded-xl">
+                  <Link to="/app/billing">View usage &amp; plans</Link>
+                </Button>
               </div>
             </Card>
           )}
