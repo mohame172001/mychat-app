@@ -151,6 +151,12 @@ RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN = _rl_int('RATE_LIMIT_PROCESS_UNREPLIED_PER
 # Admin allowlist for ops-only endpoints (webhook-log etc.). Comma-separated
 # emails. In production this MUST be set or those endpoints stay locked.
 ADMIN_EMAILS = {e.strip().lower() for e in (os.environ.get('ADMIN_EMAILS') or '').split(',') if e.strip()}
+
+# Phase 1.4H repair tools: admin endpoints under /api/admin/comments/* are
+# gated by ENABLE_ADMIN_REPAIR_TOOLS=true. Even when the flag is off, an
+# email in ADMIN_EMAILS can still call them. The flag is meant to be
+# turned on briefly during a repair window and turned off again.
+ENABLE_ADMIN_REPAIR_TOOLS = (os.environ.get('ENABLE_ADMIN_REPAIR_TOOLS') or '').strip().lower() == 'true'
 TOKEN_REFRESH_LOOKAHEAD_DAYS = int(os.environ.get('IG_TOKEN_REFRESH_LOOKAHEAD_DAYS', '15'))
 TOKEN_REFRESH_MIN_AGE_HOURS = int(os.environ.get('IG_TOKEN_REFRESH_MIN_AGE_HOURS', '24'))
 TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES', '5'))
@@ -4131,6 +4137,276 @@ async def diagnose_specific_rule_reply_plan(comment_id: str,
                 else comment.get('next_retry_at')
             ),
         },
+    }
+
+
+# ---------------- admin repair tools (Phase 1.4H) ----------------
+# Authenticated, sanitized endpoints so an operator without Railway shell
+# access can diagnose / repair / re-queue specific-post comments where a
+# public reply was missed while DM succeeded.
+
+async def _require_admin_repair_access(user_id: str, comment_doc: Optional[dict] = None) -> dict:
+    """Return user record after enforcing admin/owner+flag access.
+
+    Allowed iff:
+      - user.email is in ADMIN_EMAILS, OR
+      - ENABLE_ADMIN_REPAIR_TOOLS=true AND user owns the target comment.
+    Raises 403/404 otherwise. Never reveals existence of comments owned
+    by other users.
+    """
+    user = await db.users.find_one({'id': user_id})
+    if not user:
+        raise HTTPException(403, 'Admin access required')
+    email = (user.get('email') or '').lower()
+    if email and email in ADMIN_EMAILS:
+        return user
+    if not ENABLE_ADMIN_REPAIR_TOOLS:
+        # Hide existence — don't leak that a feature flag is off vs the user
+        # is unauthorised vs no such comment.
+        raise HTTPException(404, 'Not found')
+    if comment_doc is not None:
+        if str(comment_doc.get('user_id') or '') != str(user_id):
+            raise HTTPException(404, 'Not found')
+    return user
+
+
+async def _find_comment_by_ig_or_internal(ig_comment_id: str) -> Optional[dict]:
+    """Look up a comment by ig_comment_id first, then internal id.
+
+    Account scoping is enforced by _require_admin_repair_access using
+    comment.user_id, so this lookup is intentionally unscoped.
+    """
+    if not ig_comment_id:
+        return None
+    for field in ('ig_comment_id', 'igCommentId', 'id'):
+        doc = await db.comments.find_one({field: ig_comment_id})
+        if doc:
+            return doc
+    return None
+
+
+def _safe_repair_diagnosis(comment: dict, rule: Optional[dict]) -> dict:
+    """Build a sanitized diagnosis payload — no raw text fields."""
+    rule = rule or {}
+    runtime_replies = _automation_public_reply_texts(rule)
+    runtime_dm_text = _automation_dm_text_for_diagnostics(rule)
+    public_reply_required = _automation_public_reply_required(rule)
+    reply_status = comment.get('reply_status') or comment.get('replyStatus') or ''
+    dm_status = comment.get('dm_status') or comment.get('dmStatus') or ''
+    action_status = comment.get('action_status') or comment.get('actionStatus') or ''
+    has_proof = bool(comment.get('reply_provider_response_ok') is True)
+
+    forbidden_state_detected = bool(
+        public_reply_required
+        and _status_is_disabled(reply_status)
+        and _status_is_success(dm_status)
+    )
+
+    repair_reason = None
+    repairable = False
+    if has_proof:
+        repair_reason = 'reply_provider_response_ok_already_true'
+    elif not public_reply_required:
+        repair_reason = 'rule_does_not_require_public_reply'
+    elif _status_is_success(reply_status) and has_proof:
+        repair_reason = 'reply_already_proven_success'
+    else:
+        # Repairable if the rule requires a reply, no proof exists, and the
+        # current reply_status is disabled/skipped/missing or a non-permanent
+        # failure.
+        legacy_failure_reason = comment.get('reply_failure_reason')
+        permanent = legacy_failure_reason in PERMANENT_GRAPH_FAILURE_REASONS
+        if permanent:
+            repair_reason = f'reply_permanent_failure:{legacy_failure_reason}'
+        elif (
+            _status_is_disabled(reply_status)
+            or str(reply_status or '').lower() in ('failed', 'failed_retryable', 'pending', '')
+        ):
+            repairable = True
+            repair_reason = 'public_reply_required_not_attempted' if forbidden_state_detected else 'reply_status_repairable'
+        else:
+            repair_reason = f'reply_status_not_repairable:{reply_status}'
+
+    def _iso(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    return {
+        'comment_id': comment.get('id'),
+        'ig_comment_id': comment.get('ig_comment_id') or comment.get('igCommentId'),
+        'media_id': comment.get('media_id') or comment.get('mediaId'),
+        'user_id': comment.get('user_id'),
+        'instagram_account_id': comment.get('instagramAccountId') or comment.get('igUserId'),
+        'automation_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_scope': comment.get('matched_rule_scope') or comment.get('matchedRuleScope') or rule.get('post_scope'),
+        'reply_status': reply_status or None,
+        'dm_status': dm_status or None,
+        'action_status': action_status or None,
+        'reply_attempted_at': _iso(comment.get('reply_attempted_at')),
+        'replied_at': _iso(comment.get('replied_at') or comment.get('replySentAt')),
+        'reply_provider_response_ok': has_proof,
+        'reply_provider_comment_id_exists': _reply_provider_comment_id_exists(comment),
+        'reply_skip_reason': comment.get('reply_skip_reason') or comment.get('skip_reason'),
+        'dm_attempted_at': _iso(comment.get('dm_attempted_at')),
+        'finalDmSentAt': _iso(comment.get('finalDmSentAt') or comment.get('dm_sent_at') or comment.get('dmSentAt')),
+        'next_retry_at': _iso(comment.get('next_retry_at')),
+        'attempts': int(comment.get('attempts') or 0),
+        'queue_lock_until': _iso(comment.get('queue_lock_until')),
+        'public_reply_required': public_reply_required,
+        'public_reply_source': _automation_public_reply_source(rule) if rule else 'none',
+        'public_reply_text_length': len(runtime_replies[0]) if runtime_replies else 0,
+        'public_reply_text_hash': _safe_text_hash(runtime_replies[0]) if runtime_replies else '',
+        'dm_required': bool(runtime_dm_text),
+        'dm_text_length': len(runtime_dm_text),
+        'dm_text_hash': _safe_text_hash(runtime_dm_text),
+        'repairable': repairable,
+        'repair_reason': repair_reason,
+        'forbidden_state_detected': forbidden_state_detected,
+    }
+
+
+@api.get('/admin/tools-enabled')
+async def admin_tools_enabled(user_id: str = Depends(get_current_user_id)):
+    """Tell the frontend whether the admin repair page should render.
+
+    Returns enabled=true if the caller is in ADMIN_EMAILS or if the
+    server-side ENABLE_ADMIN_REPAIR_TOOLS flag is on. Never raises 403 —
+    a logged-in non-admin in a non-flagged environment simply sees
+    enabled=false and can hide the link.
+    """
+    user = await db.users.find_one({'id': user_id})
+    email = ((user or {}).get('email') or '').lower()
+    is_admin = bool(email and email in ADMIN_EMAILS)
+    return {
+        'enabled': bool(is_admin or ENABLE_ADMIN_REPAIR_TOOLS),
+        'is_admin': is_admin,
+        'flag': ENABLE_ADMIN_REPAIR_TOOLS,
+    }
+
+
+@api.get('/admin/comments/{ig_comment_id}/specific-reply-diagnosis')
+async def admin_specific_reply_diagnosis(
+    ig_comment_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Sanitized diagnosis for a single comment's specific-post-rule plan."""
+    comment = await _find_comment_by_ig_or_internal(ig_comment_id)
+    if not comment:
+        # Owner-scoped 404 when flag is off; otherwise admin sees true 404.
+        raise HTTPException(404, 'Not found')
+    await _require_admin_repair_access(user_id, comment)
+    rule_id = comment.get('rule_id') or comment.get('ruleId')
+    rule = await db.automations.find_one({'id': rule_id}) if rule_id else None
+    return _safe_repair_diagnosis(comment, rule)
+
+
+@api.post('/admin/comments/{ig_comment_id}/repair-specific-public-reply')
+async def admin_repair_specific_public_reply(
+    ig_comment_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Re-queue a comment for public reply only. Never resends DM."""
+    comment = await _find_comment_by_ig_or_internal(ig_comment_id)
+    if not comment:
+        raise HTTPException(404, 'Not found')
+    await _require_admin_repair_access(user_id, comment)
+    rule_id = comment.get('rule_id') or comment.get('ruleId')
+    rule = await db.automations.find_one({'id': rule_id}) if rule_id else None
+    before = _safe_repair_diagnosis(comment, rule)
+    if not before['repairable']:
+        return {
+            'ok': False,
+            'repaired': False,
+            'reason': before['repair_reason'] or 'not_repairable',
+            'before': before,
+        }
+    now = datetime.utcnow()
+    await db.comments.update_one(
+        {'id': comment.get('id')},
+        {'$set': {
+            'reply_status': 'failed_retryable',
+            'replyStatus': 'failed_retryable',
+            'reply_failure_reason': 'public_reply_required_not_attempted',
+            'reply_failure_retryable': True,
+            'reply_skip_reason': 'public_reply_required_not_attempted',
+            'action_status': 'failed_retryable',
+            'actionStatus': 'failed_retryable',
+            'queued': True,
+            'next_retry_at': now,
+            'updated': now,
+        }},
+    )
+    logger.warning(
+        'admin_repair_specific_public_reply ig_comment_id=%s user_id=%s rule_id=%s',
+        ig_comment_id, user_id, rule_id,
+    )
+    refreshed = await db.comments.find_one({'id': comment.get('id')}) or comment
+    after = _safe_repair_diagnosis(refreshed, rule)
+    return {'ok': True, 'repaired': True, 'before': before, 'after': after}
+
+
+@api.post('/admin/comments/{ig_comment_id}/process-retry-now')
+async def admin_process_retry_now(
+    ig_comment_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Process the public-reply retry for ONE comment, immediately.
+
+    Wraps the existing retry-reply (immediate) endpoint logic so the
+    same provider-proof guards and DM-untouched invariants apply. Never
+    sends a DM. Never resends a final link.
+    """
+    comment = await _find_comment_by_ig_or_internal(ig_comment_id)
+    if not comment:
+        raise HTTPException(404, 'Not found')
+    await _require_admin_repair_access(user_id, comment)
+    rule_id = comment.get('rule_id') or comment.get('ruleId')
+    rule = await db.automations.find_one({'id': rule_id}) if rule_id else None
+    before = _safe_repair_diagnosis(comment, rule)
+
+    # Provider-proof short-circuit: if the public reply already has proof,
+    # don't call Graph again.
+    if _reply_provider_proof_exists(comment):
+        return {
+            'ok': True,
+            'public_reply_attempted': False,
+            'reply_status_after': 'success',
+            'reply_provider_response_ok': True,
+            'dm_attempted': False,
+            'dm_skip_reason': 'provider_proof_exists',
+            'dm_status_after': comment.get('dm_status') or comment.get('dmStatus'),
+            'action_status_after': comment.get('action_status') or comment.get('actionStatus'),
+            'before': before,
+        }
+
+    # Re-use the canonical immediate retry endpoint behaviour by calling its
+    # internals — it already enforces account scope, permanent-failure
+    # rejection, attempts++, next_retry_at backoff. Pass the internal id.
+    cid = comment.get('id')
+    try:
+        result = await retry_comment_reply(cid, user_id=user_id)
+    except HTTPException as e:
+        return {
+            'ok': False,
+            'reason': str(e.detail),
+            'status_code': e.status_code,
+            'before': before,
+        }
+
+    refreshed = await db.comments.find_one({'id': cid}) or comment
+    return {
+        'ok': True,
+        'public_reply_attempted': True,
+        'reply_status_after': refreshed.get('reply_status') or refreshed.get('replyStatus'),
+        'reply_provider_response_ok': bool(refreshed.get('reply_provider_response_ok') is True),
+        'dm_attempted': False,
+        'dm_skip_reason': 'never_resent_by_repair_tool',
+        'dm_status_after': refreshed.get('dm_status') or refreshed.get('dmStatus'),
+        'action_status_after': refreshed.get('action_status') or refreshed.get('actionStatus'),
+        'retry_result': result,
+        'before': before,
     }
 
 
