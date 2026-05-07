@@ -15,6 +15,7 @@ import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
+import { extractAutomationPublicReplies } from '../lib/automationReplies';
 
 const exampleWords = ['Price', 'Link', 'Shop'];
 const DEFAULT_FOLLOW_MESSAGE = 'فرحان إنك مهتم 😊\nتابع الحساب الأول، وبعدها اضغط على الزر عشان أبعتلك الرابط.';
@@ -450,6 +451,7 @@ const Automations = () => {
     const keywords = Array.isArray(automation.keywords)
       ? automation.keywords.join(', ')
       : (automation.keyword || '');
+    const publicReplies = extractAutomationPublicReplies(automation);
 
     setEditingAutomation(automation);
     setPostScope(scope);
@@ -457,12 +459,12 @@ const Automations = () => {
     setKeyword(keywords);
     setReplyUnderPost(
       typeof automation.reply_under_post === 'boolean'
-        ? automation.reply_under_post
-        : Boolean(automation.comment_reply)
+        ? automation.reply_under_post || publicReplies.length > 0
+        : publicReplies.length > 0
     );
-    setCommentReply(automation.comment_reply || 'Thanks. Check your DM.');
-    setCommentReply2(automation.comment_reply_2 || '');
-    setCommentReply3(automation.comment_reply_3 || '');
+    setCommentReply(publicReplies[0] || 'Thanks. Check your DM.');
+    setCommentReply2(publicReplies[1] || '');
+    setCommentReply3(publicReplies[2] || '');
     setOpeningDmEnabled(
       typeof automation.opening_dm_enabled === 'boolean'
         ? automation.opening_dm_enabled

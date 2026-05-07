@@ -58,7 +58,7 @@
   },
   "scripts": {
     "start": "craco start",
-    "build": "craco build",
+    "build": "node scripts/write-build-info.js && craco build",
     "test": "craco test"
   },
   "engines": {

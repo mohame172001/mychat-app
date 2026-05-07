@@ -1,2 +1,11 @@
 [phases.setup]
 nixPkgs = ["nodejs_20", "yarn"]
+
+[phases.install]
+cmds = ["yarn install --frozen-lockfile"]
+
+[phases.build]
+cmds = ["yarn build"]
+
+[start]
+cmd = "./node_modules/.bin/serve -s build -l ${PORT:-3000}"

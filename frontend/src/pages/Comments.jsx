@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX } from 'lucide-react';
+import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX, RotateCcw } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
 
@@ -17,49 +17,46 @@ const PERMANENT_FAILURE_REASONS = new Set([
   'permission_error',
 ]);
 
+// Filter keys aligned with normalizeStatus output.
 const STATUS_FILTERS = [
-  { id: 'all',              label: 'All' },
-  { id: 'success',          label: 'Success' },
-  { id: 'partial_success',  label: 'Partial (DM failed)' },
-  { id: 'pending',          label: 'Pending / queued' },
-  { id: 'retryable_failed', label: 'Retryable failed' },
-  { id: 'permanent_failed', label: 'Permanent failed' },
-  { id: 'skipped',          label: 'Skipped' },
+  { key: 'all',       label: 'All' },
+  { key: 'pending',   label: 'Pending / queued' },
+  { key: 'retryable', label: 'Retryable failed' },
+  { key: 'permanent', label: 'Permanent failed' },
+  { key: 'partial',   label: 'Partial (DM failed)' },
+  { key: 'success',   label: 'Success' },
+  { key: 'skipped',   label: 'Skipped' },
 ];
 
-function classifyComment(c) {
-  // Returns one of the STATUS_FILTERS ids.
-  const action = String(c.action_status || c.actionStatus || '').toLowerCase();
-  const reply = String(c.reply_status || '').toLowerCase();
-  const dm = String(c.dm_status || '').toLowerCase();
-  const dmReason = c.dm_failure_reason;
-  const replyReason = c.reply_failure_reason;
-  if (action === 'success' || reply === 'success' && dm !== 'failed') return 'success';
-  if (action === 'partial_success' || (reply === 'success' && dm === 'failed')) return 'partial_success';
-  if (action === 'pending') return 'pending';
-  if (action === 'failed') {
-    const permanent = (
-      PERMANENT_FAILURE_REASONS.has(dmReason)
-      || PERMANENT_FAILURE_REASONS.has(replyReason)
-    );
-    return permanent ? 'permanent_failed' : 'retryable_failed';
-  }
-  if (action === 'skipped') return 'skipped';
+const normalizeStatus = (comment) => {
+  const action = String(comment.action_status || comment.actionStatus || '').toLowerCase();
+  const reply = String(comment.reply_status || comment.replyStatus || '').toLowerCase();
+  const dm = String(comment.dm_status || comment.dmStatus || '').toLowerCase();
+  const skip = comment.skip_reason || comment.skipReason;
+
+  if (action === 'partial_success' || (reply === 'success' && dm === 'failed')) return 'partial';
+  if (action === 'pending' || action === 'processing' || reply === 'pending' || dm === 'pending') return 'pending';
+  if (action === 'failed_retryable' || comment.reply_failure_retryable || comment.dm_failure_retryable) return 'retryable';
+  if (action === 'failed_permanent' || action === 'failed_retry_exhausted') return 'permanent';
+  if (action === 'skipped' || action === 'skipped_ineligible' || skip) return 'skipped';
+  if (action === 'success' || reply === 'success' || comment.replied) return 'success';
   return 'pending';
-}
+};
+
+const statusLabel = (status) => STATUS_FILTERS.find(item => item.key === status)?.label || status;
 
 function statusBadge(c) {
-  const cls = classifyComment(c);
+  const cls = normalizeStatus(c);
   switch (cls) {
     case 'success':
       return { label: 'Replied', cn: 'bg-emerald-100 text-emerald-700', Icon: CheckCircle2 };
-    case 'partial_success':
+    case 'partial':
       return { label: 'Reply OK • DM failed', cn: 'bg-amber-100 text-amber-800', Icon: AlertTriangle };
     case 'pending':
       return { label: 'Queued', cn: 'bg-blue-100 text-blue-700', Icon: Clock };
-    case 'retryable_failed':
+    case 'retryable':
       return { label: 'Retryable failed', cn: 'bg-orange-100 text-orange-700', Icon: Repeat };
-    case 'permanent_failed':
+    case 'permanent':
       return { label: 'Permanent failed', cn: 'bg-rose-100 text-rose-700', Icon: ShieldX };
     case 'skipped':
       return { label: 'Skipped', cn: 'bg-slate-100 text-slate-600', Icon: Filter };
@@ -71,8 +68,8 @@ function statusBadge(c) {
 function canRetryReply(c) {
   // Only safe when no provider-proven public reply exists AND the reply
   // step is in a state we can re-try (failed transiently or pending).
-  if (c.replied === true) return false;
-  if (String(c.reply_status || '').toLowerCase() === 'success') return false;
+  if (c.reply_provider_response_ok === true) return false;
+  if (String(c.reply_status || '').toLowerCase() === 'success' && c.replied === true) return false;
   if (PERMANENT_FAILURE_REASONS.has(c.reply_failure_reason)) return false;
   return true;
 }
@@ -171,7 +168,7 @@ const Comments = () => {
   // narrow the page to "partial success" / "permanent failed" etc.
   const filteredComments = useMemo(() => {
     if (statusFilter === 'all') return comments;
-    return comments.filter(c => classifyComment(c) === statusFilter);
+    return comments.filter(c => normalizeStatus(c) === statusFilter);
   }, [comments, statusFilter]);
 
   useEffect(() => {
@@ -208,10 +205,11 @@ const Comments = () => {
     //   • provider-proof check (reply_provider_response_ok=true → reject)
     //   • permanent-failure-reason rejection
     //   • backoff via next_retry_at on transient failure.
-    // The button is gated client-side too via canRetryReply.
-    setSending(prev => ({ ...prev, [comment.id]: true }));
+    const commentId = comment.ig_comment_id || comment.igCommentId || comment.id;
+    if (!commentId) return;
+    setSending(prev => ({ ...prev, [`retry:${comment.id}`]: true }));
     try {
-      const { data } = await api.post(`/comments/${comment.id}/retry-reply`);
+      const { data } = await api.post(`/comments/${encodeURIComponent(commentId)}/retry-reply`);
       const status = data?.reply_status || data?.action_status || 'queued';
       const reason = data?.reason || '';
       if (data?.reason === 'reply_already_proven') {
@@ -220,28 +218,18 @@ const Comments = () => {
         toast.success('Reply sent to Instagram');
       } else if (data?.next_retry_at) {
         toast.warning(`Retry failed (${reason}). Next retry at ${new Date(data.next_retry_at).toLocaleTimeString()}`);
+      } else if (data?.queued) {
+        toast.success('Reply retry queued');
       } else {
         toast.error(`Retry failed (${reason})`);
       }
-      // Merge the safe summary back into the row.
-      setComments(prev => prev.map(c => c.id === comment.id
-        ? {
-            ...c,
-            replied: status === 'success' ? true : c.replied,
-            reply_status: data?.reply_status ?? c.reply_status,
-            reply_provider_response_ok: status === 'success' ? true : c.reply_provider_response_ok,
-            action_status: data?.action_status ?? c.action_status,
-            attempts: data?.attempts ?? c.attempts,
-            next_retry_at: data?.next_retry_at ?? c.next_retry_at,
-            reply_failure_reason: status === 'success' ? null : (data?.reason || c.reply_failure_reason),
-          }
-        : c));
+      await fetchComments(1, true);
     } catch (err) {
       console.error('[Comments] retry-reply failed', err);
       const msg = err?.response?.data?.detail || 'Retry failed';
       toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
-      setSending(prev => ({ ...prev, [comment.id]: false }));
+      setSending(prev => ({ ...prev, [`retry:${comment.id}`]: false }));
     }
   };
 
@@ -257,8 +245,8 @@ const Comments = () => {
             ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3 h-3" /> Live</span>
             : <span className="flex items-center gap-1 text-xs text-slate-400"><WifiOff className="w-3 h-3" /> Offline</span>}
           
-          <Button 
-            variant={unrepliedOnly ? "default" : "outline"} 
+          <Button
+            variant={unrepliedOnly ? "default" : "outline"}
             size="sm" 
             onClick={() => setUnrepliedOnly(!unrepliedOnly)}
             className="rounded-full"
@@ -273,24 +261,19 @@ const Comments = () => {
         </div>
       </div>
 
-      {/* Status filter bar — operations visibility per Phase 1 spec.
-          Filters work client-side over the current page, so the data model
-          remains the existing /comments endpoint without new params. */}
-      <div className="mb-4 flex flex-wrap gap-2">
-        {STATUS_FILTERS.map(f => (
-          <button
-            key={f.id}
+      {/* Status filter bar — client-side filtering over the current page. */}
+      <div className="mb-5 flex flex-wrap gap-2 rounded-2xl border border-slate-100 bg-white p-2">
+        {STATUS_FILTERS.map(filter => (
+          <Button
+            key={filter.key}
             type="button"
-            onClick={() => setStatusFilter(f.id)}
-            className={
-              'rounded-full border px-3 py-1 text-xs font-medium transition '
-              + (statusFilter === f.id
-                ? 'border-blue-500 bg-blue-50 text-blue-700'
-                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50')
-            }
+            variant={statusFilter === filter.key ? 'default' : 'ghost'}
+            size="sm"
+            className="rounded-full"
+            onClick={() => setStatusFilter(filter.key)}
           >
-            {f.label}
-          </button>
+            {filter.label}
+          </Button>
         ))}
       </div>
 
@@ -298,10 +281,12 @@ const Comments = () => {
         <div className="text-center py-20 text-slate-500">Loading…</div>
       )}
 
-      {!loading && comments.length === 0 && (
+      {!loading && filteredComments.length === 0 && (
         <div className="text-center py-20 bg-white rounded-2xl border border-slate-100">
           <AtSign className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold">{unrepliedOnly ? 'No unreplied comments' : 'No comments yet'}</h3>
+          <h3 className="text-lg font-semibold">
+            {comments.length === 0 ? (unrepliedOnly ? 'No unreplied comments' : 'No comments yet') : `No ${statusLabel(statusFilter).toLowerCase()} comments`}
+          </h3>
           <p className="text-sm text-slate-500 mt-1">
             {unrepliedOnly ? "You're all caught up! Great job." : "Comments on your Instagram posts will appear here in real time."}
           </p>
@@ -317,6 +302,7 @@ const Comments = () => {
         {filteredComments.map(c => {
           const badge = statusBadge(c);
           const BadgeIcon = badge.Icon;
+          const status = normalizeStatus(c);
           return (
           <div key={c.id} className="bg-white rounded-2xl border border-slate-100 p-5">
             <div className="flex items-start justify-between gap-3">
@@ -339,6 +325,9 @@ const Comments = () => {
                       Reply: <span className="font-mono">{c.reply_failure_reason}</span>
                     </span>
                   )}
+                  <Badge variant="outline" className="capitalize">
+                    {statusLabel(status)}
+                  </Badge>
                 </div>
                 <div className="text-slate-700 mt-1">{c.text}</div>
                 <div className="text-xs text-slate-400 mt-1">

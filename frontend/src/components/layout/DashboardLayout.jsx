@@ -5,6 +5,7 @@ import Sidebar, { navItems } from './Sidebar';
 import Topbar from './Topbar';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
+import { BUILD_SHA } from '../../buildInfo.generated';
 
 const DashboardLayout = () => {
   const { logout } = useAuth();
@@ -46,22 +47,8 @@ const DashboardLayout = () => {
           <Outlet />
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
-          <span className="flex items-center gap-2">
-            © 2026 mychat
-            {/* Build marker — short SHA + version. Tells ops at a glance
-                whether the deployed bundle includes a given commit. Set
-                REACT_APP_GIT_SHA at build time (Railway exposes the
-                commit SHA via RAILWAY_GIT_COMMIT_SHA). Public-safe: only
-                the abbreviated hash, never tokens or secrets. */}
-            {(process.env.REACT_APP_GIT_SHA || process.env.REACT_APP_VERSION) && (
-              <span
-                className="font-mono text-[10px] text-slate-400"
-                title="Build marker"
-                data-testid="build-marker"
-              >
-                build {(process.env.REACT_APP_GIT_SHA || '').slice(0, 7) || process.env.REACT_APP_VERSION}
-              </span>
-            )}
+          <span className="flex items-center gap-2" data-testid="build-marker">
+            © 2026 mychat · Build: <span className="font-mono text-[10px] text-slate-400">{BUILD_SHA}</span>
           </span>
           <div className="flex gap-4 md:gap-5">
             <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">Privacy</Link>

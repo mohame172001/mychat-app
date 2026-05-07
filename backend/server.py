@@ -191,6 +191,190 @@ def _redact_secrets(value):
     return value
 
 
+USAGE_EVENT_TYPES = {
+    'comment_processed',
+    'public_reply_sent',
+    'dm_sent',
+    'link_clicked',
+    'queue_job_processed',
+    'retryable_failure',
+    'permanent_failure',
+    'automation_created',
+    'automation_activated',
+    'instagram_account_connected',
+}
+
+USAGE_COUNTER_BY_EVENT = {
+    'comment_processed': 'comments_processed',
+    'public_reply_sent': 'public_replies_sent',
+    'dm_sent': 'dms_sent',
+    'link_clicked': 'links_clicked',
+    'queue_job_processed': 'queue_jobs_processed',
+    'retryable_failure': 'retryable_failures',
+    'permanent_failure': 'permanent_failures',
+}
+
+USAGE_COUNTER_FIELDS = (
+    'comments_processed',
+    'public_replies_sent',
+    'dms_sent',
+    'links_clicked',
+    'queue_jobs_processed',
+    'retryable_failures',
+    'permanent_failures',
+)
+
+_USAGE_UNSAFE_METADATA_KEYS = {
+    'access_token', 'accesstoken', 'meta_access_token', 'token', 'authorization',
+    'client_secret', 'app_secret', 'secret', 'jwt', 'code', 'raw', 'body',
+    'payload', 'headers', 'graph_error', 'error_body', 'comment_text',
+    'dm_text', 'message_text', 'text', 'message', 'private_message',
+}
+
+
+def _usage_month(dt: datetime) -> str:
+    return dt.strftime('%Y-%m')
+
+
+def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
+    """Keep usage metadata useful without storing tokens or message content."""
+    if not isinstance(metadata, dict):
+        return {}
+
+    def sanitize(value, depth: int = 0):
+        if depth > 2:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, str):
+            return value[:160]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, child in value.items():
+                key_s = str(key)
+                if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+                    continue
+                cleaned[key_s[:80]] = sanitize(child, depth + 1)
+            return cleaned
+        if isinstance(value, (list, tuple)):
+            return [sanitize(item, depth + 1) for item in list(value)[:10]]
+        return str(value)[:160]
+
+    cleaned = {}
+    for key, value in metadata.items():
+        key_s = str(key)
+        if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+            continue
+        cleaned[key_s[:80]] = sanitize(value)
+    return cleaned
+
+
+async def _usage_snapshots_for_user(user_id: str) -> dict:
+    snapshots = {}
+    try:
+        snapshots['instagram_accounts_connected_snapshot'] = await db.instagram_accounts.count_documents({
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
+            'connectionValid': True,
+        })
+    except Exception:
+        pass
+    try:
+        snapshots['active_automations_snapshot'] = await db.automations.count_documents({
+            'user_id': user_id,
+            'status': 'active',
+        })
+    except Exception:
+        pass
+    return snapshots
+
+
+async def record_usage_event(
+    user_id,
+    event_type,
+    instagram_account_id=None,
+    automation_id=None,
+    comment_id=None,
+    queue_job_id=None,
+    metadata=None,
+    event_date=None,
+):
+    """Persist a sanitized usage event and atomically update monthly counters."""
+    if event_type not in USAGE_EVENT_TYPES:
+        raise ValueError(f'Invalid usage event type: {event_type}')
+    if not user_id:
+        raise ValueError('user_id is required')
+
+    now = datetime.utcnow()
+    event_dt = event_date if isinstance(event_date, datetime) else now
+    event_month = _usage_month(event_dt)
+    event = {
+        '_id': secrets.token_urlsafe(12),
+        'id': secrets.token_urlsafe(12),
+        'user_id': str(user_id),
+        'instagram_account_id': str(instagram_account_id) if instagram_account_id else None,
+        'automation_id': str(automation_id) if automation_id else None,
+        'comment_id': str(comment_id) if comment_id else None,
+        'queue_job_id': str(queue_job_id) if queue_job_id else None,
+        'event_type': event_type,
+        'event_month': event_month,
+        'event_date': event_dt,
+        'metadata': _sanitize_usage_metadata(metadata),
+        'created_at': now,
+    }
+    await db.usage_events.insert_one(event)
+
+    set_on_insert = {
+        '_id': secrets.token_urlsafe(12),
+        'id': secrets.token_urlsafe(12),
+        'user_id': str(user_id),
+        'event_month': event_month,
+        'created_at': now,
+    }
+    for field in USAGE_COUNTER_FIELDS:
+        set_on_insert[field] = 0
+    update = {
+        '$setOnInsert': set_on_insert,
+        '$set': {'updated_at': now, **await _usage_snapshots_for_user(str(user_id))},
+    }
+    counter = USAGE_COUNTER_BY_EVENT.get(event_type)
+    if counter:
+        update['$inc'] = {counter: 1}
+    await db.monthly_usage.update_one(
+        {'user_id': str(user_id), 'event_month': event_month},
+        update,
+        upsert=True,
+    )
+    return event
+
+
+async def _safe_record_usage_event(*args, **kwargs) -> bool:
+    try:
+        await record_usage_event(*args, **kwargs)
+        return True
+    except Exception as e:
+        event_type = kwargs.get('event_type') if kwargs else (args[1] if len(args) > 1 else None)
+        user_id = kwargs.get('user_id') if kwargs else (args[0] if args else None)
+        logger.warning('usage_event_record_failed event_type=%s user_id=%s reason=%s',
+                       event_type, user_id, str(e)[:120])
+        return False
+
+
+async def _record_comment_usage_once(comment_doc_id: str, marker_field: str, **usage_kwargs) -> None:
+    if not comment_doc_id:
+        return
+    comment = await db.comments.find_one({'id': comment_doc_id})
+    if not comment or comment.get(marker_field):
+        return
+    recorded = await _safe_record_usage_event(**usage_kwargs)
+    if recorded:
+        await db.comments.update_one(
+            {'id': comment_doc_id},
+            {'$set': {marker_field: True, f'{marker_field}_at': datetime.utcnow()}},
+        )
+
+
 TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
 _HTTP_URL_RE = re.compile(r'https?://[^\s<>"\']+', re.IGNORECASE)
 
@@ -607,7 +791,193 @@ async def _respect_account_send_spacing(user_id: str, instagram_account_id: str,
 
 
 def _automation_has_node_type(automation: dict, node_type: str) -> bool:
+    if node_type == 'reply_comment' and _automation_public_reply_texts(automation):
+        return True
     return any((node or {}).get('type') == node_type for node in automation.get('nodes') or [])
+
+
+def _automation_public_reply_texts(automation: dict) -> List[str]:
+    replies: List[str] = []
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') != 'reply_comment':
+            continue
+        data = node.get('data') or {}
+        node_replies = data.get('replies')
+        if isinstance(node_replies, list):
+            replies.extend(str(item or '').strip() for item in node_replies)
+        replies.append(str(data.get('text') or data.get('message') or '').strip())
+    replies = [reply for reply in replies if reply]
+    if replies:
+        return replies
+    if automation.get('reply_under_post') is False:
+        return []
+    top_level = [
+        automation.get('comment_reply'),
+        automation.get('comment_reply_2'),
+        automation.get('comment_reply_3'),
+    ]
+    return [str(reply or '').strip() for reply in top_level if str(reply or '').strip()]
+
+
+def _automation_public_reply_source(automation: dict) -> str:
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') != 'reply_comment':
+            continue
+        data = node.get('data') or {}
+        node_replies = data.get('replies')
+        if isinstance(node_replies, list) and any(str(item or '').strip() for item in node_replies):
+            return 'graph_node'
+        if str(data.get('text') or data.get('message') or '').strip():
+            return 'graph_node'
+    for key in ('comment_reply', 'comment_reply_2', 'comment_reply_3'):
+        if str(automation.get(key) or '').strip():
+            return key
+    return 'none'
+
+
+def _automation_dm_text_for_diagnostics(automation: dict) -> str:
+    for node in automation.get('nodes') or []:
+        if (node or {}).get('type') == 'message':
+            data = node.get('data') or {}
+            return str(
+                data.get('text')
+                or data.get('message')
+                or data.get('opening_dm_text')
+                or data.get('link_dm_text')
+                or automation.get('dm_text')
+                or ''
+            ).strip()
+    return str(
+        automation.get('opening_dm_text')
+        or automation.get('link_dm_text')
+        or automation.get('dm_text')
+        or ''
+    ).strip()
+
+
+def _safe_text_hash(text: str) -> str:
+    value = str(text or '')
+    if not value:
+        return ''
+    return hashlib.sha256(value.encode('utf-8', errors='ignore')).hexdigest()[:12]
+
+
+def _normalize_public_reply_for_persistence(update: dict, existing: Optional[dict] = None) -> dict:
+    """Keep top-level reply fields and reply_comment graph nodes in sync.
+
+    The UI and older rules may store public replies either in top-level
+    comment_reply fields or in a graph node. Normalizing before persistence
+    prevents specific-post rules from becoming DM-only when one shape is absent.
+    """
+    normalized = dict(update or {})
+    existing = existing or {}
+
+    explicit_disable = normalized.get('reply_under_post') is False
+    update_has_reply_keys = any(
+        key in normalized for key in ('comment_reply', 'comment_reply_2', 'comment_reply_3')
+    )
+    update_reply_values = [
+        str(normalized.get('comment_reply') or '').strip(),
+        str(normalized.get('comment_reply_2') or '').strip(),
+        str(normalized.get('comment_reply_3') or '').strip(),
+    ]
+    update_reply_values = [value for value in update_reply_values if value]
+    update_nodes_replies = _automation_public_reply_texts({'nodes': normalized.get('nodes') or []})
+    existing_replies = _automation_public_reply_texts(existing)
+
+    # If an older graph-only rule is edited for DM settings, preserve its
+    # public reply unless the payload includes a non-empty replacement.
+    if explicit_disable and not update_reply_values and not update_nodes_replies and existing_replies:
+        dm_related_update = any(key in normalized for key in (
+            'dm_text', 'opening_dm_enabled', 'opening_dm_text',
+            'opening_dm_button_text', 'link_dm_text', 'link_button_text',
+            'link_url', 'follow_request_enabled', 'follow_request_message',
+            'follow_request_button_text', 'follow_confirmation_keywords',
+            'follow_gate_fallback_message', 'verify_actual_follow',
+            'follow_not_detected_message', 'follow_verification_failed_message',
+            'follow_retry_button_text', 'follow_cooldown_message',
+            'max_follow_verification_attempts', 'email_request_enabled',
+            'follow_up_enabled', 'follow_up_text', 'nodes', 'edges',
+        ))
+        if dm_related_update:
+            normalized['reply_under_post'] = True
+            update_reply_values = existing_replies
+
+    replies = update_reply_values or update_nodes_replies
+    if not replies and not explicit_disable:
+        replies = existing_replies if existing and not update_has_reply_keys else []
+    if replies:
+        normalized['reply_under_post'] = True
+        normalized['comment_reply'] = replies[0]
+        normalized['comment_reply_2'] = replies[1] if len(replies) > 1 else ''
+        normalized['comment_reply_3'] = replies[2] if len(replies) > 2 else ''
+        normalized = _ensure_public_reply_node(normalized)
+    elif explicit_disable:
+        normalized['comment_reply'] = ''
+        normalized['comment_reply_2'] = ''
+        normalized['comment_reply_3'] = ''
+        nodes = [
+            node for node in (normalized.get('nodes') or [])
+            if (node or {}).get('type') != 'reply_comment'
+        ]
+        if 'nodes' in normalized:
+            normalized['nodes'] = nodes
+            normalized['edges'] = [
+                edge for edge in (normalized.get('edges') or [])
+                if (edge or {}).get('target') not in {'n_reply'}
+            ]
+    return normalized
+
+
+def _ensure_public_reply_node(automation: dict) -> dict:
+    replies = _automation_public_reply_texts(automation)
+    if not replies:
+        return automation
+    nodes = [dict(node or {}) for node in automation.get('nodes') or []]
+    if not nodes:
+        return automation
+    trigger = next((node for node in nodes if node.get('type') == 'trigger'), None)
+    if not trigger:
+        return automation
+    reply_nodes = [node for node in nodes if node.get('type') == 'reply_comment']
+    if reply_nodes:
+        changed = False
+        for node in reply_nodes:
+            data = dict(node.get('data') or {})
+            existing = data.get('replies')
+            existing_replies = [str(item or '').strip() for item in existing] if isinstance(existing, list) else []
+            if not any(existing_replies) and not str(data.get('text') or data.get('message') or '').strip():
+                data['text'] = replies[0]
+                data['replies'] = replies
+                node['data'] = data
+                changed = True
+        if not changed:
+            return automation
+        updated = dict(automation)
+        updated['nodes'] = nodes
+        return updated
+    reply_node_id = 'n_reply'
+    existing_ids = {str(node.get('id')) for node in nodes}
+    if reply_node_id in existing_ids:
+        suffix = 1
+        while f'n_reply_synth_{suffix}' in existing_ids:
+            suffix += 1
+        reply_node_id = f'n_reply_synth_{suffix}'
+    nodes.append({
+        'id': reply_node_id,
+        'type': 'reply_comment',
+        'data': {'text': replies[0], 'replies': replies, 'source': 'top_level_comment_reply'},
+    })
+    edges = [dict(edge or {}) for edge in automation.get('edges') or []]
+    edges.append({
+        'id': f'e_public_reply_synth_{reply_node_id}',
+        'source': trigger.get('id'),
+        'target': reply_node_id,
+    })
+    updated = dict(automation)
+    updated['nodes'] = nodes
+    updated['edges'] = edges
+    return updated
 
 
 def _dm_failure_retryable_from_doc(doc: dict) -> bool:
@@ -1833,6 +2203,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         Defaults are 'disabled' so a node-type that never appeared stays
         distinguishable from a node that ran but failed.
     """
+    automation = _ensure_public_reply_node(automation)
     nodes = automation.get('nodes', [])
     edges = automation.get('edges', [])
     if flow_results is None:
@@ -1860,6 +2231,40 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     flow_source = (comment_context or {}).get('source') if comment_context else None
     flow_received_monotonic = (comment_context or {}).get('received_monotonic') if comment_context else None
     flow_comment_id = (comment_context or {}).get('ig_comment_id') if comment_context else None
+    flow_comment_doc_id = (comment_context or {}).get('comment_doc_id') if comment_context else None
+    public_replies = _automation_public_reply_texts(automation)
+    public_reply_text = public_replies[0] if public_replies else ''
+    dm_diag_text = _automation_dm_text_for_diagnostics(automation)
+    public_reply_source = _automation_public_reply_source(automation)
+    before_status_doc = {}
+    if flow_comment_doc_id:
+        before_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
+    logger.info(
+        'automation_action_plan comment_id=%s user_id=%s instagram_account_id=%s media_id=%s '
+        'matched_rule_id=%s matched_rule_scope=%s matched_rule_priority=%s '
+        'broad_rules_skipped_due_specific_match=%s rule_has_public_reply=%s '
+        'public_reply_text_length=%s public_reply_text_hash=%s public_reply_source=%s rule_has_dm=%s '
+        'dm_text_length=%s dm_text_hash=%s reply_status_before=%s dm_status_before=%s '
+        'action_status_before=%s',
+        flow_comment_id,
+        user.get('id'),
+        ig_user_id,
+        before_status_doc.get('media_id') or before_status_doc.get('mediaId'),
+        automation.get('id'),
+        before_status_doc.get('matched_rule_scope'),
+        before_status_doc.get('matched_rule_priority'),
+        before_status_doc.get('broad_rules_skipped_due_specific_match'),
+        bool(public_reply_text),
+        len(public_reply_text),
+        _safe_text_hash(public_reply_text),
+        public_reply_source,
+        _automation_has_node_type(automation, 'message'),
+        len(dm_diag_text),
+        _safe_text_hash(dm_diag_text),
+        before_status_doc.get('reply_status') or before_status_doc.get('replyStatus'),
+        before_status_doc.get('dm_status') or before_status_doc.get('dmStatus'),
+        before_status_doc.get('action_status') or before_status_doc.get('actionStatus'),
+    )
 
     def webhook_elapsed_ms() -> Optional[int]:
         if flow_source != 'webhook' or flow_received_monotonic is None:
@@ -1910,6 +2315,19 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         existing_comment
                         and _status_is_success(existing_comment.get('dm_status') or existing_comment.get('dmStatus'))
                     )
+                if existing_dm_success:
+                    ok = True
+                    dm_result = {'ok': True, 'failure_reason': None, 'retryable': False}
+                    logger.info(
+                        'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                        flow_comment_id, automation.get('id'), False, 'already_dm_success'
+                    )
+                    logger.info('dm_duplicate_skipped comment_id=%s rule_id=%s',
+                                flow_comment_id, automation.get('id'))
+                elif _comment_dm_flow_enabled(automation):
+                    limit_reason = await _respect_account_send_spacing(
+                        user.get('id', ''), ig_user_id, 'dm'
+                    )
                     if limit_reason:
                         ok = False
                         dm_result = {
@@ -1918,7 +2336,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         ok = await _send_comment_dm_flow_entry(
                             user, automation, sender_ig_id, comment_context
                         )
@@ -1940,7 +2366,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         dm_result = await _call_send_ig_dm_detailed(access_token, ig_user_id, sender_ig_id, msg_text)
                     ok = bool(dm_result.get('ok'))
                     logger.info('Flow message to %s rule=%s ok=%s reason=%s',
@@ -1962,6 +2396,20 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'id': comment_context['comment_doc_id']},
                         {'$set': update},
                     )
+                    if ok and not existing_dm_success:
+                        await _record_comment_usage_once(
+                            comment_context['comment_doc_id'],
+                            'usage_dm_sent_recorded',
+                            user_id=user.get('id', ''),
+                            event_type='dm_sent',
+                            instagram_account_id=ig_user_id,
+                            automation_id=automation.get('id'),
+                            comment_id=comment_context['comment_doc_id'],
+                            metadata={
+                                'source': flow_source or 'runtime',
+                                'ig_comment_id': flow_comment_id,
+                            },
+                        )
                 if flow_source == 'webhook':
                     logger.info(
                         'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s reason=%s',
@@ -2008,6 +2456,10 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     ok = True
                     reply_result = {'ok': True, 'provider_response_ok': True,
                                     'failure_reason': None, 'retryable': False}
+                    logger.info(
+                        'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                        flow_comment_id, automation.get('id'), False, 'already_provider_confirmed'
+                    )
                     logger.info('comment_reply_duplicate_skipped ig_comment_id=%s rule_id=%s',
                                 comment_context['ig_comment_id'], automation.get('id'))
                 else:
@@ -2021,7 +2473,15 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             'retryable': True,
                             'safe_label': limit_reason,
                         }
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), False, limit_reason
+                        )
                     else:
+                        logger.info(
+                            'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
+                            flow_comment_id, automation.get('id'), True, None
+                        )
                         reply_result = await _call_reply_to_ig_comment_detailed(
                             access_token, comment_context['ig_comment_id'], msg_text
                         )
@@ -2084,6 +2544,21 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'id': comment_context['comment_doc_id']},
                         {'$set': update}
                     )
+                    if provider_ok and not already_replied:
+                        await _record_comment_usage_once(
+                            comment_context['comment_doc_id'],
+                            'usage_public_reply_sent_recorded',
+                            user_id=user.get('id', ''),
+                            event_type='public_reply_sent',
+                            instagram_account_id=ig_user_id,
+                            automation_id=automation.get('id'),
+                            comment_id=comment_context['comment_doc_id'],
+                            metadata={
+                                'source': flow_source or 'runtime',
+                                'provider_status': reply_result.get('status_code'),
+                                'provider_comment_id_exists': bool(reply_result.get('provider_comment_id')),
+                            },
+                        )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
             if secs > 0:
@@ -2116,6 +2591,18 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         await db.automations.update_one(
             {'id': automation['id']},
             {'$set': {'updated': datetime.utcnow()}}
+        )
+    if flow_comment_doc_id:
+        after_status_doc = await db.comments.find_one({'id': flow_comment_doc_id}) or {}
+        logger.info(
+            'automation_action_result comment_id=%s matched_rule_id=%s reply_status_after=%s '
+            'dm_status_after=%s action_status_after=%s reply_provider_response_ok=%s',
+            flow_comment_id,
+            automation.get('id'),
+            after_status_doc.get('reply_status') or after_status_doc.get('replyStatus'),
+            after_status_doc.get('dm_status') or after_status_doc.get('dmStatus'),
+            after_status_doc.get('action_status') or after_status_doc.get('actionStatus'),
+            bool(after_status_doc.get('reply_provider_response_ok') is True),
         )
     return bool(action_attempted and ok_all)
 
@@ -2255,9 +2742,25 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
     automation_data['processExistingComments'] = historical_catchup
     automation_data['process_existing_unreplied_comments'] = historical_catchup
     if _is_comment_automation_rule(automation_data):
+        automation_data = _normalize_public_reply_for_persistence(automation_data)
         automation_data['activationStartedAt'] = now
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=automation_data.get('instagramAccountId') or ctx.get('instagramAccountId'),
+        automation_id=a.id,
+        metadata={'status': automation_data.get('status') or 'draft'},
+    )
+    if (automation_data.get('status') or '').lower() == 'active':
+        await _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_activated',
+            instagram_account_id=automation_data.get('instagramAccountId') or ctx.get('instagramAccountId'),
+            automation_id=a.id,
+            metadata={'source': 'create_automation'},
+        )
     return a.model_dump()
 
 
@@ -2316,6 +2819,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     if not existing:
         raise HTTPException(404, 'Not found')
     now = datetime.utcnow()
+    update = _normalize_public_reply_for_persistence(update, existing)
     update['updated'] = now
     update['updatedAt'] = now
     # If any of the comment reply variations changed, rebuild the n_reply
@@ -2357,6 +2861,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         # nodes/edges in the same patch, prefer their version.
         if 'nodes' not in update:
             update['nodes'] = rebuilt_nodes
+    if update.get('reply_under_post') and _automation_public_reply_texts(update):
+        update = _ensure_public_reply_node(update)
     prospective = {**existing, **update}
     historical_catchup = _normalize_historical_catchup_flag(prospective)
     if not historical_catchup and (
@@ -2393,6 +2899,14 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     res = await db.automations.update_one({'id': aid, **scoped}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
+    if status_reenabled:
+        await _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_activated',
+            instagram_account_id=existing.get('instagramAccountId') or account.get('instagramAccountId'),
+            automation_id=aid,
+            metadata={'source': 'patch_automation'},
+        )
     d = await db.automations.find_one({'id': aid})
     return _strip_mongo(d)
 
@@ -2429,6 +2943,13 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
     if _is_comment_automation_rule(copy):
         copy['activationStartedAt'] = now
     await db.automations.insert_one(copy)
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=copy.get('instagramAccountId') or account.get('instagramAccountId'),
+        automation_id=copy.get('id'),
+        metadata={'status': copy.get('status') or 'draft', 'source': 'duplicate'},
+    )
     return _strip_mongo(copy)
 
 
@@ -2668,7 +3189,22 @@ async def create_quick_comment_rule(
         'created': now,
         'updated': now,
     }
+    doc = _normalize_public_reply_for_persistence(doc)
     await db.automations.insert_one(doc)
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_created',
+        instagram_account_id=doc.get('instagramAccountId'),
+        automation_id=doc.get('id'),
+        metadata={'status': doc.get('status'), 'source': 'quick_comment_rule'},
+    )
+    await _safe_record_usage_event(
+        user_id=user_id,
+        event_type='automation_activated',
+        instagram_account_id=doc.get('instagramAccountId'),
+        automation_id=doc.get('id'),
+        metadata={'source': 'quick_comment_rule'},
+    )
     return _strip_mongo({**doc})
 
 
@@ -3019,6 +3555,10 @@ async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_curren
         'reply_failure_reason': comment.get('reply_failure_reason'),
         'dm_failure_reason': comment.get('dm_failure_reason'),
         'rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_id': comment.get('matched_rule_id') or comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_priority': comment.get('matched_rule_priority'),
+        'matched_rule_scope': comment.get('matched_rule_scope'),
+        'broad_rules_skipped_due_specific_match': bool(comment.get('broad_rules_skipped_due_specific_match')),
         'source': comment.get('source'),
         'last_attempt_at': _iso(comment.get('last_attempt_at')),
         'replied_at': _iso(comment.get('replied_at') or comment.get('replySentAt')),
@@ -3275,7 +3815,10 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
         'rate_limit_reason': (
             comment.get('skip_reason') if 'rate_limit' in str(comment.get('skip_reason') or '') else None
         ),
-        'matched_rule_id': comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_id': comment.get('matched_rule_id') or comment.get('rule_id') or comment.get('ruleId'),
+        'matched_rule_priority': comment.get('matched_rule_priority'),
+        'matched_rule_scope': comment.get('matched_rule_scope'),
+        'broad_rules_skipped_due_specific_match': bool(comment.get('broad_rules_skipped_due_specific_match')),
         'mediaId': comment.get('media_id') or comment.get('mediaId'),
         'reply_failure_reason': comment.get('reply_failure_reason'),
         'dm_failure_reason': comment.get('dm_failure_reason'),
@@ -3603,6 +4146,24 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
         'comments_logged': len(comments),
     }
     return response
+
+
+@api.get('/usage/current')
+async def current_usage(user_id: str = Depends(get_current_user_id)):
+    event_month = _usage_month(datetime.utcnow())
+    usage = await db.monthly_usage.find_one({'user_id': user_id, 'event_month': event_month}) or {}
+    counters = {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
+    snapshots = await _usage_snapshots_for_user(user_id)
+    return {
+        'event_month': event_month,
+        'counters': counters,
+        'connectedInstagramAccountsCount': int(
+            snapshots.get('instagram_accounts_connected_snapshot') or 0
+        ),
+        'activeAutomationsCount': int(snapshots.get('active_automations_snapshot') or 0),
+        'plan': 'free',
+        'billing_enabled': False,
+    }
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -4489,6 +5050,38 @@ def _historical_catchup_enabled_for_media(rule: dict, media_id: Optional[str]) -
     )
 
 
+def _comment_rule_scope(rule: dict, media_id: Optional[str] = None) -> str:
+    selected_media_id = _selected_specific_media_id(rule)
+    if selected_media_id:
+        return 'specific_post_exact' if media_id and selected_media_id == media_id else 'specific_post_other'
+    trigger = _comment_rule_trigger_value(rule).strip().lower()
+    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
+    if trigger in ('comment:any', 'comment:all') or post_scope in ('any', 'all'):
+        return 'broad'
+    if post_scope in ('latest', 'next') or trigger in ('comment:latest', 'comment:next'):
+        return 'scoped'
+    return 'broad'
+
+
+def _comment_rule_priority(rule: dict, media_id: Optional[str] = None) -> int:
+    scope = _comment_rule_scope(rule, media_id)
+    if scope == 'specific_post_exact':
+        return 1
+    if scope in ('specific_post_other', 'scoped'):
+        return 2
+    return 3
+
+
+def _sort_comment_rules_by_priority(rules: list, media_id: Optional[str] = None) -> list:
+    def key(rule: dict):
+        return (
+            _comment_rule_priority(rule, media_id),
+            str(rule.get('createdAt') or rule.get('created') or ''),
+            str(rule.get('id') or ''),
+        )
+    return sorted(list(rules or []), key=key)
+
+
 async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         'debugTokenWorks': False,
@@ -4999,6 +5592,16 @@ async def instagram_callback(request: Request,
                     {'$set': {'ig_oauth_last_audit': _redact_secrets(audit)}},
                 )
                 await instagram_account_activate(connected_account_id, user_id=user_id)
+                await _safe_record_usage_event(
+                    user_id=user_id,
+                    event_type='instagram_account_connected',
+                    instagram_account_id=(account_doc or {}).get('instagramAccountId') or final_me['canonicalIgUserId'],
+                    metadata={
+                        'account_db_id': connected_account_id,
+                        'token_source': final_token_source,
+                        'mode': oauth_mode,
+                    },
+                )
             logger.info('IG connected (Business Login) for user %s via %s',
                         user_id, audit['whichMeVariantWorks'])
             return RedirectResponse(_frontend_redirect_url(
@@ -6314,6 +6917,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         )
         retryable_status = (
             (previous_status in ('failed', 'failed_retryable') and not already_replied)
+            or (previous_status == 'partial_success' and _has_retryable_step_failure(existing))
             or (previous_status == 'skipped' and retryable_skip)
             or selected_post_catchup_retry
             or (already_replied and dm_retryable)
@@ -6436,11 +7040,31 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
+    automations = _sort_comment_rules_by_priority(automations, media_id)
+    logger.info(
+        'rule_priority_sorted comment_id=%s media_id=%s count=%s order=%s',
+        ig_comment_id,
+        media_id,
+        len(automations),
+        ','.join(
+            f"{a.get('id')}:{_comment_rule_priority(a, media_id)}:{_comment_rule_scope(a, media_id)}"
+            for a in automations[:20]
+        ),
+    )
     latest_media_id = None
     matched_rule = None
+    matched_rule_priority = None
+    matched_rule_scope = None
+    broad_rules_skipped_due_specific_match = False
     cutoff_rule = None
     cutoff_skip_reason = None
     for auto in automations:
+        rule_priority = _comment_rule_priority(auto, media_id)
+        rule_scope = _comment_rule_scope(auto, media_id)
+        logger.info(
+            'rule_candidate_evaluated comment_id=%s media_id=%s rule_id=%s rule_scope=%s priority=%s',
+            ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+        )
         raw_trigger = auto.get('trigger') or ''
         trigger = raw_trigger.lower()
         fire = False
@@ -6546,6 +7170,30 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
         if fire:
             matched_rule = auto
+            matched_rule_priority = rule_priority
+            matched_rule_scope = rule_scope
+            broad_rules_skipped_due_specific_match = bool(
+                rule_priority < 3
+                and any(_comment_rule_priority(candidate, media_id) == 3 for candidate in automations)
+            )
+            if rule_scope == 'specific_post_exact':
+                logger.info(
+                    'rule_specific_post_matched comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                    ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+                )
+            if broad_rules_skipped_due_specific_match:
+                logger.info(
+                    'rule_broad_skipped_due_specific_match comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                    ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+                )
+            logger.info(
+                'rule_selected_for_comment comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+            )
+            logger.info(
+                'rule_evaluation_stopped_after_match comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
+                ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+            )
             break
 
     rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
@@ -6605,6 +7253,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'source': source,                # 'webhook' or 'polling'
         'rule_id': rule_id,
         'ruleId': rule_id,
+        'matched_rule_id': rule_id,
+        'matched_rule_priority': matched_rule_priority,
+        'matched_rule_scope': matched_rule_scope,
+        'broad_rules_skipped_due_specific_match': broad_rules_skipped_due_specific_match,
         'matched': matched,
         'action_status': action_status,
         'actionStatus': action_status,
@@ -6675,6 +7327,21 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
     if matched:
+        await _record_comment_usage_once(
+            doc['id'],
+            'usage_comment_processed_recorded',
+            user_id=user_id,
+            event_type='comment_processed',
+            instagram_account_id=ig_account_id,
+            automation_id=rule_id,
+            comment_id=doc['id'],
+            metadata={
+                'source': source,
+                'media_id': media_id,
+                'matched_rule_priority': matched_rule_priority,
+                'matched_rule_scope': matched_rule_scope,
+            },
+        )
         if force_queue:
             await db.comments.update_one(
                 {'id': doc['id']},
@@ -6820,6 +7487,11 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             update['next_retry_at'] = _next_retry_time(attempts)
             update['skip_reason'] = 'queued_retryable_failure'
             update['skipReason'] = 'queued_retryable_failure'
+        elif action_status == 'partial_success' and retryable_failure:
+            update['next_retry_at'] = _next_retry_time(attempts)
+            update['skip_reason'] = 'queued_retryable_failure'
+            update['skipReason'] = 'queued_retryable_failure'
+            update['queued'] = True
         elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
             update['next_retry_at'] = None
             update['skip_reason'] = _failure_category_from_doc(saved_for_status)
@@ -6828,6 +7500,37 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             {'id': comment_doc_id},
             {'$set': update},
         )
+        if action_status == 'failed_retryable':
+            await _record_comment_usage_once(
+                comment_doc_id,
+                'usage_retryable_failure_recorded',
+                user_id=user_doc.get('id', ''),
+                event_type='retryable_failure',
+                instagram_account_id=user_doc.get('ig_user_id') or '',
+                automation_id=automation.get('id'),
+                comment_id=comment_doc_id,
+                metadata={
+                    'source': source,
+                    'failure_category': _failure_category_from_doc(saved_for_status),
+                    'attempts': attempts,
+                },
+            )
+        elif action_status in ('failed_permanent', 'failed_retry_exhausted'):
+            await _record_comment_usage_once(
+                comment_doc_id,
+                'usage_permanent_failure_recorded',
+                user_id=user_doc.get('id', ''),
+                event_type='permanent_failure',
+                instagram_account_id=user_doc.get('ig_user_id') or '',
+                automation_id=automation.get('id'),
+                comment_id=comment_doc_id,
+                metadata={
+                    'source': source,
+                    'failure_category': _failure_category_from_doc(saved_for_status),
+                    'attempts': attempts,
+                    'status': action_status,
+                },
+            )
         if action_status in ('failed_retryable', 'failed_permanent', 'failed_retry_exhausted'):
             logger.warning('action_execution_send_failed ig_comment_id=%s rule_id=%s',
                            ig_comment_id, automation.get('id'))
@@ -6849,6 +7552,16 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                 'skipReason': 'temporary_graph_error',
                 'updated': datetime.utcnow(),
             }}
+        )
+        await _record_comment_usage_once(
+            comment_doc_id,
+            'usage_retryable_failure_recorded',
+            user_id=user_doc.get('id', ''),
+            event_type='retryable_failure',
+            instagram_account_id=user_doc.get('ig_user_id') or '',
+            automation_id=automation.get('id'),
+            comment_id=comment_doc_id,
+            metadata={'source': source, 'failure_category': 'action_execution_exception'},
         )
         logger.exception('action_execution_failed ig_comment_id=%s rule_id=%s err=%s',
                          ig_comment_id, automation.get('id'), e)
@@ -7918,8 +8631,10 @@ def _automation_queue_due_query(now: datetime) -> dict:
             {
                 'matched': True,
                 'action_status': 'partial_success',
-                'dm_status': 'failed',
-                'dm_failure_retryable': True,
+                '$or': [
+                    {'dm_status': 'failed', 'dm_failure_retryable': True},
+                    {'reply_status': 'failed', 'reply_failure_retryable': True},
+                ],
                 'next_retry_at': {'$lte': now},
             },
         ],
@@ -8074,6 +8789,20 @@ async def _automation_queue_tick() -> dict:
             else:
                 summary['failed_permanent'] += 1
             summary['processed'] += 1
+            await _safe_record_usage_event(
+                user_id=user_id,
+                event_type='queue_job_processed',
+                instagram_account_id=instagram_account_id,
+                automation_id=rule_id,
+                comment_id=item.get('id'),
+                queue_job_id=item.get('id'),
+                metadata={
+                    'action_status': action_status,
+                    'reply_status': saved.get('reply_status'),
+                    'dm_status': saved.get('dm_status'),
+                    'attempt': attempts + 1,
+                },
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -9976,6 +10705,17 @@ async def tracked_link_redirect(short_code: str, request: Request):
         {'shortCode': short_code},
         {'$inc': {'clicksCount': 1}, '$set': update},
     )
+    await _safe_record_usage_event(
+        user_id=event.get('user_id'),
+        event_type='link_clicked',
+        instagram_account_id=event.get('instagramAccountId'),
+        automation_id=event.get('automation_id') or event.get('ruleId'),
+        comment_id=event.get('relatedCommentId'),
+        metadata={
+            'short_code': short_code,
+            'tracked_link_id': event.get('trackedLinkId'),
+        },
+    )
     return RedirectResponse(original_url, status_code=302)
 
 
@@ -10187,6 +10927,31 @@ async def _startup():
         await db.link_click_events.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
             name='link_click_events_user_ig_contact',
+        )
+        await db.usage_events.create_index(
+            [('user_id', 1), ('event_month', 1)],
+            name='usage_events_user_month',
+        )
+        await db.usage_events.create_index(
+            [('user_id', 1), ('event_type', 1), ('event_month', 1)],
+            name='usage_events_user_type_month',
+        )
+        await db.usage_events.create_index(
+            [('instagram_account_id', 1), ('event_month', 1)],
+            name='usage_events_instagram_account_month',
+        )
+        await db.usage_events.create_index(
+            [('automation_id', 1), ('event_month', 1)],
+            name='usage_events_automation_month',
+        )
+        await db.usage_events.create_index(
+            [('created_at', -1)],
+            name='usage_events_created_at',
+        )
+        await db.monthly_usage.create_index(
+            [('user_id', 1), ('event_month', 1)],
+            unique=True,
+            name='monthly_usage_user_month_unique',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

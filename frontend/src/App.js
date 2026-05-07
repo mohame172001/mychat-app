@@ -14,6 +14,7 @@ const Automations = lazy(() => import('./pages/Automations'));
 const FlowBuilder = lazy(() => import('./pages/FlowBuilder'));
 const Broadcasting = lazy(() => import('./pages/Broadcasting'));
 const Comments = lazy(() => import('./pages/Comments'));
+const SystemHealth = lazy(() => import('./pages/SystemHealth'));
 const Settings = lazy(() => import('./pages/Settings'));
 const DmAutomation = lazy(() => import('./pages/DmAutomation'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
@@ -50,6 +51,7 @@ function App() {
                 <Route path="automations/:id" element={<FlowBuilder />} />
                 <Route path="broadcasting" element={<Broadcasting />} />
                 <Route path="comments" element={<Comments />} />
+                <Route path="system-health" element={<SystemHealth />} />
                 <Route path="dm-automation" element={<DmAutomation />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="system-health" element={<SystemHealth />} />

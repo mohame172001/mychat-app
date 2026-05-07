@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Send, Settings,
-  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram,
-  Activity,
+  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram, Activity,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
