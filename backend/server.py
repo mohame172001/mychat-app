@@ -784,8 +784,20 @@ def _status_is_disabled(value: Any) -> bool:
     return str(value or '').lower() in ('disabled', 'skipped', 'not_applicable', 'na')
 
 
+_FAILED_LIKE_STATUSES = ('failed', 'failed_retryable', 'failed_permanent', 'failed_retry_exhausted')
+
+
+def _status_is_failed_like(value: Any) -> bool:
+    return str(value or '').lower() in _FAILED_LIKE_STATUSES
+
+
 def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
-    """Compute the overall action status from independent reply/DM statuses."""
+    """Compute the overall action status from independent reply/DM statuses.
+
+    failed_retryable / failed_permanent are treated like failed for the
+    success/partial_success math, so a 'failed_retryable' reply alongside
+    a 'success' DM correctly reports 'partial_success'.
+    """
     statuses = [
         str(reply_status or 'disabled').lower(),
         str(dm_status or 'disabled').lower(),
@@ -794,7 +806,7 @@ def _compute_comment_action_status(reply_status: Any, dm_status: Any) -> str:
     if not enabled_statuses:
         return 'skipped'
     has_success = any(_status_is_success(s) for s in enabled_statuses)
-    has_failed = any(s == 'failed' for s in enabled_statuses)
+    has_failed = any(_status_is_failed_like(s) for s in enabled_statuses)
     if has_success and has_failed:
         return 'partial_success'
     if has_failed:
@@ -886,6 +898,21 @@ def _automation_public_reply_texts(automation: dict) -> List[str]:
         automation.get('comment_reply_3'),
     ]
     return [str(reply or '').strip() for reply in top_level if str(reply or '').strip()]
+
+
+def _automation_public_reply_required(automation: dict) -> bool:
+    """True if the rule has any public reply text in any persisted shape.
+
+    This is the canonical pre-flight signal: if it returns True, the
+    flow run MUST attempt a public reply. A reply_status='disabled'
+    outcome is invalid for such a rule. Used by execute_flow,
+    _run_and_record_action, dedup recovery, and the repair script.
+    """
+    if not isinstance(automation, dict):
+        return False
+    if automation.get('reply_under_post') is False:
+        return False
+    return bool(_automation_public_reply_texts(automation))
 
 
 def _automation_public_reply_source(automation: dict) -> str:
@@ -2283,6 +2310,12 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
     flow_results.setdefault('dm_status', 'disabled')
     flow_results.setdefault('dm_failure_reason', None)
     flow_results.setdefault('dm_sent_at', None)
+    # Pre-flight invariant: if the rule is configured with a public reply
+    # in any shape, reply_status='disabled' at the end is illegal. The
+    # caller (_run_and_record_action) and the dedup recovery path use
+    # this flag to convert an unattempted public reply into a retryable
+    # failure with skip_reason='public_reply_required_not_attempted'.
+    flow_results['public_reply_required'] = _automation_public_reply_required(automation)
     if not nodes:
         return False
 
@@ -3991,6 +4024,113 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
         'legacy_reply_success_without_provider_confirmation': legacy_reply_success,
         'thinks_replied_reason': thinks_replied_reason,
         'manual_retry_allowed': manual_retry_allowed,
+    }
+
+
+@api.get('/comments/{comment_id}/diagnose-specific-rule-reply-plan')
+async def diagnose_specific_rule_reply_plan(comment_id: str,
+                                            user_id: str = Depends(get_current_user_id)):
+    """Phase 1.4F debug helper.
+
+    Returns the exact public-reply plan a comment would have, plus
+    booleans/lengths/hashes (no raw text) describing the matched rule's
+    public reply configuration shape. Use this to localise specific-rule
+    bugs where reply_status=disabled despite dm_status=success.
+    """
+    account = await getActiveInstagramAccount(user_id)
+    scoped = _account_scoped_query(user_id, account)
+    comment = None
+    for field in ('id', 'ig_comment_id', 'igCommentId'):
+        comment = await db.comments.find_one({**scoped, field: comment_id})
+        if comment:
+            break
+    if not comment:
+        raise HTTPException(404, 'Comment not found')
+
+    rule_id = comment.get('rule_id') or comment.get('ruleId')
+    rule = await db.automations.find_one({'id': rule_id}) if rule_id else None
+
+    def _len_hash(text: str) -> dict:
+        text = str(text or '').strip()
+        return {'present': bool(text), 'length': len(text), 'hash': _safe_text_hash(text)}
+
+    public_reply_candidates = {
+        'comment_reply': _len_hash(rule.get('comment_reply') if rule else ''),
+        'comment_reply_2': _len_hash(rule.get('comment_reply_2') if rule else ''),
+        'comment_reply_3': _len_hash(rule.get('comment_reply_3') if rule else ''),
+        'graph_node': {'present': False, 'length': 0, 'hash': ''},
+    }
+    if rule:
+        for node in rule.get('nodes') or []:
+            if (node or {}).get('type') == 'reply_comment':
+                data = node.get('data') or {}
+                node_text = ''
+                replies = data.get('replies')
+                if isinstance(replies, list):
+                    for r in replies:
+                        s = str(r or '').strip()
+                        if s:
+                            node_text = s
+                            break
+                if not node_text:
+                    node_text = str(data.get('text') or data.get('message') or '').strip()
+                if node_text:
+                    public_reply_candidates['graph_node'] = _len_hash(node_text)
+                    break
+
+    runtime_replies = _automation_public_reply_texts(rule or {})
+    runtime_dm_text = _automation_dm_text_for_diagnostics(rule or {})
+
+    public_reply_required = _automation_public_reply_required(rule or {})
+    public_reply_source = _automation_public_reply_source(rule or {}) if rule else 'none'
+
+    skip_reason = None
+    if not rule:
+        skip_reason = 'rule_not_found'
+    elif rule.get('reply_under_post') is False:
+        skip_reason = 'reply_under_post_false'
+    elif not runtime_replies:
+        skip_reason = 'no_public_reply_text_in_any_shape'
+
+    return {
+        'comment_id': comment.get('id'),
+        'ig_comment_id': comment.get('ig_comment_id') or comment.get('igCommentId'),
+        'media_id': comment.get('media_id') or comment.get('mediaId'),
+        'matched_rule_id': rule_id,
+        'matched_rule_scope': comment.get('matched_rule_scope') or comment.get('matchedRuleScope'),
+        'rule_active': bool(rule and (rule.get('status') == 'active')) if rule else False,
+        'rule_post_scope': (rule or {}).get('post_scope'),
+        'rule_selected_media_id': (rule or {}).get('media_id'),
+        'public_reply_configured_in_saved_rule': bool(rule and any(
+            public_reply_candidates[k]['present'] for k in
+            ('comment_reply', 'comment_reply_2', 'comment_reply_3', 'graph_node')
+        )),
+        'public_reply_source_candidates': public_reply_candidates,
+        'runtime_rule_has_public_reply': bool(runtime_replies),
+        'runtime_public_reply_text_length': len(runtime_replies[0]) if runtime_replies else 0,
+        'runtime_public_reply_text_hash': _safe_text_hash(runtime_replies[0]) if runtime_replies else '',
+        'public_reply_required': public_reply_required,
+        'public_reply_source': public_reply_source,
+        'public_reply_preflight_skip_reason': skip_reason,
+        'dm_configured': bool(runtime_dm_text),
+        'dm_source': 'graph_node' if any(
+            (n or {}).get('type') == 'message' for n in (rule.get('nodes') or [])
+        ) else ('top_level' if (rule or {}).get('dm_text') else 'none'),
+        'dm_text_length': len(runtime_dm_text),
+        'dm_text_hash': _safe_text_hash(runtime_dm_text),
+        'status_before': {
+            'reply_status': comment.get('reply_status') or comment.get('replyStatus'),
+            'dm_status': comment.get('dm_status') or comment.get('dmStatus'),
+            'action_status': comment.get('action_status') or comment.get('actionStatus'),
+            'reply_provider_response_ok': bool(comment.get('reply_provider_response_ok') is True),
+            'reply_skip_reason': comment.get('reply_skip_reason'),
+            'attempts': comment.get('attempts'),
+            'next_retry_at': (
+                comment.get('next_retry_at').isoformat()
+                if isinstance(comment.get('next_retry_at'), datetime)
+                else comment.get('next_retry_at')
+            ),
+        },
     }
 
 
@@ -7174,6 +7314,54 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 previous_status, previous_reply_status, previous_dm_status,
             )
         else:
+            # Recovery for the production bug: a prior run set
+            # dm_status=success but reply_status=disabled even though the
+            # matched rule has public reply configured. The legacy
+            # _compute_comment_action_status returned 'success' for that
+            # combo, masking the missing public reply. Detect it here
+            # and re-queue for public reply only.
+            existing_rule_id = existing.get('rule_id') or existing.get('ruleId')
+            existing_rule = None
+            if existing_rule_id and (
+                str(previous_reply_status or '').lower() in ('disabled', '', 'skipped')
+                and _status_is_success(previous_dm_status)
+                and not _reply_provider_proof_exists(existing)
+            ):
+                try:
+                    existing_rule = await db.automations.find_one({'id': existing_rule_id})
+                except Exception:
+                    existing_rule = None
+                if existing_rule and _automation_public_reply_required(existing_rule):
+                    now_recover = datetime.utcnow()
+                    await db.comments.update_one(
+                        {'id': existing.get('id')},
+                        {'$set': {
+                            'reply_status': 'failed_retryable',
+                            'replyStatus': 'failed_retryable',
+                            'reply_failure_reason': 'public_reply_required_not_attempted',
+                            'reply_failure_retryable': True,
+                            'reply_skip_reason': 'public_reply_required_not_attempted',
+                            'action_status': 'failed_retryable',
+                            'actionStatus': 'failed_retryable',
+                            'queued': True,
+                            'next_retry_at': now_recover,
+                            'updated': now_recover,
+                        }},
+                    )
+                    logger.warning(
+                        'public_reply_required_recovery ig_comment_id=%s user=%s rule_id=%s '
+                        'previous_status=%s reply_status=%s dm_status=%s',
+                        ig_comment_id, user_doc.get('email'), existing_rule_id,
+                        previous_status, previous_reply_status, previous_dm_status,
+                    )
+                    return {'processed': True, 'recovered': True, 'matched': True,
+                            'action_status': 'failed_retryable',
+                            'queued': True,
+                            'reason': 'public_reply_required_recovery',
+                            'classified_reason': 'public_reply_required_not_attempted',
+                            'rule_id': existing_rule_id,
+                            'comment_doc_id': existing.get('id')}
+
             # Classify the exact reason this comment is being skipped now
             # — the legacy comment_already_processed line was vague and
             # masked partial_success / DM-failed states.
@@ -7645,8 +7833,43 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
         saved = await db.comments.find_one({'id': comment_doc_id}) or {}
         reply_status = saved.get('reply_status') or saved.get('replyStatus') or 'disabled'
         dm_status = saved.get('dm_status') or saved.get('dmStatus') or 'disabled'
+        # Hard invariant: if the matched rule is configured with a public
+        # reply, an unattempted public reply is illegal. Convert
+        # reply_status='disabled' -> 'failed_retryable' so the queue can
+        # re-run the public reply step. We do NOT touch dm_status, so a
+        # successful DM stays successful and is not resent.
+        public_reply_required = bool(flow_results.get('public_reply_required')) or _automation_public_reply_required(automation)
+        if public_reply_required and _status_is_disabled(reply_status):
+            logger.warning(
+                'public_reply_required_not_attempted ig_comment_id=%s rule_id=%s '
+                'matched_rule_scope=%s dm_status=%s — converting reply_status disabled -> failed_retryable',
+                ig_comment_id, automation.get('id'),
+                saved.get('matched_rule_scope') or saved.get('matchedRuleScope'),
+                dm_status,
+            )
+            reply_status = 'failed_retryable'
+            now_invariant = datetime.utcnow()
+            await db.comments.update_one(
+                {'id': comment_doc_id},
+                {'$set': {
+                    'reply_status': 'failed_retryable',
+                    'replyStatus': 'failed_retryable',
+                    'reply_failure_reason': 'public_reply_required_not_attempted',
+                    'reply_failure_retryable': True,
+                    'reply_skip_reason': 'public_reply_required_not_attempted',
+                    'next_retry_at': now_invariant,
+                    'last_attempt_at': now_invariant,
+                    'updated': now_invariant,
+                }},
+            )
+            saved = await db.comments.find_one({'id': comment_doc_id}) or saved
+            saved.update({
+                'reply_status': 'failed_retryable',
+                'reply_failure_retryable': True,
+                'reply_skip_reason': 'public_reply_required_not_attempted',
+            })
         action_status = _compute_comment_action_status(reply_status, dm_status)
-        if action_status == 'failed' and ok:
+        if action_status == 'failed' and ok and not public_reply_required:
             action_status = 'success'
         saved_for_status = {**saved, 'reply_status': reply_status, 'dm_status': dm_status}
         retryable_failure = _has_retryable_step_failure(saved_for_status)
