@@ -435,7 +435,10 @@ def test_comment_diagnostics_is_scoped_and_redacted(monkeypatch):
 
     result = _run(server.comment_diagnostics('commentDiag', user_id='u1'))
 
-    assert result['commentId'] == 'commentDiag'
+    # After the diagnostics shape unification, commentId is the internal
+    # stable doc id and igCommentId is the Instagram-side comment id.
+    assert result['commentId'] == 'doc1'
+    assert result['igCommentId'] == 'commentDiag'
     assert result['text_length'] == len('private full comment text')
     assert 'private full comment text' not in str(result)
     assert 'accessToken' not in str(result)

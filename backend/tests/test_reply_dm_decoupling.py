@@ -408,16 +408,22 @@ def test_dedup_partial_success_permanent_dm_failure(monkeypatch, caplog):
     monkeypatch.setattr(server, '_run_and_record_action', fake_run)
     with caplog.at_level(logging.INFO, logger='mychat'):
         res = _run(server._handle_new_comment(_user(), _comment('c_partial'), source='polling'))
-    assert res.get('reason') == 'already_partial_success'
+    assert res.get('reason') == 'comment_already_partial_success'
     assert res.get('classified_reason') == 'comment_already_partial_success'
     assert ran['count'] == 0, 'must not re-fire reply or DM on permanent partial failure'
     assert 'comment_already_partial_success' in caplog.text
 
 
 def test_dedup_partial_success_transient_dm_failure_does_not_duplicate_reply(monkeypatch):
-    """Even with a transient DM failure (rate_limited), the public reply
-    must not be duplicated. The catch-up is owned by a separate DM-retry
-    path, not by the public-reply codepath."""
+    """Transient DM failure (rate_limited) on a partial_success doc with
+    provider-proven reply: the comment is RE-processed (so the DM step
+    can be retried), but execute_flow's _reply_provider_proof_exists
+    guard prevents the public reply from being duplicated.
+
+    The 'don't duplicate the reply' invariant is enforced inside
+    execute_flow itself, not by short-circuiting in the dedup path —
+    short-circuiting here would also block legitimate DM retries.
+    """
     existing = {
         'id': 'doc_t', 'user_id': 'u1',
         'instagramAccountId': 'biz1', 'igUserId': 'biz1',
@@ -425,6 +431,10 @@ def test_dedup_partial_success_transient_dm_failure_does_not_duplicate_reply(mon
         'action_status': 'partial_success',
         'reply_status': 'success', 'dm_status': 'failed',
         'dm_failure_reason': 'rate_limited',
+        'dm_failure_retryable': True,
+        # Provider proof exists from first run — execute_flow will skip the reply.
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'replyProof',
     }
     db = FakeDB(automations=[_rule_with_reply_and_dm()], comments=[existing])
     monkeypatch.setattr(server, 'db', db)
@@ -437,8 +447,9 @@ def test_dedup_partial_success_transient_dm_failure_does_not_duplicate_reply(mon
 
     monkeypatch.setattr(server, '_run_and_record_action', fake_run)
     res = _run(server._handle_new_comment(_user(), _comment('c_rate'), source='polling'))
-    assert res.get('reason') == 'already_partial_success'
-    assert ran['count'] == 0
+    # Transient DM failure → comment is reprocessed (so DM can retry).
+    assert res.get('processed') is True or res.get('reprocessed') is True
+    assert ran['count'] == 1
 
 
 def test_dedup_dm_only_failed_classification(monkeypatch, caplog):
