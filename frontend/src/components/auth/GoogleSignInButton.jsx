@@ -3,27 +3,38 @@ import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import {
-  isGoogleAuthEnabled, renderGoogleButton, googleErrorMessage,
+  googleClientId, loadGoogleRuntimeConfig, renderGoogleButton, googleErrorMessage,
 } from '../../lib/googleAuth';
 import { Button } from '../ui/button';
 
 /**
  * Phase 2.7 reusable Google sign-in button.
  *
- * Uses Google Identity Services. Hidden when REACT_APP_GOOGLE_CLIENT_ID
- * is unset. Forwards the Google ID token to /api/auth/google via
- * AuthContext.loginWithGoogle. Never logs the credential.
+ * Uses Google Identity Services. If the build-time client id is unset,
+ * it asks the backend for the public browser config and only falls back
+ * to the disabled state if both sources are missing. Forwards the Google
+ * ID token to /api/auth/google via AuthContext.loginWithGoogle. Never
+ * logs the credential.
  */
 export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) {
   const slotRef = useRef(null);
-  const [enabled] = useState(() => isGoogleAuthEnabled());
+  const [configStatus, setConfigStatus] = useState(() => (googleClientId() ? 'enabled' : 'loading'));
   const [sdkUnavailable, setSdkUnavailable] = useState(false);
   const [busy, setBusy] = useState(false);
   const { loginWithGoogle } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!enabled) return;
+    let cancelled = false;
+    (async () => {
+      const cfg = await loadGoogleRuntimeConfig();
+      if (!cancelled) setConfigStatus(cfg.enabled ? 'enabled' : 'disabled');
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (configStatus !== 'enabled') return;
     let cancelled = false;
     (async () => {
       const ok = await renderGoogleButton(slotRef.current, {
@@ -56,9 +67,9 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
       }
     })();
     return () => { cancelled = true; };
-  }, [enabled, loginWithGoogle, navigate, onComplete, redirectTo]);
+  }, [configStatus, loginWithGoogle, navigate, onComplete, redirectTo]);
 
-  if (!enabled) {
+  if (configStatus !== 'enabled') {
     return (
       <div className="space-y-2" data-testid="google-signin-wrapper" data-google-configured="false">
         <Button
@@ -71,7 +82,9 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
           Continue with Google
         </Button>
         <div className="text-center text-xs text-slate-400">
-          Google sign-in is not configured
+          {configStatus === 'loading'
+            ? 'Checking Google sign-in configuration'
+            : 'Google sign-in is not configured'}
         </div>
       </div>
     );

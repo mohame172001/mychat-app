@@ -1,10 +1,13 @@
-import { frontendRuntimeStatus } from './frontendRuntimeStatus';
+import { frontendRuntimeStatus, loadFrontendRuntimeStatus } from './frontendRuntimeStatus';
+import { resetGoogleRuntimeConfigForTests } from './googleAuth';
 
 describe('frontendRuntimeStatus', () => {
   afterEach(() => {
     delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    delete process.env.REACT_APP_BACKEND_URL;
     delete process.env.REACT_APP_SENTRY_DSN;
     delete process.env.REACT_APP_POSTHOG_KEY;
+    resetGoogleRuntimeConfigForTests();
   });
 
   test('reports Google Sign-In configured as a boolean without exposing client id', () => {
@@ -20,5 +23,24 @@ describe('frontendRuntimeStatus', () => {
     delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
 
     expect(frontendRuntimeStatus().google_sign_in_configured).toBe(false);
+  });
+
+  test('loads backend Google config before reporting runtime status', async () => {
+    const originalFetch = global.fetch;
+    delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    process.env.REACT_APP_BACKEND_URL = 'https://backend.example.com';
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        enabled: true,
+        client_id: 'runtime-client-id.apps.googleusercontent.com',
+      }),
+    });
+
+    const status = await loadFrontendRuntimeStatus();
+
+    expect(status.google_sign_in_configured).toBe(true);
+    expect(JSON.stringify(status)).not.toContain('runtime-client-id.apps.googleusercontent.com');
+    global.fetch = originalFetch;
   });
 });

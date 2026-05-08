@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import api from '../lib/api';
 import { toast } from 'sonner';
-import { frontendRuntimeStatus } from '../lib/frontendRuntimeStatus';
+import { loadFrontendRuntimeStatus } from '../lib/frontendRuntimeStatus';
 
 /**
  * Authenticated operations health page.
@@ -93,7 +93,7 @@ const SystemHealth = () => {
     try {
       const { data: obs } = await api.get('/observability/status');
       // Layer in frontend's runtime-known config (DSN/key never echoed).
-      const fe = frontendRuntimeStatus();
+      const fe = await loadFrontendRuntimeStatus();
       setObservability({ ...obs, frontend_runtime: fe });
     } catch (_) {
       setObservability(null);

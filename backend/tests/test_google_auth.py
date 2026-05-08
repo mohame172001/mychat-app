@@ -36,6 +36,28 @@ def test_google_auth_dependency_is_installed():
     assert importlib.import_module('google.oauth2.id_token')
 
 
+def test_google_auth_config_returns_public_client_id_only(monkeypatch):
+    monkeypatch.setattr(server, 'GOOGLE_CLIENT_ID', 'test-google-client-id.apps.googleusercontent.com')
+
+    res = _run(server.google_auth_config())
+
+    assert res == {
+        'enabled': True,
+        'client_id': 'test-google-client-id.apps.googleusercontent.com',
+    }
+    assert 'credential' not in res
+    assert 'id_token' not in res
+    assert 'access_token' not in res
+
+
+def test_google_auth_config_disabled_when_missing(monkeypatch):
+    monkeypatch.setattr(server, 'GOOGLE_CLIENT_ID', None)
+
+    res = _run(server.google_auth_config())
+
+    assert res == {'enabled': False, 'client_id': ''}
+
+
 def _full_user(**overrides):
     """Test user with the keys _public_user expects."""
     doc = {

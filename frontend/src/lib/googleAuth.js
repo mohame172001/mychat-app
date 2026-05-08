@@ -17,9 +17,20 @@
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
 
 let _scriptPromise = null;
+let _runtimeClientId = '';
+let _configPromise = null;
+
+function backendUrl() {
+  return (typeof process !== 'undefined' && process.env && process.env.REACT_APP_BACKEND_URL) || '';
+}
+
+export function resetGoogleRuntimeConfigForTests() {
+  _runtimeClientId = '';
+  _configPromise = null;
+}
 
 export function googleClientId() {
-  return (typeof process !== 'undefined' && process.env && process.env.REACT_APP_GOOGLE_CLIENT_ID) || '';
+  return (typeof process !== 'undefined' && process.env && process.env.REACT_APP_GOOGLE_CLIENT_ID) || _runtimeClientId || '';
 }
 
 export function isGoogleAuthEnabled() {
@@ -34,6 +45,36 @@ export function googleStatus() {
   };
 }
 
+export async function loadGoogleRuntimeConfig() {
+  const envClientId = googleClientId();
+  if (envClientId) {
+    return { enabled: true, client_id: envClientId, source: _runtimeClientId ? 'backend' : 'env' };
+  }
+  const base = backendUrl();
+  if (!base) {
+    return { enabled: false, client_id: '', source: 'missing_backend_url' };
+  }
+  if (!_configPromise) {
+    _configPromise = fetch(`${base.replace(/\/$/, '')}/api/auth/google/config`, {
+      method: 'GET',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+    })
+      .then(async (res) => {
+        if (!res.ok) return { enabled: false, client_id: '', source: 'backend_error' };
+        const data = await res.json();
+        const clientId = typeof data?.client_id === 'string' ? data.client_id.trim() : '';
+        if (data?.enabled && clientId) {
+          _runtimeClientId = clientId;
+          return { enabled: true, client_id: clientId, source: 'backend' };
+        }
+        return { enabled: false, client_id: '', source: 'backend' };
+      })
+      .catch(() => ({ enabled: false, client_id: '', source: 'network_error' }));
+  }
+  return _configPromise;
+}
+
 /**
  * Lazily inject the Google Identity Services script. Resolves with
  * `window.google` once available. Resolves with `null` if disabled or
@@ -41,7 +82,8 @@ export function googleStatus() {
  */
 export async function loadGoogleSdk() {
   if (typeof window === 'undefined') return null;
-  if (!isGoogleAuthEnabled()) return null;
+  const cfg = await loadGoogleRuntimeConfig();
+  if (!cfg.enabled) return null;
   if (window.google && window.google.accounts && window.google.accounts.id) {
     return window.google;
   }
@@ -82,7 +124,8 @@ export async function loadGoogleSdk() {
  */
 export async function renderGoogleButton(targetEl, { onCredential, onError } = {}) {
   if (!targetEl) return false;
-  if (!isGoogleAuthEnabled()) return false;
+  const cfg = await loadGoogleRuntimeConfig();
+  if (!cfg.enabled) return false;
   const sdk = await loadGoogleSdk();
   if (!sdk || !sdk.accounts || !sdk.accounts.id) {
     if (onError) onError(new Error('google_sdk_unavailable'));

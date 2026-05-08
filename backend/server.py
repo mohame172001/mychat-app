@@ -3118,6 +3118,20 @@ async def me(user_id: str = Depends(get_current_user_id)):
 GOOGLE_AUTH_PROVIDER_KEY = 'google'
 
 
+@api.get('/auth/google/config')
+async def google_auth_config():
+    """Public Google Sign-In browser config.
+
+    The OAuth web client ID is intentionally public; it is required by
+    Google Identity Services in the browser. No credentials, ID tokens,
+    access tokens, or decoded Google payloads are returned here.
+    """
+    return {
+        'enabled': bool(GOOGLE_CLIENT_ID),
+        'client_id': GOOGLE_CLIENT_ID or '',
+    }
+
+
 def verify_google_credential(credential: str) -> dict:
     """Verify a Google ID token. Returns the claims dict.
 
