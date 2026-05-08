@@ -3309,6 +3309,98 @@ async def auth_google(data: dict = Body(...), request: Request = None):
 
 
 # ---------------- automations ----------------
+def _automation_summary_row(auto: dict) -> dict:
+    media_preview = auto.get('media_preview') or {}
+    post_scope = auto.get('post_scope')
+    if not post_scope:
+        trigger = str(auto.get('trigger') or '').lower()
+        if trigger == 'comment:any':
+            post_scope = 'any'
+        elif trigger == 'comment:latest' or auto.get('latest'):
+            post_scope = 'next'
+        else:
+            post_scope = 'specific'
+    dm_text = _automation_dm_text_for_diagnostics(auto)
+    public_replies = _automation_public_reply_texts(auto)
+    status = auto.get('status') or ('active' if auto.get('enabled') else 'draft')
+    updated = auto.get('updatedAt') or auto.get('updated') or auto.get('createdAt') or auto.get('created')
+    created = auto.get('createdAt') or auto.get('created')
+    return {
+        'id': auto.get('id'),
+        'automation_id': auto.get('id'),
+        'name': auto.get('name') or 'Untitled automation',
+        'active': str(status or '').lower() == 'active',
+        'status': status,
+        'scope': post_scope,
+        'post_scope': post_scope,
+        'selected_media_id': auto.get('media_id') or '',
+        'media_id': auto.get('media_id') or '',
+        'selected_media_label': str(media_preview.get('caption') or '')[:80],
+        'media_preview': {
+            'caption': str(media_preview.get('caption') or '')[:120],
+            'thumbnail_url': media_preview.get('thumbnail_url') or media_preview.get('media_url') or '',
+            'media_type': media_preview.get('media_type') or '',
+        },
+        'trigger_type': auto.get('trigger') or 'comment',
+        'trigger': auto.get('trigger') or 'comment',
+        'match': auto.get('match') or ('keyword' if auto.get('keyword') else 'any'),
+        'keyword': auto.get('keyword') or '',
+        'mode': auto.get('mode') or ('reply_and_dm' if dm_text else 'reply_only'),
+        'latest': bool(auto.get('latest')),
+        'has_public_reply': bool(public_replies),
+        'reply_under_post': bool(public_replies),
+        'has_dm': bool(dm_text),
+        'has_follow_gate': bool(auto.get('follow_request_enabled')),
+        'process_existing_unreplied_comments': bool(auto.get('process_existing_unreplied_comments')),
+        'processExistingComments': bool(auto.get('processExistingComments')),
+        'created_at': created.isoformat() if isinstance(created, datetime) else created,
+        'updated_at': updated.isoformat() if isinstance(updated, datetime) else updated,
+        'createdAt': created.isoformat() if isinstance(created, datetime) else created,
+        'updatedAt': updated.isoformat() if isinstance(updated, datetime) else updated,
+        'activationStartedAt': (
+            auto.get('activationStartedAt').isoformat()
+            if isinstance(auto.get('activationStartedAt'), datetime)
+            else auto.get('activationStartedAt')
+        ),
+        'last_run_at': (
+            auto.get('last_run_at') or auto.get('lastRunAt') or auto.get('lastProcessedAt')
+        ),
+        'counters': {
+            'comments_processed': int(auto.get('comments_processed') or 0),
+            'replies_sent': int(auto.get('public_replies_sent') or auto.get('replies_sent') or 0),
+            'dms_sent': int(auto.get('dms_sent') or 0),
+            'failures': int(auto.get('failures') or 0),
+        },
+        'sent': int(auto.get('sent') or 0),
+    }
+
+
+@api.get('/automations/summary')
+async def list_automations_summary(user_id: str = Depends(get_current_user_id)):
+    started = datetime.utcnow()
+    try:
+        account = await getActiveInstagramAccount(user_id)
+    except HTTPException as e:
+        if e.status_code == 400:
+            return {'items': [], 'count': 0, 'lastUpdatedAt': datetime.utcnow().isoformat()}
+        raise
+    rows = await db.automations.find(_account_scoped_query(user_id, account)).sort('updated', -1).limit(500).to_list(500)
+    items = [_automation_summary_row(row) for row in rows]
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'automations_summary_calculated user_id=%s instagramAccountId=%s count=%s durationMs=%s',
+        user_id,
+        account.get('instagramAccountId') or account.get('igUserId'),
+        len(items),
+        duration_ms,
+    )
+    return {
+        'items': items,
+        'count': len(items),
+        'lastUpdatedAt': datetime.utcnow().isoformat(),
+    }
+
+
 @api.get('/automations')
 async def list_automations(user_id: str = Depends(get_current_user_id)):
     try:

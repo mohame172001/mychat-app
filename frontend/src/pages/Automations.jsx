@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -12,6 +12,7 @@ import {
   Pencil, Trash2, UserPlus, Zap,
 } from 'lucide-react';
 import api from '../lib/api';
+import { cachedApiGet, getCachedApiData, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
@@ -26,6 +27,9 @@ const DEFAULT_FOLLOW_VERIFICATION_FAILED = 'مش قادر أتأكد من الم
 const DEFAULT_FOLLOW_RETRY_BUTTON = DEFAULT_FOLLOW_BUTTON;
 const DEFAULT_FOLLOW_COOLDOWN = 'بحاول أتأكد من المتابعة 😊 جرّب تضغط الزر مرة تانية خلال ثواني.';
 const DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3;
+const AUTOMATIONS_TTL_MS = 45000;
+const AUTOMATION_DETAIL_TTL_MS = 60000;
+const INSTAGRAM_PROFILE_TTL_MS = 120000;
 
 const TextArea = ({ className = '', ...props }) => (
   <textarea
@@ -299,10 +303,22 @@ const AutomationPhonePreview = ({
 const Automations = () => {
   const { user } = useAuth();
   const [routeSearchParams, setRouteSearchParams] = useSearchParams();
-  const [list, setList] = useState([]);
+  const cacheKey = [
+    'automations-summary',
+    user?.id || 'anon',
+    user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active',
+  ].join(':');
+  const profileCacheKey = [
+    'instagram-profile',
+    user?.id || 'anon',
+    user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active',
+  ].join(':');
+  const [list, setList] = useState(() => getCachedApiData(cacheKey)?.items || []);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!getCachedApiData(cacheKey));
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [instagramAccount, setInstagramAccount] = useState(null);
 
   const [builderOpen, setBuilderOpen] = useState(false);
@@ -344,18 +360,34 @@ const Automations = () => {
   const [previewTab, setPreviewTab] = useState('Post');
   const [saving, setSaving] = useState(false);
 
-  const refresh = async () => {
-    setLoading(true);
-    try {
-      const { data } = await api.get('/automations');
-      setList(data);
-    } catch {
-      toast.error('Failed to load automations');
+  const refresh = useCallback(async ({ force = false } = {}) => {
+    const cached = getCachedApiData(cacheKey);
+    if (cached && !force) {
+      setList(cached.items || []);
+      setLoading(false);
+    } else if (!cached) {
+      setLoading(true);
     }
-    setLoading(false);
-  };
+    setRefreshing(Boolean(force));
+    setLoadError('');
+    try {
+      const result = await cachedApiGet(
+        cacheKey,
+        () => api.get('/automations/summary', { timeout: 8000 }),
+        { ttlMs: AUTOMATIONS_TTL_MS, force }
+      );
+      setList(result.data?.items || []);
+      if (result.error) setLoadError('Showing cached automations. Refresh failed.');
+    } catch (err) {
+      setLoadError('Failed to load automations.');
+      toast.error('Failed to load automations');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [cacheKey]);
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [refresh]);
 
   useEffect(() => {
     const loadInstagramProfile = async () => {
@@ -368,7 +400,12 @@ const Automations = () => {
         profilePictureUrl: user.instagramProfilePictureUrl || user.avatar,
       });
       try {
-        const { data } = await api.get('/instagram/profile');
+        const result = await cachedApiGet(
+          profileCacheKey,
+          () => api.get('/instagram/profile', { timeout: 8000 }),
+          { ttlMs: INSTAGRAM_PROFILE_TTL_MS }
+        );
+        const data = result.data;
         setInstagramAccount({
           username: data?.username || user.instagramHandle,
           profilePictureUrl: data?.profilePictureUrl || user.instagramProfilePictureUrl || user.avatar,
@@ -381,7 +418,7 @@ const Automations = () => {
       }
     };
     loadInstagramProfile();
-  }, [user]);
+  }, [user, profileCacheKey]);
 
   const keywordList = useMemo(
     () => keyword.split(',').map(item => item.trim()).filter(Boolean),
@@ -561,11 +598,29 @@ const Automations = () => {
     await loadMediaForBuilder({ pickFirst: true });
   };
 
+  const loadAutomationDetail = async (automation) => {
+    const detailKey = `automation-detail:${automation.id}`;
+    const result = await cachedApiGet(
+      detailKey,
+      () => api.get(`/automations/${automation.id}`, { timeout: 10000 }),
+      { ttlMs: AUTOMATION_DETAIL_TTL_MS }
+    );
+    return result.data;
+  };
+
   const openEditBuilder = async (automation) => {
     resetBuilder();
-    applyAutomationToBuilder(automation);
     setBuilderOpen(true);
-    await loadMediaForBuilder({ preferredMediaId: automation.media_id || '', pickFirst: false });
+    setEditingAutomation(automation);
+    try {
+      const fullAutomation = await loadAutomationDetail(automation);
+      applyAutomationToBuilder(fullAutomation);
+      await loadMediaForBuilder({ preferredMediaId: fullAutomation.media_id || '', pickFirst: false });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Failed to load automation details');
+      applyAutomationToBuilder(automation);
+      await loadMediaForBuilder({ preferredMediaId: automation.media_id || '', pickFirst: false });
+    }
   };
 
   useEffect(() => {
@@ -583,9 +638,11 @@ const Automations = () => {
     setList(prev => prev.map(x => x.id === a.id ? { ...x, status: newStatus } : x));
     try {
       await api.patch(`/automations/${a.id}`, { status: newStatus });
+      invalidateApiCache('automations-summary');
+      invalidateApiCache(`automation-detail:${a.id}`);
     } catch {
       toast.error('Failed to update');
-      refresh();
+      refresh({ force: true });
     }
   };
 
@@ -593,10 +650,12 @@ const Automations = () => {
     setList(prev => prev.filter(a => a.id !== id));
     try {
       await api.delete(`/automations/${id}`);
+      invalidateApiCache('automations-summary');
+      invalidateApiCache(`automation-detail:${id}`);
       toast.success('Deleted');
     } catch {
       toast.error('Failed');
-      refresh();
+      refresh({ force: true });
     }
   };
 
@@ -745,12 +804,14 @@ const Automations = () => {
         body.media_preview = {};
       }
 
-      const { data } = editingAutomation
-        ? await api.patch(`/automations/${editingAutomation.id}`, body)
-        : await api.post('/automations/quick-comment-rule', body);
-      setList(prev => editingAutomation
-        ? prev.map(item => item.id === data.id ? data : item)
-        : [data, ...prev]);
+      if (editingAutomation) {
+        await api.patch(`/automations/${editingAutomation.id}`, body);
+      } else {
+        await api.post('/automations/quick-comment-rule', body);
+      }
+      invalidateApiCache('automations-summary');
+      if (editingAutomation?.id) invalidateApiCache(`automation-detail:${editingAutomation.id}`);
+      await refresh({ force: true });
       toast.success(editingAutomation ? 'Automation updated. Stats preserved.' : 'Automation is live');
       setEditingAutomation(null);
       setBuilderOpen(false);
@@ -1182,10 +1243,28 @@ const Automations = () => {
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>
           <p className="mt-1 text-slate-600">Build Instagram comment automations for new comments only.</p>
         </div>
-        <Button onClick={openBuilder} className="rounded-lg bg-slate-900 text-white hover:bg-slate-800">
-          <Plus className="mr-1.5 h-4 w-4" /> Create Automation
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => refresh({ force: true })}
+            disabled={refreshing}
+            className="rounded-lg"
+            data-testid="automations-refresh"
+          >
+            {refreshing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+            Refresh
+          </Button>
+          <Button onClick={openBuilder} className="rounded-lg bg-slate-900 text-white hover:bg-slate-800">
+            <Plus className="mr-1.5 h-4 w-4" /> Create Automation
+          </Button>
+        </div>
       </div>
+
+      {loadError && (
+        <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {loadError}
+        </div>
+      )}
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <div className="relative min-w-[240px] max-w-sm flex-1">
@@ -1213,6 +1292,22 @@ const Automations = () => {
       </div>
 
       <div className="mt-6 grid gap-3">
+        {loading && filtered.length === 0 && (
+          <div className="grid gap-3" data-testid="automations-skeleton">
+            {[0, 1, 2].map(item => (
+              <Card key={item} className="rounded-lg border-slate-100 p-4">
+                <div className="flex items-center gap-4">
+                  <div className="h-14 w-14 animate-pulse rounded-lg bg-slate-100" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 w-48 animate-pulse rounded bg-slate-100" />
+                    <div className="h-3 w-72 max-w-full animate-pulse rounded bg-slate-100" />
+                  </div>
+                  <div className="hidden h-8 w-20 animate-pulse rounded-full bg-slate-100 sm:block" />
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
         {filtered.map(a => {
           const thumb = a.media_preview?.thumbnail_url;
           const scopeLabel = a.post_scope === 'any'

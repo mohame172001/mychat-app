@@ -5,6 +5,7 @@ import {
   CreditCard, RefreshCw, CheckCircle2, AlertTriangle, XCircle, Lock, Info,
 } from 'lucide-react';
 import api from '../lib/api';
+import { cachedApiGet, getCachedApiData } from '../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../lib/analytics';
 import {
@@ -147,18 +148,26 @@ function PlanCard({ plan, current }) {
 }
 
 export default function Billing() {
-  const [current, setCurrent] = useState(null);
-  const [plans, setPlans] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [current, setCurrent] = useState(() => getCachedApiData('billing:plan-current') || null);
+  const [plans, setPlans] = useState(() => getCachedApiData('billing:plans')?.plans || null);
+  const [loading, setLoading] = useState(!(current && plans));
   const [error, setError] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async ({ force = false } = {}) => {
+    if (!(getCachedApiData('billing:plan-current') && getCachedApiData('billing:plans'))) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [planResp, plansResp] = await Promise.all([
-        api.get('/plan/current'),
-        api.get('/plans'),
+        cachedApiGet('billing:plan-current', () => api.get('/plan/current', { timeout: 8000 }), {
+          ttlMs: 60000,
+          force,
+        }),
+        cachedApiGet('billing:plans', () => api.get('/plans', { timeout: 8000 }), {
+          ttlMs: 300000,
+          force,
+        }),
       ]);
       setCurrent(planResp.data);
       setPlans(plansResp.data?.plans || []);
@@ -194,7 +203,7 @@ export default function Billing() {
             Your current plan, this month's usage, and remaining quota.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => load({ force: true })} disabled={loading}>
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
