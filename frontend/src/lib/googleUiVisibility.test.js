@@ -16,6 +16,9 @@ describe('Google Sign-In production visibility wiring', () => {
 
     expect(source).toContain('Continue with Google');
     expect(source).toContain('Google sign-in is not configured');
+    expect(source).toContain('Google sign-in config could not be loaded.');
+    expect(source).toContain('google-config-diagnostics');
+    expect(source).toContain('google_config_request_attempted');
     expect(source).toContain('data-google-configured="false"');
     expect(source).toContain('data-google-configured="true"');
   });
@@ -24,7 +27,9 @@ describe('Google Sign-In production visibility wiring', () => {
     const source = src('pages', 'SystemHealth.jsx');
 
     expect(source).toContain('Google Sign-In configured');
+    expect(source).toContain('Google config request');
     expect(source).toContain('google-signin-configured');
+    expect(source).toContain('google-config-request-status');
     expect(source).not.toContain('REACT_APP_GOOGLE_CLIENT_ID');
   });
 });

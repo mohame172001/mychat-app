@@ -14,19 +14,77 @@
  *     without any browser globals.
  */
 
+import api from './api';
+
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
 
 let _scriptPromise = null;
 let _runtimeClientId = '';
 let _configPromise = null;
+let _lastConfigDiagnostics = {
+  google_config_request_attempted: false,
+  google_config_request_ok: false,
+  google_config_response_enabled: false,
+  google_config_response_was_json: false,
+  google_config_error_code: '',
+};
 
-function backendUrl() {
-  return (typeof process !== 'undefined' && process.env && process.env.REACT_APP_BACKEND_URL) || '';
+function setConfigDiagnostics(patch = {}) {
+  _lastConfigDiagnostics = {
+    google_config_request_attempted: false,
+    google_config_request_ok: false,
+    google_config_response_enabled: false,
+    google_config_response_was_json: false,
+    google_config_error_code: '',
+    ...patch,
+  };
+  return { ..._lastConfigDiagnostics };
+}
+
+function responseHeader(headers, name) {
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || '';
+  return headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || '';
+}
+
+function parseGoogleConfigResponse(response) {
+  const contentType = String(responseHeader(response?.headers, 'content-type')).toLowerCase();
+  const raw = response?.data;
+  const isJsonContent = contentType.includes('application/json');
+
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return { data: raw, responseWasJson: true };
+  }
+
+  if (typeof raw !== 'string') {
+    const err = new Error('config_fetch_invalid_response');
+    err.code = 'config_fetch_invalid_response';
+    err.responseWasJson = isJsonContent;
+    throw err;
+  }
+
+  const trimmed = raw.trim();
+  if (!isJsonContent && !(trimmed.startsWith('{') || trimmed.startsWith('['))) {
+    const err = new Error('config_fetch_invalid_response');
+    err.code = 'config_fetch_invalid_response';
+    err.responseWasJson = false;
+    throw err;
+  }
+
+  try {
+    return { data: JSON.parse(trimmed), responseWasJson: true };
+  } catch (parseErr) {
+    const err = new Error('config_fetch_invalid_response');
+    err.code = 'config_fetch_invalid_response';
+    err.responseWasJson = false;
+    throw err;
+  }
 }
 
 export function resetGoogleRuntimeConfigForTests() {
   _runtimeClientId = '';
   _configPromise = null;
+  setConfigDiagnostics();
 }
 
 export function googleClientId() {
@@ -42,35 +100,80 @@ export function googleStatus() {
     enabled: isGoogleAuthEnabled(),
     client_id_present: Boolean(googleClientId()),
     sdk_loaded: !!(typeof window !== 'undefined' && window.google && window.google.accounts && window.google.accounts.id),
+    ..._lastConfigDiagnostics,
   };
 }
 
 export async function loadGoogleRuntimeConfig() {
   const envClientId = googleClientId();
   if (envClientId) {
-    return { enabled: true, client_id: envClientId, source: _runtimeClientId ? 'backend' : 'env' };
-  }
-  const base = backendUrl();
-  if (!base) {
-    return { enabled: false, client_id: '', source: 'missing_backend_url' };
+    const diagnostics = setConfigDiagnostics({
+      google_config_request_ok: true,
+      google_config_response_enabled: true,
+      google_config_response_was_json: true,
+    });
+    return {
+      enabled: true,
+      client_id: envClientId,
+      source: _runtimeClientId ? 'backend' : 'env',
+      ...diagnostics,
+    };
   }
   if (!_configPromise) {
-    _configPromise = fetch(`${base.replace(/\/$/, '')}/api/auth/google/config`, {
-      method: 'GET',
-      credentials: 'omit',
+    setConfigDiagnostics({ google_config_request_attempted: true });
+    _configPromise = api.get('/auth/google/config', {
       headers: { Accept: 'application/json' },
+      transformResponse: [(data) => data],
     })
-      .then(async (res) => {
-        if (!res.ok) return { enabled: false, client_id: '', source: 'backend_error' };
-        const data = await res.json();
+      .then((res) => {
+        const { data, responseWasJson } = parseGoogleConfigResponse(res);
         const clientId = typeof data?.client_id === 'string' ? data.client_id.trim() : '';
         if (data?.enabled && clientId) {
           _runtimeClientId = clientId;
-          return { enabled: true, client_id: clientId, source: 'backend' };
+          const diagnostics = setConfigDiagnostics({
+            google_config_request_attempted: true,
+            google_config_request_ok: true,
+            google_config_response_enabled: true,
+            google_config_response_was_json: responseWasJson,
+          });
+          return {
+            enabled: true,
+            client_id: clientId,
+            source: 'backend',
+            ...diagnostics,
+          };
         }
-        return { enabled: false, client_id: '', source: 'backend' };
+        const diagnostics = setConfigDiagnostics({
+          google_config_request_attempted: true,
+          google_config_request_ok: true,
+          google_config_response_enabled: Boolean(data?.enabled),
+          google_config_response_was_json: responseWasJson,
+        });
+        return {
+          enabled: false,
+          client_id: '',
+          source: 'backend',
+          ...diagnostics,
+        };
       })
-      .catch(() => ({ enabled: false, client_id: '', source: 'network_error' }));
+      .catch((err) => {
+        const code = err?.code === 'config_fetch_invalid_response'
+          ? 'config_fetch_invalid_response'
+          : 'config_fetch_failed';
+        const diagnostics = setConfigDiagnostics({
+          google_config_request_attempted: true,
+          google_config_request_ok: false,
+          google_config_response_enabled: false,
+          google_config_response_was_json: Boolean(err?.responseWasJson),
+          google_config_error_code: code,
+        });
+        return {
+          enabled: false,
+          client_id: '',
+          source: 'backend_error',
+          ...diagnostics,
+        };
+      });
   }
   return _configPromise;
 }

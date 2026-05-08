@@ -302,6 +302,18 @@ const SystemHealth = () => {
               </span>
             </div>
             <div className="flex items-center justify-between">
+              <span className="text-slate-500">Google config request</span>
+              <span className="font-mono text-xs text-slate-700" data-testid="google-config-request-status">
+                {observability?.frontend_runtime?.google_config_request_attempted ? 'attempted' : 'not_attempted'}
+                {' / '}
+                {observability?.frontend_runtime?.google_config_request_ok ? 'ok' : 'not_ok'}
+                {' / '}
+                {observability?.frontend_runtime?.google_config_response_was_json ? 'json' : 'not_json'}
+                {' / '}
+                {observability?.frontend_runtime?.google_config_error_code || 'none'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
               <span className="text-slate-500">Environment</span>
               <span className="font-mono text-slate-700">
                 {observability?.backend?.environment || '—'}

@@ -1,3 +1,4 @@
+import api from './api';
 import {
   googleClientId,
   isGoogleAuthEnabled,
@@ -7,10 +8,18 @@ import {
   googleErrorMessage,
 } from './googleAuth';
 
+jest.mock('./api', () => ({
+  __esModule: true,
+  default: {
+    get: jest.fn(),
+  },
+}));
+
 describe('googleClientId / isGoogleAuthEnabled disabled by default', () => {
   beforeEach(() => {
     delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
     delete process.env.REACT_APP_BACKEND_URL;
+    api.get.mockReset();
     resetGoogleRuntimeConfigForTests();
   });
 
@@ -30,6 +39,7 @@ describe('googleClientId / isGoogleAuthEnabled disabled by default', () => {
 describe('isGoogleAuthEnabled enabled when client id set', () => {
   beforeEach(() => {
     process.env.REACT_APP_GOOGLE_CLIENT_ID = 'test-id-123.apps.googleusercontent.com';
+    api.get.mockReset();
     resetGoogleRuntimeConfigForTests();
   });
 
@@ -45,24 +55,23 @@ describe('isGoogleAuthEnabled enabled when client id set', () => {
 });
 
 describe('loadGoogleRuntimeConfig backend fallback', () => {
-  const originalFetch = global.fetch;
-
   beforeEach(() => {
     delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
-    process.env.REACT_APP_BACKEND_URL = 'https://backend.example.com';
+    delete process.env.REACT_APP_BACKEND_URL;
+    api.get.mockReset();
     resetGoogleRuntimeConfigForTests();
   });
 
   afterEach(() => {
-    global.fetch = originalFetch;
     delete process.env.REACT_APP_BACKEND_URL;
+    api.get.mockReset();
     resetGoogleRuntimeConfigForTests();
   });
 
-  test('loads public client id from backend when build-time env is missing', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+  test('uses canonical API client and loads public client id from backend', async () => {
+    api.get.mockResolvedValue({
+      headers: { 'content-type': 'application/json' },
+      data: JSON.stringify({
         enabled: true,
         client_id: 'runtime-client-id.apps.googleusercontent.com',
       }),
@@ -74,22 +83,54 @@ describe('loadGoogleRuntimeConfig backend fallback', () => {
     expect(cfg.source).toBe('backend');
     expect(googleClientId()).toBe('runtime-client-id.apps.googleusercontent.com');
     expect(isGoogleAuthEnabled()).toBe(true);
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://backend.example.com/api/auth/google/config',
-      expect.objectContaining({ credentials: 'omit' })
+    expect(cfg.google_config_request_attempted).toBe(true);
+    expect(cfg.google_config_request_ok).toBe(true);
+    expect(cfg.google_config_response_enabled).toBe(true);
+    expect(cfg.google_config_response_was_json).toBe(true);
+    expect(api.get).toHaveBeenCalledWith(
+      '/auth/google/config',
+      expect.objectContaining({ headers: { Accept: 'application/json' } })
     );
   });
 
   test('stays disabled when backend config is missing', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ enabled: false, client_id: '' }),
+    api.get.mockResolvedValue({
+      headers: { 'content-type': 'application/json' },
+      data: { enabled: false, client_id: '' },
     });
 
     const cfg = await loadGoogleRuntimeConfig();
 
     expect(cfg.enabled).toBe(false);
+    expect(cfg.google_config_request_ok).toBe(true);
+    expect(cfg.google_config_response_enabled).toBe(false);
     expect(googleClientId()).toBe('');
+  });
+
+  test('treats HTML response as invalid config instead of not configured', async () => {
+    api.get.mockResolvedValue({
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+      data: '<!doctype html><html><body>frontend shell</body></html>',
+    });
+
+    const cfg = await loadGoogleRuntimeConfig();
+
+    expect(cfg.enabled).toBe(false);
+    expect(cfg.google_config_request_attempted).toBe(true);
+    expect(cfg.google_config_request_ok).toBe(false);
+    expect(cfg.google_config_response_was_json).toBe(false);
+    expect(cfg.google_config_error_code).toBe('config_fetch_invalid_response');
+  });
+
+  test('failed config fetch returns safe error diagnostics', async () => {
+    api.get.mockRejectedValue(new Error('network unavailable'));
+
+    const cfg = await loadGoogleRuntimeConfig();
+
+    expect(cfg.enabled).toBe(false);
+    expect(cfg.google_config_request_attempted).toBe(true);
+    expect(cfg.google_config_request_ok).toBe(false);
+    expect(cfg.google_config_error_code).toBe('config_fetch_failed');
   });
 });
 

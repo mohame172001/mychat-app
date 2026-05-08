@@ -1,5 +1,13 @@
 import { frontendRuntimeStatus, loadFrontendRuntimeStatus } from './frontendRuntimeStatus';
 import { resetGoogleRuntimeConfigForTests } from './googleAuth';
+import api from './api';
+
+jest.mock('./api', () => ({
+  __esModule: true,
+  default: {
+    get: jest.fn(),
+  },
+}));
 
 describe('frontendRuntimeStatus', () => {
   afterEach(() => {
@@ -7,6 +15,7 @@ describe('frontendRuntimeStatus', () => {
     delete process.env.REACT_APP_BACKEND_URL;
     delete process.env.REACT_APP_SENTRY_DSN;
     delete process.env.REACT_APP_POSTHOG_KEY;
+    api.get.mockReset();
     resetGoogleRuntimeConfigForTests();
   });
 
@@ -26,12 +35,10 @@ describe('frontendRuntimeStatus', () => {
   });
 
   test('loads backend Google config before reporting runtime status', async () => {
-    const originalFetch = global.fetch;
     delete process.env.REACT_APP_GOOGLE_CLIENT_ID;
-    process.env.REACT_APP_BACKEND_URL = 'https://backend.example.com';
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    api.get.mockResolvedValue({
+      headers: { 'content-type': 'application/json' },
+      data: JSON.stringify({
         enabled: true,
         client_id: 'runtime-client-id.apps.googleusercontent.com',
       }),
@@ -40,7 +47,10 @@ describe('frontendRuntimeStatus', () => {
     const status = await loadFrontendRuntimeStatus();
 
     expect(status.google_sign_in_configured).toBe(true);
+    expect(status.google_config_request_attempted).toBe(true);
+    expect(status.google_config_request_ok).toBe(true);
+    expect(status.google_config_response_enabled).toBe(true);
+    expect(status.google_config_response_was_json).toBe(true);
     expect(JSON.stringify(status)).not.toContain('runtime-client-id.apps.googleusercontent.com');
-    global.fetch = originalFetch;
   });
 });

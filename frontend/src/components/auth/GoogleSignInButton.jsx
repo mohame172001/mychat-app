@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import {
-  googleClientId, loadGoogleRuntimeConfig, renderGoogleButton, googleErrorMessage,
+  googleClientId, googleStatus, loadGoogleRuntimeConfig, renderGoogleButton, googleErrorMessage,
 } from '../../lib/googleAuth';
 import { Button } from '../ui/button';
 
@@ -19,6 +19,7 @@ import { Button } from '../ui/button';
 export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) {
   const slotRef = useRef(null);
   const [configStatus, setConfigStatus] = useState(() => (googleClientId() ? 'enabled' : 'loading'));
+  const [configDiagnostics, setConfigDiagnostics] = useState(() => googleStatus());
   const [sdkUnavailable, setSdkUnavailable] = useState(false);
   const [busy, setBusy] = useState(false);
   const { loginWithGoogle } = useAuth();
@@ -28,7 +29,10 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
     let cancelled = false;
     (async () => {
       const cfg = await loadGoogleRuntimeConfig();
-      if (!cancelled) setConfigStatus(cfg.enabled ? 'enabled' : 'disabled');
+      if (!cancelled) {
+        setConfigDiagnostics(cfg);
+        setConfigStatus(cfg.enabled ? 'enabled' : (cfg.google_config_error_code ? 'error' : 'disabled'));
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -70,6 +74,13 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
   }, [configStatus, loginWithGoogle, navigate, onComplete, redirectTo]);
 
   if (configStatus !== 'enabled') {
+    const diagnostics = {
+      google_config_request_attempted: Boolean(configDiagnostics.google_config_request_attempted),
+      google_config_request_ok: Boolean(configDiagnostics.google_config_request_ok),
+      google_config_response_enabled: Boolean(configDiagnostics.google_config_response_enabled),
+      google_config_response_was_json: Boolean(configDiagnostics.google_config_response_was_json),
+      google_config_error_code: configDiagnostics.google_config_error_code || 'none',
+    };
     return (
       <div className="space-y-2" data-testid="google-signin-wrapper" data-google-configured="false">
         <Button
@@ -84,7 +95,12 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
         <div className="text-center text-xs text-slate-400">
           {configStatus === 'loading'
             ? 'Checking Google sign-in configuration'
-            : 'Google sign-in is not configured'}
+            : configStatus === 'error'
+              ? 'Google sign-in config could not be loaded.'
+              : 'Google sign-in is not configured'}
+        </div>
+        <div className="text-center text-[11px] text-slate-400" data-testid="google-config-diagnostics">
+          {`google_config_request_attempted=${diagnostics.google_config_request_attempted ? 'yes' : 'no'} · google_config_request_ok=${diagnostics.google_config_request_ok ? 'yes' : 'no'} · google_config_response_enabled=${diagnostics.google_config_response_enabled ? 'yes' : 'no'} · google_config_response_was_json=${diagnostics.google_config_response_was_json ? 'yes' : 'no'} · google_config_error_code=${diagnostics.google_config_error_code}`}
         </div>
       </div>
     );
