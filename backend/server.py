@@ -5004,6 +5004,33 @@ async def current_usage(user_id: str = Depends(get_current_user_id)):
     }
 
 
+@api.get('/observability/status')
+async def observability_status_endpoint(user_id: str = Depends(get_current_user_id)):
+    """Phase 2.5: sanitized observability config for SystemHealth/admin.
+
+    Auth required (any logged-in user). Never echoes the DSN. Tells the
+    frontend whether Sentry is configured + the deployed build sha so
+    the System Health card can render a green/red dot per service.
+    """
+    try:
+        import observability as _observability  # noqa: WPS433
+        status = _observability.observability_status()
+    except Exception:
+        status = {'sentry_configured': False, 'sentry_initialized': False,
+                  'environment': 'unknown', 'build_sha': None, 'service': 'backend'}
+    # Frontend signals layered on top — these are populated by the React
+    # bundle at runtime; here we only echo back the build sha + env so
+    # the admin can see they match.
+    return {
+        'backend': status,
+        'frontend': {
+            'sentry_dsn_env_var': 'REACT_APP_SENTRY_DSN',
+            'posthog_key_env_var': 'REACT_APP_POSTHOG_KEY',
+            'note': 'frontend reports its own configured-state at runtime',
+        },
+    }
+
+
 @api.get('/plans')
 async def list_plans():
     """Public list of plan tiers. No auth required: prices and limits are
@@ -12386,6 +12413,13 @@ async def security_headers_middleware(request, call_next):
 async def _startup():
     global _poll_task, IS_SHUTTING_DOWN
     IS_SHUTTING_DOWN = False
+    # Phase 2.5: optional Sentry init. No-ops cleanly when SENTRY_DSN is
+    # missing or the SDK isn't installed.
+    try:
+        import observability as _observability  # noqa: WPS433
+        _observability.init_sentry()
+    except Exception as _e:
+        logger.info('observability_init_skipped reason=%s', str(_e)[:80])
     SHUTDOWN_EVENT.clear()
     # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
     try:

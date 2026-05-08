@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../lib/api';
+import analytics from '../lib/analytics';
 
 const AuthContext = createContext(null);
 
@@ -13,7 +14,10 @@ export const AuthProvider = ({ children }) => {
       const stored = localStorage.getItem('mychat_user');
       if (token && stored) {
         try {
-          setUser(JSON.parse(stored));
+          const parsed = JSON.parse(stored);
+          setUser(parsed);
+          // Restore analytics identity for an already-authenticated session.
+          analytics.identify({ id: parsed.id });
         } catch (err) {
           console.error('[Auth] Failed to parse stored user:', err);
           localStorage.removeItem('mychat_user');
@@ -22,6 +26,7 @@ export const AuthProvider = ({ children }) => {
           const { data } = await api.get('/auth/me');
           setUser(data);
           localStorage.setItem('mychat_user', JSON.stringify(data));
+          analytics.identify({ id: data.id });
         } catch (err) {
           // Non-fatal: token may be expired; api interceptor handles redirect.
           console.warn('[Auth] /auth/me refresh failed:', err?.response?.status);
@@ -37,6 +42,9 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     setUser(data.user);
+    // Phase 2.5 funnel events. analytics no-ops when PostHog is disabled.
+    analytics.identify({ id: data.user.id });
+    analytics.capture('login_completed', {});
     return data.user;
   };
 
@@ -45,6 +53,8 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     setUser(data.user);
+    analytics.identify({ id: data.user.id });
+    analytics.capture('signup_completed', {});
     return data.user;
   };
 
@@ -52,6 +62,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem('mychat_token');
     localStorage.removeItem('mychat_user');
     setUser(null);
+    analytics.reset();
   };
 
   const refreshUser = async () => {

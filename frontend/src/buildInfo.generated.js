@@ -1,1 +1,1 @@
-export const BUILD_SHA = '58827ffab372';
+export const BUILD_SHA = '670a1a77491e';

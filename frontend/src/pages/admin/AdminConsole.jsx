@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
+import analytics from '../../lib/analytics';
 import {
   PLAN_KEYS, PLAN_DISPLAY,
   hasAnyExceeded, planDistributionRows, planOptions, formatTimestamp,
@@ -418,6 +419,7 @@ export default function AdminConsole() {
       try {
         const { data } = await api.get('/admin/me');
         setMe(data);
+        if (data?.is_admin) analytics.capture('admin_console_viewed', {});
       } catch (_) {
         setMe({ is_admin: false });
       }

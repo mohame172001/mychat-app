@@ -69,6 +69,7 @@ function Section({ title, icon: Icon, children, hint }) {
 
 const SystemHealth = () => {
   const [data, setData] = useState(null);
+  const [observability, setObservability] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshedAt, setRefreshedAt] = useState(null);
@@ -86,6 +87,20 @@ const SystemHealth = () => {
       toast.error('Failed to load system health');
     } finally {
       setLoading(false);
+    }
+    // Observability status is best-effort and DSN/key-free by contract.
+    try {
+      const { data: obs } = await api.get('/observability/status');
+      // Layer in frontend's runtime-known config (DSN/key never echoed).
+      const fe = {
+        sentry_configured: Boolean(process.env.REACT_APP_SENTRY_DSN),
+        posthog_configured: Boolean(process.env.REACT_APP_POSTHOG_KEY),
+        environment: process.env.REACT_APP_SENTRY_ENVIRONMENT || 'unknown',
+        build_sha: (process.env.REACT_APP_BUILD_SHA || process.env.REACT_APP_GIT_SHA || '').slice(0, 12) || null,
+      };
+      setObservability({ ...obs, frontend_runtime: fe });
+    } catch (_) {
+      setObservability(null);
     }
   }, []);
 
@@ -253,6 +268,56 @@ const SystemHealth = () => {
                 {config.watchdog_interval_seconds ?? '—'}s
               </span>
             </div>
+          </div>
+        </Section>
+
+        <Section title="Observability" icon={Activity} hint="Sentry + PostHog">
+          <div className="space-y-2 text-sm" data-testid="observability-section">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Backend Sentry</span>
+              <span className="flex items-center gap-2">
+                {observability?.backend?.sentry_configured
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Frontend Sentry</span>
+              <span className="flex items-center gap-2">
+                {observability?.frontend_runtime?.sentry_configured
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">PostHog (frontend)</span>
+              <span className="flex items-center gap-2">
+                {observability?.frontend_runtime?.posthog_configured
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Environment</span>
+              <span className="font-mono text-slate-700">
+                {observability?.backend?.environment || '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Backend build sha</span>
+              <span className="font-mono text-slate-700">
+                {observability?.backend?.build_sha || '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Frontend build sha</span>
+              <span className="font-mono text-slate-700">
+                {observability?.frontend_runtime?.build_sha || '—'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 pt-2 border-t border-slate-100">
+              DSN values and API keys are never returned by the API or rendered here.
+            </p>
           </div>
         </Section>
       </div>

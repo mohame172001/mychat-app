@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import api from '../lib/api';
 import { toast } from 'sonner';
+import analytics from '../lib/analytics';
 import {
   computeAllUsageRows,
   computeAccountRow,
@@ -173,6 +174,7 @@ export default function Billing() {
 
   useEffect(() => {
     load();
+    analytics.capture('billing_page_viewed', {});
   }, [load]);
 
   const usageRows = current ? computeAllUsageRows(current) : [];

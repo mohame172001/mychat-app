@@ -1,10 +1,22 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import './App.css';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Toaster } from './components/ui/sonner';
+import analytics from './lib/analytics';
 
 import DashboardLayout from './components/layout/DashboardLayout';
+
+// Phase 2.5: emit page_view on every route change. analytics.pageView is
+// a no-op when PostHog isn't configured. The route is sanitized — OAuth
+// code/state and tokens are stripped before send.
+function PageViewTracker() {
+  const location = useLocation();
+  useEffect(() => {
+    analytics.pageView(location.pathname + (location.search || ''));
+  }, [location.pathname, location.search]);
+  return null;
+}
 
 const Landing = lazy(() => import('./pages/Landing'));
 const Login = lazy(() => import('./pages/Login'));
@@ -40,6 +52,7 @@ function App() {
       <AuthProvider>
         <BrowserRouter>
           <Toaster position="top-right" />
+          <PageViewTracker />
           <Suspense fallback={<PageLoading />}>
             <Routes>
               <Route path="/" element={<Landing />} />
