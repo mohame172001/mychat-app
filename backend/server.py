@@ -157,6 +157,11 @@ ADMIN_EMAILS = {e.strip().lower() for e in (os.environ.get('ADMIN_EMAILS') or ''
 # email in ADMIN_EMAILS can still call them. The flag is meant to be
 # turned on briefly during a repair window and turned off again.
 ENABLE_ADMIN_REPAIR_TOOLS = (os.environ.get('ENABLE_ADMIN_REPAIR_TOOLS') or '').strip().lower() == 'true'
+
+# Phase 2.7 Google Sign-In. Optional — when GOOGLE_CLIENT_ID is unset
+# the /api/auth/google endpoint returns 503 with 'google_auth_not_configured'.
+# Existing email/password login is unaffected.
+GOOGLE_CLIENT_ID = (os.environ.get('GOOGLE_CLIENT_ID') or '').strip() or None
 TOKEN_REFRESH_LOOKAHEAD_DAYS = int(os.environ.get('IG_TOKEN_REFRESH_LOOKAHEAD_DAYS', '15'))
 TOKEN_REFRESH_MIN_AGE_HOURS = int(os.environ.get('IG_TOKEN_REFRESH_MIN_AGE_HOURS', '24'))
 TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES', '5'))
@@ -3034,6 +3039,189 @@ async def me(user_id: str = Depends(get_current_user_id)):
     if not u:
         raise HTTPException(404, 'User not found')
     return _public_user(u)
+
+
+# ---------------- Phase 2.7 Google Sign-In ----------------
+# Login + signup via Google ID token. Email/password remains the
+# primary auth flow; Google is purely additive. Issued JWT shape is
+# identical to /auth/login so the frontend session bootstrap is the
+# same code path.
+
+GOOGLE_AUTH_PROVIDER_KEY = 'google'
+
+
+def verify_google_credential(credential: str) -> dict:
+    """Verify a Google ID token. Returns the claims dict.
+
+    Raises HTTPException on any failure. NEVER logs the credential or
+    the decoded payload — only sanitized failure reasons.
+
+    The implementation lazy-imports `google.oauth2.id_token` so the
+    server boots fine without the SDK; tests monkeypatch this whole
+    function to avoid any network call.
+    """
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(503, 'google_auth_not_configured')
+    if not credential or not isinstance(credential, str):
+        raise HTTPException(400, 'invalid_google_credential')
+    try:
+        from google.oauth2 import id_token as _gid  # type: ignore
+        from google.auth.transport import requests as _greq  # type: ignore
+    except Exception:
+        logger.warning('google_auth_sdk_missing')
+        raise HTTPException(503, 'google_auth_sdk_not_installed')
+    try:
+        info = _gid.verify_oauth2_token(
+            credential, _greq.Request(), GOOGLE_CLIENT_ID
+        )
+    except ValueError as e:
+        # google-auth raises ValueError for any verification failure:
+        # bad signature, expired, wrong audience, malformed JWT.
+        # Log only the class + sanitized prefix (no token contents).
+        msg = str(e)
+        reason = 'invalid_token'
+        low = msg.lower()
+        if 'expired' in low:
+            reason = 'token_expired'
+        elif 'audience' in low or 'aud' in low:
+            reason = 'wrong_audience'
+        elif 'issuer' in low:
+            reason = 'wrong_issuer'
+        logger.info('google_credential_verify_failed reason=%s', reason)
+        raise HTTPException(401, f'google_credential_invalid:{reason}')
+    if not isinstance(info, dict):
+        raise HTTPException(401, 'google_credential_invalid:unexpected_payload')
+    iss = (info.get('iss') or '').lower()
+    if iss not in ('accounts.google.com', 'https://accounts.google.com'):
+        raise HTTPException(401, 'google_credential_invalid:wrong_issuer')
+    return info
+
+
+def _google_claims_safe(claims: dict) -> dict:
+    """Strict allow-list extraction. Drops anything else."""
+    return {
+        'sub': str(claims.get('sub') or ''),
+        'email': (claims.get('email') or '').strip().lower(),
+        'email_verified': bool(claims.get('email_verified')),
+        'name': claims.get('name'),
+        'picture': claims.get('picture'),
+    }
+
+
+@api.post('/auth/google', response_model=AuthOut)
+async def auth_google(data: dict = Body(...), request: Request = None):
+    """Login or sign up via Google ID token.
+
+    Flow:
+      A. existing google_sub -> log that user in.
+      B. existing email      -> link google_sub to that user (only if
+                                Google reports email_verified=true).
+      C. otherwise           -> create new user, set google_sub.
+
+    Always returns the same {token, user} shape as /auth/login.
+    """
+    ip = _client_ip(request) if request is not None else 'unknown'
+    if _rate_limited('login', ip,
+                     limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=google_auth ip=%s', ip)
+        raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
+    credential = (data or {}).get('credential')
+    claims = verify_google_credential(credential)
+    safe = _google_claims_safe(claims)
+    if not safe['sub']:
+        raise HTTPException(401, 'google_credential_invalid:missing_sub')
+    if not safe['email']:
+        raise HTTPException(401, 'google_credential_invalid:missing_email')
+    if not safe['email_verified']:
+        raise HTTPException(403, 'google_email_not_verified')
+
+    now = datetime.utcnow()
+    is_new_user = False
+
+    by_sub = await db.users.find_one({'google_sub': safe['sub']})
+    by_email = await db.users.find_one({'email': safe['email']})
+
+    if by_sub and by_email and by_sub.get('id') != by_email.get('id'):
+        # Different user_id rows for sub vs email — never auto-merge.
+        logger.warning(
+            'google_account_conflict_cross_user sub_user_id=%s email_user_id=%s',
+            by_sub.get('id'), by_email.get('id'),
+        )
+        raise HTTPException(409, 'google_account_conflict')
+
+    if by_sub:
+        user = by_sub
+        # Already linked. Refresh non-secret display fields if present.
+        update_set = {'updated_at': now, 'last_seen_at': now}
+        if safe.get('name') and not user.get('name'):
+            update_set['name'] = safe['name']
+        if safe.get('picture') and not user.get('avatar'):
+            update_set['avatar'] = safe['picture']
+        await db.users.update_one({'id': user['id']}, {'$set': update_set})
+    elif by_email:
+        # Link path. Preserve existing user_id, plan, automations,
+        # admin role, Instagram accounts.
+        user = by_email
+        existing_sub = user.get('google_sub')
+        if existing_sub and existing_sub != safe['sub']:
+            logger.warning(
+                'google_account_already_linked user_id=%s', user.get('id'),
+            )
+            raise HTTPException(409, 'google_account_already_linked')
+        providers = user.get('linked_providers') or []
+        if GOOGLE_AUTH_PROVIDER_KEY not in providers:
+            providers = providers + [GOOGLE_AUTH_PROVIDER_KEY]
+        await db.users.update_one(
+            {'id': user['id']},
+            {'$set': {
+                'google_sub': safe['sub'],
+                'email_verified': True,
+                'linked_providers': providers,
+                'updated_at': now,
+                'last_seen_at': now,
+                **({'avatar': safe['picture']} if safe.get('picture') and not user.get('avatar') else {}),
+                **({'name': safe['name']} if safe.get('name') and not user.get('name') else {}),
+            }},
+        )
+        user = await db.users.find_one({'id': user['id']}) or user
+    else:
+        # New user path. Pick a username from the email local part.
+        import uuid
+        local = safe['email'].split('@')[0] if '@' in safe['email'] else safe['email']
+        base_username = ''.join(ch for ch in local if ch.isalnum() or ch == '_')[:24] or 'user'
+        username = base_username
+        suffix = 0
+        while await db.users.find_one({'username': username}):
+            suffix += 1
+            username = f'{base_username}{suffix}'[:32]
+        user_id = str(uuid.uuid4())
+        user = {
+            'id': user_id,
+            'username': username,
+            'email': safe['email'],
+            'name': safe.get('name') or base_username.capitalize(),
+            'password_hash': None,
+            'avatar': safe.get('picture') or f'https://i.pravatar.cc/150?u={username}',
+            'instagramConnected': False,
+            'instagramHandle': None,
+            'created': now,
+            'created_at': now,
+            'updated_at': now,
+            'google_sub': safe['sub'],
+            'email_verified': True,
+            'auth_provider': GOOGLE_AUTH_PROVIDER_KEY,
+            'linked_providers': [GOOGLE_AUTH_PROVIDER_KEY],
+        }
+        await db.users.insert_one(user)
+        await _seed_user(user_id)
+        is_new_user = True
+
+    # Sanitized log line: id only, no email or token contents.
+    logger.info(
+        'google_auth_success user_id=%s new_user=%s',
+        user.get('id'), is_new_user,
+    )
+    return AuthOut(token=create_token(user['id']), user=_public_user(user))
 
 
 # ---------------- automations ----------------
@@ -12827,6 +13015,11 @@ async def _startup():
         await db.admin_audit_logs.create_index(
             [('action', 1), ('created_at', -1)],
             name='admin_audit_action_created',
+        )
+        # Phase 2.7: Google sub unique (sparse — most users won't have one).
+        await db.users.create_index(
+            [('google_sub', 1)], unique=True, sparse=True,
+            name='users_google_sub_unique',
         )
         # Phase 2.6: admin_members.
         await db.admin_members.create_index(

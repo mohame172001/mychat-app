@@ -58,6 +58,22 @@ export const AuthProvider = ({ children }) => {
     return data.user;
   };
 
+  /**
+   * Phase 2.7: Google Sign-In. Sends the Google ID token to the backend,
+   * which decides login vs signup vs link based on existing google_sub /
+   * email. The credential JWT is forwarded once and never logged.
+   */
+  const loginWithGoogle = async (credential) => {
+    if (!credential) throw new Error('missing_google_credential');
+    const { data } = await api.post('/auth/google', { credential });
+    localStorage.setItem('mychat_token', data.token);
+    localStorage.setItem('mychat_user', JSON.stringify(data.user));
+    setUser(data.user);
+    analytics.identify({ id: data.user.id });
+    analytics.capture('login_completed', { method: 'google' });
+    return data.user;
+  };
+
   const logout = () => {
     localStorage.removeItem('mychat_token');
     localStorage.removeItem('mychat_user');
@@ -77,7 +93,9 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, signup, logout, loading, refreshUser }}>
+    <AuthContext.Provider value={{
+      user, login, signup, logout, loading, refreshUser, loginWithGoogle,
+    }}>
       {children}
     </AuthContext.Provider>
   );

@@ -77,6 +77,13 @@ _FORBIDDEN_BODY_KEYS = frozenset(s.lower() for s in (
     'private_message',
     'text',
     'caption',
+    # Phase 2.7 Google Sign-In: ID token / credential carries PII +
+    # signed claims, must never reach Sentry/PostHog.
+    'credential',
+    'id_token',
+    'google_id_token',
+    'google_credential',
+    'refresh_token',
 ))
 
 # URL paths whose request bodies are NEVER sent to Sentry — they may carry
@@ -88,6 +95,9 @@ _REDACT_BODY_PATH_PREFIXES = (
     '/api/dm-automation',
     '/api/automations',
     '/api/instagram/webhook-log',
+    # Phase 2.7: the body of POST /api/auth/google contains a Google ID
+    # token. Drop it whole rather than rely on key-based redaction.
+    '/api/auth/google',
 )
 
 

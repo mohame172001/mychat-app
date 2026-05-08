@@ -6,6 +6,7 @@ import { Label } from '../components/ui/label';
 import { MessageCircle, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
+import GoogleSignInButton from '../components/auth/GoogleSignInButton';
 
 const Login = () => {
   const [username, setUsername] = useState('');
@@ -46,7 +47,10 @@ const Login = () => {
           <div className="w-full max-w-sm">
             <h1 className="font-display text-3xl md:text-4xl font-extrabold tracking-tight">Welcome back</h1>
             <p className="mt-2 text-slate-600">Log in to continue automating your Instagram.</p>
-            <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+            <div className="mt-6">
+              <GoogleSignInButton redirectTo="/app" />
+            </div>
+            <form onSubmit={handleSubmit} className="mt-6 space-y-5">
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
                 <Input id="username" placeholder="yourname" value={username} onChange={e => setUsername(e.target.value)} className="h-12 rounded-xl" />

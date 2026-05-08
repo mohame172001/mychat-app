@@ -22,6 +22,9 @@ const FORBIDDEN_BODY_KEYS = new Set([
   'dm_text', 'dm_message',
   'message_text', 'message', 'private_message',
   'text', 'caption',
+  // Phase 2.7 Google Sign-In: never let an ID token / credential reach Sentry.
+  'credential', 'id_token', 'google_id_token', 'google_credential',
+  'refresh_token',
 ]);
 
 const REDACT_BODY_PATH_PREFIXES = [
@@ -29,6 +32,7 @@ const REDACT_BODY_PATH_PREFIXES = [
   '/api/comments/',
   '/api/dm-rules/',
   '/api/dm-automation',
+  '/api/auth/google',
 ];
 
 const QUERY_REDACT_TOKENS = ['token', 'code=', 'state=', 'access_token', 'jwt'];

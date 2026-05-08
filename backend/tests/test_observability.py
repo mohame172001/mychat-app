@@ -225,6 +225,41 @@ def test_scrubber_safe_on_missing_or_string_event():
 
 # ── breadcrumbs ──────────────────────────────────────────────────────────────
 
+def test_scrubber_drops_google_auth_body_entirely():
+    """Phase 2.7: POST /api/auth/google body has the Google ID token JWT.
+    Drop the whole body so Sentry never sees it."""
+    out = observability.redact_sentry_event({
+        'request': {
+            'url': 'https://api.example.com/api/auth/google',
+            'data': {'credential': 'eyJhbGciOiJSUzI1NiIs.SECRET_PAYLOAD.SIG'},
+            'headers': {},
+        },
+    })
+    assert out['request']['data'] == '[redacted]'
+    assert 'SECRET_PAYLOAD' not in repr(out)
+
+
+def test_scrubber_redacts_credential_id_token_in_extra():
+    """Forbidden Google fields outside webhook routes still get key-redacted."""
+    out = observability.redact_sentry_event({
+        'extra': {
+            'credential': 'JWT-PAYLOAD-SECRET',
+            'id_token': 'JWT-PAYLOAD-SECRET',
+            'google_id_token': 'JWT-PAYLOAD-SECRET',
+            'google_credential': 'JWT-PAYLOAD-SECRET',
+            'refresh_token': 'rt-secret',
+            'safe': 'keep_me',
+        },
+    })
+    extra = out['extra']
+    for forbidden in ('credential', 'id_token', 'google_id_token',
+                      'google_credential', 'refresh_token'):
+        assert extra[forbidden] == '[redacted]'
+    assert extra['safe'] == 'keep_me'
+    assert 'JWT-PAYLOAD-SECRET' not in repr(out)
+    assert 'rt-secret' not in repr(out)
+
+
 def test_scrubber_redacts_breadcrumb_messages_with_secrets():
     event = {
         'breadcrumbs': {

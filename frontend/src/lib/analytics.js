@@ -25,6 +25,9 @@ const FORBIDDEN_PROPERTY_KEYS = new Set([
   'message_text', 'message', 'private_message',
   'caption', 'text', 'raw', 'body', 'payload', 'graph_error', 'error_body',
   'password',
+  // Phase 2.7 Google Sign-In.
+  'credential', 'id_token', 'google_id_token', 'google_credential',
+  'refresh_token',
 ]);
 
 // Tokens in URL query strings that signal we should drop the whole query.
