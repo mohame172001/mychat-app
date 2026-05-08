@@ -5,6 +5,7 @@ Locks the privacy contract: the credential and decoded payload are
 never logged, never echoed, never stored.
 """
 import asyncio
+import importlib
 import logging
 import os
 import sys
@@ -29,6 +30,10 @@ from test_instagram_token_refresh import FakeDB, _account, _run, _user  # noqa: 
 
 
 PRIVATE_CREDENTIAL = 'eyJzZWNyZXQiOiJkby1ub3QtbG9nLW1lLTk5OTk5In0=.signature.private'
+
+
+def test_google_auth_dependency_is_installed():
+    assert importlib.import_module('google.oauth2.id_token')
 
 
 def _full_user(**overrides):

@@ -208,6 +208,11 @@ def test_unsafe_metadata_keys_are_stripped(monkeypatch):
             'access_token': 'EAAB-secret',             # forbidden
             'meta_access_token': 'EAAB-secret',        # forbidden
             'authorization': 'Bearer xyz',             # forbidden
+            'credential': 'google-credential',          # forbidden
+            'id_token': 'google-id-token',              # forbidden
+            'google_id_token': 'google-id-token',       # forbidden
+            'google_credential': 'google-credential',   # forbidden
+            'refresh_token': 'refresh-secret',          # forbidden
             'raw': '{"error": {"message": "..."}}',    # forbidden (raw Graph)
             'graph_error': 'something private',        # forbidden
             'comment_text': 'private text 12345',      # forbidden
@@ -225,7 +230,8 @@ def test_unsafe_metadata_keys_are_stripped(monkeypatch):
     assert saved.get('source') == 'webhook'
     for forbidden in (
         'access_token', 'meta_access_token', 'authorization', 'raw',
-        'graph_error', 'comment_text', 'dm_text', 'message_text',
+        'credential', 'id_token', 'google_id_token', 'google_credential',
+        'refresh_token', 'graph_error', 'comment_text', 'dm_text', 'message_text',
     ):
         assert forbidden not in saved
     # Nested object: forbidden keys also stripped one level deep.

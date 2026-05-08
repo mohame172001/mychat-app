@@ -193,7 +193,8 @@ def _redact_secrets(value):
     they hit the log stream or HTTP response bodies."""
     SECRET_KEYS = {'access_token', 'accesstoken', 'meta_access_token',
                    'client_secret', 'app_secret', 'refresh_token',
-                   'token', 'authorization'}
+                   'credential', 'google_credential', 'id_token',
+                   'google_id_token', 'token', 'authorization'}
     if isinstance(value, dict):
         return {k: ('***REDACTED***' if k.lower() in SECRET_KEYS else _redact_secrets(v))
                 for k, v in value.items()}
@@ -237,7 +238,8 @@ USAGE_COUNTER_FIELDS = (
 
 _USAGE_UNSAFE_METADATA_KEYS = {
     'access_token', 'accesstoken', 'meta_access_token', 'token', 'authorization',
-    'client_secret', 'app_secret', 'secret', 'jwt', 'code', 'raw', 'body',
+    'client_secret', 'app_secret', 'secret', 'credential', 'google_credential',
+    'id_token', 'google_id_token', 'refresh_token', 'jwt', 'code', 'raw', 'body',
     'payload', 'headers', 'graph_error', 'error_body', 'comment_text',
     'dm_text', 'message_text', 'text', 'message', 'private_message',
 }

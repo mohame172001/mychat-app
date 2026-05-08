@@ -260,6 +260,30 @@ def test_scrubber_redacts_credential_id_token_in_extra():
     assert 'rt-secret' not in repr(out)
 
 
+def test_server_redact_secrets_covers_google_credentials_and_refresh_tokens():
+    payload = {
+        'credential': 'google-credential',
+        'id_token': 'google-id-token',
+        'google_id_token': 'google-id-token-2',
+        'google_credential': 'google-credential-2',
+        'refresh_token': 'refresh-token',
+        'nested': {
+            'Authorization': 'Bearer secret',
+            'safe': 'visible',
+        },
+    }
+
+    redacted = server._redact_secrets(payload)
+
+    assert redacted['credential'] == '***REDACTED***'
+    assert redacted['id_token'] == '***REDACTED***'
+    assert redacted['google_id_token'] == '***REDACTED***'
+    assert redacted['google_credential'] == '***REDACTED***'
+    assert redacted['refresh_token'] == '***REDACTED***'
+    assert redacted['nested']['Authorization'] == '***REDACTED***'
+    assert redacted['nested']['safe'] == 'visible'
+
+
 def test_scrubber_redacts_breadcrumb_messages_with_secrets():
     event = {
         'breadcrumbs': {
