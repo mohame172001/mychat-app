@@ -5051,12 +5051,9 @@ async def admin_assign_user_plan(
     body: dict = Body(...),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Manually assign a plan to a user. Admin-only via ADMIN_EMAILS.
+    """Manually assign a plan to a user. Requires admin.plans.assign.
     Independent of ENABLE_ADMIN_REPAIR_TOOLS. No Stripe."""
-    caller = await db.users.find_one({'id': user_id})
-    email = ((caller or {}).get('email') or '').lower()
-    if not email or email not in ADMIN_EMAILS:
-        raise HTTPException(403, 'Admin access required')
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
     plan_key = (body or {}).get('plan_key')
     reason = (body or {}).get('reason') or 'manual_admin_assignment'
     if not _plans.is_valid_plan_key(plan_key):
@@ -5087,10 +5084,7 @@ async def admin_get_user_plan(
     target_user_id: str,
     user_id: str = Depends(get_current_user_id),
 ):
-    caller = await db.users.find_one({'id': user_id})
-    email = ((caller or {}).get('email') or '').lower()
-    if not email or email not in ADMIN_EMAILS:
-        raise HTTPException(403, 'Admin access required')
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     summary = await get_current_usage_with_limits(target_user_id)
     return {**summary, 'user_id': target_user_id}
 
@@ -5103,15 +5097,11 @@ async def admin_user_usage(
 ):
     """Admin-only: return monthly usage counters for any user.
 
-    Auth: caller's email MUST be in ADMIN_EMAILS. Unlike the repair tools,
-    this endpoint is NOT gated by ENABLE_ADMIN_REPAIR_TOOLS — read-only
-    usage stats are safe enough for an admin to inspect at any time.
+    Requires admin.users.view (admin / support / owner). Independent of
+    ENABLE_ADMIN_REPAIR_TOOLS — read-only usage stats are safe enough
+    for any admin role.
     """
-    caller = await db.users.find_one({'id': user_id})
-    email = ((caller or {}).get('email') or '').lower()
-    if not email or email not in ADMIN_EMAILS:
-        raise HTTPException(403, 'Admin access required')
-
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     event_month = (month or _usage_month(datetime.utcnow())).strip()
     if not re.fullmatch(r'\d{4}-\d{2}', event_month):
         raise HTTPException(400, 'month must be YYYY-MM')
@@ -5146,12 +5136,86 @@ async def admin_user_usage(
 # Privacy: never returns raw comment / reply / DM text, tokens, or
 # Authorization values. Returns counts, ids, statuses, hashes only.
 
+import admin_roles as _admin_roles  # Phase 2.6: role + permission catalogue
+
+
+async def _resolve_admin_role(user: Optional[dict]) -> tuple[Optional[str], bool]:
+    """Return (role, bootstrap_owner) for a user record.
+
+    Lookup order:
+      1. ADMIN_EMAILS bootstrap → owner. On first call we lazily insert
+         an admin_members row so the env list can be removed once the
+         team is in place.
+      2. admin_members row keyed by user_id (then email fallback).
+      3. None → not an admin.
+
+    Disabled (disabled_at != None) admin_members rows return None.
+    """
+    if not user:
+        return None, False
+    email = (user.get('email') or '').lower()
+    user_id = user.get('id')
+    bootstrap_owner = bool(email and email in ADMIN_EMAILS)
+    member = None
+    try:
+        if user_id:
+            member = await db.admin_members.find_one({'user_id': user_id})
+        if not member and email:
+            member = await db.admin_members.find_one({'email': email})
+    except Exception:
+        member = None
+    if member and member.get('disabled_at'):
+        # Disabled members lose admin access regardless of bootstrap, except
+        # we still treat ADMIN_EMAILS as a recovery path so the owner can
+        # re-enable themselves via the env list.
+        if not bootstrap_owner:
+            return None, False
+        member = None
+    if member and _admin_roles.is_admin_role(member.get('role')):
+        return member.get('role'), bootstrap_owner
+    if bootstrap_owner:
+        # Lazy insert so future role lookups skip ADMIN_EMAILS.
+        try:
+            now = datetime.utcnow()
+            await db.admin_members.update_one(
+                {'user_id': user_id} if user_id else {'email': email},
+                {
+                    '$setOnInsert': {
+                        'id': secrets.token_urlsafe(12),
+                        'user_id': user_id,
+                        'email': email,
+                        'role': _admin_roles.ROLE_OWNER,
+                        'added_by_user_id': None,
+                        'added_by_email': 'ADMIN_EMAILS',
+                        'created_at': now,
+                        'updated_at': now,
+                    },
+                },
+                upsert=True,
+            )
+        except Exception:
+            pass
+        return _admin_roles.ROLE_OWNER, True
+    return None, False
+
+
 async def _require_admin(user_id: str) -> dict:
+    """Backward-compat: any admin role passes. Use _require_admin_permission
+    for finer-grained gates."""
     user = await db.users.find_one({'id': user_id})
-    email = ((user or {}).get('email') or '').lower()
-    if not email or email not in ADMIN_EMAILS:
+    role, _ = await _resolve_admin_role(user)
+    if not _admin_roles.is_admin_role(role):
         raise HTTPException(403, 'Admin access required')
     return user
+
+
+async def _require_admin_permission(user_id: str, permission: str) -> tuple[dict, str]:
+    """Permission-based gate. Returns (user, role) on success, 403 otherwise."""
+    user = await db.users.find_one({'id': user_id})
+    role, _ = await _resolve_admin_role(user)
+    if not _admin_roles.has_permission(role, permission):
+        raise HTTPException(403, 'Admin permission required')
+    return user, role
 
 
 async def _record_admin_action(
@@ -5184,19 +5248,29 @@ async def _record_admin_action(
 
 @api.get('/admin/me')
 async def admin_me(user_id: str = Depends(get_current_user_id)):
-    """Returns {is_admin: bool}. Never raises 403 — the frontend uses this
-    to decide whether to show the Admin nav entry; non-admins simply see
-    is_admin=False and the link stays hidden."""
+    """Phase 2.6: returns the caller's role + permission set.
+
+    Never raises 403 — the frontend uses this to decide what to render.
+    Non-admins simply see is_admin=False and admin nav stays hidden.
+    """
     user = await db.users.find_one({'id': user_id})
     email = ((user or {}).get('email') or '').lower()
-    return {'is_admin': bool(email and email in ADMIN_EMAILS), 'email': email or None}
+    role, bootstrap_owner = await _resolve_admin_role(user)
+    return {
+        'is_admin': _admin_roles.is_admin_role(role),
+        'role': role,
+        'permissions': sorted(_admin_roles.get_role_permissions(role)),
+        'bootstrap_owner': bool(bootstrap_owner),
+        'email': email or None,
+        'user_id': (user or {}).get('id'),
+    }
 
 
 @api.get('/admin/overview')
 async def admin_overview(user_id: str = Depends(get_current_user_id)):
     """Sanitized aggregate snapshot of the SaaS — totals + plan distribution
     + this month's usage roll-up + failure / queue health counts."""
-    await _require_admin(user_id)
+    await _require_admin_permission(user_id, _admin_roles.PERM_OVERVIEW_VIEW)
     now = datetime.utcnow()
     today_start = datetime(now.year, now.month, now.day)
     seven_days = today_start - timedelta(days=7)
@@ -5284,7 +5358,7 @@ async def admin_users_list(
     user_id: str = Depends(get_current_user_id),
 ):
     """Paginated, sanitized user list with usage roll-ups."""
-    await _require_admin(user_id)
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or 25), 100))
 
@@ -5397,7 +5471,7 @@ async def admin_user_detail(
     """Sanitized full profile of one user — plan, usage, accounts,
     automations, recent failures. Raw text is NEVER returned; comment/
     reply/DM bodies are not in this response."""
-    await _require_admin(user_id)
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     user = await db.users.find_one({'id': target_user_id})
     if not user:
         raise HTTPException(404, 'User not found')
@@ -5526,7 +5600,7 @@ async def admin_disable_automation(
     user_id: str = Depends(get_current_user_id),
 ):
     """Set automation.status='paused' (does NOT delete). Logs an audit row."""
-    admin_user = await _require_admin(user_id)
+    admin_user, _role = await _require_admin_permission(user_id, _admin_roles.PERM_AUTOMATIONS_DISABLE)
     automation = await db.automations.find_one({'id': automation_id})
     if not automation:
         raise HTTPException(404, 'Automation not found')
@@ -5564,7 +5638,7 @@ async def admin_audit_log(
     user_id: str = Depends(get_current_user_id),
 ):
     """Recent admin actions (sanitized). Useful for the console activity feed."""
-    await _require_admin(user_id)
+    await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
     limit = max(1, min(int(limit or 50), 200))
     cursor = db.admin_audit_logs.find().sort('created_at', -1).limit(limit)
     rows = await cursor.to_list(limit)
@@ -5583,6 +5657,196 @@ async def admin_audit_log(
             ),
         })
     return {'items': items, 'count': len(items)}
+
+
+# ---------------- admin members CRUD (Phase 2.6) ----------------
+
+async def _admin_members_count_owners(exclude_user_id: Optional[str] = None) -> int:
+    query = {'role': _admin_roles.ROLE_OWNER, 'disabled_at': None}
+    cursor = db.admin_members.find(query)
+    count = 0
+    async for row in cursor:
+        if exclude_user_id and row.get('user_id') == exclude_user_id:
+            continue
+        count += 1
+    return count
+
+
+async def _safe_member_row(row: dict) -> dict:
+    if not row:
+        return {}
+    bootstrap = bool((row.get('email') or '').lower() in ADMIN_EMAILS)
+    return {
+        'user_id': row.get('user_id'),
+        'email': row.get('email'),
+        'role': row.get('role'),
+        'added_by_user_id': row.get('added_by_user_id'),
+        'added_by_email': row.get('added_by_email'),
+        'created_at': (
+            row.get('created_at').isoformat()
+            if isinstance(row.get('created_at'), datetime) else row.get('created_at')
+        ),
+        'updated_at': (
+            row.get('updated_at').isoformat()
+            if isinstance(row.get('updated_at'), datetime) else row.get('updated_at')
+        ),
+        'disabled_at': (
+            row.get('disabled_at').isoformat()
+            if isinstance(row.get('disabled_at'), datetime) else row.get('disabled_at')
+        ),
+        'bootstrap_owner': bootstrap,
+    }
+
+
+@api.get('/admin/members')
+async def admin_members_list(user_id: str = Depends(get_current_user_id)):
+    """List admin members. Anyone with admin.members.view (admin/owner)."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_VIEW)
+    cursor = db.admin_members.find().sort('created_at', -1)
+    rows = []
+    async for r in cursor:
+        rows.append(await _safe_member_row(r))
+    return {'items': rows, 'count': len(rows)}
+
+
+@api.post('/admin/members')
+async def admin_members_add(
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Add a user to the admin team. Owner-only (admin.members.manage)."""
+    actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
+    target_email = ((body or {}).get('email') or '').strip().lower()
+    new_role = (body or {}).get('role') or _admin_roles.ROLE_VIEWER
+    reason = ((body or {}).get('reason') or '')[:200]
+    if not target_email:
+        raise HTTPException(400, 'email is required')
+    if not _admin_roles.is_valid_assignable_role(new_role):
+        raise HTTPException(400, f'role must be one of: {", ".join(_admin_roles.ASSIGNABLE_ROLE_KEYS)}')
+    if not _admin_roles.can_manage_role(actor_role, None, new_role):
+        raise HTTPException(403, 'Insufficient role to assign that role')
+    target_user = await db.users.find_one({'email': target_email})
+    if not target_user:
+        raise HTTPException(404, 'User not found for that email')
+    target_uid = target_user.get('id')
+    existing = await db.admin_members.find_one({
+        '$or': [{'user_id': target_uid}, {'email': target_email}],
+    })
+    now = datetime.utcnow()
+    update = {
+        '$set': {
+            'user_id': target_uid,
+            'email': target_email,
+            'role': new_role,
+            'added_by_user_id': user_id,
+            'added_by_email': (actor.get('email') or '').lower(),
+            'disabled_at': None,
+            'updated_at': now,
+        },
+        '$setOnInsert': {
+            'id': secrets.token_urlsafe(12),
+            'created_at': now,
+        },
+    }
+    await db.admin_members.update_one(
+        {'user_id': target_uid} if target_uid else {'email': target_email},
+        update,
+        upsert=True,
+    )
+    await _record_admin_action(
+        actor,
+        action='admin_member_added',
+        target_user_id=target_uid,
+        metadata={
+            'target_email_hash': _safe_text_hash(target_email)[:12],
+            'old_role': (existing or {}).get('role'),
+            'new_role': new_role,
+            'reason_length': len(reason),
+        },
+    )
+    saved = await db.admin_members.find_one(
+        {'user_id': target_uid} if target_uid else {'email': target_email}
+    )
+    return {'ok': True, 'member': await _safe_member_row(saved)}
+
+
+@api.patch('/admin/members/{target_user_id}')
+async def admin_members_update(
+    target_user_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Change a member's role. Owner-only (admin.members.manage)."""
+    actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
+    new_role = (body or {}).get('role')
+    reason = ((body or {}).get('reason') or '')[:200]
+    if not _admin_roles.is_valid_assignable_role(new_role):
+        raise HTTPException(400, f'role must be one of: {", ".join(_admin_roles.ASSIGNABLE_ROLE_KEYS)}')
+    member = await db.admin_members.find_one({'user_id': target_user_id})
+    if not member:
+        raise HTTPException(404, 'Member not found')
+    if not _admin_roles.can_manage_role(actor_role, member.get('role'), new_role):
+        raise HTTPException(403, 'Insufficient role to change that member')
+    # Last-owner invariant.
+    if member.get('role') == _admin_roles.ROLE_OWNER and new_role != _admin_roles.ROLE_OWNER:
+        owners_left = await _admin_members_count_owners(exclude_user_id=target_user_id)
+        if owners_left <= 0:
+            raise HTTPException(409, 'Cannot demote the last owner')
+    now = datetime.utcnow()
+    await db.admin_members.update_one(
+        {'user_id': target_user_id},
+        {'$set': {
+            'role': new_role,
+            'disabled_at': None,
+            'updated_at': now,
+        }},
+    )
+    await _record_admin_action(
+        actor,
+        action='admin_member_role_changed',
+        target_user_id=target_user_id,
+        metadata={
+            'old_role': member.get('role'),
+            'new_role': new_role,
+            'reason_length': len(reason),
+        },
+    )
+    refreshed = await db.admin_members.find_one({'user_id': target_user_id})
+    return {'ok': True, 'member': await _safe_member_row(refreshed)}
+
+
+@api.delete('/admin/members/{target_user_id}')
+async def admin_members_remove(
+    target_user_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Soft-disable a member. Owner-only (admin.members.manage).
+
+    Cannot remove the last owner.
+    """
+    actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
+    member = await db.admin_members.find_one({'user_id': target_user_id})
+    if not member:
+        raise HTTPException(404, 'Member not found')
+    if not _admin_roles.can_manage_role(actor_role, member.get('role')):
+        raise HTTPException(403, 'Insufficient role to remove that member')
+    if member.get('role') == _admin_roles.ROLE_OWNER:
+        owners_left = await _admin_members_count_owners(exclude_user_id=target_user_id)
+        if owners_left <= 0:
+            raise HTTPException(409, 'Cannot remove the last owner')
+    now = datetime.utcnow()
+    await db.admin_members.update_one(
+        {'user_id': target_user_id},
+        {'$set': {'disabled_at': now, 'updated_at': now}},
+    )
+    await _record_admin_action(
+        actor,
+        action='admin_member_removed',
+        target_user_id=target_user_id,
+        metadata={'old_role': member.get('role')},
+    )
+    refreshed = await db.admin_members.find_one({'user_id': target_user_id})
+    return {'ok': True, 'member': await _safe_member_row(refreshed)}
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -8210,10 +8474,7 @@ async def instagram_webhook_log(
     server logs and browser history. Raw payloads, full comment/DM text,
     and any token-like fields are NEVER returned.
     """
-    u = await db.users.find_one({'id': user_id})
-    email = (u or {}).get('email', '').lower()
-    if not email or email not in ADMIN_EMAILS:
-        raise HTTPException(403, 'Admin access required')
+    await _require_admin_permission(user_id, _admin_roles.PERM_FAILURES_VIEW)
     docs = await db.webhook_log.find().sort('received', -1).limit(max(1, min(limit, 50))).to_list(50)
     items = [_webhook_log_safe_summary(d) for d in docs]
     return {'items': items, 'count': await db.webhook_log.count_documents({})}
@@ -12566,6 +12827,23 @@ async def _startup():
         await db.admin_audit_logs.create_index(
             [('action', 1), ('created_at', -1)],
             name='admin_audit_action_created',
+        )
+        # Phase 2.6: admin_members.
+        await db.admin_members.create_index(
+            [('user_id', 1)], unique=True, sparse=True,
+            name='admin_members_user_unique',
+        )
+        await db.admin_members.create_index(
+            [('email', 1)], unique=True, sparse=True,
+            name='admin_members_email_unique',
+        )
+        await db.admin_members.create_index(
+            [('role', 1), ('created_at', -1)],
+            name='admin_members_role_created',
+        )
+        await db.admin_members.create_index(
+            [('disabled_at', 1)],
+            name='admin_members_disabled_at',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

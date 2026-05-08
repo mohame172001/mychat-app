@@ -4,7 +4,7 @@ import { Input } from '../../components/ui/input';
 import { Badge } from '../../components/ui/badge';
 import {
   ShieldAlert, Users, Activity, RefreshCw, Search, ArrowLeft,
-  CheckCircle2, AlertTriangle, Lock,
+  CheckCircle2, AlertTriangle, Lock, UserCog,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
@@ -13,6 +13,11 @@ import {
   PLAN_KEYS, PLAN_DISPLAY,
   hasAnyExceeded, planDistributionRows, planOptions, formatTimestamp,
 } from '../../lib/admin';
+import {
+  ROLE_DISPLAY, hasPermission, canManageRole, roleOptionsAssignableBy,
+  PERM_OVERVIEW_VIEW, PERM_USERS_VIEW, PERM_PLANS_ASSIGN,
+  PERM_AUTOMATIONS_DISABLE, PERM_MEMBERS_VIEW, PERM_MEMBERS_MANAGE,
+} from '../../lib/adminPermissions';
 
 /**
  * Phase 2.4 Admin Console v0.
@@ -193,12 +198,14 @@ function UsersTab({ onSelect }) {
   );
 }
 
-function UserDetailTab({ userId, onBack }) {
+function UserDetailTab({ userId, onBack, me }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [planKey, setPlanKey] = useState('');
   const [reason, setReason] = useState('');
   const [assigning, setAssigning] = useState(false);
+  const canAssignPlan = hasPermission(me, PERM_PLANS_ASSIGN);
+  const canDisableAutomation = hasPermission(me, PERM_AUTOMATIONS_DISABLE);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -285,25 +292,31 @@ function UserDetailTab({ userId, onBack }) {
                 </div>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2 items-center">
-              <select
-                value={planKey}
-                onChange={(e) => setPlanKey(e.target.value)}
-                className="rounded-md border border-slate-200 px-2 text-sm h-10"
-                data-testid="admin-detail-plan-select"
-              >
-                {planOptions().map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-              <Input
-                placeholder="Reason (e.g. 'beta tester')"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                className="flex-1 min-w-[180px]"
-              />
-              <Button onClick={onAssign} disabled={assigning} data-testid="admin-detail-assign-btn">
-                {assigning ? 'Saving…' : 'Assign plan'}
-              </Button>
-            </div>
+            {canAssignPlan ? (
+              <div className="flex flex-wrap gap-2 items-center" data-testid="admin-detail-plan-controls">
+                <select
+                  value={planKey}
+                  onChange={(e) => setPlanKey(e.target.value)}
+                  className="rounded-md border border-slate-200 px-2 text-sm h-10"
+                  data-testid="admin-detail-plan-select"
+                >
+                  {planOptions().map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                <Input
+                  placeholder="Reason (e.g. 'beta tester')"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className="flex-1 min-w-[180px]"
+                />
+                <Button onClick={onAssign} disabled={assigning} data-testid="admin-detail-assign-btn">
+                  {assigning ? 'Saving…' : 'Assign plan'}
+                </Button>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-500" data-testid="admin-detail-plan-readonly">
+                You don't have permission to change this user's plan.
+              </div>
+            )}
           </section>
 
           {/* Usage */}
@@ -363,7 +376,7 @@ function UserDetailTab({ userId, onBack }) {
                     {a.active
                       ? <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>
                       : <Badge className="bg-slate-100 text-slate-600 border-0">{a.status || 'paused'}</Badge>}
-                    {a.active && (
+                    {a.active && canDisableAutomation && (
                       <Button size="sm" variant="outline" onClick={() => onDisableAutomation(a.automation_id)}>
                         Pause
                       </Button>
@@ -405,6 +418,202 @@ function UserDetailTab({ userId, onBack }) {
     </div>
   );
 }
+
+function AdminsTab({ me }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [addEmail, setAddEmail] = useState('');
+  const [addRole, setAddRole] = useState('viewer');
+  const [addReason, setAddReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const canManage = hasPermission(me, PERM_MEMBERS_MANAGE);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/admin/members');
+      setData(data);
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to load members';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to load members');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const onAdd = useCallback(async (e) => {
+    e?.preventDefault?.();
+    if (!addEmail.trim()) return;
+    setSubmitting(true);
+    try {
+      await api.post('/admin/members', {
+        email: addEmail.trim().toLowerCase(),
+        role: addRole,
+        reason: addReason || 'manual_admin_assignment',
+      });
+      toast.success(`Added ${addEmail} as ${ROLE_DISPLAY[addRole]}`);
+      setAddEmail(''); setAddReason(''); setAddRole('viewer');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to add member';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to add member');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [addEmail, addRole, addReason, load]);
+
+  const onChangeRole = useCallback(async (member, newRole) => {
+    try {
+      await api.patch(`/admin/members/${encodeURIComponent(member.user_id)}`, {
+        role: newRole, reason: 'admin_role_change',
+      });
+      toast.success(`Role changed to ${ROLE_DISPLAY[newRole]}`);
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to change role';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to change role');
+    }
+  }, [load]);
+
+  const onRemove = useCallback(async (member) => {
+    if (!window.confirm(`Remove ${member.email}?`)) return;
+    try {
+      await api.delete(`/admin/members/${encodeURIComponent(member.user_id)}`);
+      toast.success('Member removed');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to remove member';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to remove member');
+    }
+  }, [load]);
+
+  const myRole = me?.role;
+  const assignableOptions = roleOptionsAssignableBy(myRole);
+
+  return (
+    <div data-testid="admin-admins">
+      <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
+        <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1">
+          You are
+        </div>
+        <div className="text-base font-semibold text-slate-800">
+          {ROLE_DISPLAY[myRole] || myRole}
+          {me?.bootstrap_owner && (
+            <span className="ml-2 text-xs text-blue-700">(bootstrap owner via ADMIN_EMAILS)</span>
+          )}
+        </div>
+        <div className="text-xs text-slate-400 mt-1">{(me?.permissions || []).length} permissions</div>
+      </section>
+
+      {canManage && (
+        <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-add-member">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Add admin member</h3>
+          <form className="flex flex-wrap gap-2 items-center" onSubmit={onAdd}>
+            <Input
+              placeholder="email@example.com"
+              value={addEmail}
+              onChange={(e) => setAddEmail(e.target.value)}
+              className="flex-1 min-w-[200px]"
+              type="email"
+            />
+            <select
+              value={addRole}
+              onChange={(e) => setAddRole(e.target.value)}
+              className="rounded-md border border-slate-200 px-2 text-sm h-10"
+              data-testid="admin-add-role-select"
+            >
+              {assignableOptions.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <Input
+              placeholder="Reason (optional)"
+              value={addReason}
+              onChange={(e) => setAddReason(e.target.value)}
+              className="flex-1 min-w-[160px]"
+            />
+            <Button type="submit" disabled={submitting || !addEmail.trim()} data-testid="admin-add-member-btn">
+              {submitting ? 'Adding…' : 'Add member'}
+            </Button>
+          </form>
+          <p className="text-xs text-slate-400 mt-2">
+            User must already have an account. No invitation email is sent.
+          </p>
+        </section>
+      )}
+
+      <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-slate-600">
+            <tr>
+              <th className="text-left px-3 py-2">Email</th>
+              <th className="text-left px-3 py-2">Role</th>
+              <th className="text-left px-3 py-2">Status</th>
+              <th className="text-left px-3 py-2">Added by</th>
+              <th className="text-left px-3 py-2">Created</th>
+              <th className="text-right px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.items || []).map(m => {
+              const canMutate = canManage && canManageRole(myRole, m.role);
+              return (
+                <tr key={m.user_id || m.email} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-mono">
+                    {m.email}
+                    {m.bootstrap_owner && <span className="ml-2 text-[10px] text-blue-700">bootstrap</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <Badge className="bg-slate-100 text-slate-700 border-0">
+                      {ROLE_DISPLAY[m.role] || m.role}
+                    </Badge>
+                  </td>
+                  <td className="px-3 py-2">
+                    {m.disabled_at
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0">Disabled</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">{m.added_by_email || '—'}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500">{formatTimestamp(m.created_at)}</td>
+                  <td className="px-3 py-2 text-right">
+                    {canMutate && !m.disabled_at && (
+                      <span className="inline-flex gap-1">
+                        <select
+                          value={m.role}
+                          onChange={(e) => onChangeRole(m, e.target.value)}
+                          className="rounded-md border border-slate-200 px-2 text-xs h-8"
+                          data-testid={`admin-member-role-${m.user_id}`}
+                        >
+                          {roleOptionsAssignableBy(myRole).map(o => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                          {/* Always show current role as an option even if not assignable. */}
+                          {!roleOptionsAssignableBy(myRole).some(o => o.value === m.role) && (
+                            <option value={m.role}>{ROLE_DISPLAY[m.role] || m.role}</option>
+                          )}
+                        </select>
+                        <Button size="sm" variant="ghost" onClick={() => onRemove(m)}>
+                          Remove
+                        </Button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {(!loading && (!data?.items || data.items.length === 0)) && (
+              <tr><td className="px-3 py-6 text-center text-slate-500" colSpan={6}>No members.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 
 export default function AdminConsole() {
   const [me, setMe] = useState(null);   // null = loading
@@ -466,13 +675,19 @@ export default function AdminConsole() {
   const onSelectUser = (uid) => { setSelectedUserId(uid); setTab('user-detail'); };
   const onBackToUsers = () => { setSelectedUserId(null); setTab('users'); };
 
+  const canViewOverview = hasPermission(me, PERM_OVERVIEW_VIEW);
+  const canViewUsers = hasPermission(me, PERM_USERS_VIEW);
+  const canViewMembers = hasPermission(me, PERM_MEMBERS_VIEW);
+
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto" data-testid="admin-console">
       <div className="mb-6">
         <div className="flex items-center gap-2 text-amber-700 mb-1">
           <Lock className="w-4 h-4" />
           <span className="text-xs font-semibold uppercase tracking-wide">Owner console</span>
-          <Badge className="bg-blue-100 text-blue-700 border-0 text-[10px]">admin</Badge>
+          <Badge className="bg-blue-100 text-blue-700 border-0 text-[10px]" data-testid="admin-current-role">
+            {ROLE_DISPLAY[me?.role] || me?.role}
+          </Badge>
         </div>
         <h1 className="text-3xl font-bold font-display">Admin</h1>
         <p className="text-slate-500 mt-1 text-sm">
@@ -481,25 +696,39 @@ export default function AdminConsole() {
         </p>
       </div>
 
-      <div className="flex gap-2 mb-4">
-        <Button
-          variant={tab === 'overview' ? 'default' : 'outline'}
-          size="sm"
-          onClick={() => { setTab('overview'); setSelectedUserId(null); }}
-          data-testid="admin-tab-overview"
-        >
-          <Activity className="w-4 h-4 mr-2" /> Overview
-        </Button>
-        <Button
-          variant={tab === 'users' || tab === 'user-detail' ? 'default' : 'outline'}
-          size="sm"
-          onClick={() => { setTab('users'); setSelectedUserId(null); }}
-          data-testid="admin-tab-users"
-        >
-          <Users className="w-4 h-4 mr-2" /> Users
-        </Button>
+      <div className="flex gap-2 mb-4 flex-wrap">
+        {canViewOverview && (
+          <Button
+            variant={tab === 'overview' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('overview'); setSelectedUserId(null); }}
+            data-testid="admin-tab-overview"
+          >
+            <Activity className="w-4 h-4 mr-2" /> Overview
+          </Button>
+        )}
+        {canViewUsers && (
+          <Button
+            variant={tab === 'users' || tab === 'user-detail' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('users'); setSelectedUserId(null); }}
+            data-testid="admin-tab-users"
+          >
+            <Users className="w-4 h-4 mr-2" /> Users
+          </Button>
+        )}
+        {canViewMembers && (
+          <Button
+            variant={tab === 'admins' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('admins'); setSelectedUserId(null); }}
+            data-testid="admin-tab-admins"
+          >
+            <UserCog className="w-4 h-4 mr-2" /> Admins
+          </Button>
+        )}
         <div className="ml-auto" />
-        {tab === 'overview' && (
+        {tab === 'overview' && canViewOverview && (
           <Button variant="outline" size="sm" onClick={loadOverview} disabled={overviewLoading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${overviewLoading ? 'animate-spin' : ''}`} />
             Refresh
@@ -507,11 +736,14 @@ export default function AdminConsole() {
         )}
       </div>
 
-      {tab === 'overview' && <OverviewTab data={overview} loading={overviewLoading} onRefresh={loadOverview} />}
-      {tab === 'users' && <UsersTab onSelect={onSelectUser} />}
-      {tab === 'user-detail' && selectedUserId && (
-        <UserDetailTab userId={selectedUserId} onBack={onBackToUsers} />
+      {tab === 'overview' && canViewOverview && (
+        <OverviewTab data={overview} loading={overviewLoading} onRefresh={loadOverview} />
       )}
+      {tab === 'users' && canViewUsers && <UsersTab onSelect={onSelectUser} />}
+      {tab === 'user-detail' && selectedUserId && canViewUsers && (
+        <UserDetailTab userId={selectedUserId} onBack={onBackToUsers} me={me} />
+      )}
+      {tab === 'admins' && canViewMembers && <AdminsTab me={me} />}
     </div>
   );
 }
