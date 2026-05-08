@@ -2,11 +2,13 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX, RotateCcw } from 'lucide-react';
+import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
+import { cachedApiGet, invalidateApiCache } from '../lib/apiCache';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
+const COMMENTS_TTL_MS = 15000;
 
 // Pure logic moved to lib/commentStatus.js so tests can import it
 // without pulling axios / sonner / browser-only deps.
@@ -57,14 +59,22 @@ const Comments = () => {
   const wsAttempts = useRef(0);
   const wsGaveUp = useRef(false);
 
-  const fetchComments = useCallback(async (pageToFetch, isReset) => {
+  const fetchComments = useCallback(async (pageToFetch, isReset, options = {}) => {
     if (isReset) setLoading(true);
     else setLoadingMore(true);
 
     try {
-      const { data } = await api.get('/comments', {
-        params: { page: pageToFetch, limit: 30, unreplied: unrepliedOnly }
-      });
+      const cacheKey = `comments:list:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
+      const data = await cachedApiGet(
+        cacheKey,
+        async () => {
+          const response = await api.get('/comments', {
+            params: { page: pageToFetch, limit: 30, unreplied: unrepliedOnly }
+          });
+          return response.data;
+        },
+        { ttlMs: COMMENTS_TTL_MS, force: options.force === true },
+      );
       
       // Fallback for older backend cache just in case
       const incomingComments = Array.isArray(data) ? data : data.comments;
@@ -189,7 +199,8 @@ const Comments = () => {
       } else {
         toast.error(`Retry failed (${reason})`);
       }
-      await fetchComments(1, true);
+      invalidateApiCache('comments:list');
+      await fetchComments(1, true, { force: true });
     } catch (err) {
       console.error('[Comments] retry-reply failed', err);
       const msg = err?.response?.data?.detail || 'Retry failed';
@@ -221,7 +232,14 @@ const Comments = () => {
             {unrepliedOnly ? 'Unreplied Only' : 'All Comments'}
           </Button>
 
-          <Button variant="outline" size="sm" onClick={() => fetchComments(1, true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              invalidateApiCache('comments:list');
+              fetchComments(1, true, { force: true });
+            }}
+          >
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </Button>
         </div>

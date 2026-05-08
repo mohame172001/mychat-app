@@ -43,6 +43,20 @@ def _click(account_id='igA', instagram_user_id='viewer1', user_id='u1', days_ago
     }
 
 
+def _comment(account_id='igA', commenter='viewer1', user_id='u1', days_ago=0, **extra):
+    dt = datetime.utcnow() - timedelta(days=days_ago)
+    doc = {
+        'id': f'comment-{account_id}-{commenter}-{days_ago}-{len(extra)}',
+        'user_id': user_id,
+        'instagramAccountId': account_id,
+        'commenter_id': commenter,
+        'created': dt,
+        'updated': dt,
+    }
+    doc.update(extra)
+    return doc
+
+
 def _summary_db():
     month = datetime.utcnow().strftime('%Y-%m')
     account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
@@ -114,9 +128,11 @@ def test_dashboard_summary_includes_plan_counters_from_monthly_usage(monkeypatch
 
     assert result['plan']['counters']['comments_processed'] == 9
     assert result['plan']['counters']['dms_sent'] == 5
-    assert result['commentsProcessed'] == 9
-    assert result['dmsSent'] == 5
-    assert result['publicRepliesSent'] == 4
+    # Dashboard cards stay active-account scoped; plan counters remain the
+    # user-month source of truth for billing/limit display.
+    assert result['commentsProcessed'] == 0
+    assert result['dmsSent'] == 1
+    assert result['publicRepliesSent'] == 1
 
 
 def test_dashboard_summary_does_not_expose_tokens(monkeypatch):
@@ -127,5 +143,76 @@ def test_dashboard_summary_does_not_expose_tokens(monkeypatch):
 
     payload = str(result)
     assert 'old-token' not in payload
+    assert 'accessToken' not in payload
+    assert 'meta_access_token' not in payload
+
+
+def test_dashboard_summary_prefers_provider_proof_for_active_account(monkeypatch):
+    month = datetime.utcnow().strftime('%Y-%m')
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    account_b = _account(id='accB', userId='u1', instagramAccountId='igB', username='acct_b')
+    fake_db = FakeDB(
+        account=[account_a, account_b],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        contacts=[],
+        comments=[
+            _comment(
+                'igA', 'viewer1',
+                action_status='success',
+                reply_status='success',
+                reply_provider_response_ok=True,
+                replied_at=datetime.utcnow(),
+                dm_status='success',
+                dm_sent_at=datetime.utcnow(),
+            ),
+            _comment(
+                'igA', 'viewer2',
+                action_status='partial_success',
+                reply_status='success',
+                reply_provider_response_ok=False,
+                replied_at=datetime.utcnow(),
+                dm_status='failed',
+            ),
+            _comment(
+                'igB', 'viewer3',
+                action_status='success',
+                reply_status='success',
+                reply_provider_response_ok=True,
+                replied_at=datetime.utcnow(),
+                dm_status='success',
+                dm_sent_at=datetime.utcnow(),
+            ),
+        ],
+        monthly_usage=[{
+            'id': 'usage1',
+            'user_id': 'u1',
+            'event_month': month,
+            'comments_processed': 99,
+            'public_replies_sent': 99,
+            'dms_sent': 99,
+            'links_clicked': 0,
+        }],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_summary(user_id='u1'))
+
+    assert result['commentsProcessed'] == 2
+    assert result['publicRepliesSent'] == 1
+    assert result['dmsSent'] == 1
+    assert result['messagesSent'] == 2
+    assert result['totalContacts'] == 2
+    assert sum(day['messages'] for day in result['weeklyPerformance']) == 2
+
+
+def test_dashboard_metric_sources_are_metadata_only(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_metric_sources(user_id='u1'))
+
+    assert 'user_dashboard' in result['metrics']
+    assert result['metrics']['user_dashboard']['public_replies_sent']['source']
+    payload = str(result)
     assert 'accessToken' not in payload
     assert 'meta_access_token' not in payload

@@ -5136,6 +5136,167 @@ def _dashboard_success_status(value: Any) -> bool:
     return str(value or '').strip().lower() in _DASHBOARD_SUCCESS_STATUSES
 
 
+DASHBOARD_METRIC_SOURCES = {
+    'user_dashboard': {
+        'comments_processed': {
+            'meaning': 'Eligible comments processed for the current user and active Instagram account.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'comments.action_status or usage_events.comment_processed fallback',
+            'freshness': 'near real-time from comment processing writes',
+            'limitations': 'Legacy comments without status fields are not counted unless usage events exist.',
+        },
+        'public_replies_sent': {
+            'meaning': 'Public Instagram comment replies accepted by Meta.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'comments.reply_status=success + reply_provider_response_ok=true',
+            'freshness': 'provider-confirmed',
+            'limitations': 'Legacy successes without provider proof are excluded.',
+        },
+        'dms_sent': {
+            'meaning': 'Automation DMs accepted by Meta.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'comments.dm_status=success or usage_events.dm_sent fallback',
+            'freshness': 'provider-confirmed/status-confirmed',
+            'limitations': 'Legacy unscoped counters are used only for single-account users.',
+        },
+        'messages_sent': {
+            'meaning': 'Public replies plus automation DMs sent this month.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'public_replies_sent + dms_sent',
+            'freshness': 'same as component metrics',
+            'limitations': 'False legacy successes are excluded unless repaired.',
+        },
+        'link_clicks': {
+            'meaning': 'Tracked link clicks this month.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'link_click_events',
+            'freshness': 'near real-time from tracking endpoint',
+            'limitations': 'Raw historical links sent without tracking cannot be inferred.',
+        },
+        'conversion_rate': {
+            'meaning': 'Unique Instagram users who clicked tracked links divided by total contacts.',
+            'scope': ['user_id', 'active_instagram_account_id', 'current_month'],
+            'source': 'unique link_click_events users / contacts plus observed commenters',
+            'freshness': 'near real-time',
+            'limitations': 'Contacts with no stable Instagram user key cannot be deduped.',
+        },
+        'active_automations': {
+            'meaning': 'Active automations scoped to the active Instagram account.',
+            'scope': ['user_id', 'active_instagram_account_id'],
+            'source': 'automations.status or enabled flags',
+            'freshness': 'immediate after save/cache invalidation',
+            'limitations': 'Legacy enabled-only rules are normalized as active when enabled=true.',
+        },
+        'queue_pending': {
+            'meaning': 'Pending or processing eligible comment automation work for the active account.',
+            'scope': ['user_id', 'active_instagram_account_id'],
+            'source': 'comments.action_status in pending/processing',
+            'freshness': 'queue write cadence',
+            'limitations': 'Bounded dashboard sample; admin views provide broader reconciliation.',
+        },
+    },
+    'admin_dashboard': {
+        'total_users': {
+            'meaning': 'All user records, including suspended and deleted users for audit continuity.',
+            'scope': ['global'],
+            'source': 'users collection',
+            'freshness': 'immediate',
+        },
+        'active_users': {
+            'meaning': 'Users not suspended or deleted.',
+            'scope': ['global'],
+            'source': 'users.status not in suspended/deleted',
+            'freshness': 'immediate',
+        },
+        'connected_instagram_accounts': {
+            'meaning': 'Instagram accounts currently marked connectionValid=true.',
+            'scope': ['global'],
+            'source': 'instagram_accounts.connectionValid',
+            'freshness': 'immediate after OAuth/token refresh status writes',
+        },
+        'active_automations': {
+            'meaning': 'Global active automation count.',
+            'scope': ['global'],
+            'source': 'automations.status=active',
+            'freshness': 'immediate after automation mutation',
+        },
+        'current_month_usage': {
+            'meaning': 'Summed monthly usage counters across users for the current month.',
+            'scope': ['global', 'current_month'],
+            'source': 'monthly_usage',
+            'freshness': 'usage event write cadence',
+            'limitations': 'Use reconciliation to detect drift from usage_events/provider status.',
+        },
+        'plan_limited_count': {
+            'meaning': 'Comments currently blocked by plan limits.',
+            'scope': ['global'],
+            'source': 'comments.action_status=plan_limited',
+            'freshness': 'immediate from automation processing',
+        },
+        'retryable_failure_count': {
+            'meaning': 'Comments requiring retry.',
+            'scope': ['global'],
+            'source': 'comments.action_status=failed_retryable',
+            'freshness': 'queue write cadence',
+        },
+        'permanent_failure_count': {
+            'meaning': 'Comments that reached permanent failure/exhausted retry.',
+            'scope': ['global'],
+            'source': 'comments.action_status in failed_permanent/failed_retry_exhausted',
+            'freshness': 'queue write cadence',
+        },
+    },
+}
+
+
+def _dashboard_month_bounds(month: Optional[str] = None) -> tuple:
+    if month and re.fullmatch(r'\d{4}-\d{2}', str(month)):
+        year, mon = [int(part) for part in str(month).split('-')]
+        start = datetime(year, mon, 1)
+    else:
+        now = datetime.utcnow()
+        start = datetime(now.year, now.month, 1)
+    if start.month == 12:
+        end = datetime(start.year + 1, 1, 1)
+    else:
+        end = datetime(start.year, start.month + 1, 1)
+    return start, end
+
+
+def _dashboard_comment_dt(comment: dict) -> Optional[datetime]:
+    return _dashboard_dt(
+        comment.get('replied_at'), comment.get('dm_sent_at'),
+        comment.get('last_attempt_at'), comment.get('processed_at'),
+        comment.get('updated'), comment.get('updatedAt'),
+        comment.get('created'), comment.get('createdAt'),
+        comment.get('timestamp'),
+    )
+
+
+def _dashboard_public_reply_confirmed(comment: dict) -> bool:
+    return (
+        str(comment.get('reply_status') or comment.get('replyStatus') or '').lower() == 'success'
+        and comment.get('reply_provider_response_ok') is True
+    )
+
+
+def _dashboard_dm_confirmed(comment: dict) -> bool:
+    return str(comment.get('dm_status') or comment.get('dmStatus') or '').lower() == 'success'
+
+
+def _dashboard_comment_processed(comment: dict) -> bool:
+    status = str(comment.get('action_status') or comment.get('actionStatus') or '').lower()
+    if status in {
+        'success', 'partial_success', 'pending', 'processing',
+        'failed_retryable', 'failed_permanent', 'failed_retry_exhausted',
+        'plan_limited',
+    }:
+        return True
+    if comment.get('matched_rule_id') or comment.get('matchedRuleId'):
+        return True
+    return _dashboard_public_reply_confirmed(comment) or _dashboard_dm_confirmed(comment)
+
+
 def _dashboard_comment_message_count(comment: dict) -> int:
     sent_count = 0
     if comment.get('replied') is True:
@@ -5236,6 +5397,20 @@ def _dashboard_auto_out(auto: dict) -> dict:
     }
 
 
+@api.get('/dashboard/metric-sources')
+async def dashboard_metric_sources(user_id: str = Depends(get_current_user_id)):
+    """Return the dashboard metric contract.
+
+    This is intentionally metadata-only: no raw comments, messages, tokens, or
+    provider payloads. It gives support/admin verification a stable source map
+    for the numbers shown in the UI.
+    """
+    return {
+        'metrics': DASHBOARD_METRIC_SOURCES,
+        'billing_enabled': False,
+    }
+
+
 @api.get('/dashboard/summary')
 async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
     """Compact dashboard payload for fast route transitions.
@@ -5259,18 +5434,21 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
     buckets = _dashboard_last_seven_buckets()
     start_day = datetime.fromisoformat(next(iter(buckets.keys()))).date()
     current_month = _usage_month(datetime.utcnow())
+    month_start, month_end = _dashboard_month_bounds(current_month)
 
     usage_summary = await get_current_usage_with_limits(user_id)
     counters = usage_summary.get('counters') or {}
 
     events = await _dashboard_usage_events_for_window(
         user_id,
-        ['public_reply_sent', 'dm_sent', 'link_clicked'],
+        ['comment_processed', 'public_reply_sent', 'dm_sent', 'link_clicked'],
         start_day,
     )
 
-    month_messages_sent = 0
-    month_link_clicks = 0
+    usage_comments_processed = 0
+    usage_public_replies = 0
+    usage_dms = 0
+    usage_link_clicks = 0
     for event in events:
         if not _dashboard_doc_matches_account(event, account, include_unscoped):
             continue
@@ -5280,16 +5458,20 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
         event_type = event.get('event_type')
         day_key = event_dt.date().isoformat()
         in_current_month = (event.get('event_month') or event_dt.strftime('%Y-%m')) == current_month
-        if event_type in ('public_reply_sent', 'dm_sent'):
+        if event_type == 'comment_processed':
+            if in_current_month:
+                usage_comments_processed += 1
+        elif event_type in ('public_reply_sent', 'dm_sent'):
             if day_key in buckets:
                 buckets[day_key]['messages'] += 1
             if in_current_month:
-                month_messages_sent += 1
+                if event_type == 'public_reply_sent':
+                    usage_public_replies += 1
+                else:
+                    usage_dms += 1
         elif event_type == 'link_clicked':
-            if day_key in buckets:
-                buckets[day_key]['conversions'] += 1
             if in_current_month:
-                month_link_clicks += 1
+                usage_link_clicks += 1
 
     autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 1000)
     active_autos = [auto for auto in autos if _automation_active(auto)]
@@ -5310,6 +5492,7 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
             contact_keys.add(key)
 
     converted_contacts = set()
+    tracked_month_link_clicks = 0
     try:
         clicks = await db.link_click_events.find({
             '$or': [{'userId': user_id}, {'user_id': user_id}],
@@ -5322,6 +5505,7 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
         click_dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
         if click_dt and click_dt.strftime('%Y-%m') != current_month:
             continue
+        tracked_month_link_clicks += 1
         key = _dashboard_key(
             click.get('instagramUserId') or click.get('instagram_user_id') or
             click.get('recipient_id') or click.get('sender_id')
@@ -5330,30 +5514,75 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
             converted_contacts.add(key)
             contact_keys.add(key)
 
-    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 500)
-    if not contact_keys:
-        for comment in recent_comments:
-            if not _dashboard_doc_matches_account(comment, account, include_unscoped):
-                continue
-            key = _dashboard_key(
-                comment.get('commenter_id') or comment.get('commenterId') or
-                comment.get('sender_id') or comment.get('instagramUserId') or
-                comment.get('commenter_username')
-            )
-            if key and key != ig_owner_id:
-                contact_keys.add(key)
+    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 5000)
+    provider_comments_processed = 0
+    provider_public_replies = 0
+    provider_dms = 0
+    provider_weekly_messages = {key: 0 for key in buckets.keys()}
+    for comment in recent_comments:
+        if not _dashboard_doc_matches_account(comment, account, include_unscoped):
+            continue
+        key = _dashboard_key(
+            comment.get('commenter_id') or comment.get('commenterId') or
+            comment.get('sender_id') or comment.get('instagramUserId') or
+            comment.get('commenter_username')
+        )
+        if key and key != ig_owner_id:
+            contact_keys.add(key)
+
+        comment_dt = _dashboard_comment_dt(comment)
+        in_current_month = bool(comment_dt and month_start <= comment_dt < month_end)
+        if in_current_month and _dashboard_comment_processed(comment):
+            provider_comments_processed += 1
+        if in_current_month and _dashboard_public_reply_confirmed(comment):
+            provider_public_replies += 1
+            day_key = comment_dt.date().isoformat() if comment_dt else None
+            if day_key in provider_weekly_messages:
+                provider_weekly_messages[day_key] += 1
+        if in_current_month and _dashboard_dm_confirmed(comment):
+            provider_dms += 1
+            day_key = comment_dt.date().isoformat() if comment_dt else None
+            if day_key in provider_weekly_messages:
+                provider_weekly_messages[day_key] += 1
 
     # For workspaces that do not yet have account-scoped usage_events, fall back
     # to the monthly_usage counters only when there is a single account. This
     # preserves isolation for multi-account users.
-    if include_unscoped and month_messages_sent == 0:
-        month_messages_sent = int(counters.get('public_replies_sent') or 0) + int(counters.get('dms_sent') or 0)
-    if include_unscoped and month_link_clicks == 0:
-        month_link_clicks = int(counters.get('links_clicked') or 0)
+    if include_unscoped:
+        usage_comments_processed = max(usage_comments_processed, int(counters.get('comments_processed') or 0))
+        usage_public_replies = max(usage_public_replies, int(counters.get('public_replies_sent') or 0))
+        usage_dms = max(usage_dms, int(counters.get('dms_sent') or 0))
+        usage_link_clicks = max(usage_link_clicks, int(counters.get('links_clicked') or 0))
+
+    comments_processed = max(provider_comments_processed, usage_comments_processed)
+    public_replies_sent = max(provider_public_replies, usage_public_replies)
+    dms_sent = max(provider_dms, usage_dms)
+    month_messages_sent = public_replies_sent + dms_sent
 
     total_contacts = len(contact_keys)
     converted_count = len(converted_contacts)
     conversion_rate = 0 if not total_contacts else round((converted_count / total_contacts) * 100, 1)
+    month_link_clicks = max(tracked_month_link_clicks, usage_link_clicks)
+
+    conversion_users_by_day = {key: set() for key in buckets.keys()}
+    for click in clicks:
+        if not _dashboard_doc_matches_account(click, account, include_unscoped):
+            continue
+        click_dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
+        day_key = click_dt.date().isoformat() if click_dt else None
+        if day_key not in conversion_users_by_day:
+            continue
+        user_key = _dashboard_key(
+            click.get('instagramUserId') or click.get('instagram_user_id') or
+            click.get('recipient_id') or click.get('sender_id') or click.get('id')
+        )
+        if user_key:
+            conversion_users_by_day[day_key].add(user_key)
+    if any(provider_weekly_messages.values()):
+        for day_key, count in provider_weekly_messages.items():
+            buckets[day_key]['messages'] = count
+    for day_key, users in conversion_users_by_day.items():
+        buckets[day_key]['conversions'] = len(users)
 
     try:
         connected_accounts = await db.instagram_accounts.count_documents({
@@ -5384,11 +5613,13 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
         'dashboard_summary_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
-        'messagesSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
+        'messagesSent=%s publicRepliesSent=%s dmsSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
         user_id,
         (account or {}).get('id'),
         instagram_account_id,
         month_messages_sent,
+        public_replies_sent,
+        dms_sent,
         len(active_autos),
         total_contacts,
         duration_ms,
@@ -5403,9 +5634,9 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
         'weeklyPerformance': weekly_performance,
         'linkClicks': month_link_clicks,
         'convertedContacts': converted_count,
-        'commentsProcessed': int(counters.get('comments_processed') or 0),
-        'publicRepliesSent': int(counters.get('public_replies_sent') or 0),
-        'dmsSent': int(counters.get('dms_sent') or 0),
+        'commentsProcessed': comments_processed,
+        'publicRepliesSent': public_replies_sent,
+        'dmsSent': dms_sent,
         'connectedAccounts': int(connected_accounts or 0),
         'queueSummary': queue_summary,
         'plan': usage_summary,
@@ -5905,6 +6136,7 @@ async def admin_me(user_id: str = Depends(get_current_user_id)):
 async def admin_overview(user_id: str = Depends(get_current_user_id)):
     """Sanitized aggregate snapshot of the SaaS — totals + plan distribution
     + this month's usage roll-up + failure / queue health counts."""
+    started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_OVERVIEW_VIEW)
     now = datetime.utcnow()
     today_start = datetime(now.year, now.month, now.day)
@@ -5913,6 +6145,9 @@ async def admin_overview(user_id: str = Depends(get_current_user_id)):
 
     # User totals
     total_users = await db.users.count_documents({})
+    active_users = await db.users.count_documents({'status': {'$nin': ['suspended', 'deleted']}})
+    suspended_users = await db.users.count_documents({'status': 'suspended'})
+    deleted_users = await db.users.count_documents({'status': 'deleted'})
     users_today = await db.users.count_documents({'created_at': {'$gte': today_start}})
     users_7d = await db.users.count_documents({'created_at': {'$gte': seven_days}})
     users_30d = await db.users.count_documents({'created_at': {'$gte': thirty_days}})
@@ -5958,8 +6193,14 @@ async def admin_overview(user_id: str = Depends(get_current_user_id)):
     })
     queue_pending = await db.comments.count_documents({'queued': True})
 
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info('admin_overview_calculated user_id=%s durationMs=%s', user_id, duration_ms)
+
     return {
         'total_users': total_users,
+        'active_users': active_users,
+        'suspended_users': suspended_users,
+        'deleted_users': deleted_users,
         'users_created_today': users_today,
         'users_created_7d': users_7d,
         'users_created_30d': users_30d,
@@ -6794,6 +7035,30 @@ async def admin_metrics_reconciliation(
     event_month = (month or _usage_month(datetime.utcnow())).strip()
     if not re.fullmatch(r'\d{4}-\d{2}', event_month):
         raise HTTPException(400, 'month must be YYYY-MM')
+    month_start, month_end = _dashboard_month_bounds(event_month)
+
+    async def _count_monthly_comments(predicate) -> int:
+        count = 0
+        cursor = db.comments.find({})
+        async for comment in cursor:
+            dt = _dashboard_comment_dt(comment)
+            if not dt or not (month_start <= dt < month_end):
+                continue
+            if predicate(comment):
+                count += 1
+        return count
+
+    async def _count_monthly_clicks() -> int:
+        count = 0
+        try:
+            cursor = db.link_click_events.find({})
+            async for click in cursor:
+                dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
+                if dt and month_start <= dt < month_end:
+                    count += 1
+        except Exception:
+            return 0
+        return count
 
     # ---- Recompute totals from raw sources ----
     # active automations
@@ -6813,24 +7078,19 @@ async def admin_metrics_reconciliation(
     # Recompute by counting comments with provider proof flagged in this
     # month. We use the comment's `replied_at` if present; otherwise
     # `updated`. This is approximate — admins read it as a sanity check.
-    recomputed_public_replies = await db.comments.count_documents({
-        'reply_provider_response_ok': True,
-    })
+    recomputed_public_replies = await _count_monthly_comments(_dashboard_public_reply_confirmed)
 
     dashboard_dms = 0
     cursor = db.monthly_usage.find({'event_month': event_month})
     async for r in cursor:
         dashboard_dms += int(r.get('dms_sent') or 0)
-    recomputed_dms = await db.comments.count_documents({'dm_status': 'success'})
+    recomputed_dms = await _count_monthly_comments(_dashboard_dm_confirmed)
 
     dashboard_links = 0
     cursor = db.monthly_usage.find({'event_month': event_month})
     async for r in cursor:
         dashboard_links += int(r.get('links_clicked') or 0)
-    try:
-        recomputed_links = await db.link_click_events.count_documents({})
-    except Exception:
-        recomputed_links = 0
+    recomputed_links = await _count_monthly_clicks()
 
     plan_limited = await db.comments.count_documents({'action_status': 'plan_limited'})
     retryable = await db.comments.count_documents({'action_status': 'failed_retryable'})
@@ -6859,13 +7119,13 @@ async def admin_metrics_reconciliation(
         _row('public_replies_sent_month',
              dashboard_public_replies, recomputed_public_replies,
              source='sum(monthly_usage.public_replies_sent) vs comments.reply_provider_response_ok=true',
-             notes='lifetime count vs monthly sum — approximate; expect mismatch on legacy data'),
+             notes='provider-proof comments only; legacy false successes are excluded'),
         _row('dms_sent_month', dashboard_dms, recomputed_dms,
              source='sum(monthly_usage.dms_sent) vs comments.dm_status=success',
-             notes='lifetime count vs monthly sum — approximate'),
+             notes='status-confirmed DMs only'),
         _row('links_clicked_month', dashboard_links, recomputed_links,
              source='sum(monthly_usage.links_clicked) vs link_click_events count',
-             notes='lifetime count vs monthly sum — approximate'),
+             notes='tracked link events only'),
         _row('plan_limited_counts', plan_limited, plan_limited,
              source='comments.action_status=plan_limited (single source)'),
         _row('retryable_failure_counts', retryable, retryable,
@@ -6877,6 +7137,7 @@ async def admin_metrics_reconciliation(
         'event_month': event_month,
         'items': rows,
         'mismatch_count': sum(1 for r in rows if r['status'] == 'mismatch'),
+        'metric_sources': DASHBOARD_METRIC_SOURCES,
         'billing_enabled': False,
     }
 
