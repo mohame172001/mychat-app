@@ -4,7 +4,7 @@ import { Input } from '../../components/ui/input';
 import { Badge } from '../../components/ui/badge';
 import {
   ShieldAlert, Users, Activity, RefreshCw, Search, ArrowLeft,
-  CheckCircle2, AlertTriangle, Lock, UserCog,
+  CheckCircle2, AlertTriangle, Lock, UserCog, BarChart3,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { toast } from 'sonner';
@@ -206,6 +206,16 @@ function UserDetailTab({ userId, onBack, me }) {
   const [assigning, setAssigning] = useState(false);
   const canAssignPlan = hasPermission(me, PERM_PLANS_ASSIGN);
   const canDisableAutomation = hasPermission(me, PERM_AUTOMATIONS_DISABLE);
+  const canManageUsers = hasPermission(me, PERM_USERS_MANAGE);
+  const canDeleteUsers = hasPermission(me, 'admin.owner.manage');
+  // Allowance form state
+  const [allowanceType, setAllowanceType] = useState('additive_allowance');
+  const [allowanceCommentsExtra, setAllowanceCommentsExtra] = useState('');
+  const [allowanceDmsExtra, setAllowanceDmsExtra] = useState('');
+  const [allowanceRepliesExtra, setAllowanceRepliesExtra] = useState('');
+  const [allowanceDays, setAllowanceDays] = useState('30');
+  const [allowanceReason, setAllowanceReason] = useState('');
+  const [grantBusy, setGrantBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -240,6 +250,94 @@ function UserDetailTab({ userId, onBack, me }) {
       setAssigning(false);
     }
   }, [userId, planKey, reason, load]);
+
+  const onCreateAllowance = useCallback(async () => {
+    const metrics = {};
+    if (parseInt(allowanceCommentsExtra, 10) > 0)
+      metrics.comments_processed_extra = parseInt(allowanceCommentsExtra, 10);
+    if (parseInt(allowanceDmsExtra, 10) > 0)
+      metrics.dms_sent_extra = parseInt(allowanceDmsExtra, 10);
+    if (parseInt(allowanceRepliesExtra, 10) > 0)
+      metrics.public_replies_sent_extra = parseInt(allowanceRepliesExtra, 10);
+    if (Object.keys(metrics).length === 0) {
+      toast.error('Enter at least one numeric allowance');
+      return;
+    }
+    setGrantBusy(true);
+    try {
+      const days = parseInt(allowanceDays, 10);
+      const ends_at = days > 0 ? new Date(Date.now() + days * 24 * 3600 * 1000).toISOString() : null;
+      await api.post(`/admin/users/${encodeURIComponent(userId)}/limit-overrides`, {
+        type: allowanceType, metrics,
+        starts_at: new Date().toISOString(), ends_at,
+        reason: allowanceReason || 'manual_admin_grant',
+      });
+      toast.success('Allowance granted');
+      setAllowanceCommentsExtra('');
+      setAllowanceDmsExtra('');
+      setAllowanceRepliesExtra('');
+      setAllowanceReason('');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to grant';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to grant');
+    } finally {
+      setGrantBusy(false);
+    }
+  }, [userId, allowanceType, allowanceCommentsExtra, allowanceDmsExtra,
+      allowanceRepliesExtra, allowanceDays, allowanceReason, load]);
+
+  const onRevokeAllowance = useCallback(async (overrideId) => {
+    if (!window.confirm('Revoke this allowance now?')) return;
+    try {
+      await api.patch(
+        `/admin/users/${encodeURIComponent(userId)}/limit-overrides/${encodeURIComponent(overrideId)}/revoke`,
+        { reason: 'admin_revoke' },
+      );
+      toast.success('Allowance revoked');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to revoke';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to revoke');
+    }
+  }, [userId, load]);
+
+  const onSuspend = useCallback(async () => {
+    const reasonText = window.prompt('Suspend reason (optional):', '') || '';
+    try {
+      await api.post(`/admin/users/${encodeURIComponent(userId)}/suspend`, { reason: reasonText });
+      toast.success('User suspended');
+      await load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || 'Failed to suspend');
+    }
+  }, [userId, load]);
+
+  const onUnsuspend = useCallback(async () => {
+    try {
+      await api.post(`/admin/users/${encodeURIComponent(userId)}/unsuspend`, {});
+      toast.success('User reactivated');
+      await load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || 'Failed to unsuspend');
+    }
+  }, [userId, load]);
+
+  const onSoftDelete = useCallback(async () => {
+    const reasonText = window.prompt(
+      'SOFT DELETE this user? This pauses all automations, disconnects IG accounts, and blocks login. Type a reason:',
+      '',
+    );
+    if (reasonText === null) return;
+    if (!window.confirm(`Confirm soft-delete of ${userId}? This cannot be undone via UI.`)) return;
+    try {
+      await api.post(`/admin/users/${encodeURIComponent(userId)}/delete`, { reason: reasonText });
+      toast.success('User soft-deleted');
+      await load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || 'Failed to delete');
+    }
+  }, [userId, load]);
 
   const onDisableAutomation = useCallback(async (automationId) => {
     if (!window.confirm(`Pause automation ${automationId}?`)) return;
@@ -315,6 +413,128 @@ function UserDetailTab({ userId, onBack, me }) {
             ) : (
               <div className="text-xs text-slate-500" data-testid="admin-detail-plan-readonly">
                 You don't have permission to change this user's plan.
+              </div>
+            )}
+          </section>
+
+          {/* Status + suspend/delete */}
+          <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-user-status">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Status</div>
+                <div className="mt-1 text-base font-semibold">
+                  {data.profile?.status === 'suspended'
+                    ? <Badge className="bg-amber-100 text-amber-800 border-0">Suspended</Badge>
+                    : data.profile?.status === 'deleted'
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0">Deleted</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
+                  {data.profile?.google_linked && (
+                    <Badge className="ml-2 bg-blue-100 text-blue-700 border-0">Google linked</Badge>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                {canManageUsers && data.profile?.status === 'active' && (
+                  <Button size="sm" variant="outline" onClick={onSuspend} data-testid="admin-suspend-btn">
+                    Suspend
+                  </Button>
+                )}
+                {canManageUsers && data.profile?.status === 'suspended' && (
+                  <Button size="sm" variant="outline" onClick={onUnsuspend} data-testid="admin-unsuspend-btn">
+                    Unsuspend
+                  </Button>
+                )}
+                {canDeleteUsers && data.profile?.status !== 'deleted' && (
+                  <Button size="sm" variant="outline"
+                          className="text-rose-700 border-rose-200 hover:bg-rose-50"
+                          onClick={onSoftDelete} data-testid="admin-soft-delete-btn">
+                    Soft delete
+                  </Button>
+                )}
+              </div>
+            </div>
+            {data.profile?.suspended_at && (
+              <div className="text-xs text-slate-500">
+                Suspended at {formatTimestamp(data.profile.suspended_at)}
+                {data.profile.suspended_by && <> by <span className="font-mono">{data.profile.suspended_by}</span></>}
+              </div>
+            )}
+            {data.profile?.deleted_at && (
+              <div className="text-xs text-slate-500">
+                Deleted at {formatTimestamp(data.profile.deleted_at)}
+                {data.profile.deleted_by && <> by <span className="font-mono">{data.profile.deleted_by}</span></>}
+              </div>
+            )}
+          </section>
+
+          {/* Active allowances + grant form */}
+          <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-allowances">
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">Custom allowances</h3>
+            {(!data.active_overrides || data.active_overrides.length === 0) && (
+              <div className="text-sm text-slate-500 mb-3">No active grants.</div>
+            )}
+            {data.active_overrides && data.active_overrides.length > 0 && (
+              <ul className="space-y-2 text-sm mb-3">
+                {data.active_overrides.map((ov) => (
+                  <li key={ov.id} className="flex items-start justify-between border-b border-slate-100 pb-2 last:border-0">
+                    <div>
+                      <div className="font-semibold">
+                        {ov.grant_name || ov.type}
+                        <Badge className="ml-2 bg-slate-100 text-slate-700 border-0 text-[10px]">{ov.type}</Badge>
+                      </div>
+                      <div className="text-xs text-slate-500 font-mono mt-1">
+                        {Object.entries(ov.metrics || {}).map(([k, v]) => (
+                          <span key={k} className="mr-3">{k}: +{v}</span>
+                        ))}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">
+                        starts {formatTimestamp(ov.starts_at)}
+                        {ov.ends_at && <> · ends {formatTimestamp(ov.ends_at)}</>}
+                        {ov.created_by_email && <> · by {ov.created_by_email}</>}
+                      </div>
+                    </div>
+                    {canAssignPlan && (
+                      <Button size="sm" variant="ghost" onClick={() => onRevokeAllowance(ov.id)}>
+                        Revoke
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {canAssignPlan && (
+              <div className="border-t border-slate-100 pt-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-2">
+                  Grant new allowance
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <select value={allowanceType} onChange={(e) => setAllowanceType(e.target.value)}
+                          className="rounded-md border border-slate-200 px-2 text-sm h-10"
+                          data-testid="admin-allowance-type-select">
+                    <option value="additive_allowance">Additive (extras on top of plan)</option>
+                    <option value="trial_grant">Trial grant (extras with end date)</option>
+                  </select>
+                  <Input type="number" min="0" placeholder="Days valid (0 = no end)"
+                         value={allowanceDays} onChange={(e) => setAllowanceDays(e.target.value)} />
+                  <Input type="number" min="0" placeholder="Extra comments processed"
+                         value={allowanceCommentsExtra}
+                         onChange={(e) => setAllowanceCommentsExtra(e.target.value)} />
+                  <Input type="number" min="0" placeholder="Extra DMs sent"
+                         value={allowanceDmsExtra}
+                         onChange={(e) => setAllowanceDmsExtra(e.target.value)} />
+                  <Input type="number" min="0" placeholder="Extra public replies"
+                         value={allowanceRepliesExtra}
+                         onChange={(e) => setAllowanceRepliesExtra(e.target.value)} />
+                  <Input placeholder="Reason / grant name (optional)"
+                         value={allowanceReason}
+                         onChange={(e) => setAllowanceReason(e.target.value)} />
+                </div>
+                <div className="mt-2">
+                  <Button onClick={onCreateAllowance} disabled={grantBusy}
+                          data-testid="admin-grant-allowance-btn">
+                    {grantBusy ? 'Granting…' : 'Grant allowance'}
+                  </Button>
+                </div>
               </div>
             )}
           </section>
@@ -615,6 +835,82 @@ function AdminsTab({ me }) {
 }
 
 
+function ReconciliationTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/admin/metrics/reconciliation');
+      setData(data);
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to load reconciliation';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to load reconciliation');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div data-testid="admin-reconciliation">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700">
+          Metrics reconciliation
+          {data?.event_month && <span className="text-slate-400 font-mono ml-2">{data.event_month}</span>}
+        </h3>
+        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </Button>
+      </div>
+      {data && data.mismatch_count > 0 && (
+        <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+             data-testid="reconciliation-mismatch-banner">
+          <AlertTriangle className="inline w-4 h-4 mr-1" />
+          {data.mismatch_count} mismatch(es) detected. Review the table below.
+        </div>
+      )}
+      <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-slate-600">
+            <tr>
+              <th className="text-left px-3 py-2">Metric</th>
+              <th className="text-right px-3 py-2">Dashboard</th>
+              <th className="text-right px-3 py-2">Recomputed</th>
+              <th className="text-right px-3 py-2">Δ</th>
+              <th className="text-left px-3 py-2">Status</th>
+              <th className="text-left px-3 py-2">Source</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.items || []).map((row) => (
+              <tr key={row.metric_name} className="border-t border-slate-100">
+                <td className="px-3 py-2 font-mono text-xs">{row.metric_name}</td>
+                <td className="px-3 py-2 text-right font-mono">{row.dashboard_value}</td>
+                <td className="px-3 py-2 text-right font-mono">{row.recomputed_value}</td>
+                <td className="px-3 py-2 text-right font-mono">{row.difference ?? '—'}</td>
+                <td className="px-3 py-2">
+                  {row.status === 'ok'
+                    ? <Badge className="bg-emerald-100 text-emerald-700 border-0">OK</Badge>
+                    : <Badge className="bg-amber-100 text-amber-800 border-0">Mismatch</Badge>}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-500">{row.source}</td>
+              </tr>
+            ))}
+            {(!loading && (!data?.items || data.items.length === 0)) && (
+              <tr><td className="px-3 py-6 text-center text-slate-500" colSpan={6}>No data.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const [me, setMe] = useState(null);   // null = loading
   const [overview, setOverview] = useState(null);
@@ -678,6 +974,7 @@ export default function AdminConsole() {
   const canViewOverview = hasPermission(me, PERM_OVERVIEW_VIEW);
   const canViewUsers = hasPermission(me, PERM_USERS_VIEW);
   const canViewMembers = hasPermission(me, PERM_MEMBERS_VIEW);
+  const canViewMetrics = hasPermission(me, 'admin.audit.view');
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto" data-testid="admin-console">
@@ -727,6 +1024,16 @@ export default function AdminConsole() {
             <UserCog className="w-4 h-4 mr-2" /> Admins
           </Button>
         )}
+        {canViewMetrics && (
+          <Button
+            variant={tab === 'metrics' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('metrics'); setSelectedUserId(null); }}
+            data-testid="admin-tab-metrics"
+          >
+            <BarChart3 className="w-4 h-4 mr-2" /> Metrics
+          </Button>
+        )}
         <div className="ml-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button variant="outline" size="sm" onClick={loadOverview} disabled={overviewLoading}>
@@ -744,6 +1051,7 @@ export default function AdminConsole() {
         <UserDetailTab userId={selectedUserId} onBack={onBackToUsers} me={me} />
       )}
       {tab === 'admins' && canViewMembers && <AdminsTab me={me} />}
+      {tab === 'metrics' && canViewMetrics && <ReconciliationTab />}
     </div>
   );
 }

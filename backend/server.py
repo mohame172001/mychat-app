@@ -456,33 +456,90 @@ async def _user_monthly_counters(user_id: str, month: Optional[str] = None) -> d
     return {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
 
 
+import limit_overrides as _overrides  # Phase 2.8: custom allowances
+
+
+async def get_active_user_limit_overrides(user_id: str,
+                                          now: Optional[datetime] = None) -> List[dict]:
+    """Return active override rows for a user. Empty list on errors."""
+    if not user_id:
+        return []
+    try:
+        rows = []
+        cursor = db.user_limit_overrides.find({
+            'user_id': str(user_id),
+            'status': _overrides.STATUS_ACTIVE,
+        })
+        async for r in cursor:
+            rows.append(r)
+        return _overrides.filter_active_overrides(rows, now)
+    except Exception:
+        return []
+
+
+async def compute_effective_limits(user_id: str, *,
+                                   now: Optional[datetime] = None) -> dict:
+    """Effective limits = base plan limits + active overrides.
+
+    Returns a dict with the same keys as a plan limit dict so callers
+    that previously passed the plan dict to limit-check helpers can
+    pass this instead.
+    """
+    plan = await get_user_plan(user_id)
+    base = {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS}
+    overrides = await get_active_user_limit_overrides(user_id, now)
+    eff = _overrides.compute_effective(base, overrides)
+    return eff
+
+
 async def get_current_usage_with_limits(user_id: str, month: Optional[str] = None) -> dict:
-    """Return the user's current-month usage, plan limits, and remaining."""
+    """Return the user's current-month usage, EFFECTIVE limits, and remaining.
+
+    Phase 2.8: 'limits' / 'remaining' / 'exceeded' / max_* values now
+    incorporate user_limit_overrides. The base plan is exposed
+    separately via 'base_limits' so the UI can show 'X added by your
+    free trial' etc.
+    """
     plan = await get_user_plan(user_id)
     counters = await _user_monthly_counters(user_id, month)
     snapshots = await _usage_snapshots_for_user(str(user_id))
-    limits = {key: plan.get(key) for key in _plans.LIMIT_COUNTER_KEYS}
+    base_limits = {key: plan.get(key) for key in _plans.LIMIT_COUNTER_KEYS}
+    overrides = await get_active_user_limit_overrides(user_id)
+    effective = _overrides.compute_effective(
+        {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS},
+        overrides,
+    )
+    limits = {key: effective.get(key) for key in _plans.LIMIT_COUNTER_KEYS}
     remaining_map = {}
     exceeded = {}
     for limit_key, counter_field in _plans.LIMIT_TO_COUNTER_FIELD.items():
         used = int(counters.get(counter_field) or 0)
-        limit_value = plan.get(limit_key)
+        limit_value = effective.get(limit_key)
         remaining_map[limit_key] = _plans.remaining(limit_value, used)
         exceeded[limit_key] = _plans.is_exceeded(limit_value, used, increment=0) or (
             limit_value is not None and used >= int(limit_value)
         )
+    explanation = _overrides.explain_effective(
+        {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS},
+        overrides,
+    )
     return {
         'plan_key': plan['plan_key'],
         'display_name': plan['display_name'],
         'billing_enabled': False,
         'limits': limits,
+        'base_limits': base_limits,
         'counters': counters,
         'remaining': remaining_map,
         'exceeded': exceeded,
         'connectedInstagramAccountsCount': int(snapshots.get('instagram_accounts_connected_snapshot') or 0),
         'activeAutomationsCount': int(snapshots.get('active_automations_snapshot') or 0),
-        'max_instagram_accounts': plan.get('max_instagram_accounts'),
-        'max_active_automations': plan.get('max_active_automations'),
+        'max_instagram_accounts': effective.get('max_instagram_accounts'),
+        'max_active_automations': effective.get('max_active_automations'),
+        'base_max_instagram_accounts': plan.get('max_instagram_accounts'),
+        'base_max_active_automations': plan.get('max_active_automations'),
+        'active_overrides_count': len(overrides),
+        'limits_explanation': explanation,
         'event_month': month or _usage_month(datetime.utcnow()),
     }
 
@@ -490,10 +547,12 @@ async def get_current_usage_with_limits(user_id: str, month: Optional[str] = Non
 async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> dict:
     """Return {exceeded, remaining, limit, used, plan_key}. Never raises.
 
-    Used by enforcement points (comment processing, public reply send,
-    DM send) to short-circuit before calling Meta. Errors fail OPEN so a
-    monitoring blip on monthly_usage never blocks the automation flow —
-    we'd rather over-deliver by a tiny amount than silently drop messages.
+    Phase 2.8: limits considered here are EFFECTIVE limits (base plan
+    plus active user_limit_overrides), so additive grants and trial
+    grants extend the cap before any Meta call is gated.
+
+    Errors fail OPEN so a monitoring blip on monthly_usage / overrides
+    never blocks the automation flow.
     """
     try:
         plan = await get_user_plan(user_id)
@@ -503,7 +562,12 @@ async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> 
                     'used': 0, 'plan_key': plan['plan_key'], 'fail_open': True}
         counters = await _user_monthly_counters(user_id)
         used = int(counters.get(counter_field) or 0)
-        limit_value = plan.get(limit_key)
+        overrides = await get_active_user_limit_overrides(user_id)
+        effective = _overrides.compute_effective(
+            {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS},
+            overrides,
+        )
+        limit_value = effective.get(limit_key)
         return {
             'exceeded': _plans.is_exceeded(limit_value, used, increment),
             'remaining': _plans.remaining(limit_value, used),
@@ -3030,6 +3094,8 @@ async def login(data: LoginIn, request: Request):
     u = await db.users.find_one({'username': data.username})
     if not u or not verify_password(data.password, u['password_hash']):
         raise HTTPException(401, 'Invalid username or password')
+    # Phase 2.8: block login for suspended/deleted users.
+    _ensure_user_active(u)
     return AuthOut(token=create_token(u['id']), user=_public_user(u))
 
 
@@ -3216,6 +3282,8 @@ async def auth_google(data: dict = Body(...), request: Request = None):
         await _seed_user(user_id)
         is_new_user = True
 
+    # Phase 2.8: block Google login for suspended/deleted users.
+    _ensure_user_active(user)
     # Sanitized log line: id only, no email or token contents.
     logger.info(
         'google_auth_success user_id=%s new_user=%s',
@@ -3268,7 +3336,8 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
     # Phase 2.2 plan enforcement: if creating directly as active, count it.
     if (automation_data.get('status') or '').lower() == 'active':
         plan = await get_user_plan(user_id)
-        max_active = plan.get('max_active_automations')
+        effective = await compute_effective_limits(user_id)
+        max_active = effective.get('max_active_automations')
         if max_active is not None:
             active_count = await db.automations.count_documents({
                 'user_id': user_id, 'status': 'active',
@@ -3429,7 +3498,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     # Phase 2.2 plan enforcement: block activation if at active-automation cap.
     if status_reenabled:
         plan = await get_user_plan(user_id)
-        max_active = plan.get('max_active_automations')
+        effective = await compute_effective_limits(user_id)
+        max_active = effective.get('max_active_automations')
         if max_active is not None:
             active_count = await db.automations.count_documents({
                 'user_id': user_id, 'status': 'active',
@@ -3685,7 +3755,8 @@ async def create_quick_comment_rule(
 
     # Phase 2.2 plan enforcement: this endpoint always creates active rules.
     plan = await get_user_plan(user_id)
-    max_active = plan.get('max_active_automations')
+    effective = await compute_effective_limits(user_id)
+    max_active = effective.get('max_active_automations')
     if max_active is not None:
         active_count = await db.automations.count_documents({
             'user_id': user_id, 'status': 'active',
@@ -5754,6 +5825,26 @@ async def admin_user_detail(
         'profile': {
             'user_id': target_user_id,
             'email': user.get('email'),
+            'username': user.get('username'),
+            'name': user.get('name'),
+            # Phase 2.7: Google identity fields (boolean only, never sub).
+            'google_linked': bool(user.get('google_sub')),
+            'email_verified': bool(user.get('email_verified')),
+            'auth_provider': user.get('auth_provider'),
+            'linked_providers': user.get('linked_providers') or [],
+            # Phase 2.8: status fields.
+            'status': _user_status(user),
+            'suspended_at': (
+                user.get('suspended_at').isoformat()
+                if isinstance(user.get('suspended_at'), datetime) else user.get('suspended_at')
+            ),
+            'suspended_by': user.get('suspended_by'),
+            'suspended_reason_length': user.get('suspended_reason_length'),
+            'deleted_at': (
+                user.get('deleted_at').isoformat()
+                if isinstance(user.get('deleted_at'), datetime) else user.get('deleted_at')
+            ),
+            'deleted_by': user.get('deleted_by'),
             'created_at': (
                 user.get('created_at').isoformat()
                 if isinstance(user.get('created_at'), datetime) else user.get('created_at')
@@ -5769,6 +5860,10 @@ async def admin_user_detail(
             'billing_enabled': False,
             **plan.get('_assignment', {}),
         },
+        'active_overrides': [
+            _overrides.safe_override_summary(r)
+            for r in await get_active_user_limit_overrides(target_user_id)
+        ],
         'usage_current_month': usage_now,
         'usage_last_month': {
             'event_month': last_month_key,
@@ -6035,6 +6130,379 @@ async def admin_members_remove(
     )
     refreshed = await db.admin_members.find_one({'user_id': target_user_id})
     return {'ok': True, 'member': await _safe_member_row(refreshed)}
+
+
+# ---------------- Phase 2.8 admin: allowances + suspend/delete + metrics ----
+
+def _user_status(user: Optional[dict]) -> str:
+    """Return user.status defaulting to 'active' for legacy rows."""
+    if not user:
+        return 'unknown'
+    s = (user.get('status') or 'active').lower()
+    return s
+
+
+def _ensure_user_active(user: Optional[dict]) -> None:
+    """Raise 403 if the user is suspended/deleted."""
+    s = _user_status(user)
+    if s == 'suspended':
+        raise HTTPException(403, 'account_suspended')
+    if s == 'deleted':
+        raise HTTPException(403, 'account_deleted')
+
+
+@api.get('/admin/users/{target_user_id}/limit-overrides')
+async def admin_list_user_overrides(
+    target_user_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Active + history overrides for a target user. View-only — anyone
+    with admin.users.view can read."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    rows = []
+    cursor = db.user_limit_overrides.find({'user_id': target_user_id}).sort('created_at', -1)
+    async for r in cursor:
+        rows.append(_overrides.safe_override_summary(r))
+    active = [r for r in rows if r.get('status') == _overrides.STATUS_ACTIVE]
+    return {'items': rows, 'count': len(rows), 'active_count': len(active)}
+
+
+@api.post('/admin/users/{target_user_id}/limit-overrides')
+async def admin_create_user_override(
+    target_user_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create a custom allowance / limit_override / trial_grant.
+    Requires admin.plans.assign (admin / owner)."""
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    target_user = await db.users.find_one({'id': target_user_id})
+    if not target_user:
+        raise HTTPException(404, 'User not found')
+
+    body = body or {}
+    override_type = body.get('type')
+    if not _overrides.is_valid_override_type(override_type):
+        raise HTTPException(
+            400, f'type must be one of: {", ".join(sorted(_overrides.VALID_OVERRIDE_TYPES))}'
+        )
+    grant_name = (body.get('grant_name') or '').strip()[:120]
+    reason = (body.get('reason') or '').strip()[:500]
+    raw_metrics = body.get('metrics') or {}
+    if not isinstance(raw_metrics, dict):
+        raise HTTPException(400, 'metrics must be an object')
+    allowed_keys = set(_overrides.ADDITIVE_KEYS) | set(_overrides.LIMIT_OVERRIDE_KEYS)
+    metrics: dict = {}
+    for k, v in raw_metrics.items():
+        if k not in allowed_keys:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n < 0:
+            continue
+        metrics[k] = n
+    if not metrics:
+        raise HTTPException(400, 'metrics must contain at least one allowed numeric field')
+
+    starts_at = _overrides._to_dt(body.get('starts_at')) or datetime.utcnow()
+    ends_at = _overrides._to_dt(body.get('ends_at'))
+    if ends_at and ends_at <= starts_at:
+        raise HTTPException(400, 'ends_at must be after starts_at')
+
+    now = datetime.utcnow()
+    row = {
+        '_id': secrets.token_urlsafe(12),
+        'id': secrets.token_urlsafe(12),
+        'user_id': target_user_id,
+        'type': override_type,
+        'status': _overrides.STATUS_ACTIVE,
+        'grant_name': grant_name or None,
+        'reason': reason or None,
+        'metrics': metrics,
+        'starts_at': starts_at,
+        'ends_at': ends_at,
+        'created_by_user_id': user_id,
+        'created_by_email': (actor.get('email') or '').lower(),
+        'created_at': now,
+        'updated_at': now,
+    }
+    await db.user_limit_overrides.insert_one(row)
+    await _record_admin_action(
+        actor,
+        action='user_limit_override_created',
+        target_user_id=target_user_id,
+        metadata={
+            'override_id': row['id'],
+            'type': override_type,
+            'metric_keys': sorted(list(metrics.keys())),
+            'reason_length': len(reason),
+        },
+    )
+    return {'ok': True, 'override': _overrides.safe_override_summary(row)}
+
+
+@api.patch('/admin/users/{target_user_id}/limit-overrides/{override_id}/revoke')
+async def admin_revoke_user_override(
+    target_user_id: str,
+    override_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    row = await db.user_limit_overrides.find_one({
+        'id': override_id, 'user_id': target_user_id,
+    })
+    if not row:
+        raise HTTPException(404, 'Override not found')
+    reason = ((body or {}).get('reason') or '').strip()[:500]
+    now = datetime.utcnow()
+    await db.user_limit_overrides.update_one(
+        {'id': override_id},
+        {'$set': {
+            'status': _overrides.STATUS_REVOKED,
+            'revoked_by_user_id': user_id,
+            'revoked_by_email': (actor.get('email') or '').lower(),
+            'revoked_at': now,
+            'updated_at': now,
+        }},
+    )
+    await _record_admin_action(
+        actor,
+        action='user_limit_override_revoked',
+        target_user_id=target_user_id,
+        metadata={'override_id': override_id, 'reason_length': len(reason)},
+    )
+    refreshed = await db.user_limit_overrides.find_one({'id': override_id})
+    return {'ok': True, 'override': _overrides.safe_override_summary(refreshed or row)}
+
+
+@api.get('/admin/users/{target_user_id}/effective-limits')
+async def admin_user_effective_limits(
+    target_user_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    summary = await get_current_usage_with_limits(target_user_id)
+    overrides = await get_active_user_limit_overrides(target_user_id)
+    return {
+        **summary,
+        'user_id': target_user_id,
+        'active_overrides': [_overrides.safe_override_summary(r) for r in overrides],
+    }
+
+
+# ---- suspend / soft delete ------------------------------------------------
+
+async def _admin_user_status_change(
+    actor: dict, target_user_id: str, *,
+    status: str, reason: str, action_name: str,
+    require_owner: bool = False,
+) -> dict:
+    target = await db.users.find_one({'id': target_user_id})
+    if not target:
+        raise HTTPException(404, 'User not found')
+    # Cannot demote/remove the last owner via suspend/delete either.
+    target_member = await db.admin_members.find_one({'user_id': target_user_id})
+    target_role = (target_member or {}).get('role')
+    if target_role == _admin_roles.ROLE_OWNER:
+        owners_left = await _admin_members_count_owners(exclude_user_id=target_user_id)
+        if owners_left <= 0:
+            raise HTTPException(409, 'Cannot suspend or delete the last owner')
+    now = datetime.utcnow()
+    update: dict = {
+        'status': status,
+        'updated_at': now,
+    }
+    reason_field = 'suspended_reason_length' if status == 'suspended' else 'delete_reason_length'
+    if status == 'suspended':
+        update['suspended_at'] = now
+        update['suspended_by'] = actor.get('id')
+        update[reason_field] = len(reason or '')
+    elif status == 'deleted':
+        update['deleted_at'] = now
+        update['deleted_by'] = actor.get('id')
+        update[reason_field] = len(reason or '')
+    elif status == 'active':
+        # Unsuspend: clear suspension fields but keep history in audit log.
+        update['suspended_at'] = None
+        update['suspended_by'] = None
+    await db.users.update_one({'id': target_user_id}, {'$set': update})
+    if status == 'deleted':
+        # Soft delete pauses all the user's automations to stop further
+        # Meta calls. Comments / usage / audit are preserved.
+        await db.automations.update_many(
+            {'user_id': target_user_id, 'status': 'active'},
+            {'$set': {'status': 'paused', 'updated': now, 'updatedAt': now,
+                       'admin_disabled_at': now, 'admin_disable_reason': 'soft_delete'}},
+        )
+        await db.instagram_accounts.update_many(
+            {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]},
+            {'$set': {'connectionValid': False, 'instagramConnected': False, 'updated': now}},
+        )
+    await _record_admin_action(
+        actor, action=action_name, target_user_id=target_user_id,
+        metadata={'reason_length': len(reason or ''), 'new_status': status},
+    )
+    refreshed = await db.users.find_one({'id': target_user_id})
+    return {
+        'ok': True,
+        'user_id': target_user_id,
+        'status': (refreshed or {}).get('status') or status,
+    }
+
+
+@api.post('/admin/users/{target_user_id}/suspend')
+async def admin_suspend_user(
+    target_user_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    reason = ((body or {}).get('reason') or '')
+    return await _admin_user_status_change(
+        actor, target_user_id,
+        status='suspended', reason=reason,
+        action_name='user_suspended',
+    )
+
+
+@api.post('/admin/users/{target_user_id}/unsuspend')
+async def admin_unsuspend_user(
+    target_user_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    reason = ((body or {}).get('reason') or '')
+    return await _admin_user_status_change(
+        actor, target_user_id,
+        status='active', reason=reason,
+        action_name='user_unsuspended',
+    )
+
+
+@api.post('/admin/users/{target_user_id}/delete')
+async def admin_soft_delete_user(
+    target_user_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Soft delete only. Pauses automations, disconnects IG accounts,
+    blocks login. Owner-only (admin.owner.manage). Cannot delete the
+    last owner. Cannot delete yourself. Hard delete is intentionally
+    NOT implemented in Phase 2.8."""
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_OWNER_MANAGE)
+    if user_id == target_user_id:
+        raise HTTPException(403, 'cannot_delete_self')
+    reason = ((body or {}).get('reason') or '')
+    return await _admin_user_status_change(
+        actor, target_user_id,
+        status='deleted', reason=reason,
+        action_name='user_soft_deleted',
+        require_owner=True,
+    )
+
+
+# ---- metrics reconciliation -----------------------------------------------
+
+@api.get('/admin/metrics/reconciliation')
+async def admin_metrics_reconciliation(
+    month: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Compare Admin Overview numbers against fresh aggregations from
+    raw collections. Read-only. Admin-only via admin.audit.view."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', event_month):
+        raise HTTPException(400, 'month must be YYYY-MM')
+
+    # ---- Recompute totals from raw sources ----
+    # active automations
+    dash_active_autos = await db.automations.count_documents({'status': 'active'})
+    recomputed_active_autos = dash_active_autos  # same source today
+
+    # connected IG accounts
+    dash_ig = await db.instagram_accounts.count_documents({'connectionValid': True})
+    recomputed_ig = dash_ig
+
+    # public_replies_sent (this month) recomputed from comments with provider proof
+    # vs sum of monthly_usage.public_replies_sent
+    dashboard_public_replies = 0
+    cursor = db.monthly_usage.find({'event_month': event_month})
+    async for r in cursor:
+        dashboard_public_replies += int(r.get('public_replies_sent') or 0)
+    # Recompute by counting comments with provider proof flagged in this
+    # month. We use the comment's `replied_at` if present; otherwise
+    # `updated`. This is approximate — admins read it as a sanity check.
+    recomputed_public_replies = await db.comments.count_documents({
+        'reply_provider_response_ok': True,
+    })
+
+    dashboard_dms = 0
+    cursor = db.monthly_usage.find({'event_month': event_month})
+    async for r in cursor:
+        dashboard_dms += int(r.get('dms_sent') or 0)
+    recomputed_dms = await db.comments.count_documents({'dm_status': 'success'})
+
+    dashboard_links = 0
+    cursor = db.monthly_usage.find({'event_month': event_month})
+    async for r in cursor:
+        dashboard_links += int(r.get('links_clicked') or 0)
+    try:
+        recomputed_links = await db.link_click_events.count_documents({})
+    except Exception:
+        recomputed_links = 0
+
+    plan_limited = await db.comments.count_documents({'action_status': 'plan_limited'})
+    retryable = await db.comments.count_documents({'action_status': 'failed_retryable'})
+    permanent = await db.comments.count_documents({
+        'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
+    })
+
+    def _row(name, dash, recomputed, source, notes=''):
+        diff = (dash - recomputed) if (isinstance(dash, int) and isinstance(recomputed, int)) else None
+        status = 'ok' if diff == 0 else 'mismatch'
+        return {
+            'metric_name': name,
+            'dashboard_value': dash,
+            'recomputed_value': recomputed,
+            'difference': diff,
+            'status': status,
+            'source': source,
+            'notes': notes,
+        }
+
+    rows = [
+        _row('active_automations', dash_active_autos, recomputed_active_autos,
+             source='automations.status=active'),
+        _row('connected_instagram_accounts', dash_ig, recomputed_ig,
+             source='instagram_accounts.connectionValid=true'),
+        _row('public_replies_sent_month',
+             dashboard_public_replies, recomputed_public_replies,
+             source='sum(monthly_usage.public_replies_sent) vs comments.reply_provider_response_ok=true',
+             notes='lifetime count vs monthly sum — approximate; expect mismatch on legacy data'),
+        _row('dms_sent_month', dashboard_dms, recomputed_dms,
+             source='sum(monthly_usage.dms_sent) vs comments.dm_status=success',
+             notes='lifetime count vs monthly sum — approximate'),
+        _row('links_clicked_month', dashboard_links, recomputed_links,
+             source='sum(monthly_usage.links_clicked) vs link_click_events count',
+             notes='lifetime count vs monthly sum — approximate'),
+        _row('plan_limited_counts', plan_limited, plan_limited,
+             source='comments.action_status=plan_limited (single source)'),
+        _row('retryable_failure_counts', retryable, retryable,
+             source='comments.action_status=failed_retryable (single source)'),
+        _row('permanent_failure_counts', permanent, permanent,
+             source='comments.action_status in failed_permanent/failed_retry_exhausted'),
+    ]
+    return {
+        'event_month': event_month,
+        'items': rows,
+        'mismatch_count': sum(1 for r in rows if r['status'] == 'mismatch'),
+        'billing_enabled': False,
+    }
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -7167,9 +7635,10 @@ async def instagram_auth_url(
     # not adding a new one).
     if oauth_mode == 'add_account':
         plan = await get_user_plan(user_id)
+        effective = await compute_effective_limits(user_id)
         snapshots = await _usage_snapshots_for_user(user_id)
         connected = int(snapshots.get('instagram_accounts_connected_snapshot') or 0)
-        max_accounts = plan.get('max_instagram_accounts')
+        max_accounts = effective.get('max_instagram_accounts')
         if max_accounts is not None and connected >= int(max_accounts):
             raise HTTPException(
                 402,
@@ -13020,6 +13489,28 @@ async def _startup():
         await db.users.create_index(
             [('google_sub', 1)], unique=True, sparse=True,
             name='users_google_sub_unique',
+        )
+        # Phase 2.8: user_limit_overrides indexes.
+        await db.user_limit_overrides.create_index(
+            [('user_id', 1), ('status', 1)],
+            name='user_limit_overrides_user_status',
+        )
+        await db.user_limit_overrides.create_index(
+            [('user_id', 1), ('starts_at', 1), ('ends_at', 1)],
+            name='user_limit_overrides_user_window',
+        )
+        await db.user_limit_overrides.create_index(
+            [('status', 1), ('ends_at', 1)],
+            name='user_limit_overrides_status_ends',
+        )
+        await db.user_limit_overrides.create_index(
+            [('created_by_user_id', 1), ('created_at', -1)],
+            name='user_limit_overrides_creator_created',
+        )
+        # Phase 2.8: status field on users (sparse — legacy rows treated as active).
+        await db.users.create_index(
+            [('status', 1)], sparse=True,
+            name='users_status',
         )
         # Phase 2.6: admin_members.
         await db.admin_members.create_index(

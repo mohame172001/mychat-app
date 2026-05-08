@@ -188,6 +188,7 @@ class FakeDB:
         self.user_plans = FakeCollection(collections.get('user_plans', []))
         self.admin_audit_logs = FakeCollection(collections.get('admin_audit_logs', []))
         self.admin_members = FakeCollection(collections.get('admin_members', []))
+        self.user_limit_overrides = FakeCollection(collections.get('user_limit_overrides', []))
 
 
 def _account(**overrides):
