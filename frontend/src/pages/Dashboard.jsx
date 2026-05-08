@@ -3,37 +3,80 @@ import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import {
-  Users, Zap, Send, TrendingUp, Plus
+  Users, Zap, Send, TrendingUp, Plus, RefreshCw
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
+import { cachedApiGet, getCachedApiData } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
+
+const DASHBOARD_TTL_MS = 45000;
 
 const Dashboard = () => {
   const { user } = useAuth();
-  const [stats, setStats] = useState(null);
-  const [autos, setAutos] = useState([]);
+  const cacheKey = [
+    'dashboard-summary',
+    user?.id || 'anon',
+    user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active',
+  ].join(':');
+  const [stats, setStats] = useState(() => getCachedApiData(cacheKey) || null);
+  const [loading, setLoading] = useState(!stats);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
   const [hoveredBar, setHoveredBar] = useState(null);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
+    const cached = getCachedApiData(cacheKey);
+    if (cached) {
+      setStats(cached);
+      setLoading(false);
+    } else {
+      setStats(null);
+      setLoading(true);
+    }
+
+    const load = async () => {
       try {
-        const [s, a] = await Promise.all([
-          api.get('/dashboard/stats'),
-          api.get('/automations'),
-        ]);
+        const result = await cachedApiGet(
+          cacheKey,
+          () => api.get('/dashboard/summary', { timeout: 8000 }),
+          { ttlMs: DASHBOARD_TTL_MS }
+        );
         if (!alive) return;
-        setStats(s.data);
-        setAutos(a.data);
+        setStats(result.data);
+        setError(result.error ? 'Showing cached dashboard data. Refresh failed.' : '');
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
+        if (alive) setError('Dashboard data could not be loaded.');
+      } finally {
+        if (alive) setLoading(false);
       }
-    })();
+    };
+    load();
     return () => {
       alive = false;
     };
-  }, [user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
+  }, [cacheKey]);
+
+  const refreshDashboard = async () => {
+    setRefreshing(true);
+    setError('');
+    try {
+      const result = await cachedApiGet(
+        cacheKey,
+        () => api.get('/dashboard/summary', { timeout: 8000 }),
+        { ttlMs: DASHBOARD_TTL_MS, force: true }
+      );
+      setStats(result.data);
+    } catch (err) {
+      console.error('[Dashboard] Refresh failed:', err);
+      setError('Refresh failed. Please try again.');
+    } finally {
+      setRefreshing(false);
+      setLoading(false);
+    }
+  };
 
   const chart = stats?.weeklyPerformance || stats?.weekly_chart || [];
   const maxVal = Math.max(
@@ -47,23 +90,42 @@ const Dashboard = () => {
   const statsCards = [
     { label: 'Total Contacts', value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
     { label: 'Active Automations', value: stats?.activeAutomations ?? stats?.active_automations ?? '-', icon: Zap },
-    { label: 'Messages Sent', value: (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString(), icon: Send },
+    { label: 'Messages Sent', value: stats ? (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString() : '-', icon: Send },
     { label: 'Conversion Rate', value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
   ];
+  const topAutomations = stats?.topAutomations || [];
 
   return (
-    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto" data-testid="dashboard-page">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Good morning, {user?.name}</h1>
           <p className="mt-1 text-slate-600">Here is what is happening with your Instagram automations today.</p>
         </div>
-        <Link to="/app/automations">
-          <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-            <Plus className="w-4 h-4 mr-1.5" /> New Automation
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            className="rounded-xl"
+            onClick={refreshDashboard}
+            disabled={refreshing}
+            data-testid="dashboard-refresh"
+          >
+            <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
           </Button>
-        </Link>
+          <Link to="/app/automations">
+            <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
+              <Plus className="w-4 h-4 mr-1.5" /> New Automation
+            </Button>
+          </Link>
+        </div>
       </div>
+
+      {error && (
+        <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {error}
+        </div>
+      )}
 
       <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {statsCards.map((s) => {
@@ -73,7 +135,11 @@ const Dashboard = () => {
               <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center">
                 <Icon className="w-5 h-5 text-slate-700" />
               </div>
-              <div className="mt-4 text-3xl font-extrabold font-display">{s.value}</div>
+              <div className="mt-4 text-3xl font-extrabold font-display">
+                {loading && !stats ? (
+                  <span className="block h-9 w-20 animate-pulse rounded-lg bg-slate-100" data-testid="dashboard-skeleton" />
+                ) : s.value}
+              </div>
               <div className="text-sm text-slate-500 mt-1">{s.label}</div>
             </Card>
           );
@@ -93,6 +159,9 @@ const Dashboard = () => {
             </div>
           </div>
           <div className="mt-6">
+            {loading && !chart.length ? (
+              <div className="h-48 animate-pulse rounded-xl bg-slate-100" data-testid="dashboard-chart-skeleton" />
+            ) : (
             <div className="flex gap-3">
               <div className="h-48 w-8 flex flex-col justify-between text-[11px] font-medium text-slate-400 text-right">
                 {yTicks.map((tick) => (
@@ -144,6 +213,7 @@ const Dashboard = () => {
                 </div>
               </div>
             </div>
+            )}
             <div className="ml-11 mt-2 grid grid-cols-7 gap-2 sm:gap-3">
               {chart.map((d) => (
                 <div key={d.date || d.day} className="text-center text-xs text-slate-500 font-medium">{d.day}</div>
@@ -160,7 +230,14 @@ const Dashboard = () => {
             <Link to="/app/automations" className="text-sm font-medium text-slate-600 hover:text-slate-900">View all</Link>
           </div>
           <div className="mt-4 space-y-3">
-            {autos.slice(0, 6).map(a => (
+            {loading && !topAutomations.length && (
+              <div className="space-y-3" data-testid="dashboard-automation-skeleton">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-16 animate-pulse rounded-xl bg-slate-100" />
+                ))}
+              </div>
+            )}
+            {topAutomations.map(a => (
               <div key={a.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors">
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center"><Zap className="w-5 h-5 text-white" /></div>
                 <div className="flex-1 min-w-0">
@@ -172,7 +249,7 @@ const Dashboard = () => {
                 </Badge>
               </div>
             ))}
-            {autos.length === 0 && <div className="text-sm text-slate-500 text-center py-6">No automations yet</div>}
+            {!loading && topAutomations.length === 0 && <div className="text-sm text-slate-500 text-center py-6">No automations yet</div>}
           </div>
         </Card>
       </div>

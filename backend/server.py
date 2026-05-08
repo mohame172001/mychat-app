@@ -5066,6 +5066,274 @@ def _dashboard_conversation_message_sent(message: dict) -> bool:
     return False
 
 
+def _dashboard_account_keys(account: Optional[dict]) -> set:
+    keys = set()
+    if not account:
+        return keys
+    for value in (
+        account.get('id'),
+        account.get('instagramAccountDbId'),
+        account.get('instagram_account_id'),
+        account.get('instagramAccountId'),
+        account.get('igUserId'),
+        account.get('accountId'),
+    ):
+        key = _dashboard_key(value)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _dashboard_doc_matches_account(doc: dict, account: Optional[dict], include_unscoped: bool) -> bool:
+    account_keys = _dashboard_account_keys(account)
+    doc_keys = set()
+    for field in (
+        'instagram_account_id', 'instagramAccountId', 'instagramAccountDbId',
+        'igUserId', 'ig_user_id', 'accountId',
+    ):
+        key = _dashboard_key(doc.get(field))
+        if key:
+            doc_keys.add(key)
+    if account_keys and doc_keys.intersection(account_keys):
+        return True
+    return include_unscoped and not doc_keys
+
+
+def _dashboard_last_seven_buckets() -> dict:
+    from collections import OrderedDict
+    today = datetime.utcnow().date()
+    buckets = OrderedDict()
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        buckets[d.isoformat()] = {
+            'day': d.strftime('%a'),
+            'date': d.isoformat(),
+            'messages': 0,
+            'conversions': 0,
+        }
+    return buckets
+
+
+def _dashboard_event_dt(event: dict) -> Optional[datetime]:
+    return _dashboard_dt(event.get('event_date'), event.get('created_at'), event.get('createdAt'))
+
+
+async def _dashboard_usage_events_for_window(user_id: str, event_types: list, start_date) -> list:
+    months = sorted({
+        (start_date + timedelta(days=i)).strftime('%Y-%m')
+        for i in range(0, 8)
+    })
+    try:
+        cursor = db.usage_events.find({
+            'user_id': str(user_id),
+            'event_month': {'$in': months},
+            'event_type': {'$in': event_types},
+        }).sort('event_date', -1).limit(5000)
+        return await cursor.to_list(5000)
+    except Exception:
+        return []
+
+
+def _dashboard_auto_out(auto: dict) -> dict:
+    return {
+        'id': auto.get('id'),
+        'name': auto.get('name') or 'Untitled automation',
+        'trigger': auto.get('trigger') or auto.get('keyword') or auto.get('match') or 'Comment trigger',
+        'status': auto.get('status') or ('active' if auto.get('enabled') else 'draft'),
+        'sent': int(auto.get('sent') or 0),
+    }
+
+
+@api.get('/dashboard/summary')
+async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
+    """Compact dashboard payload for fast route transitions.
+
+    The legacy /dashboard/stats endpoint intentionally remains available for
+    backwards compatibility, but it scans several large collections. This
+    summary uses monthly usage counters and bounded event windows so the app can
+    render the dashboard shell and first numbers without waiting on heavy
+    history aggregation.
+    """
+    started = datetime.utcnow()
+    try:
+        account = await getActiveInstagramAccount(user_id)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        account = None
+
+    include_unscoped = await _dashboard_include_unscoped(user_id)
+    instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
+    buckets = _dashboard_last_seven_buckets()
+    start_day = datetime.fromisoformat(next(iter(buckets.keys()))).date()
+    current_month = _usage_month(datetime.utcnow())
+
+    usage_summary = await get_current_usage_with_limits(user_id)
+    counters = usage_summary.get('counters') or {}
+
+    events = await _dashboard_usage_events_for_window(
+        user_id,
+        ['public_reply_sent', 'dm_sent', 'link_clicked'],
+        start_day,
+    )
+
+    month_messages_sent = 0
+    month_link_clicks = 0
+    for event in events:
+        if not _dashboard_doc_matches_account(event, account, include_unscoped):
+            continue
+        event_dt = _dashboard_event_dt(event)
+        if not event_dt:
+            continue
+        event_type = event.get('event_type')
+        day_key = event_dt.date().isoformat()
+        in_current_month = (event.get('event_month') or event_dt.strftime('%Y-%m')) == current_month
+        if event_type in ('public_reply_sent', 'dm_sent'):
+            if day_key in buckets:
+                buckets[day_key]['messages'] += 1
+            if in_current_month:
+                month_messages_sent += 1
+        elif event_type == 'link_clicked':
+            if day_key in buckets:
+                buckets[day_key]['conversions'] += 1
+            if in_current_month:
+                month_link_clicks += 1
+
+    autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 1000)
+    active_autos = [auto for auto in autos if _automation_active(auto)]
+    top_automations = [_dashboard_auto_out(auto) for auto in autos[:6]]
+
+    contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 2000)
+    ig_owner_id = _dashboard_key(instagram_account_id)
+    contact_keys = set()
+    for contact in contacts:
+        if not _dashboard_doc_matches_account(contact, account, include_unscoped):
+            continue
+        key = _dashboard_key(
+            contact.get('ig_id') or contact.get('instagramUserId') or
+            contact.get('instagram_user_id') or contact.get('username') or
+            contact.get('contact_id')
+        )
+        if key and key != ig_owner_id:
+            contact_keys.add(key)
+
+    converted_contacts = set()
+    try:
+        clicks = await db.link_click_events.find({
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
+        }).sort('clickedAt', -1).limit(5000).to_list(5000)
+    except Exception:
+        clicks = []
+    for click in clicks:
+        if not _dashboard_doc_matches_account(click, account, include_unscoped):
+            continue
+        click_dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
+        if click_dt and click_dt.strftime('%Y-%m') != current_month:
+            continue
+        key = _dashboard_key(
+            click.get('instagramUserId') or click.get('instagram_user_id') or
+            click.get('recipient_id') or click.get('sender_id')
+        )
+        if key and key != ig_owner_id:
+            converted_contacts.add(key)
+            contact_keys.add(key)
+
+    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 500)
+    if not contact_keys:
+        for comment in recent_comments:
+            if not _dashboard_doc_matches_account(comment, account, include_unscoped):
+                continue
+            key = _dashboard_key(
+                comment.get('commenter_id') or comment.get('commenterId') or
+                comment.get('sender_id') or comment.get('instagramUserId') or
+                comment.get('commenter_username')
+            )
+            if key and key != ig_owner_id:
+                contact_keys.add(key)
+
+    # For workspaces that do not yet have account-scoped usage_events, fall back
+    # to the monthly_usage counters only when there is a single account. This
+    # preserves isolation for multi-account users.
+    if include_unscoped and month_messages_sent == 0:
+        month_messages_sent = int(counters.get('public_replies_sent') or 0) + int(counters.get('dms_sent') or 0)
+    if include_unscoped and month_link_clicks == 0:
+        month_link_clicks = int(counters.get('links_clicked') or 0)
+
+    total_contacts = len(contact_keys)
+    converted_count = len(converted_contacts)
+    conversion_rate = 0 if not total_contacts else round((converted_count / total_contacts) * 100, 1)
+
+    try:
+        connected_accounts = await db.instagram_accounts.count_documents({
+            'userId': user_id,
+            'isActive': {'$ne': False},
+            'connectionValid': True,
+        })
+    except Exception:
+        connected_accounts = int(usage_summary.get('connectedInstagramAccountsCount') or 0)
+
+    queue_summary = {
+        'pending': 0,
+        'retryable': 0,
+        'permanentFailures': 0,
+        'partialSuccess': 0,
+    }
+    for comment in recent_comments:
+        status = str(comment.get('action_status') or comment.get('actionStatus') or '').lower()
+        if status in ('pending', 'processing'):
+            queue_summary['pending'] += 1
+        elif status in ('failed_retryable', 'retryable'):
+            queue_summary['retryable'] += 1
+        elif status in ('failed_permanent', 'failed_retry_exhausted'):
+            queue_summary['permanentFailures'] += 1
+        elif status == 'partial_success':
+            queue_summary['partialSuccess'] += 1
+
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'dashboard_summary_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
+        'messagesSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
+        user_id,
+        (account or {}).get('id'),
+        instagram_account_id,
+        month_messages_sent,
+        len(active_autos),
+        total_contacts,
+        duration_ms,
+    )
+
+    weekly_performance = list(buckets.values())
+    return {
+        'totalContacts': total_contacts,
+        'activeAutomations': len(active_autos),
+        'messagesSent': month_messages_sent,
+        'conversionRate': conversion_rate,
+        'weeklyPerformance': weekly_performance,
+        'linkClicks': month_link_clicks,
+        'convertedContacts': converted_count,
+        'commentsProcessed': int(counters.get('comments_processed') or 0),
+        'publicRepliesSent': int(counters.get('public_replies_sent') or 0),
+        'dmsSent': int(counters.get('dms_sent') or 0),
+        'connectedAccounts': int(connected_accounts or 0),
+        'queueSummary': queue_summary,
+        'plan': usage_summary,
+        'topAutomations': top_automations,
+        'lastUpdatedAt': datetime.utcnow().isoformat(),
+        'instagram': {
+            'connected': bool(account and account.get('connectionValid')),
+            'username': (account or {}).get('username') or None,
+            'activeAccountId': (account or {}).get('id') or None,
+            'instagramAccountId': instagram_account_id or None,
+        },
+        # Backward-compatible keys used by older frontend bundles.
+        'total_contacts': total_contacts,
+        'active_automations': len(active_autos),
+        'messages_sent': month_messages_sent,
+        'conversion_rate': conversion_rate,
+        'weekly_chart': weekly_performance,
+    }
+
+
 @api.get('/dashboard/stats')
 async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
     started = datetime.utcnow()

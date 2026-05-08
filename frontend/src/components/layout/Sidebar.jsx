@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { NavLink, Link } from 'react-router-dom';
+import { NavLink, Link, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Send, Settings,
   MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram, Activity,
@@ -19,6 +19,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
 import { useIsAdmin } from '../../lib/useIsAdmin';
+import { invalidateApiCache } from '../../lib/apiCache';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -33,6 +34,7 @@ export const navItems = [
 
 const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
+  const navigate = useNavigate();
   const [instagramAccounts, setInstagramAccounts] = useState([]);
   const [switchingAccount, setSwitchingAccount] = useState(false);
   const { isAdmin } = useIsAdmin();
@@ -69,8 +71,9 @@ const Sidebar = () => {
     try {
       await api.post(`/instagram/accounts/${account.id}/activate`);
       await refreshUser?.();
+      invalidateApiCache('dashboard-summary');
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
-      window.location.assign(`/app?igAccount=${encodeURIComponent(account.id)}`);
+      navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {
       toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
     }
