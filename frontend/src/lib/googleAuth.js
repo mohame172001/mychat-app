@@ -9,7 +9,7 @@
  *   - The credential JWT is forwarded to /api/auth/google and is never
  *     logged client-side.
  *   - When REACT_APP_GOOGLE_CLIENT_ID is unset, the helper returns
- *     {enabled: false} and the UI hides the button.
+ *     {enabled: false} and the UI renders a disabled not-configured state.
  *   - Pure helpers (`isGoogleAuthEnabled`, `googleStatus`) are unit-tested
  *     without any browser globals.
  */

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import api from '../lib/api';
 import { toast } from 'sonner';
+import { frontendRuntimeStatus } from '../lib/frontendRuntimeStatus';
 
 /**
  * Authenticated operations health page.
@@ -92,12 +93,7 @@ const SystemHealth = () => {
     try {
       const { data: obs } = await api.get('/observability/status');
       // Layer in frontend's runtime-known config (DSN/key never echoed).
-      const fe = {
-        sentry_configured: Boolean(process.env.REACT_APP_SENTRY_DSN),
-        posthog_configured: Boolean(process.env.REACT_APP_POSTHOG_KEY),
-        environment: process.env.REACT_APP_SENTRY_ENVIRONMENT || 'unknown',
-        build_sha: (process.env.REACT_APP_BUILD_SHA || process.env.REACT_APP_GIT_SHA || '').slice(0, 12) || null,
-      };
+      const fe = frontendRuntimeStatus();
       setObservability({ ...obs, frontend_runtime: fe });
     } catch (_) {
       setObservability(null);
@@ -295,6 +291,14 @@ const SystemHealth = () => {
                 {observability?.frontend_runtime?.posthog_configured
                   ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
                   : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Google Sign-In configured</span>
+              <span className="flex items-center gap-2" data-testid="google-signin-configured">
+                {observability?.frontend_runtime?.google_sign_in_configured
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> yes</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> no</>}
               </span>
             </div>
             <div className="flex items-center justify-between">
