@@ -3,7 +3,7 @@ import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Send, Settings,
   MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram, Activity,
-  CreditCard,
+  CreditCard, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../ui/button';
@@ -18,6 +18,7 @@ import {
 import api from '../../lib/api';
 import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
+import { useIsAdmin } from '../../lib/useIsAdmin';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -34,6 +35,7 @@ const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
   const [instagramAccounts, setInstagramAccounts] = useState([]);
   const [switchingAccount, setSwitchingAccount] = useState(false);
+  const { isAdmin } = useIsAdmin();
 
   useEffect(() => {
     let alive = true;
@@ -107,6 +109,16 @@ const Sidebar = () => {
             {label}
           </NavLink>
         ))}
+        {isAdmin && (
+          <NavLink
+            to="/app/admin"
+            data-testid="sidebar-admin-link"
+            className={({ isActive }) => `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors border-t border-slate-100 mt-2 pt-3 ${isActive ? 'bg-slate-900 text-white' : 'text-blue-700 hover:bg-blue-50'}`}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            Admin
+          </NavLink>
+        )}
       </nav>
       <div className="p-4 border-t border-slate-100 space-y-2">
         <DropdownMenu>

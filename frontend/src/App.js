@@ -20,6 +20,7 @@ const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
 const Terms = lazy(() => import('./pages/Terms'));
 const SystemHealth = lazy(() => import('./pages/SystemHealth'));
 const Billing = lazy(() => import('./pages/Billing'));
+const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
 const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
 
 const PageLoading = () => (
@@ -56,6 +57,7 @@ function App() {
                 <Route path="settings" element={<Settings />} />
                 <Route path="system-health" element={<SystemHealth />} />
                 <Route path="billing" element={<Billing />} />
+                <Route path="admin" element={<AdminConsole />} />
                 <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
               </Route>
             </Routes>

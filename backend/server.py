@@ -5039,6 +5039,13 @@ async def admin_assign_user_plan(
         'admin_plan_assigned target_user_id=%s plan_key=%s assigned_by=%s',
         target_user_id, plan_key, user_id,
     )
+    # Phase 2.4 admin audit log entry. Best-effort — never blocks the action.
+    await _record_admin_action(
+        caller,
+        action='plan_assign',
+        target_user_id=target_user_id,
+        metadata={'plan_key': plan_key, 'reason_length': len(str(reason or ''))},
+    )
     return {
         'ok': True,
         'user_id': target_user_id,
@@ -5104,6 +5111,451 @@ async def admin_user_usage(
         'plan': 'free',
         'billing_enabled': False,
     }
+
+
+# ---------------- admin console v0 (Phase 2.4) ----------------
+# Authenticated, sanitized admin endpoints for the product owner.
+# Auth: ADMIN_EMAILS only. Independent of ENABLE_ADMIN_REPAIR_TOOLS.
+# Privacy: never returns raw comment / reply / DM text, tokens, or
+# Authorization values. Returns counts, ids, statuses, hashes only.
+
+async def _require_admin(user_id: str) -> dict:
+    user = await db.users.find_one({'id': user_id})
+    email = ((user or {}).get('email') or '').lower()
+    if not email or email not in ADMIN_EMAILS:
+        raise HTTPException(403, 'Admin access required')
+    return user
+
+
+async def _record_admin_action(
+    admin_user: dict,
+    action: str,
+    target_user_id: Optional[str] = None,
+    target_automation_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Append a sanitized audit-log row. Failures never break the calling
+    admin endpoint — audit log is best-effort but loud on failure."""
+    try:
+        await db.admin_audit_logs.insert_one({
+            '_id': secrets.token_urlsafe(12),
+            'id': secrets.token_urlsafe(12),
+            'admin_user_id': str((admin_user or {}).get('id') or ''),
+            'admin_email': ((admin_user or {}).get('email') or '').lower(),
+            'action': action,
+            'target_user_id': str(target_user_id) if target_user_id else None,
+            'target_automation_id': str(target_automation_id) if target_automation_id else None,
+            'metadata': _sanitize_usage_metadata(metadata or {}),
+            'created_at': datetime.utcnow(),
+        })
+    except Exception as e:
+        logger.warning(
+            'admin_audit_log_failed action=%s admin=%s reason=%s',
+            action, ((admin_user or {}).get('email') or '').lower(), str(e)[:120],
+        )
+
+
+@api.get('/admin/me')
+async def admin_me(user_id: str = Depends(get_current_user_id)):
+    """Returns {is_admin: bool}. Never raises 403 — the frontend uses this
+    to decide whether to show the Admin nav entry; non-admins simply see
+    is_admin=False and the link stays hidden."""
+    user = await db.users.find_one({'id': user_id})
+    email = ((user or {}).get('email') or '').lower()
+    return {'is_admin': bool(email and email in ADMIN_EMAILS), 'email': email or None}
+
+
+@api.get('/admin/overview')
+async def admin_overview(user_id: str = Depends(get_current_user_id)):
+    """Sanitized aggregate snapshot of the SaaS — totals + plan distribution
+    + this month's usage roll-up + failure / queue health counts."""
+    await _require_admin(user_id)
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    seven_days = today_start - timedelta(days=7)
+    thirty_days = today_start - timedelta(days=30)
+
+    # User totals
+    total_users = await db.users.count_documents({})
+    users_today = await db.users.count_documents({'created_at': {'$gte': today_start}})
+    users_7d = await db.users.count_documents({'created_at': {'$gte': seven_days}})
+    users_30d = await db.users.count_documents({'created_at': {'$gte': thirty_days}})
+
+    # Instagram accounts
+    total_ig = await db.instagram_accounts.count_documents({})
+    connected_ig = await db.instagram_accounts.count_documents({'connectionValid': True})
+
+    # Automations
+    total_autos = await db.automations.count_documents({})
+    active_autos = await db.automations.count_documents({'status': 'active'})
+
+    # Current-month usage roll-up (sum across users)
+    month = _usage_month(now)
+    usage_totals = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    try:
+        cursor = db.monthly_usage.find({'event_month': month})
+        async for row in cursor:
+            for field in USAGE_COUNTER_FIELDS:
+                usage_totals[field] += int(row.get(field) or 0)
+    except Exception:
+        pass
+
+    # Plan distribution
+    plan_distribution = {key: 0 for key in _plans.PLAN_KEYS}
+    try:
+        cursor = db.user_plans.find({})
+        async for row in cursor:
+            key = row.get('plan_key')
+            if _plans.is_valid_plan_key(key):
+                plan_distribution[key] += 1
+    except Exception:
+        pass
+    # Users without a user_plans row are implicitly 'free'.
+    user_plan_rows = sum(plan_distribution.values())
+    plan_distribution['free'] += max(0, total_users - user_plan_rows)
+
+    # Failure / plan_limited counts (cheap counts on indexed fields)
+    plan_limited = await db.comments.count_documents({'action_status': 'plan_limited'})
+    retryable_failures = await db.comments.count_documents({'action_status': 'failed_retryable'})
+    permanent_failures = await db.comments.count_documents({
+        'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
+    })
+    queue_pending = await db.comments.count_documents({'queued': True})
+
+    return {
+        'total_users': total_users,
+        'users_created_today': users_today,
+        'users_created_7d': users_7d,
+        'users_created_30d': users_30d,
+        'total_instagram_accounts': total_ig,
+        'connected_instagram_accounts': connected_ig,
+        'total_automations': total_autos,
+        'active_automations': active_autos,
+        'event_month': month,
+        'current_month_usage_totals': usage_totals,
+        'plan_distribution': plan_distribution,
+        'plan_limited_counts': plan_limited,
+        'retryable_failure_counts': retryable_failures,
+        'permanent_failure_counts': permanent_failures,
+        'queue_health': {
+            'pending': queue_pending,
+            'failed_retryable': retryable_failures,
+            'failed_permanent': permanent_failures,
+            'plan_limited': plan_limited,
+        },
+        'billing_enabled': False,
+    }
+
+
+@api.get('/admin/users')
+async def admin_users_list(
+    page: int = 1,
+    page_size: int = 25,
+    search: Optional[str] = None,
+    plan_key: Optional[str] = None,
+    sort: Optional[str] = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Paginated, sanitized user list with usage roll-ups."""
+    await _require_admin(user_id)
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 25), 100))
+
+    query: dict = {}
+    if search:
+        s = str(search).strip()
+        if s:
+            # Match on email or id (sanitized regex).
+            esc = re.escape(s)
+            query['$or'] = [
+                {'email': {'$regex': esc, '$options': 'i'}},
+                {'id': s},
+            ]
+
+    # Plan filter requires a join — we resolve in two passes when filtering.
+    plan_filter_user_ids: Optional[set] = None
+    if plan_key:
+        if not _plans.is_valid_plan_key(plan_key):
+            raise HTTPException(400, f'Invalid plan_key: {plan_key}')
+        plan_filter_user_ids = set()
+        if plan_key == _plans.DEFAULT_PLAN_KEY:
+            # 'free' = users with no row OR row.plan_key=free.
+            # Cheaper: exclude the non-free plans, count rest.
+            non_free = set()
+            cursor = db.user_plans.find({'plan_key': {'$ne': 'free'}})
+            async for row in cursor:
+                non_free.add(row.get('user_id'))
+            cursor2 = db.users.find({})
+            async for row in cursor2:
+                if row.get('id') not in non_free:
+                    plan_filter_user_ids.add(row.get('id'))
+        else:
+            cursor = db.user_plans.find({'plan_key': plan_key})
+            async for row in cursor:
+                plan_filter_user_ids.add(row.get('user_id'))
+        if plan_filter_user_ids is not None:
+            query['id'] = {'$in': list(plan_filter_user_ids)}
+
+    sort_spec = [('created_at', -1)]
+    if sort == 'email':
+        sort_spec = [('email', 1)]
+    elif sort == 'created_at_asc':
+        sort_spec = [('created_at', 1)]
+
+    total = await db.users.count_documents(query)
+    skip = (page - 1) * page_size
+    cursor = db.users.find(query).sort(sort_spec).skip(skip).limit(page_size)
+    rows = await cursor.to_list(page_size)
+
+    month = _usage_month(datetime.utcnow())
+    items = []
+    for u in rows:
+        uid = u.get('id') or ''
+        plan = await get_user_plan(uid)
+        usage = await db.monthly_usage.find_one(
+            {'user_id': uid, 'event_month': month}
+        ) or {}
+        snapshots = await _usage_snapshots_for_user(uid)
+        counters = {f: int(usage.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
+        exceeded = {}
+        for limit_key, counter_field in _plans.LIMIT_TO_COUNTER_FIELD.items():
+            used = int(counters.get(counter_field) or 0)
+            limit_value = plan.get(limit_key)
+            exceeded[limit_key] = bool(
+                limit_value is not None and used >= int(limit_value)
+            )
+        items.append({
+            'user_id': uid,
+            'email': u.get('email'),
+            'created_at': (
+                u.get('created_at').isoformat()
+                if isinstance(u.get('created_at'), datetime) else u.get('created_at')
+            ),
+            'last_seen_at': (
+                u.get('last_seen_at').isoformat()
+                if isinstance(u.get('last_seen_at'), datetime) else u.get('last_seen_at')
+            ),
+            'plan_key': plan['plan_key'],
+            'billing_status': plan['_assignment'].get('billing_status') or 'manual',
+            'billing_enabled': False,
+            'instagram_accounts_count': int(snapshots.get('instagram_accounts_connected_snapshot') or 0),
+            'active_automations_count': int(snapshots.get('active_automations_snapshot') or 0),
+            'current_month_usage': {
+                'comments_processed': counters.get('comments_processed', 0),
+                'public_replies_sent': counters.get('public_replies_sent', 0),
+                'dms_sent': counters.get('dms_sent', 0),
+                'links_clicked': counters.get('links_clicked', 0),
+            },
+            'exceeded': exceeded,
+        })
+
+    return {
+        'items': items,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'total_pages': max(1, (total + page_size - 1) // page_size),
+        },
+        'event_month': month,
+        'billing_enabled': False,
+    }
+
+
+@api.get('/admin/users/{target_user_id}/detail')
+async def admin_user_detail(
+    target_user_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Sanitized full profile of one user — plan, usage, accounts,
+    automations, recent failures. Raw text is NEVER returned; comment/
+    reply/DM bodies are not in this response."""
+    await _require_admin(user_id)
+    user = await db.users.find_one({'id': target_user_id})
+    if not user:
+        raise HTTPException(404, 'User not found')
+
+    plan = await get_user_plan(target_user_id)
+    usage_now = await get_current_usage_with_limits(target_user_id)
+    last_month_dt = datetime.utcnow().replace(day=1) - timedelta(days=1)
+    last_month_key = _usage_month(last_month_dt)
+    last_month = await db.monthly_usage.find_one(
+        {'user_id': target_user_id, 'event_month': last_month_key}
+    ) or {}
+    last_month_counters = {f: int(last_month.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
+
+    # Instagram accounts (no tokens)
+    accounts = []
+    cursor = db.instagram_accounts.find(
+        {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]}
+    )
+    async for acc in cursor:
+        accounts.append({
+            'id': acc.get('id'),
+            'instagram_account_id': acc.get('instagramAccountId') or acc.get('igUserId'),
+            'username': acc.get('username'),
+            'connectionValid': bool(acc.get('connectionValid')),
+            'tokenSource': acc.get('tokenSource'),
+            'tokenExpiresAt': (
+                acc.get('tokenExpiresAt').isoformat()
+                if isinstance(acc.get('tokenExpiresAt'), datetime) else acc.get('tokenExpiresAt')
+            ),
+            'connected_at': (
+                acc.get('created').isoformat()
+                if isinstance(acc.get('created'), datetime) else acc.get('created')
+            ),
+            'active': bool(acc.get('active') or acc.get('isCurrent')),
+        })
+
+    # Automations
+    automations = []
+    auto_cursor = db.automations.find({'user_id': target_user_id}).sort('updated', -1).limit(50)
+    async for a in auto_cursor:
+        automations.append({
+            'automation_id': a.get('id'),
+            'name': a.get('name'),
+            'status': a.get('status'),
+            'active': (a.get('status') == 'active'),
+            'post_scope': a.get('post_scope'),
+            'selected_media_id': a.get('media_id'),
+            'created_at': (
+                a.get('createdAt').isoformat()
+                if isinstance(a.get('createdAt'), datetime) else a.get('createdAt')
+            ),
+            'updated_at': (
+                a.get('updated').isoformat()
+                if isinstance(a.get('updated'), datetime) else a.get('updated')
+            ),
+        })
+
+    # Recent failures (no raw text)
+    fail_query = {
+        'user_id': target_user_id,
+        'action_status': {'$in': [
+            'failed', 'failed_retryable', 'failed_permanent',
+            'failed_retry_exhausted', 'partial_success', 'plan_limited',
+        ]},
+    }
+    failures = []
+    fail_cursor = db.comments.find(fail_query).sort('updated', -1).limit(25)
+    async for c in fail_cursor:
+        failures.append({
+            'comment_id': c.get('id'),
+            'ig_comment_id': c.get('ig_comment_id') or c.get('igCommentId'),
+            'media_id': c.get('media_id') or c.get('mediaId'),
+            'reply_status': c.get('reply_status') or c.get('replyStatus'),
+            'dm_status': c.get('dm_status') or c.get('dmStatus'),
+            'action_status': c.get('action_status') or c.get('actionStatus'),
+            'skip_reason': c.get('skip_reason') or c.get('skipReason'),
+            'reply_failure_reason': c.get('reply_failure_reason'),
+            'dm_failure_reason': c.get('dm_failure_reason'),
+            'attempts': int(c.get('attempts') or 0),
+            'created_at': (
+                c.get('created').isoformat()
+                if isinstance(c.get('created'), datetime) else c.get('created')
+            ),
+            'updated_at': (
+                c.get('updated').isoformat()
+                if isinstance(c.get('updated'), datetime) else c.get('updated')
+            ),
+        })
+
+    return {
+        'user_id': target_user_id,
+        'profile': {
+            'user_id': target_user_id,
+            'email': user.get('email'),
+            'created_at': (
+                user.get('created_at').isoformat()
+                if isinstance(user.get('created_at'), datetime) else user.get('created_at')
+            ),
+            'last_seen_at': (
+                user.get('last_seen_at').isoformat()
+                if isinstance(user.get('last_seen_at'), datetime) else user.get('last_seen_at')
+            ),
+        },
+        'plan': {
+            'plan_key': plan['plan_key'],
+            'display_name': plan['display_name'],
+            'billing_enabled': False,
+            **plan.get('_assignment', {}),
+        },
+        'usage_current_month': usage_now,
+        'usage_last_month': {
+            'event_month': last_month_key,
+            'counters': last_month_counters,
+        },
+        'instagram_accounts': accounts,
+        'automations': automations,
+        'recent_failures': failures,
+        'billing_enabled': False,
+    }
+
+
+@api.post('/admin/automations/{automation_id}/disable')
+async def admin_disable_automation(
+    automation_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Set automation.status='paused' (does NOT delete). Logs an audit row."""
+    admin_user = await _require_admin(user_id)
+    automation = await db.automations.find_one({'id': automation_id})
+    if not automation:
+        raise HTTPException(404, 'Automation not found')
+    reason = ((body or {}).get('reason') or '')[:200]
+    now = datetime.utcnow()
+    await db.automations.update_one(
+        {'id': automation_id},
+        {'$set': {
+            'status': 'paused',
+            'admin_disabled_at': now,
+            'admin_disabled_by': user_id,
+            'admin_disable_reason': reason or None,
+            'updated': now,
+            'updatedAt': now,
+        }},
+    )
+    await _record_admin_action(
+        admin_user,
+        action='automation_disable',
+        target_user_id=automation.get('user_id'),
+        target_automation_id=automation_id,
+        metadata={'reason_present': bool(reason), 'reason_length': len(reason)},
+    )
+    return {
+        'ok': True,
+        'automation_id': automation_id,
+        'status': 'paused',
+        'admin_disabled_at': now.isoformat(),
+    }
+
+
+@api.get('/admin/audit-log')
+async def admin_audit_log(
+    limit: int = 50,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Recent admin actions (sanitized). Useful for the console activity feed."""
+    await _require_admin(user_id)
+    limit = max(1, min(int(limit or 50), 200))
+    cursor = db.admin_audit_logs.find().sort('created_at', -1).limit(limit)
+    rows = await cursor.to_list(limit)
+    items = []
+    for r in rows:
+        items.append({
+            'id': r.get('id'),
+            'admin_email': r.get('admin_email'),
+            'action': r.get('action'),
+            'target_user_id': r.get('target_user_id'),
+            'target_automation_id': r.get('target_automation_id'),
+            'metadata': r.get('metadata') or {},
+            'created_at': (
+                r.get('created_at').isoformat()
+                if isinstance(r.get('created_at'), datetime) else r.get('created_at')
+            ),
+        })
+    return {'items': items, 'count': len(items)}
 
 
 # ---------------- Instagram OAuth (Business Login) ----------------
@@ -12067,6 +12519,19 @@ async def _startup():
         # Phase 2.2: user_plans — one row per user.
         await db.user_plans.create_index(
             [('user_id', 1)], unique=True, name='user_plans_user_unique',
+        )
+        # Phase 2.4: admin audit log indexes for the console activity feed.
+        await db.admin_audit_logs.create_index(
+            [('admin_user_id', 1), ('created_at', -1)],
+            name='admin_audit_admin_created',
+        )
+        await db.admin_audit_logs.create_index(
+            [('target_user_id', 1), ('created_at', -1)],
+            name='admin_audit_target_user_created',
+        )
+        await db.admin_audit_logs.create_index(
+            [('action', 1), ('created_at', -1)],
+            name='admin_audit_action_created',
         )
     except Exception as e:
         logger.warning('account scoped index create: %s', e)

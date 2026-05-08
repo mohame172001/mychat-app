@@ -75,6 +75,14 @@ def _match(doc, query):
                 return False
             if '$ne' in expected and value == expected['$ne']:
                 return False
+            if '$regex' in expected:
+                import re as _re
+                flags = 0
+                if expected.get('$options', '').lower().count('i'):
+                    flags |= _re.IGNORECASE
+                pattern = expected['$regex']
+                if value is None or not _re.search(pattern, str(value), flags):
+                    return False
         elif value != expected:
             return False
     return True
@@ -83,11 +91,13 @@ def _match(doc, query):
 class FakeCursor:
     def __init__(self, docs):
         self.docs = docs
+        self._limit = None
 
     def sort(self, *_args, **_kwargs):
         return self
 
-    def limit(self, _limit):
+    def limit(self, n):
+        self._limit = n
         return self
 
     def skip(self, n):
@@ -95,7 +105,15 @@ class FakeCursor:
         return self
 
     async def to_list(self, limit):
-        return list(self.docs)[:limit]
+        cap = self._limit if self._limit is not None else limit
+        return list(self.docs)[:cap]
+
+    def __aiter__(self):
+        capped = list(self.docs)[: self._limit] if self._limit is not None else list(self.docs)
+        async def _gen():
+            for d in capped:
+                yield d
+        return _gen()
 
 
 class FakeCollection:
@@ -105,8 +123,8 @@ class FakeCollection:
     async def find_one(self, query):
         return next((doc for doc in self.docs if _match(doc, query)), None)
 
-    def find(self, query):
-        return FakeCursor([doc for doc in self.docs if _match(doc, query)])
+    def find(self, query=None):
+        return FakeCursor([doc for doc in self.docs if _match(doc, query or {})])
 
     async def update_one(self, query, update, upsert=False):
         doc = await self.find_one(query)
@@ -168,6 +186,7 @@ class FakeDB:
         self.usage_events = FakeCollection(collections.get('usage_events', []))
         self.monthly_usage = FakeCollection(collections.get('monthly_usage', []))
         self.user_plans = FakeCollection(collections.get('user_plans', []))
+        self.admin_audit_logs = FakeCollection(collections.get('admin_audit_logs', []))
 
 
 def _account(**overrides):
