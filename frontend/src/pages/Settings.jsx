@@ -11,6 +11,7 @@ import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import api from '../lib/api';
 import { startInstagramConnect } from '../lib/instagramConnect';
+import { instagramErrorMessage, instagramConnectExceptionMessage } from '../lib/instagramErrors';
 
 const tabs = [
   { id: 'profile', label: 'Profile', icon: User },
@@ -19,15 +20,6 @@ const tabs = [
   { id: 'billing', label: 'Billing', icon: CreditCard },
   { id: 'security', label: 'Security', icon: Shield }
 ];
-
-const instagramErrorMessage = (reason) => {
-  if (reason === 'token_cannot_call_graph_me') {
-    return 'Instagram connected failed: token cannot call /me';
-  }
-  if (reason === 'missing_code') return 'Instagram connection failed: OAuth code was missing';
-  if (reason === 'token_exchange_failed') return 'Instagram connection failed: token exchange failed';
-  return `Instagram connection failed: ${reason || 'unknown'}`;
-};
 
 const Settings = () => {
   const { user, refreshUser } = useAuth();
@@ -123,7 +115,7 @@ const Settings = () => {
                       <Button onClick={async () => {
                         setIgConnecting(true);
                         try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
-                        catch (e) { toast.error(e?.response?.data?.detail || 'Failed'); setIgConnecting(false); }
+                        catch (e) { toast.error(instagramConnectExceptionMessage(e)); setIgConnecting(false); }
                       }} variant="outline" className="rounded-xl" disabled={igConnecting}>
                         {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                         Refresh Token
@@ -156,7 +148,7 @@ const Settings = () => {
                     <Button onClick={async () => {
                       setIgConnecting(true);
                       try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
-                      catch (e) { toast.error(e?.response?.data?.detail || 'Failed - check IG_APP_ID/IG_APP_SECRET in .env'); setIgConnecting(false); }
+                      catch (e) { toast.error(instagramConnectExceptionMessage(e, 'Failed - check IG_APP_ID/IG_APP_SECRET in .env')); setIgConnecting(false); }
                     }} className="w-full bg-slate-900 text-white rounded-xl sm:w-auto" disabled={igConnecting}>
                       {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}
                       Connect Instagram

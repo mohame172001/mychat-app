@@ -189,6 +189,7 @@ class FakeDB:
         self.admin_audit_logs = FakeCollection(collections.get('admin_audit_logs', []))
         self.admin_members = FakeCollection(collections.get('admin_members', []))
         self.user_limit_overrides = FakeCollection(collections.get('user_limit_overrides', []))
+        self.instagram_account_trial_claims = FakeCollection(collections.get('instagram_account_trial_claims', []))
 
 
 def _account(**overrides):

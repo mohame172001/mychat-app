@@ -9,7 +9,7 @@ import re
 import secrets
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 import httpx
 
 from models import (
@@ -249,6 +250,50 @@ def _usage_month(dt: datetime) -> str:
     return dt.strftime('%Y-%m')
 
 
+def _monthly_usage_user_query(user_id: str, event_month: str) -> dict:
+    return {
+        'user_id': str(user_id),
+        'event_month': event_month,
+        '$or': [
+            {'limit_subject_type': 'user'},
+            {'limit_subject_type': {'$exists': False}},
+            {'limit_subject_type': None},
+        ],
+    }
+
+
+def _monthly_usage_user_scope_query(event_month: str) -> dict:
+    return {
+        'event_month': event_month,
+        '$or': [
+            {'limit_subject_type': 'user'},
+            {'limit_subject_type': {'$exists': False}},
+            {'limit_subject_type': None},
+        ],
+    }
+
+
+def _monthly_usage_instagram_query(instagram_account_id: str, event_month: str) -> dict:
+    return {
+        'event_month': event_month,
+        'limit_subject_type': 'instagram_account',
+        'limit_subject_id': str(instagram_account_id),
+    }
+
+
+def _canonical_instagram_account_id(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _safe_partial_identifier(value: Any) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    if len(raw) <= 6:
+        return f"***{raw[-2:]}"
+    return f"{raw[:3]}...{raw[-3:]}"
+
+
 def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
     """Keep usage metadata useful without storing tokens or message content."""
     if not isinstance(metadata, dict):
@@ -327,6 +372,8 @@ async def record_usage_event(
         'id': secrets.token_urlsafe(12),
         'user_id': str(user_id),
         'instagram_account_id': str(instagram_account_id) if instagram_account_id else None,
+        'limit_subject_type': 'instagram_account' if instagram_account_id else 'user',
+        'limit_subject_id': str(instagram_account_id) if instagram_account_id else str(user_id),
         'automation_id': str(automation_id) if automation_id else None,
         'comment_id': str(comment_id) if comment_id else None,
         'queue_job_id': str(queue_job_id) if queue_job_id else None,
@@ -342,6 +389,8 @@ async def record_usage_event(
         '_id': secrets.token_urlsafe(12),
         'id': secrets.token_urlsafe(12),
         'user_id': str(user_id),
+        'limit_subject_type': 'user',
+        'limit_subject_id': str(user_id),
         'event_month': event_month,
         'created_at': now,
     }
@@ -349,16 +398,45 @@ async def record_usage_event(
         set_on_insert[field] = 0
     update = {
         '$setOnInsert': set_on_insert,
-        '$set': {'updated_at': now, **await _usage_snapshots_for_user(str(user_id))},
+        '$set': {
+            'updated_at': now,
+            'limit_subject_type': 'user',
+            'limit_subject_id': str(user_id),
+            **await _usage_snapshots_for_user(str(user_id)),
+        },
     }
     counter = USAGE_COUNTER_BY_EVENT.get(event_type)
     if counter:
         update['$inc'] = {counter: 1}
     await db.monthly_usage.update_one(
-        {'user_id': str(user_id), 'event_month': event_month},
+        _monthly_usage_user_query(str(user_id), event_month),
         update,
         upsert=True,
     )
+    if instagram_account_id:
+        account_set_on_insert = dict(set_on_insert)
+        account_set_on_insert.update({
+            '_id': secrets.token_urlsafe(12),
+            'id': secrets.token_urlsafe(12),
+            'limit_subject_type': 'instagram_account',
+            'limit_subject_id': str(instagram_account_id),
+            'instagram_account_id': str(instagram_account_id),
+        })
+        account_update = {
+            '$setOnInsert': account_set_on_insert,
+            '$set': {
+                'updated_at': now,
+                'user_id': str(user_id),
+                'instagram_account_id': str(instagram_account_id),
+            },
+        }
+        if counter:
+            account_update['$inc'] = {counter: 1}
+        await db.monthly_usage.update_one(
+            _monthly_usage_instagram_query(str(instagram_account_id), event_month),
+            account_update,
+            upsert=True,
+        )
     return event
 
 
@@ -453,7 +531,17 @@ async def assign_user_plan(
 async def _user_monthly_counters(user_id: str, month: Optional[str] = None) -> dict:
     event_month = (month or _usage_month(datetime.utcnow())).strip()
     usage = await db.monthly_usage.find_one(
-        {'user_id': str(user_id), 'event_month': event_month}
+        _monthly_usage_user_query(str(user_id), event_month)
+    ) or {}
+    return {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
+
+
+async def _instagram_monthly_counters(instagram_account_id: str, month: Optional[str] = None) -> dict:
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    if not instagram_account_id:
+        return {field: 0 for field in USAGE_COUNTER_FIELDS}
+    usage = await db.monthly_usage.find_one(
+        _monthly_usage_instagram_query(str(instagram_account_id), event_month)
     ) or {}
     return {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
 
@@ -546,7 +634,15 @@ async def get_current_usage_with_limits(user_id: str, month: Optional[str] = Non
     }
 
 
-async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> dict:
+ACCOUNT_USAGE_LIMIT_KEYS = {
+    'monthly_comments_processed_limit',
+    'monthly_public_replies_sent_limit',
+    'monthly_dms_sent_limit',
+}
+
+
+async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1,
+                           instagram_account_id: Optional[str] = None) -> dict:
     """Return {exceeded, remaining, limit, used, plan_key}. Never raises.
 
     Phase 2.8: limits considered here are EFFECTIVE limits (base plan
@@ -562,7 +658,24 @@ async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> 
         if not counter_field:
             return {'exceeded': False, 'remaining': None, 'limit': None,
                     'used': 0, 'plan_key': plan['plan_key'], 'fail_open': True}
-        counters = await _user_monthly_counters(user_id)
+        canonical_ig_id = _canonical_instagram_account_id(instagram_account_id)
+        if canonical_ig_id and limit_key in ACCOUNT_USAGE_LIMIT_KEYS:
+            account_counters = await _instagram_monthly_counters(canonical_ig_id)
+            # Backward compatibility: before Phase 2.12, some production rows
+            # were user-scoped only. Until the safe backfill maps them, enforce
+            # the stricter value so reconnects never receive a fresh allowance.
+            legacy_user_counters = await _user_monthly_counters(user_id)
+            counters = {
+                field: max(int(account_counters.get(field) or 0),
+                           int(legacy_user_counters.get(field) or 0))
+                for field in USAGE_COUNTER_FIELDS
+            }
+            subject_type = 'instagram_account'
+            subject_id = canonical_ig_id
+        else:
+            counters = await _user_monthly_counters(user_id)
+            subject_type = 'user'
+            subject_id = str(user_id)
         used = int(counters.get(counter_field) or 0)
         overrides = await get_active_user_limit_overrides(user_id)
         effective = _overrides.compute_effective(
@@ -577,6 +690,8 @@ async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1) -> 
             'used': used,
             'plan_key': plan['plan_key'],
             'fail_open': False,
+            'limit_subject_type': subject_type,
+            'limit_subject_id': subject_id,
         }
     except Exception as e:
         logger.warning('plan_limit_check_failed user_id=%s limit_key=%s reason=%s',
@@ -2637,6 +2752,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 # public reply (if any) is unaffected.
                 dm_limit_check = await check_plan_limit(
                     user.get('id', ''), 'monthly_dms_sent_limit', increment=1,
+                    instagram_account_id=ig_user_id,
                 )
                 if dm_limit_check.get('exceeded') and not dm_limit_check.get('fail_open'):
                     flow_results['dm_status'] = 'plan_limited'
@@ -2822,6 +2938,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 # is exceeded. The DM step (if any) runs normally.
                 reply_limit_check = await check_plan_limit(
                     user.get('id', ''), 'monthly_public_replies_sent_limit', increment=1,
+                    instagram_account_id=ig_user_id,
                 )
                 if reply_limit_check.get('exceeded') and not reply_limit_check.get('fail_open'):
                     flow_results['reply_status'] = 'plan_limited'
@@ -6039,7 +6156,7 @@ async def admin_user_usage(
         raise HTTPException(400, 'month must be YYYY-MM')
 
     usage = await db.monthly_usage.find_one(
-        {'user_id': target_user_id, 'event_month': event_month}
+        _monthly_usage_user_query(target_user_id, event_month)
     ) or {}
     counters = {field: int(usage.get(field) or 0) for field in USAGE_COUNTER_FIELDS}
     snapshots = await _usage_snapshots_for_user(target_user_id)
@@ -6230,7 +6347,7 @@ async def admin_overview(user_id: str = Depends(get_current_user_id)):
     month = _usage_month(now)
     usage_totals = {field: 0 for field in USAGE_COUNTER_FIELDS}
     try:
-        cursor = db.monthly_usage.find({'event_month': month})
+        cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(month))
         async for row in cursor:
             for field in USAGE_COUNTER_FIELDS:
                 usage_totals[field] += int(row.get(field) or 0)
@@ -6357,7 +6474,7 @@ async def admin_users_list(
         uid = u.get('id') or ''
         plan = await get_user_plan(uid)
         usage = await db.monthly_usage.find_one(
-            {'user_id': uid, 'event_month': month}
+            _monthly_usage_user_query(uid, month)
         ) or {}
         snapshots = await _usage_snapshots_for_user(uid)
         counters = {f: int(usage.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
@@ -6430,7 +6547,7 @@ async def admin_user_detail(
     last_month_dt = datetime.utcnow().replace(day=1) - timedelta(days=1)
     last_month_key = _usage_month(last_month_dt)
     last_month = await db.monthly_usage.find_one(
-        {'user_id': target_user_id, 'event_month': last_month_key}
+        _monthly_usage_user_query(target_user_id, last_month_key)
     ) or {}
     last_month_counters = {f: int(last_month.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
 
@@ -6440,9 +6557,26 @@ async def admin_user_detail(
         {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]}
     )
     async for acc in cursor:
+        canonical_ig_id = _canonical_instagram_account_id(
+            acc.get('instagramAccountId') or acc.get('igUserId')
+        )
+        account_usage = await _instagram_monthly_counters(canonical_ig_id) if canonical_ig_id else {
+            field: 0 for field in USAGE_COUNTER_FIELDS
+        }
+        trial_claim = None
+        if canonical_ig_id:
+            trial_claim = await db.instagram_account_trial_claims.find_one({
+                'instagram_account_id': canonical_ig_id,
+            })
+        ownership_status = acc.get('ownershipStatus') or (
+            'active_owner' if acc.get('connectionValid') and acc.get('isActive') is not False
+            else 'disconnected'
+        )
         accounts.append({
             'id': acc.get('id'),
-            'instagram_account_id': acc.get('instagramAccountId') or acc.get('igUserId'),
+            'instagram_account_id': canonical_ig_id,
+            'instagram_account_id_partial': _safe_partial_identifier(canonical_ig_id),
+            'instagram_account_id_hash': _hash_tracking_value(canonical_ig_id) if canonical_ig_id else None,
             'username': acc.get('username'),
             'connectionValid': bool(acc.get('connectionValid')),
             'tokenSource': acc.get('tokenSource'),
@@ -6455,6 +6589,13 @@ async def admin_user_detail(
                 if isinstance(acc.get('created'), datetime) else acc.get('created')
             ),
             'active': bool(acc.get('active') or acc.get('isCurrent')),
+            'ownership_status': ownership_status,
+            'usage_subject': {
+                'type': 'instagram_account',
+                'id_partial': _safe_partial_identifier(canonical_ig_id),
+            } if canonical_ig_id else None,
+            'prior_usage_history': any(int(account_usage.get(field) or 0) > 0 for field in USAGE_COUNTER_FIELDS),
+            'trial_claim_exists': bool(trial_claim),
         })
 
     # Automations
@@ -6905,6 +7046,12 @@ async def admin_create_user_override(
     ends_at = _overrides._to_dt(body.get('ends_at'))
     if ends_at and ends_at <= starts_at:
         raise HTTPException(400, 'ends_at must be after starts_at')
+    instagram_trial_account_ids: List[str] = []
+    if override_type == _overrides.OVERRIDE_TYPE_TRIAL:
+        instagram_trial_account_ids = await _ensure_instagram_trial_claim_available(
+            target_user_id,
+            'trial_grant',
+        )
 
     now = datetime.utcnow()
     row = {
@@ -6924,6 +7071,9 @@ async def admin_create_user_override(
         'updated_at': now,
     }
     await db.user_limit_overrides.insert_one(row)
+    if override_type == _overrides.OVERRIDE_TYPE_TRIAL:
+        for canonical in instagram_trial_account_ids:
+            await _record_instagram_trial_claim(target_user_id, canonical, 'trial_grant')
     await _record_admin_action(
         actor,
         action='user_limit_override_created',
@@ -7034,7 +7184,14 @@ async def _admin_user_status_change(
         )
         await db.instagram_accounts.update_many(
             {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]},
-            {'$set': {'connectionValid': False, 'instagramConnected': False, 'updated': now}},
+            {'$set': {
+                'connectionValid': False,
+                'instagramConnected': False,
+                'isActive': False,
+                'ownershipStatus': 'released_soft_deleted',
+                'updated': now,
+                'updatedAt': now,
+            }},
         )
     await _record_admin_action(
         actor, action=action_name, target_user_id=target_user_id,
@@ -7151,7 +7308,7 @@ async def admin_metrics_reconciliation(
     # public_replies_sent (this month) recomputed from comments with provider proof
     # vs sum of monthly_usage.public_replies_sent
     dashboard_public_replies = 0
-    cursor = db.monthly_usage.find({'event_month': event_month})
+    cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(event_month))
     async for r in cursor:
         dashboard_public_replies += int(r.get('public_replies_sent') or 0)
     # Recompute by counting comments with provider proof flagged in this
@@ -7160,13 +7317,13 @@ async def admin_metrics_reconciliation(
     recomputed_public_replies = await _count_monthly_comments(_dashboard_public_reply_confirmed)
 
     dashboard_dms = 0
-    cursor = db.monthly_usage.find({'event_month': event_month})
+    cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(event_month))
     async for r in cursor:
         dashboard_dms += int(r.get('dms_sent') or 0)
     recomputed_dms = await _count_monthly_comments(_dashboard_dm_confirmed)
 
     dashboard_links = 0
-    cursor = db.monthly_usage.find({'event_month': event_month})
+    cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(event_month))
     async for r in cursor:
         dashboard_links += int(r.get('links_clicked') or 0)
     recomputed_links = await _count_monthly_clicks()
@@ -7212,6 +7369,7 @@ async def admin_metrics_reconciliation(
         _row('permanent_failure_counts', permanent, permanent,
              source='comments.action_status in failed_permanent/failed_retry_exhausted'),
     ]
+    account_usage_reconciliation = await _usage_subject_reconciliation(event_month)
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
         'admin_metrics_reconciliation_calculated user_id=%s resultCount=%s durationMs=%s',
@@ -7222,7 +7380,118 @@ async def admin_metrics_reconciliation(
         'items': rows,
         'mismatch_count': sum(1 for r in rows if r['status'] == 'mismatch'),
         'metric_sources': DASHBOARD_METRIC_SOURCES,
+        'account_usage_reconciliation': account_usage_reconciliation,
         'billing_enabled': False,
+    }
+
+
+@api.post('/admin/limits/backfill-instagram-usage-subjects')
+async def admin_backfill_instagram_usage_subjects(
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Admin-only migration path for legacy user-scoped monthly usage.
+
+    Dry-run by default. It never deletes legacy data and marks ambiguous rows
+    instead of guessing.
+    """
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    body = body or {}
+    month = (body.get('month') or '').strip() or None
+    if month and not re.fullmatch(r'\d{4}-\d{2}', month):
+        raise HTTPException(400, 'month must be YYYY-MM')
+    dry_run = bool(body.get('dry_run', True))
+    if not dry_run and body.get('confirm') is not True:
+        raise HTTPException(400, 'confirm=true is required when dry_run=false')
+    result = await _backfill_instagram_account_usage_subjects(
+        month=month,
+        dry_run=dry_run,
+        limit=int(body.get('limit') or 5000),
+    )
+    await _record_admin_action(
+        actor,
+        action='instagram_account_usage_backfill_dry_run' if dry_run else 'instagram_account_usage_backfill_applied',
+        target_user_id=None,
+        metadata={
+            'month': month,
+            'dry_run': dry_run,
+            'checked': result.get('checked'),
+            'mapped': result.get('mapped'),
+            'unmapped': result.get('unmapped'),
+            'ambiguous': result.get('ambiguous'),
+        },
+    )
+    return result
+
+
+async def _safe_index_names(collection) -> List[str]:
+    try:
+        info = await collection.index_information()
+        return sorted(list((info or {}).keys()))
+    except Exception:
+        return []
+
+
+@api.get('/admin/limits/instagram-account-diagnostics')
+async def admin_instagram_account_limit_diagnostics(
+    user_id: str = Depends(get_current_user_id),
+):
+    """Read-only production diagnostic for account-level limit enforcement."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
+    instagram_index_names = await _safe_index_names(db.instagram_accounts)
+    usage_index_names = await _safe_index_names(db.usage_events)
+    monthly_index_names = await _safe_index_names(db.monthly_usage)
+    trial_index_names = await _safe_index_names(db.instagram_account_trial_claims)
+
+    active_missing_canonical = await db.instagram_accounts.count_documents({
+        'connectionValid': True,
+        'isActive': {'$ne': False},
+        '$or': [
+            {'instagramAccountId': {'$exists': False}},
+            {'instagramAccountId': None},
+            {'instagramAccountId': ''},
+        ],
+    })
+    duplicate_groups = 0
+    seen: Dict[str, int] = {}
+    cursor = db.instagram_accounts.find({'connectionValid': True, 'isActive': {'$ne': False}}).limit(10000)
+    async for account in cursor:
+        canonical = _canonical_instagram_account_id(
+            account.get('instagramAccountId') or account.get('igUserId')
+        )
+        if not canonical:
+            continue
+        seen[canonical] = seen.get(canonical, 0) + 1
+    duplicate_groups = sum(1 for count in seen.values() if count > 1)
+
+    return {
+        'canonical_instagram_account_id_field': 'instagram_accounts.instagramAccountId',
+        'legacy_alias_fields': ['instagram_accounts.igUserId', 'users.ig_user_id'],
+        'duplicate_active_ownership_policy': 'blocked_by_unique_partial_index_and_connect_guard',
+        'duplicate_active_group_count_sampled': duplicate_groups,
+        'active_accounts_missing_canonical_id': active_missing_canonical,
+        'usage_subject_policy': {
+            'monthly_comments_processed_limit': 'instagram_account',
+            'monthly_public_replies_sent_limit': 'instagram_account',
+            'monthly_dms_sent_limit': 'instagram_account',
+            'other_limits': 'user',
+        },
+        'trial_claim_policy': 'one trial claim per Instagram account and trial identifier',
+        'admin_overrides_policy': 'user_scoped; account-scoped overrides are not enabled',
+        'required_indexes': {
+            'uniq_active_instagram_account_owner': 'uniq_active_instagram_account_owner' in instagram_index_names,
+            'usage_events_subject_month': 'usage_events_subject_month' in usage_index_names,
+            'monthly_usage_subject_month': 'monthly_usage_subject_month' in monthly_index_names,
+            'monthly_usage_subject_unique': 'monthly_usage_subject_unique' in monthly_index_names,
+            'uniq_instagram_trial_claim': 'uniq_instagram_trial_claim' in trial_index_names,
+        },
+        'index_names': {
+            'instagram_accounts': instagram_index_names,
+            'usage_events': usage_index_names,
+            'monthly_usage': monthly_index_names,
+            'instagram_account_trial_claims': trial_index_names,
+        },
+        'read_only': True,
     }
 
 
@@ -7648,6 +7917,284 @@ async def _find_user_doc_for_instagram_account_id(instagram_account_id: str) -> 
     return None, None
 
 
+async def _active_instagram_account_owner(instagram_account_id: str) -> Optional[dict]:
+    canonical = _canonical_instagram_account_id(instagram_account_id)
+    if not canonical:
+        return None
+    account = await db.instagram_accounts.find_one({
+        'instagramAccountId': canonical,
+        'isActive': {'$ne': False},
+        'connectionValid': True,
+    })
+    if not account:
+        return None
+    owner_id = account.get('userId') or account.get('user_id')
+    if not owner_id:
+        return None
+    owner = await db.users.find_one({'id': owner_id}) or {}
+    if owner.get('status') in ('deleted', 'suspended'):
+        return None
+    return account
+
+
+async def _ensure_instagram_account_connect_allowed(user_id: str, instagram_account_id: str) -> None:
+    owner = await _active_instagram_account_owner(instagram_account_id)
+    owner_user_id = (owner or {}).get('userId') or (owner or {}).get('user_id')
+    if owner and owner_user_id and owner_user_id != user_id:
+        logger.warning(
+            'instagram_duplicate_active_owner_blocked instagramAccountIdPartial=%s requesting_user_id=%s',
+            _safe_partial_identifier(instagram_account_id),
+            user_id,
+        )
+        raise HTTPException(
+            409,
+            {
+                'code': 'instagram_account_already_connected',
+                'message': 'This Instagram account is already connected to another MyChat account.',
+            },
+        )
+
+
+async def _record_instagram_trial_claim(user_id: str, instagram_account_id: str,
+                                        plan_or_trial: str = 'instagram_account_connected') -> None:
+    canonical = _canonical_instagram_account_id(instagram_account_id)
+    if not canonical:
+        return
+    now = datetime.utcnow()
+    try:
+        await db.instagram_account_trial_claims.update_one(
+            {'instagram_account_id': canonical, 'plan_trial_identifier': plan_or_trial},
+            {'$setOnInsert': {
+                '_id': secrets.token_urlsafe(12),
+                'id': secrets.token_urlsafe(12),
+                'instagram_account_id': canonical,
+                'first_claimed_by_user_id': user_id,
+                'claimed_at': now,
+                'plan_trial_identifier': plan_or_trial,
+                'status': 'claimed',
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning('instagram_trial_claim_record_failed instagramAccountIdPartial=%s reason=%s',
+                       _safe_partial_identifier(canonical), str(e)[:100])
+
+
+async def _connected_instagram_account_ids_for_user(user_id: str, *, active_only: bool = False,
+                                                    limit: int = 25) -> List[str]:
+    query = {'$or': [{'userId': user_id}, {'user_id': user_id}]}
+    if active_only:
+        query.update({'connectionValid': True, 'isActive': {'$ne': False}})
+    ids: List[str] = []
+    cursor = db.instagram_accounts.find(query).limit(limit)
+    async for account in cursor:
+        canonical = _canonical_instagram_account_id(
+            account.get('instagramAccountId') or account.get('igUserId')
+        )
+        if canonical and canonical not in ids:
+            ids.append(canonical)
+    return ids
+
+
+async def _ensure_instagram_trial_claim_available(user_id: str,
+                                                  plan_or_trial: str = 'trial_grant') -> List[str]:
+    """Prevent account-level trial grants from being claimed through a new user.
+
+    This keeps admin/user-level grants independent of paid billing while making
+    the Instagram professional account the durable anti-abuse subject for trials.
+    """
+    account_ids = await _connected_instagram_account_ids_for_user(user_id, active_only=True)
+    for canonical in account_ids:
+        claim = await db.instagram_account_trial_claims.find_one({
+            'instagram_account_id': canonical,
+            'plan_trial_identifier': plan_or_trial,
+            'status': {'$ne': 'revoked'},
+        })
+        first_user = (claim or {}).get('first_claimed_by_user_id')
+        if claim and first_user and first_user != user_id:
+            logger.warning(
+                'instagram_trial_duplicate_claim_blocked instagramAccountIdPartial=%s requesting_user_id=%s',
+                _safe_partial_identifier(canonical),
+                user_id,
+            )
+            raise HTTPException(409, {
+                'code': 'instagram_account_trial_already_claimed',
+                'message': 'This Instagram account has already used this trial grant.',
+            })
+    return account_ids
+
+
+async def _map_user_usage_to_instagram_account(user_id: str) -> Tuple[str, Optional[str]]:
+    account_ids = await _connected_instagram_account_ids_for_user(user_id, active_only=False, limit=10)
+    if len(account_ids) == 1:
+        return 'mapped', account_ids[0]
+    if not account_ids:
+        return 'unmapped_no_instagram_account', None
+    return 'ambiguous_multiple_instagram_accounts', None
+
+
+def _monthly_usage_row_identity(row: dict) -> dict:
+    if row.get('_id') is not None:
+        return {'_id': row.get('_id')}
+    if row.get('id'):
+        return {'id': row.get('id')}
+    return {
+        'user_id': row.get('user_id'),
+        'event_month': row.get('event_month'),
+        'limit_subject_type': row.get('limit_subject_type'),
+        'limit_subject_id': row.get('limit_subject_id'),
+    }
+
+
+async def _backfill_instagram_account_usage_subjects(
+    *,
+    month: Optional[str] = None,
+    dry_run: bool = True,
+    limit: int = 5000,
+) -> dict:
+    """Map legacy user-scoped monthly_usage rows to Instagram-account subjects.
+
+    No legacy rows are deleted. Ambiguous rows are marked/reportable so admins
+    can resolve them manually before any enforcement decision depends on them.
+    """
+    query = {}
+    if month:
+        query['event_month'] = month
+    cursor = db.monthly_usage.find(query).limit(max(1, min(int(limit or 5000), 10000)))
+    now = datetime.utcnow()
+    summary = {
+        'dry_run': dry_run,
+        'checked': 0,
+        'mapped': 0,
+        'unmapped': 0,
+        'ambiguous': 0,
+        'written': 0,
+        'examples': [],
+    }
+    async for row in cursor:
+        subject_type = row.get('limit_subject_type') or 'user'
+        if subject_type == 'instagram_account':
+            continue
+        user_id = str(row.get('user_id') or row.get('limit_subject_id') or '')
+        event_month = row.get('event_month')
+        if not user_id or not event_month:
+            continue
+        summary['checked'] += 1
+        status, canonical = await _map_user_usage_to_instagram_account(user_id)
+        if status == 'mapped' and canonical:
+            summary['mapped'] += 1
+            if not dry_run:
+                existing = await db.monthly_usage.find_one(
+                    _monthly_usage_instagram_query(canonical, event_month)
+                ) or {}
+                counters = {
+                    field: max(int(existing.get(field) or 0), int(row.get(field) or 0))
+                    for field in USAGE_COUNTER_FIELDS
+                }
+                set_on_insert = {
+                    '_id': secrets.token_urlsafe(12),
+                    'id': secrets.token_urlsafe(12),
+                    'user_id': user_id,
+                    'event_month': event_month,
+                    'limit_subject_type': 'instagram_account',
+                    'limit_subject_id': canonical,
+                    'instagram_account_id': canonical,
+                    'created_at': now,
+                }
+                await db.monthly_usage.update_one(
+                    _monthly_usage_instagram_query(canonical, event_month),
+                    {
+                        '$setOnInsert': set_on_insert,
+                        '$set': {
+                            **counters,
+                            'updated_at': now,
+                            'user_id': user_id,
+                            'instagram_account_id': canonical,
+                            'backfilled_from_user_monthly_usage': True,
+                            'backfilled_at': now,
+                        },
+                    },
+                    upsert=True,
+                )
+                await db.monthly_usage.update_one(
+                    _monthly_usage_row_identity(row),
+                    {'$set': {
+                        'limit_subject_type': row.get('limit_subject_type') or 'user',
+                        'limit_subject_id': row.get('limit_subject_id') or user_id,
+                        'instagram_subject_mapping_status': 'mapped',
+                        'mapped_instagram_account_id': canonical,
+                        'mapped_at': now,
+                    }},
+                )
+                summary['written'] += 1
+        else:
+            if status.startswith('ambiguous'):
+                summary['ambiguous'] += 1
+            else:
+                summary['unmapped'] += 1
+            if not dry_run:
+                await db.monthly_usage.update_one(
+                    _monthly_usage_row_identity(row),
+                    {'$set': {
+                        'limit_subject_type': row.get('limit_subject_type') or 'user',
+                        'limit_subject_id': row.get('limit_subject_id') or user_id,
+                        'instagram_subject_mapping_status': status,
+                        'mapping_checked_at': now,
+                    }},
+                )
+        if len(summary['examples']) < 10 and status != 'mapped':
+            summary['examples'].append({
+                'user_id': user_id,
+                'event_month': event_month,
+                'mapping_status': status,
+            })
+    return summary
+
+
+async def _usage_subject_reconciliation(event_month: str) -> dict:
+    monthly_user = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    monthly_account = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    rows = {'user_scoped': 0, 'instagram_account_scoped': 0, 'unmapped': 0, 'ambiguous': 0}
+    cursor = db.monthly_usage.find({'event_month': event_month})
+    async for row in cursor:
+        subject_type = row.get('limit_subject_type') or 'user'
+        mapping_status = row.get('instagram_subject_mapping_status') or ''
+        if mapping_status.startswith('unmapped'):
+            rows['unmapped'] += 1
+        if mapping_status.startswith('ambiguous'):
+            rows['ambiguous'] += 1
+        if subject_type == 'instagram_account':
+            rows['instagram_account_scoped'] += 1
+            target = monthly_account
+        else:
+            rows['user_scoped'] += 1
+            target = monthly_user
+        for field in USAGE_COUNTER_FIELDS:
+            target[field] += int(row.get(field) or 0)
+
+    events_account = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    events_user = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    cursor = db.usage_events.find({'event_month': event_month})
+    async for event in cursor:
+        counter = USAGE_COUNTER_BY_EVENT.get(event.get('event_type'))
+        if not counter:
+            continue
+        if event.get('limit_subject_type') == 'instagram_account':
+            events_account[counter] += 1
+        else:
+            events_user[counter] += 1
+
+    return {
+        'event_month': event_month,
+        'monthly_usage_rows': rows,
+        'monthly_usage_user_scoped_counters': monthly_user,
+        'monthly_usage_instagram_account_scoped_counters': monthly_account,
+        'usage_events_user_scoped_counters': events_user,
+        'usage_events_instagram_account_scoped_counters': events_account,
+        'repair_applied': False,
+    }
+
+
 def _cron_secret_is_valid(provided: Optional[str]) -> bool:
     return bool(CRON_SECRET and provided and hmac.compare_digest(str(provided), CRON_SECRET))
 
@@ -7686,6 +8233,7 @@ async def _sync_user_instagram_account_doc(
     token = access_token if access_token is not None else (user_doc.get('meta_access_token') or '')
     if not (user_id and instagram_account_id and token):
         return None
+    await _ensure_instagram_account_connect_allowed(user_id, instagram_account_id)
     now = datetime.utcnow()
     deterministic_account_id = _instagram_account_doc_id(user_id, instagram_account_id)
     existing = await db.instagram_accounts.find_one({'$or': [
@@ -7730,14 +8278,29 @@ async def _sync_user_instagram_account_doc(
         'createdAt': created_at,
         'updatedAt': now,
     }
-    await db.instagram_accounts.update_one(
-        {'id': account_id},
-        {
-            '$set': doc,
-            '$setOnInsert': {'connectedAt': created_at},
-        },
-        upsert=True,
-    )
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': account_id},
+            {
+                '$set': doc,
+                '$setOnInsert': {'connectedAt': created_at},
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        logger.warning(
+            'instagram_duplicate_active_owner_blocked_db instagramAccountIdPartial=%s user_id=%s',
+            _safe_partial_identifier(instagram_account_id),
+            user_id,
+        )
+        raise HTTPException(
+            409,
+            {
+                'code': 'instagram_account_already_connected',
+                'message': 'This Instagram account is already connected to another MyChat account.',
+            },
+        )
+    await _record_instagram_trial_claim(user_id, instagram_account_id)
     await db.users.update_one(
         {'id': user_id, '$or': [
             {'active_instagram_account_id': {'$exists': False}},
@@ -8622,6 +9185,24 @@ async def instagram_callback(request: Request,
                 'probeUsed': final_me.get('whichMeVariantWorks'),
             }
             audit['connectionSaved'] = True
+            try:
+                await _ensure_instagram_account_connect_allowed(
+                    user_id, final_me['canonicalIgUserId'],
+                )
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                if exc.status_code == 409 and detail.get('code') == 'instagram_account_already_connected':
+                    await _store_oauth_failure(
+                        user_id,
+                        'instagram_account_already_connected',
+                        clear_existing_connection=False,
+                        audit={'canonicalIgUserIdExists': True},
+                    )
+                    return RedirectResponse(_frontend_redirect_url(return_to, {
+                        'ig': 'error',
+                        'reason': 'instagram_account_already_connected',
+                    }))
+                raise
 
             await db.users.update_one(
                 {'id': user_id},
@@ -10529,6 +11110,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             # for next month's reset.
             comment_limit_check = await check_plan_limit(
                 user_id, 'monthly_comments_processed_limit', increment=1,
+                instagram_account_id=ig_account_id,
             )
             if comment_limit_check.get('exceeded') and not comment_limit_check.get('fail_open'):
                 now_pl = datetime.utcnow()
@@ -14181,6 +14763,10 @@ async def _startup():
             name='usage_events_instagram_account_month',
         )
         await db.usage_events.create_index(
+            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
+            name='usage_events_subject_month',
+        )
+        await db.usage_events.create_index(
             [('automation_id', 1), ('event_month', 1)],
             name='usage_events_automation_month',
         )
@@ -14188,10 +14774,26 @@ async def _startup():
             [('created_at', -1)],
             name='usage_events_created_at',
         )
+        try:
+            await db.monthly_usage.drop_index('monthly_usage_user_month_unique')
+        except Exception:
+            pass
         await db.monthly_usage.create_index(
             [('user_id', 1), ('event_month', 1)],
+            name='monthly_usage_user_month_lookup',
+        )
+        await db.monthly_usage.create_index(
+            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
+            name='monthly_usage_subject_month',
+        )
+        await db.monthly_usage.create_index(
+            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
             unique=True,
-            name='monthly_usage_user_month_unique',
+            name='monthly_usage_subject_unique',
+            partialFilterExpression={
+                'limit_subject_type': {'$exists': True},
+                'limit_subject_id': {'$exists': True},
+            },
         )
         # Phase 2.2: user_plans — one row per user.
         await db.user_plans.create_index(
@@ -14275,6 +14877,29 @@ async def _startup():
         await db.instagram_accounts.create_index(
             [('isActive', 1), ('connectionValid', 1), ('tokenExpiresAt', 1)],
             name='instagram_accounts_refresh_due',
+        )
+        await db.instagram_accounts.create_index(
+            [('instagramAccountId', 1)],
+            name='instagram_accounts_canonical_lookup',
+        )
+        await db.instagram_accounts.create_index(
+            [('instagramAccountId', 1)],
+            unique=True,
+            name='uniq_active_instagram_account_owner',
+            partialFilterExpression={
+                'instagramAccountId': {'$exists': True},
+                'isActive': True,
+                'connectionValid': True,
+            },
+        )
+        await db.instagram_account_trial_claims.create_index(
+            [('instagram_account_id', 1), ('plan_trial_identifier', 1)],
+            unique=True,
+            name='uniq_instagram_trial_claim',
+        )
+        await db.instagram_account_trial_claims.create_index(
+            [('first_claimed_by_user_id', 1), ('claimed_at', -1)],
+            name='instagram_trial_claims_user_claimed',
         )
     except Exception as e:
         logger.warning('instagram_accounts index create: %s', e)
