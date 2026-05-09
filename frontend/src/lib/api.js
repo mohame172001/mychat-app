@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearApiCache } from './apiCache';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API_BASE = `${BACKEND_URL}/api`;
@@ -17,6 +18,7 @@ api.interceptors.response.use(
     if (err?.response?.status === 401) {
       localStorage.removeItem('mychat_token');
       localStorage.removeItem('mychat_user');
+      clearApiCache();
       if (window.location.pathname.startsWith('/app')) window.location.href = '/login';
     }
     return Promise.reject(err);

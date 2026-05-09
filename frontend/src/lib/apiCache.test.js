@@ -1,5 +1,6 @@
 import {
   cachedApiGet,
+  clearApiCache,
   getCachedApiData,
   invalidateApiCache,
   resetApiCacheForTests,
@@ -58,5 +59,15 @@ describe('cachedApiGet', () => {
 
     expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
     expect(getCachedApiData('comments:u1:acc1')).toEqual({ b: 2 });
+  });
+
+  test('clearApiCache removes all user-scoped cached data', async () => {
+    await cachedApiGet('dashboard-summary:u1:acc1', () => ({ data: { a: 1 } }));
+    await cachedApiGet('comments:u2:acc2', () => ({ data: { b: 2 } }));
+
+    clearApiCache();
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
+    expect(getCachedApiData('comments:u2:acc2')).toBeUndefined();
   });
 });

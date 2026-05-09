@@ -36,6 +36,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clear_retry_reply_rate_limits():
+    """Retry-reply unit tests call the route many times as the same fake user.
+    Keep the production limiter enabled while isolating test cases."""
+    server._RATE_LIMIT_HITS.clear()
+    yield
+    server._RATE_LIMIT_HITS.clear()
+
+
 def _run(coro):
     return asyncio.run(coro)
 

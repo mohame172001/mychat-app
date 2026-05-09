@@ -15,6 +15,10 @@ export function invalidateApiCache(prefix = '') {
   }
 }
 
+export function clearApiCache() {
+  cache.clear();
+}
+
 export async function cachedApiGet(key, fetcher, options = {}) {
   const ttlMs = Number(options.ttlMs ?? 30000);
   const force = Boolean(options.force);
@@ -53,5 +57,5 @@ export async function cachedApiGet(key, fetcher, options = {}) {
 }
 
 export function resetApiCacheForTests() {
-  cache.clear();
+  clearApiCache();
 }

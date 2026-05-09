@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../lib/api';
 import analytics from '../lib/analytics';
+import { clearApiCache } from '../lib/apiCache';
 
 const AuthContext = createContext(null);
 
@@ -21,6 +22,7 @@ export const AuthProvider = ({ children }) => {
         } catch (err) {
           console.error('[Auth] Failed to parse stored user:', err);
           localStorage.removeItem('mychat_user');
+          clearApiCache();
         }
         try {
           const { data } = await api.get('/auth/me');
@@ -41,6 +43,7 @@ export const AuthProvider = ({ children }) => {
     const { data } = await api.post('/auth/login', { username, password });
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
+    clearApiCache();
     setUser(data.user);
     // Phase 2.5 funnel events. analytics no-ops when PostHog is disabled.
     analytics.identify({ id: data.user.id });
@@ -52,6 +55,7 @@ export const AuthProvider = ({ children }) => {
     const { data } = await api.post('/auth/signup', { username, email, password });
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
+    clearApiCache();
     setUser(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('signup_completed', {});
@@ -68,6 +72,7 @@ export const AuthProvider = ({ children }) => {
     const { data } = await api.post('/auth/google', { credential });
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
+    clearApiCache();
     setUser(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('login_completed', { method: 'google' });
@@ -77,6 +82,7 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     localStorage.removeItem('mychat_token');
     localStorage.removeItem('mychat_user');
+    clearApiCache();
     setUser(null);
     analytics.reset();
   };

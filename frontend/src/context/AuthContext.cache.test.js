@@ -1,0 +1,19 @@
+const fs = require('fs');
+const path = require('path');
+
+describe('auth cache isolation wiring', () => {
+  test('auth transitions clear user-scoped API cache', () => {
+    const source = fs.readFileSync(path.join(__dirname, 'AuthContext.jsx'), 'utf8');
+
+    expect(source).toContain("import { clearApiCache } from '../lib/apiCache';");
+    expect((source.match(/clearApiCache\(\);/g) || []).length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('401 interceptor clears user-scoped API cache before redirecting', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../lib/api.js'), 'utf8');
+
+    expect(source).toContain("import { clearApiCache } from './apiCache';");
+    expect(source).toContain('if (err?.response?.status === 401)');
+    expect(source).toContain('clearApiCache();');
+  });
+});

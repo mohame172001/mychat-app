@@ -148,6 +148,10 @@ RATE_LIMIT_LOGIN_PER_MIN = _rl_int('RATE_LIMIT_LOGIN_PER_MIN', 10)
 RATE_LIMIT_SIGNUP_PER_HOUR = _rl_int('RATE_LIMIT_SIGNUP_PER_HOUR', 5)
 RATE_LIMIT_POLL_NOW_PER_MIN = _rl_int('RATE_LIMIT_POLL_NOW_PER_MIN', 5)
 RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN = _rl_int('RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN', 5)
+RATE_LIMIT_INSTAGRAM_CONNECT_PER_MIN = _rl_int('RATE_LIMIT_INSTAGRAM_CONNECT_PER_MIN', 5)
+RATE_LIMIT_RETRY_REPLY_PER_MIN = _rl_int('RATE_LIMIT_RETRY_REPLY_PER_MIN', 10)
+RATE_LIMIT_ADMIN_HEAVY_PER_MIN = _rl_int('RATE_LIMIT_ADMIN_HEAVY_PER_MIN', 10)
+RATE_LIMIT_DATA_DELETION_PER_HOUR = _rl_int('RATE_LIMIT_DATA_DELETION_PER_HOUR', 20)
 
 # Admin allowlist for ops-only endpoints (webhook-log etc.). Comma-separated
 # emails. In production this MUST be set or those endpoints stay locked.
@@ -187,6 +191,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 # leaks the user's IG long-lived token into Railway log retention.
 for _noisy in ('httpx', 'httpcore', 'httpcore.http11', 'httpcore.connection'):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+async def get_current_active_user_id(user_id: str = Depends(get_current_user_id)) -> str:
+    """JWT dependency for normal app/admin APIs.
+
+    Auth login already blocks suspended/deleted users, but long-lived JWTs can
+    survive a later admin status change. This central guard closes that gap
+    without preventing admins from viewing suspended/deleted *target* users.
+    """
+    user = await db.users.find_one({'id': user_id})
+    if not user:
+        raise HTTPException(401, 'Invalid token')
+    status_value = str(user.get('status') or 'active').lower()
+    if status_value == 'suspended':
+        raise HTTPException(403, 'account_suspended')
+    if status_value == 'deleted':
+        raise HTTPException(403, 'account_deleted')
+    return user_id
 
 
 def _redact_secrets(value):
@@ -3211,6 +3233,11 @@ async def meta_data_deletion_callback(request: Request):
     public deletion-status instructions. It never returns stored user data and
     never logs signed_request contents.
     """
+    ip = _client_ip(request)
+    if _rate_limited('data_deletion', ip,
+                     limit=RATE_LIMIT_DATA_DELETION_PER_HOUR, window_seconds=3600):
+        logger.warning('rate_limit_hit bucket=data_deletion ip=%s', ip)
+        raise HTTPException(429, 'Too many data deletion requests. Try again later.')
     payload = await _parse_data_deletion_payload(request)
     confirmation_code = _data_deletion_confirmation_code()
     signed_request = str(payload.get('signed_request') or '')
@@ -3285,7 +3312,7 @@ async def login(data: LoginIn, request: Request):
 
 
 @api.get('/auth/me', response_model=UserPublic)
-async def me(user_id: str = Depends(get_current_user_id)):
+async def me(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
@@ -3559,7 +3586,7 @@ def _automation_summary_row(auto: dict) -> dict:
 
 
 @api.get('/automations/summary')
-async def list_automations_summary(user_id: str = Depends(get_current_user_id)):
+async def list_automations_summary(user_id: str = Depends(get_current_active_user_id)):
     started = datetime.utcnow()
     try:
         account = await getActiveInstagramAccount(user_id)
@@ -3585,7 +3612,7 @@ async def list_automations_summary(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/automations')
-async def list_automations(user_id: str = Depends(get_current_user_id)):
+async def list_automations(user_id: str = Depends(get_current_active_user_id)):
     try:
         account = await getActiveInstagramAccount(user_id)
     except HTTPException as e:
@@ -3597,7 +3624,7 @@ async def list_automations(user_id: str = Depends(get_current_user_id)):
 
 
 @api.post('/automations')
-async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_user_id)):
+async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_active_user_id)):
     automation_data = data.model_dump()
     account = await getActiveInstagramAccount(user_id)
     ctx = _instagram_context_from_account(account)
@@ -3660,7 +3687,7 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
 
 
 @api.get('/automations/{aid}')
-async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
+async def get_automation(aid: str, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, account)})
     if not d:
@@ -3669,7 +3696,7 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_user_id)):
 
 
 @api.patch('/automations/{aid}')
-async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_user_id)):
+async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_active_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
     camel_aliases = {
         'followGateEnabled': 'follow_request_enabled',
@@ -3822,7 +3849,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
 
 
 @api.delete('/automations/{aid}')
-async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id)):
+async def delete_automation(aid: str, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     res = await db.automations.delete_one({'id': aid, **_account_scoped_query(user_id, account)})
     if res.deleted_count == 0:
@@ -3831,7 +3858,7 @@ async def delete_automation(aid: str, user_id: str = Depends(get_current_user_id
 
 
 @api.post('/automations/{aid}/duplicate')
-async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user_id)):
+async def duplicate_automation(aid: str, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     d = await db.automations.find_one({'id': aid, **_account_scoped_query(user_id, account)})
     if not d:
@@ -3866,7 +3893,7 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_user
 @api.post('/automations/quick-comment-rule')
 async def create_quick_comment_rule(
     data: dict = Body(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Create an automation that watches comments on an IG media (specific or latest).
 
@@ -4136,7 +4163,7 @@ async def create_quick_comment_rule(
 # ---------------- contacts ----------------
 @api.get('/contacts')
 async def list_contacts(search: Optional[str] = None, tag: Optional[str] = None,
-                        user_id: str = Depends(get_current_user_id)):
+                        user_id: str = Depends(get_current_active_user_id)):
     q = {'user_id': user_id}
     if search:
         q['$or'] = [
@@ -4150,7 +4177,7 @@ async def list_contacts(search: Optional[str] = None, tag: Optional[str] = None,
 
 
 @api.post('/contacts')
-async def create_contact(data: ContactIn, user_id: str = Depends(get_current_user_id)):
+async def create_contact(data: ContactIn, user_id: str = Depends(get_current_active_user_id)):
     import uuid
     doc = {
         'id': str(uuid.uuid4()), 'user_id': user_id,
@@ -4164,7 +4191,7 @@ async def create_contact(data: ContactIn, user_id: str = Depends(get_current_use
 
 
 @api.patch('/contacts/{cid}')
-async def patch_contact(cid: str, data: ContactPatch, user_id: str = Depends(get_current_user_id)):
+async def patch_contact(cid: str, data: ContactPatch, user_id: str = Depends(get_current_active_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
     res = await db.contacts.update_one({'id': cid, 'user_id': user_id}, {'$set': update})
     if res.matched_count == 0:
@@ -4174,7 +4201,7 @@ async def patch_contact(cid: str, data: ContactPatch, user_id: str = Depends(get
 
 
 @api.delete('/contacts/{cid}')
-async def delete_contact(cid: str, user_id: str = Depends(get_current_user_id)):
+async def delete_contact(cid: str, user_id: str = Depends(get_current_active_user_id)):
     res = await db.contacts.delete_one({'id': cid, 'user_id': user_id})
     if res.deleted_count == 0:
         raise HTTPException(404, 'Not found')
@@ -4183,13 +4210,13 @@ async def delete_contact(cid: str, user_id: str = Depends(get_current_user_id)):
 
 # ---------------- broadcasts ----------------
 @api.get('/broadcasts')
-async def list_broadcasts(user_id: str = Depends(get_current_user_id)):
+async def list_broadcasts(user_id: str = Depends(get_current_active_user_id)):
     docs = await db.broadcasts.find({'user_id': user_id}).sort('created', -1).to_list(500)
     return [_strip_mongo(d) for d in docs]
 
 
 @api.post('/broadcasts')
-async def create_broadcast(data: BroadcastIn, user_id: str = Depends(get_current_user_id)):
+async def create_broadcast(data: BroadcastIn, user_id: str = Depends(get_current_active_user_id)):
     import uuid
     total_audience = await db.contacts.count_documents({'user_id': user_id, 'subscribed': True})
     doc = {
@@ -4205,7 +4232,7 @@ async def create_broadcast(data: BroadcastIn, user_id: str = Depends(get_current
 
 
 @api.patch('/broadcasts/{bid}')
-async def patch_broadcast(bid: str, data: BroadcastPatch, user_id: str = Depends(get_current_user_id)):
+async def patch_broadcast(bid: str, data: BroadcastPatch, user_id: str = Depends(get_current_active_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
     res = await db.broadcasts.update_one({'id': bid, 'user_id': user_id}, {'$set': update})
     if res.matched_count == 0:
@@ -4215,7 +4242,7 @@ async def patch_broadcast(bid: str, data: BroadcastPatch, user_id: str = Depends
 
 
 @api.post('/broadcasts/{bid}/send')
-async def send_broadcast(bid: str, user_id: str = Depends(get_current_user_id)):
+async def send_broadcast(bid: str, user_id: str = Depends(get_current_active_user_id)):
     """Send a broadcast to all subscribed contacts via Meta API (or mock if IG not connected)."""
     broadcast = await db.broadcasts.find_one({'id': bid, 'user_id': user_id})
     if not broadcast:
@@ -4272,7 +4299,7 @@ async def _send_broadcast_task(bid: str, broadcast: dict, user_doc: dict, contac
 
 # ---------------- conversations ----------------
 @api.get('/conversations')
-async def list_conversations(user_id: str = Depends(get_current_user_id)):
+async def list_conversations(user_id: str = Depends(get_current_active_user_id)):
     try:
         account = await getActiveInstagramAccount(user_id)
         query = _account_scoped_query(user_id, account)
@@ -4285,7 +4312,7 @@ async def list_conversations(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/conversations/{cid}')
-async def get_conversation(cid: str, user_id: str = Depends(get_current_user_id)):
+async def get_conversation(cid: str, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     d = await db.conversations.find_one({'id': cid, **_account_scoped_query(user_id, account)})
     if not d:
@@ -4294,7 +4321,7 @@ async def get_conversation(cid: str, user_id: str = Depends(get_current_user_id)
 
 
 @api.post('/conversations/{cid}/messages')
-async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_current_user_id)):
+async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_current_active_user_id)):
     """Send a message. If the conversation is tied to a real IG contact and the
     user is connected to Instagram, send via Graph API. No fake auto-reply."""
     import uuid
@@ -4358,7 +4385,7 @@ async def send_message(cid: str, data: MessageIn, user_id: str = Depends(get_cur
 # ---------------- comments ----------------
 @api.get('/comments')
 async def list_comments(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
     limit: int = Query(50, le=100),
     page: int = Query(1, ge=1),
     unreplied: bool = Query(False)
@@ -4388,7 +4415,7 @@ async def list_comments(
 
 
 @api.post('/comments/{cid}/reply')
-async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get_current_user_id)):
+async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get_current_active_user_id)):
     """Reply to an Instagram comment via Graph API.
     POST /{comment-id}/replies with message=..."""
     account = await getActiveInstagramAccount(user_id)
@@ -4449,7 +4476,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
 
 
 @api.get('/comments/{comment_id}/diagnostics')
-async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_current_user_id)):
+async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_current_active_user_id)):
     """Safe per-comment automation status diagnostics for the active IG account."""
     account = await getActiveInstagramAccount(user_id)
     scoped = _account_scoped_query(user_id, account)
@@ -4504,7 +4531,7 @@ async def comment_diagnostics(comment_id: str, user_id: str = Depends(get_curren
 
 
 @api.post('/comments/{cid}/retry-reply')
-async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_user_id)):
+async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_active_user_id)):
     """Safely retry the PUBLIC comment reply for one comment.
 
     Distinct from POST /comments/{cid}/reply (a manual operator-typed
@@ -4527,6 +4554,10 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_user_
       attempts, reason. Never includes the reply text, access token,
       or raw Graph error body.
     """
+    if _rate_limited('retry_reply', user_id,
+                     limit=RATE_LIMIT_RETRY_REPLY_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=retry_reply user_id=%s', user_id)
+        raise HTTPException(429, 'Too many retry requests. Try again in a minute.')
     account = await getActiveInstagramAccount(user_id)
     comment = await db.comments.find_one({
         'id': cid, **_account_scoped_query(user_id, account),
@@ -4702,7 +4733,7 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_user_
 # tooling and tests that prefer the background worker to send the reply.
 # Distinct from retry_comment_reply (immediate) — tests reach this via
 # server.comment_retry_reply directly.
-async def comment_retry_reply(comment_id: str, user_id: str = Depends(get_current_user_id)):
+async def comment_retry_reply(comment_id: str, user_id: str = Depends(get_current_active_user_id)):
     """Safely enqueue a public reply retry for a comment without provider proof."""
     account = await getActiveInstagramAccount(user_id)
     scoped = _account_scoped_query(user_id, account)
@@ -4760,7 +4791,7 @@ async def comment_retry_reply(comment_id: str, user_id: str = Depends(get_curren
 
 
 @api.get('/comments/{comment_id}/why-not-replied')
-async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_current_user_id)):
+async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_current_active_user_id)):
     """Explain why a comment has not been fully replied to, without exposing content."""
     account = await getActiveInstagramAccount(user_id)
     scoped = _account_scoped_query(user_id, account)
@@ -4836,7 +4867,7 @@ async def comment_why_not_replied(comment_id: str, user_id: str = Depends(get_cu
 
 @api.get('/comments/{comment_id}/diagnose-specific-rule-reply-plan')
 async def diagnose_specific_rule_reply_plan(comment_id: str,
-                                            user_id: str = Depends(get_current_user_id)):
+                                            user_id: str = Depends(get_current_active_user_id)):
     """Phase 1.4F debug helper.
 
     Returns the exact public-reply plan a comment would have, plus
@@ -5078,7 +5109,7 @@ def _safe_repair_diagnosis(comment: dict, rule: Optional[dict]) -> dict:
 
 
 @api.get('/admin/tools-enabled')
-async def admin_tools_enabled(user_id: str = Depends(get_current_user_id)):
+async def admin_tools_enabled(user_id: str = Depends(get_current_active_user_id)):
     """Tell the frontend whether the admin repair page should render.
 
     Returns enabled=true if the caller is in ADMIN_EMAILS or if the
@@ -5099,7 +5130,7 @@ async def admin_tools_enabled(user_id: str = Depends(get_current_user_id)):
 @api.get('/admin/comments/{ig_comment_id}/specific-reply-diagnosis')
 async def admin_specific_reply_diagnosis(
     ig_comment_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Sanitized diagnosis for a single comment's specific-post-rule plan."""
     comment = await _find_comment_by_ig_or_internal(ig_comment_id)
@@ -5115,7 +5146,7 @@ async def admin_specific_reply_diagnosis(
 @api.post('/admin/comments/{ig_comment_id}/repair-specific-public-reply')
 async def admin_repair_specific_public_reply(
     ig_comment_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Re-queue a comment for public reply only. Never resends DM."""
     comment = await _find_comment_by_ig_or_internal(ig_comment_id)
@@ -5160,7 +5191,7 @@ async def admin_repair_specific_public_reply(
 @api.post('/admin/comments/{ig_comment_id}/process-retry-now')
 async def admin_process_retry_now(
     ig_comment_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Process the public-reply retry for ONE comment, immediately.
 
@@ -5581,7 +5612,7 @@ def _dashboard_auto_out(auto: dict) -> dict:
 
 
 @api.get('/dashboard/metric-sources')
-async def dashboard_metric_sources(user_id: str = Depends(get_current_user_id)):
+async def dashboard_metric_sources(user_id: str = Depends(get_current_active_user_id)):
     """Return the dashboard metric contract.
 
     This is intentionally metadata-only: no raw comments, messages, tokens, or
@@ -5595,7 +5626,7 @@ async def dashboard_metric_sources(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/dashboard/summary')
-async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
+async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
     """Compact dashboard payload for fast route transitions.
 
     The legacy /dashboard/stats endpoint intentionally remains available for
@@ -5841,7 +5872,7 @@ async def dashboard_summary(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/dashboard/stats')
-async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
+async def dashboard_stats(user_id: str = Depends(get_current_active_user_id)):
     started = datetime.utcnow()
     try:
         account = await getActiveInstagramAccount(user_id)
@@ -6030,7 +6061,7 @@ async def dashboard_stats(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/usage/current')
-async def current_usage(user_id: str = Depends(get_current_user_id)):
+async def current_usage(user_id: str = Depends(get_current_active_user_id)):
     """Phase 2.1 + 2.2: monthly usage for the current user PLUS the plan
     limits and remaining counters. billing_enabled stays False until
     Phase 3 lands real billing."""
@@ -6054,7 +6085,7 @@ async def current_usage(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/observability/status')
-async def observability_status_endpoint(user_id: str = Depends(get_current_user_id)):
+async def observability_status_endpoint(user_id: str = Depends(get_current_active_user_id)):
     """Phase 2.5: sanitized observability config for SystemHealth/admin.
 
     Auth required (any logged-in user). Never echoes the DSN. Tells the
@@ -6088,7 +6119,7 @@ async def list_plans():
 
 
 @api.get('/plan/current')
-async def current_plan(user_id: str = Depends(get_current_user_id)):
+async def current_plan(user_id: str = Depends(get_current_active_user_id)):
     """The caller's current plan + its limits + this month's usage."""
     summary = await get_current_usage_with_limits(user_id)
     return summary
@@ -6098,7 +6129,7 @@ async def current_plan(user_id: str = Depends(get_current_user_id)):
 async def admin_assign_user_plan(
     target_user_id: str,
     body: dict = Body(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Manually assign a plan to a user. Requires admin.plans.assign.
     Independent of ENABLE_ADMIN_REPAIR_TOOLS. No Stripe."""
@@ -6131,7 +6162,7 @@ async def admin_assign_user_plan(
 @api.get('/admin/users/{target_user_id}/plan')
 async def admin_get_user_plan(
     target_user_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     summary = await get_current_usage_with_limits(target_user_id)
@@ -6142,7 +6173,7 @@ async def admin_get_user_plan(
 async def admin_user_usage(
     target_user_id: str,
     month: Optional[str] = None,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Admin-only: return monthly usage counters for any user.
 
@@ -6296,7 +6327,7 @@ async def _record_admin_action(
 
 
 @api.get('/admin/me')
-async def admin_me(user_id: str = Depends(get_current_user_id)):
+async def admin_me(user_id: str = Depends(get_current_active_user_id)):
     """Phase 2.6: returns the caller's role + permission set.
 
     Never raises 403 — the frontend uses this to decide what to render.
@@ -6316,7 +6347,7 @@ async def admin_me(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/admin/overview')
-async def admin_overview(user_id: str = Depends(get_current_user_id)):
+async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
     """Sanitized aggregate snapshot of the SaaS — totals + plan distribution
     + this month's usage roll-up + failure / queue health counts."""
     started = datetime.utcnow()
@@ -6414,7 +6445,7 @@ async def admin_users_list(
     search: Optional[str] = None,
     plan_key: Optional[str] = None,
     sort: Optional[str] = None,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Paginated, sanitized user list with usage roll-ups."""
     started = datetime.utcnow()
@@ -6531,7 +6562,7 @@ async def admin_users_list(
 @api.get('/admin/users/{target_user_id}/detail')
 async def admin_user_detail(
     target_user_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Sanitized full profile of one user — plan, usage, accounts,
     automations, recent failures. Raw text is NEVER returned; comment/
@@ -6716,7 +6747,7 @@ async def admin_user_detail(
 async def admin_disable_automation(
     automation_id: str,
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Set automation.status='paused' (does NOT delete). Logs an audit row."""
     admin_user, _role = await _require_admin_permission(user_id, _admin_roles.PERM_AUTOMATIONS_DISABLE)
@@ -6754,7 +6785,7 @@ async def admin_disable_automation(
 @api.get('/admin/audit-log')
 async def admin_audit_log(
     limit: int = 50,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Recent admin actions (sanitized). Useful for the console activity feed."""
     await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
@@ -6818,7 +6849,7 @@ async def _safe_member_row(row: dict) -> dict:
 
 
 @api.get('/admin/members')
-async def admin_members_list(user_id: str = Depends(get_current_user_id)):
+async def admin_members_list(user_id: str = Depends(get_current_active_user_id)):
     """List admin members. Anyone with admin.members.view (admin/owner)."""
     await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_VIEW)
     cursor = db.admin_members.find().sort('created_at', -1)
@@ -6831,7 +6862,7 @@ async def admin_members_list(user_id: str = Depends(get_current_user_id)):
 @api.post('/admin/members')
 async def admin_members_add(
     body: dict = Body(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Add a user to the admin team. Owner-only (admin.members.manage)."""
     actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
@@ -6893,7 +6924,7 @@ async def admin_members_add(
 async def admin_members_update(
     target_user_id: str,
     body: dict = Body(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Change a member's role. Owner-only (admin.members.manage)."""
     actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
@@ -6937,7 +6968,7 @@ async def admin_members_update(
 @api.delete('/admin/members/{target_user_id}')
 async def admin_members_remove(
     target_user_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Soft-disable a member. Owner-only (admin.members.manage).
 
@@ -6990,7 +7021,7 @@ def _ensure_user_active(user: Optional[dict]) -> None:
 @api.get('/admin/users/{target_user_id}/limit-overrides')
 async def admin_list_user_overrides(
     target_user_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Active + history overrides for a target user. View-only — anyone
     with admin.users.view can read."""
@@ -7007,7 +7038,7 @@ async def admin_list_user_overrides(
 async def admin_create_user_override(
     target_user_id: str,
     body: dict = Body(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Create a custom allowance / limit_override / trial_grant.
     Requires admin.plans.assign (admin / owner)."""
@@ -7093,7 +7124,7 @@ async def admin_revoke_user_override(
     target_user_id: str,
     override_id: str,
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
     row = await db.user_limit_overrides.find_one({
@@ -7126,7 +7157,7 @@ async def admin_revoke_user_override(
 @api.get('/admin/users/{target_user_id}/effective-limits')
 async def admin_user_effective_limits(
     target_user_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     summary = await get_current_usage_with_limits(target_user_id)
@@ -7209,7 +7240,7 @@ async def _admin_user_status_change(
 async def admin_suspend_user(
     target_user_id: str,
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
     reason = ((body or {}).get('reason') or '')
@@ -7224,7 +7255,7 @@ async def admin_suspend_user(
 async def admin_unsuspend_user(
     target_user_id: str,
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
     reason = ((body or {}).get('reason') or '')
@@ -7239,7 +7270,7 @@ async def admin_unsuspend_user(
 async def admin_soft_delete_user(
     target_user_id: str,
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Soft delete only. Pauses automations, disconnects IG accounts,
     blocks login. Owner-only (admin.owner.manage). Cannot delete the
@@ -7262,12 +7293,16 @@ async def admin_soft_delete_user(
 @api.get('/admin/metrics/reconciliation')
 async def admin_metrics_reconciliation(
     month: Optional[str] = None,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Compare Admin Overview numbers against fresh aggregations from
     raw collections. Read-only. Admin-only via admin.audit.view."""
     started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
+    if _rate_limited('admin_metrics_reconciliation', user_id,
+                     limit=RATE_LIMIT_ADMIN_HEAVY_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=admin_metrics_reconciliation user_id=%s', user_id)
+        raise HTTPException(429, 'Too many reconciliation requests. Try again in a minute.')
     event_month = (month or _usage_month(datetime.utcnow())).strip()
     if not re.fullmatch(r'\d{4}-\d{2}', event_month):
         raise HTTPException(400, 'month must be YYYY-MM')
@@ -7388,7 +7423,7 @@ async def admin_metrics_reconciliation(
 @api.post('/admin/limits/backfill-instagram-usage-subjects')
 async def admin_backfill_instagram_usage_subjects(
     body: Optional[dict] = Body(None),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Admin-only migration path for legacy user-scoped monthly usage.
 
@@ -7396,6 +7431,10 @@ async def admin_backfill_instagram_usage_subjects(
     instead of guessing.
     """
     actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    if _rate_limited('admin_backfill_instagram_usage_subjects', user_id,
+                     limit=RATE_LIMIT_ADMIN_HEAVY_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=admin_backfill_instagram_usage_subjects user_id=%s', user_id)
+        raise HTTPException(429, 'Too many backfill requests. Try again in a minute.')
     body = body or {}
     month = (body.get('month') or '').strip() or None
     if month and not re.fullmatch(r'\d{4}-\d{2}', month):
@@ -7434,7 +7473,7 @@ async def _safe_index_names(collection) -> List[str]:
 
 @api.get('/admin/limits/instagram-account-diagnostics')
 async def admin_instagram_account_limit_diagnostics(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Read-only production diagnostic for account-level limit enforcement."""
     await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
@@ -8908,8 +8947,12 @@ async def _run_instagram_me_probes(c: httpx.AsyncClient, token: str) -> Dict[str
 async def instagram_auth_url(
     mode: str = Query('connect'),
     returnTo: str = Query('/app/settings?tab=instagram'),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
+    if _rate_limited('instagram_connect', user_id,
+                     limit=RATE_LIMIT_INSTAGRAM_CONNECT_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=instagram_connect user_id=%s', user_id)
+        raise HTTPException(429, 'Too many Instagram connection attempts. Try again in a minute.')
     if not IG_APP_ID or not IG_APP_SECRET:
         raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
@@ -9286,7 +9329,7 @@ async def instagram_callback(request: Request,
 
 
 @api.get('/instagram/oauth/last-attempt')
-async def oauth_last_attempt(user_id: str = Depends(get_current_user_id)):
+async def oauth_last_attempt(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
@@ -9327,7 +9370,7 @@ async def oauth_last_attempt(user_id: str = Depends(get_current_user_id)):
     }
 
 @api.delete('/admin/users/{email}')
-async def admin_delete_user(email: str, user_id: str = Depends(get_current_user_id)):
+async def admin_delete_user(email: str, user_id: str = Depends(get_current_active_user_id)):
     """Delete a user by email. Only allows self-deletion or deletion of test
     accounts (those with @test.com or @example.com emails). Never deletes the
     primary production user."""
@@ -9356,7 +9399,7 @@ async def admin_delete_user(email: str, user_id: str = Depends(get_current_user_
 
 
 @api.get('/instagram/status')
-async def instagram_status(user_id: str = Depends(get_current_user_id)):
+async def instagram_status(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
@@ -9375,7 +9418,7 @@ async def instagram_status(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/instagram/profile')
-async def instagram_profile(user_id: str = Depends(get_current_user_id)):
+async def instagram_profile(user_id: str = Depends(get_current_active_user_id)):
     """Return safe, user-scoped Instagram profile data for UI previews.
 
     Never returns the access token. If Graph does not expose a profile picture
@@ -9442,7 +9485,7 @@ async def instagram_profile(user_id: str = Depends(get_current_user_id)):
 
 
 @api.post('/instagram/subscribe-webhook')
-async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id)):
+async def instagram_subscribe_webhook(user_id: str = Depends(get_current_active_user_id)):
     """Force-subscribe the user's connected IG user to webhook fields via
     Instagram API (graph.instagram.com). Requires an IG user access token
     obtained through Instagram Business Login."""
@@ -9480,7 +9523,7 @@ async def instagram_subscribe_webhook(user_id: str = Depends(get_current_user_id
 
 
 @api.post('/instagram/subscribe-webhook-legacy')
-async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_user_id)):
+async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_active_user_id)):
     """Legacy Page-based subscribe (kept for old Facebook-Login-flow users)."""
     u = await db.users.find_one({'id': user_id})
     if not _has_valid_instagram_connection(u):
@@ -9732,7 +9775,7 @@ async def instagram_debug_dump(email: str = '', key: str = '', media_id: str = '
 
 
 @api.get('/instagram/media')
-async def instagram_media(user_id: str = Depends(get_current_user_id), limit: int = 25):
+async def instagram_media(user_id: str = Depends(get_current_active_user_id), limit: int = 25):
     """List the user's recent Instagram posts via Graph API.
 
     Always uses /me/media as the primary endpoint (Instagram Business Login).
@@ -9819,7 +9862,7 @@ async def instagram_media(user_id: str = Depends(get_current_user_id), limit: in
 
 
 @api.get('/instagram/media/diagnostics')
-async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id)):
+async def instagram_media_diagnostics(user_id: str = Depends(get_current_active_user_id)):
     """Self-diagnose why /instagram/media may be returning empty.
 
     Hits /me, /me/media, and /{ig_user_id}/media against graph.instagram.com
@@ -9969,7 +10012,7 @@ async def instagram_media_diagnostics(user_id: str = Depends(get_current_user_id
 
 
 @api.get('/instagram/identity-matrix')
-async def instagram_identity_matrix(user_id: str = Depends(get_current_user_id)):
+async def instagram_identity_matrix(user_id: str = Depends(get_current_active_user_id)):
     """Full token + identity + media endpoint matrix.
 
     Always returns 200 with a structured JSON envelope so the frontend
@@ -10221,7 +10264,7 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
 
 
 @api.post('/instagram/disconnect')
-async def instagram_disconnect(user_id: str = Depends(get_current_user_id)):
+async def instagram_disconnect(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     await db.users.update_one(
         {'id': user_id},
@@ -10424,7 +10467,7 @@ def _webhook_log_safe_summary(doc: dict) -> dict:
 async def instagram_webhook_log(
     request: Request,
     limit: int = 20,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Return a SAFE summary of recent webhook deliveries for ops debugging.
 
@@ -11515,7 +11558,7 @@ def _classify_messaging_event(event: dict) -> dict:
 
 
 @api.get('/instagram/webhook/diagnostics')
-async def webhook_diagnostics(user_id: str = Depends(get_current_user_id)):
+async def webhook_diagnostics(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
@@ -11563,7 +11606,7 @@ async def webhook_diagnostics(user_id: str = Depends(get_current_user_id)):
     return out
 
 @api.post('/instagram/webhook/resubscribe')
-async def webhook_resubscribe(user_id: str = Depends(get_current_user_id)):
+async def webhook_resubscribe(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u or not _has_valid_instagram_connection(u):
         raise HTTPException(400, 'Instagram not connected')
@@ -12865,7 +12908,7 @@ async def _follow_verifier_loop():
 
 
 @api.get('/instagram/automation-health')
-async def instagram_automation_health(user_id: str = Depends(get_current_user_id)):
+async def instagram_automation_health(user_id: str = Depends(get_current_active_user_id)):
     """Operational status for comment / DM / follow automation.
 
     Returns liveness data for every background loop, the time of the
@@ -12944,7 +12987,7 @@ async def instagram_automation_health(user_id: str = Depends(get_current_user_id
 
 
 @api.post('/instagram/process-unreplied-comments')
-async def instagram_process_unreplied_comments(user_id: str = Depends(get_current_user_id)):
+async def instagram_process_unreplied_comments(user_id: str = Depends(get_current_active_user_id)):
     """Manual catch-up for selected-post historical replies.
 
     This intentionally fetches comments only for active rules that request
@@ -13097,7 +13140,7 @@ async def instagram_poll_now(email: str = '', key: str = ''):
 
 
 @api.post('/instagram/comments/poll-now')
-async def instagram_comments_poll_now(user_id: str = Depends(get_current_user_id)):
+async def instagram_comments_poll_now(user_id: str = Depends(get_current_active_user_id)):
     """Authenticated trigger: poll comments for the calling user right now.
     Returns a summary in the documented shape."""
     if _rate_limited('poll_now', user_id,
@@ -13131,7 +13174,7 @@ async def instagram_comments_poll_now(user_id: str = Depends(get_current_user_id
 @api.get('/instagram/comments/processed')
 async def instagram_comments_processed(
     limit: int = 50,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_active_user_id),
 ):
     """Diagnostic: list recently processed comments for the calling user."""
     limit = max(1, min(limit, 200))
@@ -13166,7 +13209,7 @@ async def instagram_comments_processed(
 
 
 @api.get('/instagram/diagnostics/full')
-async def instagram_diagnostics_full(user_id: str = Depends(get_current_user_id)):
+async def instagram_diagnostics_full(user_id: str = Depends(get_current_active_user_id)):
     """Comprehensive end-to-end diagnostic.
     Hits Graph API directly with the stored token and reports every layer.
     Token values are never returned."""
@@ -13533,14 +13576,14 @@ def _dm_rule_out(d: dict) -> dict:
 
 
 @api.get('/instagram/dm/rules')
-async def list_dm_rules(user_id: str = Depends(get_current_user_id)):
+async def list_dm_rules(user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     rows = await db.dm_rules.find(_account_scoped_query(user_id, account)).sort('created_at', -1).to_list(500)
     return {'items': [_dm_rule_out(r) for r in rows], 'count': len(rows)}
 
 
 @api.post('/instagram/dm/rules')
-async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_user_id)):
+async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_active_user_id)):
     import uuid as _uuid
     mode = (data.matchMode or 'contains').lower()
     if mode not in _DM_VALID_MODES:
@@ -13568,7 +13611,7 @@ async def create_dm_rule(data: DmRuleIn, user_id: str = Depends(get_current_user
 
 
 @api.patch('/instagram/dm/rules/{rid}')
-async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_current_user_id)):
+async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     scoped = _account_scoped_query(user_id, account)
     update: dict = {'updated_at': datetime.utcnow()}
@@ -13593,7 +13636,7 @@ async def patch_dm_rule(rid: str, data: DmRulePatch, user_id: str = Depends(get_
 
 
 @api.delete('/instagram/dm/rules/{rid}')
-async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_user_id)):
+async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     res = await db.dm_rules.delete_one({'id': rid, **_account_scoped_query(user_id, account)})
     if res.deleted_count == 0:
@@ -13602,7 +13645,7 @@ async def delete_dm_rule(rid: str, user_id: str = Depends(get_current_user_id)):
 
 
 @api.post('/instagram/dm/test-rule')
-async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_user_id)):
+async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_active_user_id)):
     """Match `text` against the user's active rules without sending anything."""
     account = await getActiveInstagramAccount(user_id)
     rules = await db.dm_rules.find(
@@ -13628,7 +13671,7 @@ async def test_dm_rule(data: DmTestIn, user_id: str = Depends(get_current_user_i
 
 
 @api.get('/instagram/dm/logs')
-async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_id)):
+async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_active_user_id)):
     limit = max(1, min(limit, 200))
     account = await getActiveInstagramAccount(user_id)
     rows = await db.dm_logs.find(_account_scoped_query(user_id, account)).sort('created', -1).limit(limit).to_list(limit)
@@ -13660,7 +13703,7 @@ async def list_dm_logs(limit: int = 50, user_id: str = Depends(get_current_user_
 
 
 @api.get('/instagram/dm/diagnostics')
-async def dm_diagnostics(user_id: str = Depends(get_current_user_id)):
+async def dm_diagnostics(user_id: str = Depends(get_current_active_user_id)):
     account = await getActiveInstagramAccount(user_id)
     u = _with_instagram_account_context(await db.users.find_one({'id': user_id}) or {}, account)
     ig_user_id = account.get('instagramAccountId') or account.get('igUserId') or ''
@@ -13740,7 +13783,7 @@ def _redact_id(s):
 
 
 @api.get('/instagram/credentials/diagnostics')
-async def instagram_credentials_diagnostics(user_id: str = Depends(get_current_user_id)):
+async def instagram_credentials_diagnostics(user_id: str = Depends(get_current_active_user_id)):
     """Audit which credential set is wired into each integration step.
     Never returns the secret values themselves — only presence flags and the
     env-var name that supplied each one.
@@ -13859,7 +13902,7 @@ async def instagram_credentials_diagnostics(user_id: str = Depends(get_current_u
 
 
 @api.get('/instagram/dm/debug-latest')
-async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
+async def dm_debug_latest(user_id: str = Depends(get_current_active_user_id)):
     """Self-diagnostic: reads live DB collections + Graph subscription state.
     Never exposes tokens or full webhook payloads. Sender IDs are partially
     redacted. Used by the DM Automation page "Run DM debug" button.
@@ -14277,7 +14320,7 @@ async def dm_debug_latest(user_id: str = Depends(get_current_user_id)):
 
 
 @api.post('/instagram/dm/resubscribe')
-async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
+async def dm_resubscribe(user_id: str = Depends(get_current_active_user_id)):
     """Re-subscribe the connected IG account to the messaging webhook fields.
     Calls POST /{ig_user_id}/subscribed_apps with the messaging field set,
     then GETs the current state and returns it.
@@ -14371,7 +14414,7 @@ async def dm_resubscribe(user_id: str = Depends(get_current_user_id)):
 
 
 @api.get('/instagram/accounts')
-async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
+async def instagram_accounts(user_id: str = Depends(get_current_active_user_id)):
     user_doc = await db.users.find_one({'id': user_id}) or {}
     if user_doc:
         await _sync_user_instagram_account_doc(user_doc)
@@ -14391,7 +14434,7 @@ async def instagram_accounts(user_id: str = Depends(get_current_user_id)):
 
 
 @api.post('/instagram/accounts/{account_id}/activate')
-async def instagram_account_activate(account_id: str, user_id: str = Depends(get_current_user_id)):
+async def instagram_account_activate(account_id: str, user_id: str = Depends(get_current_active_user_id)):
     user_doc = await db.users.find_one({'id': user_id})
     if user_doc:
         await _sync_user_instagram_account_doc(user_doc)
@@ -14447,7 +14490,7 @@ async def cron_refresh_instagram_tokens(request: Request):
 
 
 @api.get('/instagram/token-refresh/status')
-async def instagram_token_refresh_status(user_id: str = Depends(get_current_user_id)):
+async def instagram_token_refresh_status(user_id: str = Depends(get_current_active_user_id)):
     user_doc = await db.users.find_one({'id': user_id})
     if user_doc:
         await _sync_user_instagram_account_doc(user_doc)
