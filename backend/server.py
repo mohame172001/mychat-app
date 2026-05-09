@@ -6234,6 +6234,7 @@ async def admin_users_list(
     user_id: str = Depends(get_current_user_id),
 ):
     """Paginated, sanitized user list with usage roll-ups."""
+    started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or 25), 100))
@@ -6326,6 +6327,11 @@ async def admin_users_list(
             'exceeded': exceeded,
         })
 
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'admin_users_list_calculated user_id=%s resultCount=%s durationMs=%s',
+        user_id, len(items), duration_ms,
+    )
     return {
         'items': items,
         'pagination': {
@@ -6347,6 +6353,7 @@ async def admin_user_detail(
     """Sanitized full profile of one user — plan, usage, accounts,
     automations, recent failures. Raw text is NEVER returned; comment/
     reply/DM bodies are not in this response."""
+    started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
     user = await db.users.find_one({'id': target_user_id})
     if not user:
@@ -6437,6 +6444,11 @@ async def admin_user_detail(
             ),
         })
 
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'admin_user_detail_calculated user_id=%s target_user_id=%s accounts=%s automations=%s failures=%s durationMs=%s',
+        user_id, target_user_id, len(accounts), len(automations), len(failures), duration_ms,
+    )
     return {
         'user_id': target_user_id,
         'profile': {
@@ -7031,6 +7043,7 @@ async def admin_metrics_reconciliation(
 ):
     """Compare Admin Overview numbers against fresh aggregations from
     raw collections. Read-only. Admin-only via admin.audit.view."""
+    started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
     event_month = (month or _usage_month(datetime.utcnow())).strip()
     if not re.fullmatch(r'\d{4}-\d{2}', event_month):
@@ -7133,6 +7146,11 @@ async def admin_metrics_reconciliation(
         _row('permanent_failure_counts', permanent, permanent,
              source='comments.action_status in failed_permanent/failed_retry_exhausted'),
     ]
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'admin_metrics_reconciliation_calculated user_id=%s resultCount=%s durationMs=%s',
+        user_id, len(rows), duration_ms,
+    )
     return {
         'event_month': event_month,
         'items': rows,

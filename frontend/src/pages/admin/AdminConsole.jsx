@@ -7,6 +7,7 @@ import {
   CheckCircle2, AlertTriangle, Lock, UserCog, BarChart3,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { cachedApiGet, invalidateApiCache } from '../../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../../lib/analytics';
 import {
@@ -15,9 +16,83 @@ import {
 } from '../../lib/admin';
 import {
   ROLE_DISPLAY, hasPermission, canManageRole, roleOptionsAssignableBy,
-  PERM_OVERVIEW_VIEW, PERM_USERS_VIEW, PERM_PLANS_ASSIGN,
+  PERM_OVERVIEW_VIEW, PERM_USERS_VIEW, PERM_USERS_MANAGE, PERM_PLANS_ASSIGN,
   PERM_AUTOMATIONS_DISABLE, PERM_MEMBERS_VIEW, PERM_MEMBERS_MANAGE,
 } from '../../lib/adminPermissions';
+
+const ADMIN_CACHE_TTL_MS = 30000;
+
+class AdminSectionErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error) {
+    // Safe diagnostic only: no payload, tokens, request bodies, or user content.
+    console.error('[AdminConsole] section render failed', {
+      section: this.props.name || 'unknown',
+      error: error?.name || 'RenderError',
+    });
+  }
+
+  componentDidUpdate(prevProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-2xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-800"
+             data-testid="admin-section-error">
+          <div className="font-semibold">Could not render this user section</div>
+          <div className="text-xs mt-1">section={this.props.name || 'unknown'}</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function AdminErrorCard({ title = 'Could not load this section', onRetry, loading }) {
+  return (
+    <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
+      <div className="font-semibold">{title}</div>
+      {onRetry && (
+        <Button variant="outline" size="sm" className="mt-3" onClick={onRetry} disabled={loading}>
+          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          Retry
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function AdminSkeleton({ rows = 3 }) {
+  return (
+    <div className="space-y-2" data-testid="admin-section-skeleton">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="h-12 rounded-xl bg-slate-100 animate-pulse" />
+      ))}
+    </div>
+  );
+}
+
+function safeList(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function invalidateAdminUserCaches(userId) {
+  invalidateApiCache(`admin:user-detail:${userId}`);
+  invalidateApiCache('admin:users');
+  invalidateApiCache('admin:overview');
+}
 
 /**
  * Phase 2.4 Admin Console v0.
@@ -90,8 +165,13 @@ function UsersTab({ onSelect }) {
       const params = { page, page_size: pageSize };
       if (search.trim()) params.search = search.trim();
       if (planKey) params.plan_key = planKey;
-      const { data } = await api.get('/admin/users', { params });
-      setData(data);
+      const cacheKey = `admin:users:${page}:${pageSize}:${search.trim()}:${planKey || 'all'}`;
+      const result = await cachedApiGet(
+        cacheKey,
+        () => api.get('/admin/users', { params }),
+        { ttlMs: ADMIN_CACHE_TTL_MS },
+      );
+      setData(result.data);
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to load users';
       toast.error(typeof msg === 'string' ? msg : 'Failed to load users');
@@ -123,7 +203,15 @@ function UsersTab({ onSelect }) {
           <option value="">All plans</option>
           {PLAN_KEYS.map(k => <option key={k} value={k}>{PLAN_DISPLAY[k]}</option>)}
         </select>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            invalidateApiCache('admin:users');
+            load();
+          }}
+          disabled={loading}
+        >
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
@@ -204,6 +292,7 @@ function UserDetailTab({ userId, onBack, me }) {
   const [planKey, setPlanKey] = useState('');
   const [reason, setReason] = useState('');
   const [assigning, setAssigning] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const canAssignPlan = hasPermission(me, PERM_PLANS_ASSIGN);
   const canDisableAutomation = hasPermission(me, PERM_AUTOMATIONS_DISABLE);
   const canManageUsers = hasPermission(me, PERM_USERS_MANAGE);
@@ -219,12 +308,20 @@ function UserDetailTab({ userId, onBack, me }) {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      const { data } = await api.get(`/admin/users/${encodeURIComponent(userId)}/detail`);
-      setData(data);
-      setPlanKey(data?.plan?.plan_key || 'free');
+      const cacheKey = `admin:user-detail:${userId}`;
+      const result = await cachedApiGet(
+        cacheKey,
+        () => api.get(`/admin/users/${encodeURIComponent(userId)}/detail`),
+        { ttlMs: ADMIN_CACHE_TTL_MS },
+      );
+      setData(result.data);
+      setPlanKey(result.data?.plan?.plan_key || 'free');
+      if (result.stale) setLoadError('Showing cached user detail. Refresh failed.');
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to load user';
+      setLoadError(typeof msg === 'string' ? msg : 'Failed to load user');
       toast.error(typeof msg === 'string' ? msg : 'Failed to load user');
     } finally {
       setLoading(false);
@@ -242,6 +339,7 @@ function UserDetailTab({ userId, onBack, me }) {
       });
       toast.success(`Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
       setReason('');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Plan assignment failed';
@@ -277,6 +375,7 @@ function UserDetailTab({ userId, onBack, me }) {
       setAllowanceDmsExtra('');
       setAllowanceRepliesExtra('');
       setAllowanceReason('');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to grant';
@@ -295,6 +394,7 @@ function UserDetailTab({ userId, onBack, me }) {
         { reason: 'admin_revoke' },
       );
       toast.success('Allowance revoked');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to revoke';
@@ -307,6 +407,7 @@ function UserDetailTab({ userId, onBack, me }) {
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/suspend`, { reason: reasonText });
       toast.success('User suspended');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Failed to suspend');
@@ -317,6 +418,7 @@ function UserDetailTab({ userId, onBack, me }) {
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/unsuspend`, {});
       toast.success('User reactivated');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Failed to unsuspend');
@@ -333,6 +435,7 @@ function UserDetailTab({ userId, onBack, me }) {
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/delete`, { reason: reasonText });
       toast.success('User soft-deleted');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Failed to delete');
@@ -346,12 +449,22 @@ function UserDetailTab({ userId, onBack, me }) {
         reason: 'admin_pause',
       });
       toast.success('Automation paused');
+      invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to pause';
       toast.error(typeof msg === 'string' ? msg : 'Failed to pause');
     }
-  }, [load]);
+  }, [userId, load]);
+
+  const profile = data?.profile || {};
+  const plan = data?.plan || {};
+  const usage = data?.usage_current_month || {};
+  const usageCounters = usage.counters || {};
+  const activeOverrides = safeList(data?.active_overrides);
+  const instagramAccounts = safeList(data?.instagram_accounts);
+  const automations = safeList(data?.automations);
+  const recentFailures = safeList(data?.recent_failures);
 
   return (
     <div data-testid="admin-user-detail">
@@ -363,14 +476,27 @@ function UserDetailTab({ userId, onBack, me }) {
         <div className="text-center py-12 text-slate-500">Loading…</div>
       )}
 
+      {loadError && (
+        <div className="mb-4">
+          <AdminErrorCard
+            title={loadError}
+            onRetry={() => {
+              invalidateApiCache(`admin:user-detail:${userId}`);
+              load();
+            }}
+            loading={loading}
+          />
+        </div>
+      )}
+
       {data && (
         <>
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">User</div>
-            <div className="mt-1 text-2xl font-bold text-slate-800 font-mono">{data.profile?.email}</div>
-            <div className="text-xs text-slate-500 font-mono mt-1">{data.user_id}</div>
+            <div className="mt-1 text-2xl font-bold text-slate-800 font-mono">{profile.email || 'Unknown user'}</div>
+            <div className="text-xs text-slate-500 font-mono mt-1">{data.user_id || userId}</div>
             <div className="text-xs text-slate-400 mt-1">
-              Created: {formatTimestamp(data.profile?.created_at)}
+              Created: {formatTimestamp(profile.created_at)}
             </div>
           </section>
 
@@ -380,12 +506,12 @@ function UserDetailTab({ userId, onBack, me }) {
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Plan</div>
                 <div className="mt-1 text-2xl font-bold text-slate-800">
-                  {data.plan?.display_name || PLAN_DISPLAY[data.plan?.plan_key] || data.plan?.plan_key}
+                  {plan.display_name || PLAN_DISPLAY[plan.plan_key] || plan.plan_key || 'Free'}
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
                   Billing: <span className="font-semibold">Not enabled yet</span>
-                  {data.plan?.assignment_reason && (
-                    <span className="ml-2 text-slate-400">· last reason: {data.plan.assignment_reason}</span>
+                  {plan.assignment_reason && (
+                    <span className="ml-2 text-slate-400">· last reason: {plan.assignment_reason}</span>
                   )}
                 </div>
               </div>
@@ -423,28 +549,28 @@ function UserDetailTab({ userId, onBack, me }) {
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Status</div>
                 <div className="mt-1 text-base font-semibold">
-                  {data.profile?.status === 'suspended'
+                  {profile.status === 'suspended'
                     ? <Badge className="bg-amber-100 text-amber-800 border-0">Suspended</Badge>
-                    : data.profile?.status === 'deleted'
+                    : profile.status === 'deleted'
                       ? <Badge className="bg-rose-100 text-rose-700 border-0">Deleted</Badge>
                       : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
-                  {data.profile?.google_linked && (
+                  {profile.google_linked && (
                     <Badge className="ml-2 bg-blue-100 text-blue-700 border-0">Google linked</Badge>
                   )}
                 </div>
               </div>
               <div className="flex gap-2">
-                {canManageUsers && data.profile?.status === 'active' && (
+                {canManageUsers && (profile.status || 'active') === 'active' && (
                   <Button size="sm" variant="outline" onClick={onSuspend} data-testid="admin-suspend-btn">
                     Suspend
                   </Button>
                 )}
-                {canManageUsers && data.profile?.status === 'suspended' && (
+                {canManageUsers && profile.status === 'suspended' && (
                   <Button size="sm" variant="outline" onClick={onUnsuspend} data-testid="admin-unsuspend-btn">
                     Unsuspend
                   </Button>
                 )}
-                {canDeleteUsers && data.profile?.status !== 'deleted' && (
+                {canDeleteUsers && profile.status !== 'deleted' && (
                   <Button size="sm" variant="outline"
                           className="text-rose-700 border-rose-200 hover:bg-rose-50"
                           onClick={onSoftDelete} data-testid="admin-soft-delete-btn">
@@ -453,16 +579,16 @@ function UserDetailTab({ userId, onBack, me }) {
                 )}
               </div>
             </div>
-            {data.profile?.suspended_at && (
+            {profile.suspended_at && (
               <div className="text-xs text-slate-500">
-                Suspended at {formatTimestamp(data.profile.suspended_at)}
-                {data.profile.suspended_by && <> by <span className="font-mono">{data.profile.suspended_by}</span></>}
+                Suspended at {formatTimestamp(profile.suspended_at)}
+                {profile.suspended_by && <> by <span className="font-mono">{profile.suspended_by}</span></>}
               </div>
             )}
-            {data.profile?.deleted_at && (
+            {profile.deleted_at && (
               <div className="text-xs text-slate-500">
-                Deleted at {formatTimestamp(data.profile.deleted_at)}
-                {data.profile.deleted_by && <> by <span className="font-mono">{data.profile.deleted_by}</span></>}
+                Deleted at {formatTimestamp(profile.deleted_at)}
+                {profile.deleted_by && <> by <span className="font-mono">{profile.deleted_by}</span></>}
               </div>
             )}
           </section>
@@ -470,12 +596,12 @@ function UserDetailTab({ userId, onBack, me }) {
           {/* Active allowances + grant form */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-allowances">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">Custom allowances</h3>
-            {(!data.active_overrides || data.active_overrides.length === 0) && (
+            {activeOverrides.length === 0 && (
               <div className="text-sm text-slate-500 mb-3">No active grants.</div>
             )}
-            {data.active_overrides && data.active_overrides.length > 0 && (
+            {activeOverrides.length > 0 && (
               <ul className="space-y-2 text-sm mb-3">
-                {data.active_overrides.map((ov) => (
+                {activeOverrides.map((ov) => (
                   <li key={ov.id} className="flex items-start justify-between border-b border-slate-100 pb-2 last:border-0">
                     <div>
                       <div className="font-semibold">
@@ -542,26 +668,29 @@ function UserDetailTab({ userId, onBack, me }) {
           {/* Usage */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">
-              Usage — {data.usage_current_month?.event_month}
+              Usage — {usage.event_month || 'current month'}
             </h3>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {Object.entries(data.usage_current_month?.counters || {}).map(([k, v]) => (
+              {Object.entries(usageCounters).map(([k, v]) => (
                 <div key={k} className="rounded-xl border border-slate-100 p-3">
                   <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">{k}</div>
                   <div className="mt-1 text-xl font-bold text-slate-800 font-mono">{v}</div>
                 </div>
               ))}
+              {Object.keys(usageCounters).length === 0 && (
+                <div className="text-sm text-slate-500">No usage recorded this month.</div>
+              )}
             </div>
           </section>
 
           {/* Instagram accounts */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">Instagram accounts</h3>
-            {data.instagram_accounts?.length === 0 && (
+            {instagramAccounts.length === 0 && (
               <div className="text-sm text-slate-500">None connected.</div>
             )}
             <ul className="space-y-2 text-sm">
-              {(data.instagram_accounts || []).map(a => (
+              {instagramAccounts.map(a => (
                 <li key={a.id} className="flex items-center justify-between border-b border-slate-100 pb-2 last:border-0">
                   <div>
                     <div className="font-mono">{a.username || a.instagram_account_id}</div>
@@ -579,11 +708,11 @@ function UserDetailTab({ userId, onBack, me }) {
           {/* Automations */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">Automations</h3>
-            {data.automations?.length === 0 && (
+            {automations.length === 0 && (
               <div className="text-sm text-slate-500">No automations.</div>
             )}
             <ul className="space-y-2 text-sm">
-              {(data.automations || []).map(a => (
+              {automations.map(a => (
                 <li key={a.automation_id} className="flex items-center justify-between border-b border-slate-100 pb-2 last:border-0">
                   <div>
                     <div className="font-semibold">{a.name || a.automation_id}</div>
@@ -610,11 +739,11 @@ function UserDetailTab({ userId, onBack, me }) {
           {/* Recent failures */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">Recent failures</h3>
-            {data.recent_failures?.length === 0 && (
+            {recentFailures.length === 0 && (
               <div className="text-sm text-slate-500">No recent failures.</div>
             )}
             <ul className="space-y-2 text-sm font-mono">
-              {(data.recent_failures || []).map(f => (
+              {recentFailures.map(f => (
                 <li key={f.comment_id} className="border-b border-slate-100 pb-2 last:border-0">
                   <div>
                     <span className="text-slate-700">{f.action_status}</span>
@@ -652,8 +781,12 @@ function AdminsTab({ me }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/admin/members');
-      setData(data);
+      const result = await cachedApiGet(
+        'admin:members',
+        () => api.get('/admin/members'),
+        { ttlMs: ADMIN_CACHE_TTL_MS },
+      );
+      setData(result.data);
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to load members';
       toast.error(typeof msg === 'string' ? msg : 'Failed to load members');
@@ -676,6 +809,7 @@ function AdminsTab({ me }) {
       });
       toast.success(`Added ${addEmail} as ${ROLE_DISPLAY[addRole]}`);
       setAddEmail(''); setAddReason(''); setAddRole('viewer');
+      invalidateApiCache('admin:members');
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to add member';
@@ -691,6 +825,7 @@ function AdminsTab({ me }) {
         role: newRole, reason: 'admin_role_change',
       });
       toast.success(`Role changed to ${ROLE_DISPLAY[newRole]}`);
+      invalidateApiCache('admin:members');
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to change role';
@@ -703,6 +838,7 @@ function AdminsTab({ me }) {
     try {
       await api.delete(`/admin/members/${encodeURIComponent(member.user_id)}`);
       toast.success('Member removed');
+      invalidateApiCache('admin:members');
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to remove member';
@@ -842,8 +978,12 @@ function ReconciliationTab() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/admin/metrics/reconciliation');
-      setData(data);
+      const result = await cachedApiGet(
+        'admin:metrics:reconciliation',
+        () => api.get('/admin/metrics/reconciliation'),
+        { ttlMs: ADMIN_CACHE_TTL_MS },
+      );
+      setData(result.data);
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to load reconciliation';
       toast.error(typeof msg === 'string' ? msg : 'Failed to load reconciliation');
@@ -861,7 +1001,15 @@ function ReconciliationTab() {
           Metrics reconciliation
           {data?.event_month && <span className="text-slate-400 font-mono ml-2">{data.event_month}</span>}
         </h3>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            invalidateApiCache('admin:metrics');
+            load();
+          }}
+          disabled={loading}
+        >
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
@@ -934,8 +1082,12 @@ export default function AdminConsole() {
   const loadOverview = useCallback(async () => {
     setOverviewLoading(true);
     try {
-      const { data } = await api.get('/admin/overview');
-      setOverview(data);
+      const result = await cachedApiGet(
+        'admin:overview',
+        () => api.get('/admin/overview'),
+        { ttlMs: ADMIN_CACHE_TTL_MS },
+      );
+      setOverview(result.data);
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to load overview';
       toast.error(typeof msg === 'string' ? msg : 'Failed to load overview');
@@ -1036,7 +1188,15 @@ export default function AdminConsole() {
         )}
         <div className="ml-auto" />
         {tab === 'overview' && canViewOverview && (
-          <Button variant="outline" size="sm" onClick={loadOverview} disabled={overviewLoading}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              invalidateApiCache('admin:overview');
+              loadOverview();
+            }}
+            disabled={overviewLoading}
+          >
             <RefreshCw className={`w-4 h-4 mr-2 ${overviewLoading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
@@ -1048,7 +1208,9 @@ export default function AdminConsole() {
       )}
       {tab === 'users' && canViewUsers && <UsersTab onSelect={onSelectUser} />}
       {tab === 'user-detail' && selectedUserId && canViewUsers && (
-        <UserDetailTab userId={selectedUserId} onBack={onBackToUsers} me={me} />
+        <AdminSectionErrorBoundary name="user-detail" resetKey={selectedUserId}>
+          <UserDetailTab userId={selectedUserId} onBack={onBackToUsers} me={me} />
+        </AdminSectionErrorBoundary>
       )}
       {tab === 'admins' && canViewMembers && <AdminsTab me={me} />}
       {tab === 'metrics' && canViewMetrics && <ReconciliationTab />}
