@@ -65,7 +65,7 @@ const Comments = () => {
 
     try {
       const cacheKey = `comments:list:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
-      const data = await cachedApiGet(
+      const result = await cachedApiGet(
         cacheKey,
         async () => {
           const response = await api.get('/comments', {
@@ -75,9 +75,10 @@ const Comments = () => {
         },
         { ttlMs: COMMENTS_TTL_MS, force: options.force === true },
       );
+      const data = result.data;
       
       // Fallback for older backend cache just in case
-      const incomingComments = Array.isArray(data) ? data : data.comments;
+      const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
       const incomingHasMore = data.has_more ?? false;
 
       setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);

@@ -21,4 +21,10 @@ describe('Comments performance wiring', () => {
     expect(source).toContain('/retry-reply');
     expect(source).toContain("invalidateApiCache('comments:list')");
   });
+
+  test('unwraps cachedApiGet result before reading comments payload', () => {
+    expect(source).toContain('const result = await cachedApiGet');
+    expect(source).toContain('const data = result.data');
+    expect(source).toContain('data?.comments || []');
+  });
 });
