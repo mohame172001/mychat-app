@@ -160,6 +160,13 @@ describe('googleErrorMessage backend detail mapping', () => {
       .toContain('conflicting');
   });
 
+  test('suspended/deleted linked accounts use auth status messages', () => {
+    expect(googleErrorMessage('account_suspended'))
+      .toBe('Your account is suspended. Contact support.');
+    expect(googleErrorMessage('account_deleted'))
+      .toBe('Your account has been deleted or disabled. Contact support.');
+  });
+
   test('expired token', () => {
     expect(googleErrorMessage('google_credential_invalid:token_expired'))
       .toBe('Google sign-in expired, try again');

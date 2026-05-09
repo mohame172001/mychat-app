@@ -261,6 +261,46 @@ def test_google_auth_rejects_cross_user_conflict(monkeypatch):
     assert 'google_account_conflict' in str(exc.value.detail)
 
 
+def test_google_auth_rejects_suspended_linked_user(monkeypatch):
+    _setup(monkeypatch, users=[
+        _full_user(
+            id='u_suspended',
+            email='suspended@example.com',
+            google_sub='g_sub_suspended',
+            status='suspended',
+        ),
+    ])
+    _stub_verify(monkeypatch, {
+        'sub': 'g_sub_suspended',
+        'email': 'suspended@example.com',
+        'email_verified': True,
+    })
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.auth_google({'credential': PRIVATE_CREDENTIAL}, request=None))
+    assert exc.value.status_code == 403
+    assert 'account_suspended' in str(exc.value.detail)
+
+
+def test_google_auth_rejects_deleted_linked_user(monkeypatch):
+    _setup(monkeypatch, users=[
+        _full_user(
+            id='u_deleted',
+            email='deleted@example.com',
+            google_sub='g_sub_deleted',
+            status='deleted',
+        ),
+    ])
+    _stub_verify(monkeypatch, {
+        'sub': 'g_sub_deleted',
+        'email': 'deleted@example.com',
+        'email_verified': True,
+    })
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.auth_google({'credential': PRIVATE_CREDENTIAL}, request=None))
+    assert exc.value.status_code == 403
+    assert 'account_deleted' in str(exc.value.detail)
+
+
 # ── verify_google_credential reasons (real path through the helper) ─────────
 
 def test_verify_google_credential_no_sdk_returns_503(monkeypatch):

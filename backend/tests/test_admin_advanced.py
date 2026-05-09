@@ -364,6 +364,24 @@ def test_suspended_user_cannot_login(monkeypatch):
     assert 'account_suspended' in str(exc.value.detail)
 
 
+def test_suspended_user_wrong_password_gets_generic_login_error(monkeypatch):
+    from auth_utils import hash_password as _hash
+    _setup(monkeypatch, users=[
+        _full_user(id='u1', email='u1@x.com', username='u1user',
+                   password_hash=_hash('Hunter22!!'), status='suspended'),
+    ])
+
+    class _LoginIn:
+        username = 'u1user'
+        password = 'wrong-password'
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.login(_LoginIn(), request=SimpleNamespace(
+            client=SimpleNamespace(host='1.1.1.1'), headers={})))
+    assert exc.value.status_code == 401
+    assert 'Invalid username or password' in str(exc.value.detail)
+    assert 'account_suspended' not in str(exc.value.detail)
+
+
 def test_unsuspend_restores_login(monkeypatch):
     from auth_utils import hash_password as _hash
     db = _setup(monkeypatch, users=[

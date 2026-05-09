@@ -15,6 +15,7 @@
  */
 
 import api from './api';
+import { authErrorCode, authErrorMessage } from './authErrors';
 
 const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
 
@@ -268,6 +269,10 @@ export async function renderGoogleButton(targetEl, { onCredential, onError } = {
  * message. Pure function — testable without React.
  */
 export function googleErrorMessage(detail) {
+  const authCode = authErrorCode(detail);
+  if (authCode === 'account_suspended' || authCode === 'account_deleted') {
+    return authErrorMessage(detail);
+  }
   const s = String(detail || '').toLowerCase();
   if (!s) return 'Google sign-in failed';
   if (s.includes('google_auth_not_configured')) return 'Google sign-in is not configured';

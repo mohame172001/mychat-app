@@ -7,6 +7,7 @@ import { MessageCircle, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import GoogleSignInButton from '../components/auth/GoogleSignInButton';
+import { authErrorMessageFromApiError } from '../lib/authErrors';
 
 const Login = () => {
   const [username, setUsername] = useState('');
@@ -28,7 +29,7 @@ const Login = () => {
       toast.success('Welcome back');
       navigate('/app');
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Login failed');
+      toast.error(authErrorMessageFromApiError(err));
     } finally {
       setLoading(false);
     }
