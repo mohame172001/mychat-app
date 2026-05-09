@@ -10,7 +10,7 @@ import secrets
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
@@ -3057,6 +3057,72 @@ async def _seed_user(user_id: str):
     conversations, automations and comments will be populated by real
     Instagram webhook events once the account is connected."""
     return
+
+
+def _hash_identifier(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return hashlib.sha256(value.strip().lower().encode('utf-8')).hexdigest()
+
+
+def _data_deletion_confirmation_code() -> str:
+    return f"mychat-del-{secrets.token_hex(8)}"
+
+
+async def _parse_data_deletion_payload(request: Request) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    content_type = (request.headers.get('content-type') or '').lower()
+    if 'application/json' in content_type:
+        try:
+            payload = json.loads(raw.decode('utf-8'))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+    if 'application/x-www-form-urlencoded' in content_type:
+        parsed = parse_qs(raw.decode('utf-8'), keep_blank_values=False)
+        return {k: v[-1] for k, v in parsed.items() if v}
+    return {}
+
+
+@api.post('/meta/data-deletion')
+async def meta_data_deletion_callback(request: Request):
+    """Public Meta data-deletion callback.
+
+    Stores only hashed request metadata and returns a confirmation code plus
+    public deletion-status instructions. It never returns stored user data and
+    never logs signed_request contents.
+    """
+    payload = await _parse_data_deletion_payload(request)
+    confirmation_code = _data_deletion_confirmation_code()
+    signed_request = str(payload.get('signed_request') or '')
+    email = str(payload.get('email') or payload.get('user_email') or '')
+    doc = {
+        'confirmation_code': confirmation_code,
+        'source': 'meta_callback',
+        'signed_request_present': bool(signed_request),
+        'signed_request_sha256': _hash_identifier(signed_request),
+        'email_sha256': _hash_identifier(email),
+        'ip_hash': _hash_identifier(_client_ip(request)),
+        'created_at': datetime.utcnow(),
+        'status': 'received',
+    }
+    try:
+        await db.data_deletion_requests.insert_one(doc)
+    except Exception as e:
+        logger.warning('data_deletion_request_store_failed reason=%s',
+                       str(e)[:80])
+    logger.info(
+        'data_deletion_request_received source=meta_callback '
+        'signed_request_present=%s confirmation_code=%s',
+        bool(signed_request),
+        confirmation_code,
+    )
+    return {
+        'url': f"{FRONTEND_URL.rstrip('/')}/data-deletion?confirmation_code={confirmation_code}",
+        'confirmation_code': confirmation_code,
+    }
 
 
 # ---------------- auth ----------------
@@ -14059,6 +14125,10 @@ async def _startup():
         await db.comment_dm_sessions.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='comment_dm_sessions_user_ig_created',
+        )
+        await db.data_deletion_requests.create_index(
+            [('created_at', -1)],
+            name='data_deletion_requests_created',
         )
         await db.contacts.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],

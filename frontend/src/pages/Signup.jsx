@@ -73,6 +73,8 @@ const Signup = () => {
               <Link to="/terms" className="hover:text-slate-900 underline">Terms</Link>
               {' '}and{' '}
               <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>.
+              {' '}Data deletion instructions are available{' '}
+              <Link to="/data-deletion" className="hover:text-slate-900 underline">here</Link>.
             </p>
           </div>
         </div>

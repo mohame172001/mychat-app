@@ -76,6 +76,8 @@ const Login = () => {
               <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>
               <span className="mx-2">-</span>
               <Link to="/terms" className="hover:text-slate-900 underline">Terms of Service</Link>
+              <span className="mx-2">-</span>
+              <Link to="/data-deletion" className="hover:text-slate-900 underline">Data Deletion</Link>
             </p>
           </div>
         </div>

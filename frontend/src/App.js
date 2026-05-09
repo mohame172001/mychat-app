@@ -30,6 +30,7 @@ const Settings = lazy(() => import('./pages/Settings'));
 const DmAutomation = lazy(() => import('./pages/DmAutomation'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
 const Terms = lazy(() => import('./pages/Terms'));
+const DataDeletion = lazy(() => import('./pages/DataDeletion'));
 const SystemHealth = lazy(() => import('./pages/SystemHealth'));
 const Billing = lazy(() => import('./pages/Billing'));
 const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
@@ -60,6 +61,7 @@ function App() {
               <Route path="/signup" element={<Signup />} />
               <Route path="/privacy" element={<PrivacyPolicy />} />
               <Route path="/terms" element={<Terms />} />
+              <Route path="/data-deletion" element={<DataDeletion />} />
               <Route path="/app" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
                 <Route index element={<Dashboard />} />
                 <Route path="automations" element={<Automations />} />

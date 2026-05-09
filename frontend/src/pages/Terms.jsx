@@ -21,7 +21,7 @@ const Terms = () => {
 
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
         <h1 className="text-4xl font-bold tracking-tight mb-2">Terms of Service</h1>
-        <p className="text-sm text-slate-500 mb-10">Last updated: April 25, 2026</p>
+        <p className="text-sm text-slate-500 mb-10">Last updated: May 9, 2026</p>
 
         <div className="space-y-6 text-slate-700 leading-relaxed">
           <section>
@@ -59,7 +59,7 @@ const Terms = () => {
 
           <section>
             <h2 className="text-2xl font-semibold text-slate-900 mt-8 mb-3">6. Account Termination</h2>
-            <p>You may delete your account at any time. We may suspend or terminate accounts that violate these Terms, abuse the API, or pose risk to other users or to Meta's platform.</p>
+            <p>You may delete your account at any time through the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or by contacting support. We may suspend or terminate accounts that violate these Terms, abuse the API, or pose risk to other users or to Meta's platform.</p>
           </section>
 
           <section>
@@ -90,6 +90,7 @@ const Terms = () => {
           <div className="flex gap-6">
             <Link to="/privacy" className="hover:text-slate-900">Privacy</Link>
             <Link to="/terms" className="hover:text-slate-900">Terms</Link>
+            <Link to="/data-deletion" className="hover:text-slate-900">Data Deletion</Link>
           </div>
         </div>
       </footer>

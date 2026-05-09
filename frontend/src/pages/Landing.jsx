@@ -231,6 +231,7 @@ const Landing = () => {
           <div className="flex gap-6 text-sm text-slate-500">
             <Link to="/privacy" className="hover:text-slate-900">Privacy</Link>
             <Link to="/terms" className="hover:text-slate-900">Terms</Link>
+            <Link to="/data-deletion" className="hover:text-slate-900">Data Deletion</Link>
             <a href="mailto:mm.mohame172000@gmail.com" className="hover:text-slate-900">Contact</a>
           </div>
         </div>

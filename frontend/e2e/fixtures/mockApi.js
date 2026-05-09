@@ -272,6 +272,12 @@ async function setupMockApi(page, options = {}) {
     if (path === '/auth/login' && method === 'POST') {
       return route.fulfill(json({ detail: 'invalid_credentials' }, 401));
     }
+    if (path === '/meta/data-deletion' && method === 'POST') {
+      return route.fulfill(json({
+        confirmation_code: 'mychat-del-e2e',
+        url: '/data-deletion?confirmation_code=mychat-del-e2e',
+      }));
+    }
     if (path === '/auth/me') return route.fulfill(json(user));
     if (path === '/admin/me') {
       return route.fulfill(json({
@@ -433,4 +439,3 @@ module.exports = {
   signInWithMockUser,
   installBrowserGuards,
 };
-
