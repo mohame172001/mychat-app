@@ -3626,6 +3626,8 @@ async def list_automations(user_id: str = Depends(get_current_active_user_id)):
 @api.post('/automations')
 async def create_automation(data: AutomationIn, user_id: str = Depends(get_current_active_user_id)):
     automation_data = data.model_dump()
+    for server_owned_field in ('user_id', 'instagramAccountId', 'igUserId', 'instagramUsername'):
+        automation_data.pop(server_owned_field, None)
     account = await getActiveInstagramAccount(user_id)
     ctx = _instagram_context_from_account(account)
     if ctx['instagramAccountId']:
@@ -3698,6 +3700,8 @@ async def get_automation(aid: str, user_id: str = Depends(get_current_active_use
 @api.patch('/automations/{aid}')
 async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depends(get_current_active_user_id)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
+    for server_owned_field in ('user_id', 'instagramAccountId', 'igUserId', 'instagramUsername'):
+        update.pop(server_owned_field, None)
     camel_aliases = {
         'followGateEnabled': 'follow_request_enabled',
         'followGateMessage': 'follow_request_message',
@@ -3844,7 +3848,7 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
             automation_id=aid,
             metadata={'source': 'patch_automation'},
         )
-    d = await db.automations.find_one({'id': aid})
+    d = await db.automations.find_one({'id': aid, **scoped})
     return _strip_mongo(d)
 
 
@@ -4196,7 +4200,7 @@ async def patch_contact(cid: str, data: ContactPatch, user_id: str = Depends(get
     res = await db.contacts.update_one({'id': cid, 'user_id': user_id}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
-    d = await db.contacts.find_one({'id': cid})
+    d = await db.contacts.find_one({'id': cid, 'user_id': user_id})
     return _strip_mongo(d)
 
 
@@ -4237,7 +4241,7 @@ async def patch_broadcast(bid: str, data: BroadcastPatch, user_id: str = Depends
     res = await db.broadcasts.update_one({'id': bid, 'user_id': user_id}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
-    d = await db.broadcasts.find_one({'id': bid})
+    d = await db.broadcasts.find_one({'id': bid, 'user_id': user_id})
     return _strip_mongo(d)
 
 
@@ -4253,7 +4257,7 @@ async def send_broadcast(bid: str, user_id: str = Depends(get_current_active_use
     user_doc = await db.users.find_one({'id': user_id})
     contacts = await db.contacts.find({'user_id': user_id, 'subscribed': True}).to_list(5000)
 
-    await db.broadcasts.update_one({'id': bid}, {'$set': {'status': 'sending'}})
+    await db.broadcasts.update_one({'id': bid, 'user_id': user_id}, {'$set': {'status': 'sending'}})
     create_tracked_task(_send_broadcast_task(bid, broadcast, user_doc, contacts), 'broadcast')
     return {'ok': True, 'status': 'sending', 'recipients': len(contacts)}
 
@@ -4285,7 +4289,7 @@ async def _send_broadcast_task(bid: str, broadcast: dict, user_doc: dict, contac
     open_rate = '-'
     click_rate = '-'
     await db.broadcasts.update_one(
-        {'id': bid},
+        {'id': bid, 'user_id': broadcast.get('user_id') or (user_doc or {}).get('id')},
         {'$set': {
             'status': 'sent',
             'audience': total,
@@ -4437,7 +4441,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     )
     if not _reply_result_has_provider_proof(result):
         await db.comments.update_one(
-            {'id': cid},
+            {'id': cid, **_account_scoped_query(user_id, account)},
             {'$set': {
                 'reply_status': 'failed',
                 'replyStatus': 'failed',
@@ -4456,7 +4460,7 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
         )
     body = result.get('body') or {}
     await db.comments.update_one(
-        {'id': cid},
+        {'id': cid, **_account_scoped_query(user_id, account)},
         {'$set': {
             'replied': True,
             'reply_text': text,
@@ -4643,7 +4647,7 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
     # Mark as in-flight pending BEFORE the network call so concurrent
     # retries see the elevated attempt count and the pending state.
     await db.comments.update_one(
-        {'id': cid},
+        {'id': cid, **_account_scoped_query(user_id, account)},
         {'$set': {
             'reply_status': 'pending',
             'attempts': attempts,
@@ -4660,7 +4664,7 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
         # Persist provider-proven success — including the proof flag
         # that future retries will check FIRST.
         await db.comments.update_one(
-            {'id': cid},
+            {'id': cid, **_account_scoped_query(user_id, account)},
             {'$set': {
                 'replied': True,
                 'reply_text': reply_text,
@@ -4705,7 +4709,7 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
         next_retry_at = final_now + timedelta(seconds=delay_seconds)
     new_reply_status = 'failed'
     await db.comments.update_one(
-        {'id': cid},
+        {'id': cid, **_account_scoped_query(user_id, account)},
         {'$set': {
             'reply_status': new_reply_status,
             'reply_failure_reason': classified_reason or 'unknown_graph_error',
@@ -4751,7 +4755,7 @@ async def comment_retry_reply(comment_id: str, user_id: str = Depends(get_curren
         raise HTTPException(400, 'Comment is not eligible for automation reply retry')
     now = datetime.utcnow()
     await db.comments.update_one(
-        {'id': comment.get('id')},
+        {'id': comment.get('id'), **scoped},
         {'$set': {
             'replied': False,
             'reply_status': 'pending',
