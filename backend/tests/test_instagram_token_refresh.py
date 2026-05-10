@@ -57,6 +57,10 @@ class FakeAsyncClient:
 
 def _match(doc, query):
     for key, expected in query.items():
+        if key == '$and':
+            if not all(_match(doc, item) for item in expected):
+                return False
+            continue
         if key == '$or':
             if not any(_match(doc, item) for item in expected):
                 return False

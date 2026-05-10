@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
@@ -1087,6 +1088,98 @@ def test_retryable_queue_failure_is_rescheduled(monkeypatch):
     assert saved['action_status'] == 'failed_retryable'
     assert saved['next_retry_at'] is not None
     assert saved['attempts'] == 1
+
+
+def test_partial_success_with_retryable_step_stays_queued(monkeypatch):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_reply_and_dm_automation()], comments=[{
+        'id': 'queued_partial_reschedule',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'partialDmRetry',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'replied_at': now - timedelta(minutes=1),
+        'dm_status': 'failed',
+        'dm_failure_retryable': True,
+        'dm_failure_reason': 'temporary_graph_error',
+        'action_status': 'partial_success',
+        'next_retry_at': now - timedelta(seconds=1),
+        'queued': True,
+        'attempts': 0,
+    }])
+
+    async def still_partial(*_args, **kwargs):
+        await db.comments.update_one(
+            {'id': kwargs.get('comment_doc_id')},
+            {'$set': {
+                'reply_status': 'success',
+                'reply_provider_response_ok': True,
+                'dm_status': 'failed',
+                'dm_failure_retryable': True,
+                'dm_failure_reason': 'temporary_graph_error',
+                'action_status': 'partial_success',
+            }},
+        )
+        return {'action_status': 'partial_success'}
+
+    monkeypatch.setattr(server, '_run_and_record_action', still_partial)
+
+    summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['partial_success'] == 1
+    assert saved['action_status'] == 'partial_success'
+    assert saved['reply_status'] == 'success'
+    assert saved['dm_status'] == 'failed'
+    assert saved['queued'] is True
+    assert saved['next_retry_at'] is not None
+    assert saved['queue_lock_until'] is None
+
+
+def test_queue_exception_reaches_retry_exhausted_after_max_attempts(monkeypatch, caplog):
+    now = datetime.utcnow()
+    db = _install_db(monkeypatch, [_reply_and_dm_automation()], comments=[{
+        'id': 'queued_poison',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'poisonComment',
+        'media_id': 'media1',
+        'commenter_id': 'contact1',
+        'text': 'PDF',
+        'matched': True,
+        'rule_id': 'auto1',
+        'reply_status': 'pending',
+        'dm_status': 'pending',
+        'action_status': 'failed_retryable',
+        'next_retry_at': now - timedelta(seconds=1),
+        'queued': True,
+        'attempts': server.AUTOMATION_QUEUE_MAX_ATTEMPTS - 1,
+    }])
+
+    async def poison(*_args, **_kwargs):
+        raise RuntimeError('provider body must not be stored')
+
+    monkeypatch.setattr(server, '_run_and_record_action', poison)
+
+    with caplog.at_level(logging.ERROR, logger='mychat'):
+        summary = _run(server._automation_queue_tick())
+    saved = db.comments.docs[0]
+
+    assert summary['failed_permanent'] == 1
+    assert saved['action_status'] == 'failed_retry_exhausted'
+    assert saved['next_retry_at'] is None
+    assert saved['queue_lock_until'] is None
+    assert saved['skip_reason'] == 'max_attempts_reached'
+    assert 'provider body must not be stored' not in caplog.text
+    assert 'exception_type=RuntimeError' in caplog.text
 
 
 def test_queue_does_not_duplicate_successful_public_reply(monkeypatch):

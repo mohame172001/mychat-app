@@ -20,6 +20,8 @@ Covers:
     and the comment-DM-flow-entry / quick-reply path.
 """
 import asyncio
+import hashlib
+import hmac
 import importlib
 import json
 import logging
@@ -191,6 +193,23 @@ def test_webhook_hmac_warn_mode_logs_marker(monkeypatch, caplog):
     assert 'webhook_hmac_not_enforced' in caplog.text
 
 
+def test_webhook_hmac_uses_exact_raw_body(monkeypatch):
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', 'webhook-secret')
+    raw_body = b'{"object":"instagram","entry":[{"id":"1","time":1}]}'
+    signature = hmac.new(b'webhook-secret', raw_body, hashlib.sha256).hexdigest()
+
+    ok = server._verify_webhook_signature(raw_body, f'sha256={signature}')
+    changed = server._verify_webhook_signature(
+        b'{"entry":[{"time":1,"id":"1"}],"object":"instagram"}',
+        f'sha256={signature}',
+    )
+
+    assert ok['valid'] is True
+    assert ok['reason'] == 'signature_valid'
+    assert changed['valid'] is False
+    assert changed['reason'] == 'signature_mismatch'
+
+
 # ── Webhook-log: admin-only + redaction ──────────────────────────────────────
 
 class _FakeWebhookLogColl:
@@ -214,6 +233,18 @@ class _FakeWebhookLogColl:
 
     async def count_documents(self, _q):
         return len(self.docs)
+
+    async def insert_one(self, doc):
+        stored = dict(doc)
+        stored.setdefault('_id', str(len(self.docs) + 1))
+        self.docs.append(stored)
+        return SimpleNamespace(inserted_id=stored['_id'])
+
+    async def delete_one(self, query):
+        target = query.get('_id')
+        before = len(self.docs)
+        self.docs = [doc for doc in self.docs if doc.get('_id') != target]
+        return SimpleNamespace(deleted_count=before - len(self.docs))
 
 
 class _FakeUsers:
@@ -273,6 +304,39 @@ def test_webhook_log_allows_admin_returns_redacted(monkeypatch):
     assert item['object'] == 'instagram'
     assert item['entry_count'] == 1
     assert item['signature_valid'] is True
+
+
+def test_webhook_log_writer_stores_safe_metadata_only(monkeypatch):
+    secret_token = 'IGAA_SUPER_SECRET_TOKEN_ABC'
+    private_text = 'private webhook comment that must not be stored'
+    db = SimpleNamespace(webhook_log=_FakeWebhookLogColl([]))
+    monkeypatch.setattr(server, 'db', db)
+
+    _run(server._write_webhook_log_async({
+        'object': 'instagram',
+        'entry': [{
+            'id': 'ig-business-123',
+            'time': 123,
+            'changes': [{'field': 'comments', 'value': {'text': private_text}}],
+            'messaging': [{'message': {'text': 'private dm'}}],
+        }],
+        'access_token': secret_token,
+    }, {
+        'valid': True,
+        'reason': 'signature_valid',
+    }))
+
+    assert len(db.webhook_log.docs) == 1
+    stored = db.webhook_log.docs[0]
+    serialized = json.dumps(stored, default=str)
+    assert 'payload' not in stored
+    assert secret_token not in serialized
+    assert private_text not in serialized
+    assert 'private dm' not in serialized
+    assert stored['object'] == 'instagram'
+    assert stored['entry_count'] == 1
+    assert stored['entry_summaries'][0]['changes_count'] == 1
+    assert stored['entry_summaries'][0]['messaging_count'] == 1
 
 
 def test_webhook_log_signature_does_not_accept_token_query():

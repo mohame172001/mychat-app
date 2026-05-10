@@ -10356,14 +10356,30 @@ def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dic
 
 
 async def _write_webhook_log_async(payload: dict, sig_result: dict):
-    """Persist the raw webhook payload off the ACK path. Bounded retention."""
+    """Persist only safe webhook metadata off the ACK path. Bounded retention."""
     try:
+        entries = payload.get('entry') or []
+        entry_summaries = []
+        if isinstance(entries, list):
+            for entry in entries[:20]:
+                if not isinstance(entry, dict):
+                    continue
+                messaging = entry.get('messaging') if isinstance(entry.get('messaging'), list) else []
+                changes = entry.get('changes') if isinstance(entry.get('changes'), list) else []
+                entry_summaries.append({
+                    'entry_id_hash': _safe_text_hash(entry.get('id'))[:12] if entry.get('id') else None,
+                    'time_exists': bool(entry.get('time')),
+                    'messaging_count': len(messaging),
+                    'changes_count': len(changes),
+                })
         await db.webhook_log.insert_one({
             'received': datetime.utcnow(),
-            'payload': payload,
             'object': payload.get('object'),
+            'entry_count': len(entries) if isinstance(entries, list) else 0,
+            'entry_summaries': entry_summaries,
             'signature_valid': sig_result.get('valid'),
             'signature_reason': sig_result.get('reason'),
+            'enforce_mode': bool(META_WEBHOOK_HMAC_ENFORCE),
         })
         count = await db.webhook_log.count_documents({})
         if count > 50:
@@ -10453,14 +10469,13 @@ def _webhook_log_safe_summary(doc: dict) -> dict:
     Strips raw payload, full text fields, and any potential secrets.
     Only metadata that is safe to surface to support staff is returned.
     """
-    payload = doc.get('payload') or {}
-    entries = payload.get('entry') or []
-    object_kind = payload.get('object')
+    legacy_payload = doc.get('payload') if isinstance(doc.get('payload'), dict) else {}
+    legacy_entries = legacy_payload.get('entry') if isinstance(legacy_payload.get('entry'), list) else []
     return {
         'id': str(doc.get('_id') or ''),
         'received': doc.get('received').isoformat() if isinstance(doc.get('received'), datetime) else doc.get('received'),
-        'object': object_kind,
-        'entry_count': len(entries) if isinstance(entries, list) else 0,
+        'object': doc.get('object') or legacy_payload.get('object'),
+        'entry_count': int(doc.get('entry_count') if doc.get('entry_count') is not None else len(legacy_entries)),
         'signature_valid': doc.get('signature_valid'),
         'signature_reason': doc.get('signature_reason'),
         'enforce_mode': doc.get('enforce_mode'),
@@ -12522,16 +12537,22 @@ async def _automation_queue_tick() -> dict:
         rule_id = item.get('rule_id') or item.get('ruleId')
         attempts = int(item.get('attempts') or 0)
         lock_until = datetime.utcnow() + timedelta(minutes=5)
-        try:
-            claimed = await db.comments.find_one_and_update(
+        claim_query = {
+            'id': item.get('id'),
+            '$and': [
+                _automation_queue_due_query(datetime.utcnow()),
                 {
-                    'id': item.get('id'),
                     '$or': [
                         {'queue_lock_until': {'$exists': False}},
                         {'queue_lock_until': None},
                         {'queue_lock_until': {'$lte': datetime.utcnow()}},
                     ],
                 },
+            ],
+        }
+        try:
+            claimed = await db.comments.find_one_and_update(
+                claim_query,
                 {'$set': {
                     'action_status': 'processing',
                     'actionStatus': 'processing',
@@ -12543,7 +12564,7 @@ async def _automation_queue_tick() -> dict:
             )
         except TypeError:
             claimed = await db.comments.find_one_and_update(
-                {'id': item.get('id')},
+                claim_query,
                 {'$set': {
                     'action_status': 'processing',
                     'actionStatus': 'processing',
@@ -12554,10 +12575,18 @@ async def _automation_queue_tick() -> dict:
             )
         if not claimed:
             continue
+        item = claimed
+        comment_id = item.get('ig_comment_id') or item.get('igCommentId') or item.get('id')
+        media_id = item.get('media_id') or item.get('mediaId')
+        user_id = item.get('user_id')
+        instagram_account_id = item.get('instagramAccountId') or item.get('igUserId')
+        rule_id = item.get('rule_id') or item.get('ruleId')
+        attempts = max(int(item.get('attempts') or 1) - 1, attempts)
+        claim_attempt = attempts + 1
         logger.info('automation_queue_item_claimed comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
                     comment_id, media_id, user_id, instagram_account_id, rule_id,
                     item.get('action_status'), item.get('reply_status'), item.get('dm_status'),
-                    attempts + 1, item.get('next_retry_at'), item.get('skip_reason'))
+                    claim_attempt, item.get('next_retry_at'), item.get('skip_reason'))
         try:
             user_doc = await db.users.find_one({'id': user_id})
             automation = await db.automations.find_one({'id': rule_id, 'user_id': user_id})
@@ -12602,8 +12631,9 @@ async def _automation_queue_tick() -> dict:
             saved = await db.comments.find_one({'id': item.get('id')}) or {}
             action_status = action_status or saved.get('action_status') or 'failed_retryable'
             update = {'queue_lock_until': None, 'updated': datetime.utcnow()}
+            retryable_step_remaining = _has_retryable_step_failure(saved)
             if action_status == 'failed_retryable':
-                if attempts + 1 >= AUTOMATION_QUEUE_MAX_ATTEMPTS:
+                if claim_attempt >= AUTOMATION_QUEUE_MAX_ATTEMPTS:
                     action_status = 'failed_retry_exhausted'
                     update.update({
                         'action_status': action_status,
@@ -12614,14 +12644,31 @@ async def _automation_queue_tick() -> dict:
                     })
                     logger.info('automation_queue_item_failed_permanent comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s attempt=%s reason=max_attempts_reached',
                                 comment_id, media_id, user_id, instagram_account_id, rule_id,
-                                action_status, attempts + 1)
+                                action_status, claim_attempt)
                 else:
-                    next_retry = _next_retry_time(attempts + 1)
+                    next_retry = _next_retry_time(claim_attempt)
                     update.update({'next_retry_at': next_retry, 'queued': True})
                     logger.info('automation_queue_item_rescheduled comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
                                 comment_id, media_id, user_id, instagram_account_id, rule_id,
                                 action_status, saved.get('reply_status'), saved.get('dm_status'),
-                                attempts + 1, next_retry, _failure_category_from_doc(saved))
+                                claim_attempt, next_retry, _failure_category_from_doc(saved))
+            elif action_status == 'partial_success' and retryable_step_remaining:
+                if claim_attempt >= AUTOMATION_QUEUE_MAX_ATTEMPTS:
+                    update.update({
+                        'queued': False,
+                        'next_retry_at': None,
+                        'skip_reason': 'max_attempts_reached',
+                        'skipReason': 'max_attempts_reached',
+                    })
+                    logger.info('automation_queue_item_partial_retry_exhausted comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s attempt=%s reason=max_attempts_reached',
+                                comment_id, media_id, user_id, instagram_account_id, rule_id,
+                                claim_attempt)
+                else:
+                    next_retry = _next_retry_time(claim_attempt)
+                    update.update({'queued': True, 'next_retry_at': next_retry})
+                    logger.info('automation_queue_item_partial_rescheduled comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s attempt=%s next_retry_at=%s reason=%s',
+                                comment_id, media_id, user_id, instagram_account_id, rule_id,
+                                claim_attempt, next_retry, _failure_category_from_doc(saved))
             elif action_status in ('success', 'partial_success'):
                 update.update({'queued': False, 'next_retry_at': None})
             elif action_status == 'failed_permanent':
@@ -12630,7 +12677,7 @@ async def _automation_queue_tick() -> dict:
             logger.info('automation_queue_item_lock_released comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s reply_status=%s dm_status=%s attempt=%s next_retry_at=%s reason=%s',
                         comment_id, media_id, user_id, instagram_account_id, rule_id,
                         action_status, saved.get('reply_status'), saved.get('dm_status'),
-                        attempts + 1, update.get('next_retry_at'), _failure_category_from_doc(saved))
+                        claim_attempt, update.get('next_retry_at'), _failure_category_from_doc(saved))
             if action_status == 'success':
                 summary['success'] += 1
                 logger.info('automation_queue_item_processing_success comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s',
@@ -12658,28 +12705,37 @@ async def _automation_queue_tick() -> dict:
                     'action_status': action_status,
                     'reply_status': saved.get('reply_status'),
                     'dm_status': saved.get('dm_status'),
-                    'attempt': attempts + 1,
+                    'attempt': claim_attempt,
                 },
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            next_retry = _next_retry_time(attempts + 1)
+        except Exception as exc:
+            claim_attempt = attempts + 1
+            exhausted = claim_attempt >= AUTOMATION_QUEUE_MAX_ATTEMPTS
+            next_retry = None if exhausted else _next_retry_time(claim_attempt)
+            action_status = 'failed_retry_exhausted' if exhausted else 'failed_retryable'
             await db.comments.update_one(
                 {'id': item.get('id')},
                 {'$set': {
-                    'action_status': 'failed_retryable',
-                    'actionStatus': 'failed_retryable',
+                    'action_status': action_status,
+                    'actionStatus': action_status,
                     'next_retry_at': next_retry,
                     'queue_lock_until': None,
-                    'skip_reason': 'queue_processing_exception',
-                    'skipReason': 'queue_processing_exception',
+                    'skip_reason': 'max_attempts_reached' if exhausted else 'queue_processing_exception',
+                    'skipReason': 'max_attempts_reached' if exhausted else 'queue_processing_exception',
                     'updated': datetime.utcnow(),
                 }},
             )
-            logger.exception('automation_queue_item_failed_retryable comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s next_retry_at=%s reason=queue_processing_exception',
-                             comment_id, media_id, user_id, instagram_account_id, rule_id, next_retry)
-            summary['failed_retryable'] += 1
+            logger.error('automation_queue_item_failed comment_id=%s media_id=%s user_id=%s instagramAccountId=%s rule_id=%s action_status=%s next_retry_at=%s reason=%s exception_type=%s',
+                         comment_id, media_id, user_id, instagram_account_id, rule_id,
+                         action_status, next_retry,
+                         'max_attempts_reached' if exhausted else 'queue_processing_exception',
+                         type(exc).__name__)
+            if exhausted:
+                summary['failed_permanent'] += 1
+            else:
+                summary['failed_retryable'] += 1
     return summary
 
 
