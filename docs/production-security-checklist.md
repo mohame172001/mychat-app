@@ -36,6 +36,13 @@ Use this checklist before public launch, Meta review updates, and billing rollou
   - HSTS is sent only for HTTPS production requests.
 - Frontend source maps policy: production source maps may exist only if Railway/static hosting access is acceptable; otherwise disable source map publishing before public scale.
 
+## Meta / Graph API Version
+
+- Current documented Facebook Graph API version: `v21.0`.
+- Instagram Graph calls use `graph.instagram.com`; diagnostics may probe versioned endpoints when needed, but production Meta dashboard settings should be kept aligned with the documented version.
+- Expected webhook subscription fields: `comments`, `messages`.
+- Keep unused webhook fields disabled until product support exists: `live_comments`, `mentions`, `message_edit`, `message_reactions`, `messaging_handover`, `messaging_postbacks`, `messaging_referral`, `messaging_seen`, `standby`.
+
 ## Operational Flags
 
 - System Health may show booleans such as HMAC configured and repair tools enabled, but never secret values.

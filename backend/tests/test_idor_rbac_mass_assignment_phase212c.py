@@ -244,6 +244,77 @@ def test_create_automation_ignores_client_supplied_instagram_account_context(mon
     assert db.automations.docs[0]['instagramAccountId'] == 'biz1'
 
 
+def test_create_automation_rejects_selected_media_not_owned_by_active_account(monkeypatch):
+    db = FakeDB(users=[_user('u1', 'u1@example.com')], automations=[])
+    monkeypatch.setattr(server, 'db', db)
+    _setup_active_account(monkeypatch, 'biz1')
+
+    async def fake_recent_media(_token, _ig_user_id, limit=10):
+        return ['media-owned']
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent_media)
+    payload = server.AutomationIn(
+        name='Bad selected post',
+        status='active',
+        trigger='comment:media-other',
+        media_id='media-other',
+    )
+
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.create_automation(payload, user_id='u1'))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == 'selected_media_not_found_or_not_owned'
+    assert db.automations.docs == []
+
+
+def test_patch_automation_rejects_selected_media_from_another_account(monkeypatch):
+    db = FakeDB(
+        users=[_user('u1', 'u1@example.com')],
+        automations=[_automation(status='active', trigger='comment:media-owned', media_id='media-owned')],
+    )
+    monkeypatch.setattr(server, 'db', db)
+    _setup_active_account(monkeypatch, 'biz1')
+
+    async def fake_recent_media(_token, _ig_user_id, limit=10):
+        return ['media-owned']
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent_media)
+
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.patch_automation(
+            'a1',
+            server.AutomationPatch(media_id='media-other', trigger='comment:media-other'),
+            user_id='u1',
+        ))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == 'selected_media_not_found_or_not_owned'
+    assert db.automations.docs[0]['media_id'] == 'media-owned'
+
+
+def test_activation_rejects_disconnected_instagram_account(monkeypatch):
+    db = FakeDB(
+        users=[_user('u1', 'u1@example.com')],
+        automations=[_automation(status='paused', trigger='comment:any')],
+    )
+    monkeypatch.setattr(server, 'db', db)
+
+    async def disconnected_account(_user_id):
+        account = _account(_user_id, 'biz1')
+        account['connectionValid'] = False
+        return account
+
+    monkeypatch.setattr(server, 'getActiveInstagramAccount', disconnected_account)
+
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.patch_automation('a1', server.AutomationPatch(status='active'), user_id='u1'))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == 'instagram_reconnect_required'
+    assert db.automations.docs[0]['status'] == 'paused'
+
+
 def test_user_cannot_access_or_mutate_other_users_automation(monkeypatch):
     db = FakeDB(
         users=[_user('u1', 'u1@example.com')],

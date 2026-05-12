@@ -3250,6 +3250,25 @@ async def _parse_data_deletion_payload(request: Request) -> dict:
     return {}
 
 
+def _verify_meta_signed_request(signed_request: str) -> bool:
+    signed_request = str(signed_request or '').strip()
+    secret = META_APP_SECRET or META_WEBHOOK_APP_SECRET
+    if not signed_request or not secret or '.' not in signed_request:
+        return False
+    try:
+        encoded_sig, payload = signed_request.split('.', 1)
+        expected = hmac.new(
+            secret.encode('utf-8'),
+            payload.encode('utf-8'),
+            hashlib.sha256,
+        ).digest()
+        padding = '=' * (-len(encoded_sig) % 4)
+        provided = base64.urlsafe_b64decode((encoded_sig + padding).encode('utf-8'))
+        return hmac.compare_digest(provided, expected)
+    except Exception:
+        return False
+
+
 @api.post('/meta/data-deletion')
 async def meta_data_deletion_callback(request: Request):
     """Public Meta data-deletion callback.
@@ -3267,10 +3286,12 @@ async def meta_data_deletion_callback(request: Request):
     confirmation_code = _data_deletion_confirmation_code()
     signed_request = str(payload.get('signed_request') or '')
     email = str(payload.get('email') or payload.get('user_email') or '')
+    signed_request_valid = _verify_meta_signed_request(signed_request)
     doc = {
         'confirmation_code': confirmation_code,
         'source': 'meta_callback',
         'signed_request_present': bool(signed_request),
+        'signed_request_valid': bool(signed_request_valid),
         'signed_request_sha256': _hash_identifier(signed_request),
         'email_sha256': _hash_identifier(email),
         'ip_hash': _hash_identifier(_client_ip(request)),
@@ -3678,6 +3699,12 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
     if _is_comment_automation_rule(automation_data):
         automation_data = _normalize_public_reply_for_persistence(automation_data)
         automation_data['activationStartedAt'] = now
+    await _validate_automation_integrity_for_account(
+        user_id,
+        account,
+        automation_data,
+        require_connected=(automation_data.get('status') or '').lower() == 'active',
+    )
     # Phase 2.2 plan enforcement: if creating directly as active, count it.
     if (automation_data.get('status') or '').lower() == 'active':
         plan = await get_user_plan(user_id)
@@ -3815,6 +3842,15 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     if update.get('reply_under_post') and _automation_public_reply_texts(update):
         update = _ensure_public_reply_node(update)
     prospective = {**existing, **update}
+    status_reenabled = (
+        update.get('status') == 'active' and existing.get('status') != 'active'
+    )
+    await _validate_automation_integrity_for_account(
+        user_id,
+        account,
+        prospective,
+        require_connected=status_reenabled,
+    )
     historical_catchup = _normalize_historical_catchup_flag(prospective)
     if not historical_catchup and (
         update.get('process_existing_unreplied_comments')
@@ -3839,9 +3875,6 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
         'follow_cooldown_message', 'max_follow_verification_attempts',
         'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
     }
-    status_reenabled = (
-        update.get('status') == 'active' and existing.get('status') != 'active'
-    )
     # Phase 2.2 plan enforcement: block activation if at active-automation cap.
     if status_reenabled:
         plan = await get_user_plan(user_id)
@@ -4045,6 +4078,19 @@ async def create_quick_comment_rule(
 
     account = await getActiveInstagramAccount(user_id)
     ctx = _instagram_context_from_account(account)
+    await _validate_automation_integrity_for_account(
+        user_id,
+        account,
+        {
+            **ctx,
+            'post_scope': post_scope,
+            'media_id': media_id,
+            'latest': latest,
+            'trigger': f'comment:{media_id}' if media_id else ('comment:latest' if latest else 'comment:any'),
+            'status': 'active',
+        },
+        require_connected=True,
+    )
 
     if post_scope == 'any':
         trigger = 'comment:any'
@@ -7820,6 +7866,69 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
             if clause not in clauses[:i]
         ]
     return query
+
+
+async def _validate_selected_media_owned_by_account(account_doc: dict, media_id: Optional[str]) -> None:
+    media_id = str(media_id or '').strip()
+    if not media_id:
+        return
+    instagram_account_id = str(
+        (account_doc or {}).get('instagramAccountId') or
+        (account_doc or {}).get('igUserId') or
+        ''
+    ).strip()
+    token = str((account_doc or {}).get('accessToken') or '').strip()
+    # Unit tests and legacy local fixtures sometimes omit access tokens. In
+    # production, an active/valid connection carries one; tokenless active
+    # operations are rejected separately by connection validation.
+    if not instagram_account_id or not token:
+        return
+    try:
+        recent_media_ids = await _fetch_recent_media_ids(token, instagram_account_id, limit=100)
+    except Exception as exc:
+        logger.warning(
+            'selected_media_validation_failed instagramAccountId=%s media_id=%s exception_type=%s',
+            instagram_account_id,
+            media_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(400, 'selected_media_not_found_or_not_owned')
+    if media_id not in set(str(mid) for mid in recent_media_ids):
+        raise HTTPException(400, 'selected_media_not_found_or_not_owned')
+
+
+async def _validate_automation_integrity_for_account(
+    user_id: str,
+    account_doc: dict,
+    automation_doc: dict,
+    *,
+    require_connected: bool = False,
+) -> None:
+    if not account_doc:
+        if not require_connected:
+            return
+        raise HTTPException(400, 'No Instagram account connected')
+    if require_connected and account_doc.get('connectionValid') is False:
+        raise HTTPException(400, 'instagram_reconnect_required')
+    expected_ig = str(account_doc.get('instagramAccountId') or account_doc.get('igUserId') or '').strip()
+    actual_ig = str(
+        automation_doc.get('instagramAccountId') or
+        automation_doc.get('igUserId') or
+        ''
+    ).strip()
+    if expected_ig and actual_ig and actual_ig != expected_ig:
+        logger.warning(
+            'automation_account_context_mismatch user_id=%s automation_id=%s expected_ig=%s actual_ig=%s',
+            user_id,
+            automation_doc.get('id') or '',
+            expected_ig,
+            actual_ig,
+        )
+        raise HTTPException(400, 'instagram_account_mismatch')
+    media_id = _selected_specific_media_id(automation_doc) or automation_doc.get('media_id')
+    latest = bool(automation_doc.get('latest')) or automation_doc.get('post_scope') in ('latest', 'next')
+    if media_id and not latest:
+        await _validate_selected_media_owned_by_account(account_doc, str(media_id))
 
 
 def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict]) -> dict:

@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -89,3 +92,42 @@ def test_meta_data_deletion_callback_accepts_form_encoded_payload(monkeypatch):
     assert stored['signed_request_present'] is True
     assert stored['signed_request_sha256']
     assert stored['email_sha256']
+
+
+def test_meta_data_deletion_callback_verifies_signed_request_when_secret_configured(monkeypatch):
+    fake_db = _FakeDb()
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'META_APP_SECRET', 'meta-secret')
+    payload = base64.urlsafe_b64encode(b'{"user_id":"meta-user"}').decode().rstrip('=')
+    sig = hmac.new(b'meta-secret', payload.encode('utf-8'), hashlib.sha256).digest()
+    encoded_sig = base64.urlsafe_b64encode(sig).decode().rstrip('=')
+    signed_request = f'{encoded_sig}.{payload}'
+    body = json.dumps({'signed_request': signed_request}).encode('utf-8')
+    request = _FakeRequest(body=body, headers={'content-type': 'application/json'})
+
+    result = _run(server.meta_data_deletion_callback(request))
+
+    assert result['confirmation_code'].startswith('mychat-del-')
+    stored = fake_db.data_deletion_requests.docs[0]
+    assert stored['signed_request_present'] is True
+    assert stored['signed_request_valid'] is True
+    assert signed_request not in str(stored)
+
+
+def test_meta_data_deletion_callback_invalid_signed_request_is_non_destructive(monkeypatch):
+    fake_db = _FakeDb()
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'META_APP_SECRET', 'meta-secret')
+    body = json.dumps({
+        'signed_request': 'bad.signature',
+        'email': 'victim@example.com',
+    }).encode('utf-8')
+    request = _FakeRequest(body=body, headers={'content-type': 'application/json'})
+
+    result = _run(server.meta_data_deletion_callback(request))
+
+    assert result['confirmation_code'].startswith('mychat-del-')
+    stored = fake_db.data_deletion_requests.docs[0]
+    assert stored['signed_request_valid'] is False
+    assert stored['status'] == 'received'
+    assert 'victim@example.com' not in str(stored)
