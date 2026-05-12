@@ -8,6 +8,7 @@ import api from '../lib/api';
 import { cachedApiGet, getCachedApiData } from '../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../lib/analytics';
+import { useAuth } from '../context/AuthContext';
 import {
   computeAllUsageRows,
   computeAccountRow,
@@ -148,23 +149,26 @@ function PlanCard({ plan, current }) {
 }
 
 export default function Billing() {
-  const [current, setCurrent] = useState(() => getCachedApiData('billing:plan-current') || null);
-  const [plans, setPlans] = useState(() => getCachedApiData('billing:plans')?.plans || null);
+  const { user } = useAuth();
+  const billingCacheKey = `billing:plan-current:${user?.id || 'anon'}`;
+  const plansCacheKey = `billing:plans:${user?.id || 'anon'}`;
+  const [current, setCurrent] = useState(() => getCachedApiData(billingCacheKey) || null);
+  const [plans, setPlans] = useState(() => getCachedApiData(plansCacheKey)?.plans || null);
   const [loading, setLoading] = useState(!(current && plans));
   const [error, setError] = useState(null);
 
   const load = useCallback(async ({ force = false } = {}) => {
-    if (!(getCachedApiData('billing:plan-current') && getCachedApiData('billing:plans'))) {
+    if (!(getCachedApiData(billingCacheKey) && getCachedApiData(plansCacheKey))) {
       setLoading(true);
     }
     setError(null);
     try {
       const [planResp, plansResp] = await Promise.all([
-        cachedApiGet('billing:plan-current', () => api.get('/plan/current', { timeout: 8000 }), {
+        cachedApiGet(billingCacheKey, () => api.get('/plan/current', { timeout: 8000 }), {
           ttlMs: 60000,
           force,
         }),
-        cachedApiGet('billing:plans', () => api.get('/plans', { timeout: 8000 }), {
+        cachedApiGet(plansCacheKey, () => api.get('/plans', { timeout: 8000 }), {
           ttlMs: 300000,
           force,
         }),
@@ -179,7 +183,7 @@ export default function Billing() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [billingCacheKey, plansCacheKey]);
 
   useEffect(() => {
     load();

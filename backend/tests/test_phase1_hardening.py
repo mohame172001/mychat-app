@@ -418,6 +418,27 @@ def test_hsts_only_in_production_https(monkeypatch):
     assert 'Strict-Transport-Security' not in res2.headers
 
 
+def test_default_api_csp_in_production(monkeypatch):
+    class _Resp:
+        def __init__(self):
+            self.headers = {}
+
+    async def fake_next(_r):
+        return _Resp()
+
+    monkeypatch.setattr(server, 'IS_PRODUCTION', True)
+    monkeypatch.delenv('CONTENT_SECURITY_POLICY', raising=False)
+
+    res = _run(server.security_headers_middleware(
+        _FakeRequest(headers={'x-forwarded-proto': 'https'}),
+        fake_next,
+    ))
+
+    assert res.headers['Content-Security-Policy'] == (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
+
+
 # ── Docs disabled in production ──────────────────────────────────────────────
 
 def test_docs_disabled_when_production_env_set():

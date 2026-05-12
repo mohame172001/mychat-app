@@ -2,6 +2,18 @@ const cache = new Map();
 
 const now = () => Date.now();
 
+function isJsonResponse(response) {
+  if (!response || !response.headers) return true;
+  const contentType = String(response.headers['content-type'] || response.headers.get?.('content-type') || '').toLowerCase();
+  return contentType.includes('application/json') || contentType.includes('+json');
+}
+
+function isCacheableResponse(response) {
+  if (!response || response.data === undefined) return true;
+  const status = Number(response.status || 200);
+  return status >= 200 && status < 300 && isJsonResponse(response);
+}
+
 export function getCachedApiData(key) {
   const entry = cache.get(key);
   return entry?.data;
@@ -35,6 +47,12 @@ export async function cachedApiGet(key, fetcher, options = {}) {
   const promise = Promise.resolve()
     .then(fetcher)
     .then((response) => {
+      if (!isCacheableResponse(response)) {
+        const error = new Error('api_cache_uncacheable_response');
+        error.code = 'api_cache_uncacheable_response';
+        error.response = response;
+        throw error;
+      }
       const data = response?.data ?? response;
       cache.set(key, { data, updatedAt: now(), promise: null });
       return { data, cached: false, stale: false };

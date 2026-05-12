@@ -10,6 +10,9 @@ describe('Comments performance wiring', () => {
     expect(source).toContain('cachedApiGet');
     expect(source).toContain('comments:list');
     expect(source).toContain('COMMENTS_TTL_MS');
+    expect(source).toContain("${user?.id || 'anon'}");
+    expect(source).toContain('${activeAccountKey}');
+    expect(source).toContain('${statusFilter}');
   });
 
   test('manual refresh invalidates the comments cache and forces refetch', () => {

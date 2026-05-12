@@ -70,4 +70,32 @@ describe('cachedApiGet', () => {
     expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
     expect(getCachedApiData('comments:u2:acc2')).toBeUndefined();
   });
+
+  test('does not cache non-json html responses', async () => {
+    const fetcher = jest.fn(() => Promise.resolve({
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+      data: '<html>not api json</html>',
+    }));
+
+    await expect(cachedApiGet('html-response:u1', fetcher)).rejects.toMatchObject({
+      code: 'api_cache_uncacheable_response',
+    });
+
+    expect(getCachedApiData('html-response:u1')).toBeUndefined();
+  });
+
+  test('does not cache 403 responses returned by a fetcher', async () => {
+    const fetcher = jest.fn(() => Promise.resolve({
+      status: 403,
+      headers: { 'content-type': 'application/json' },
+      data: { detail: 'Forbidden' },
+    }));
+
+    await expect(cachedApiGet('forbidden:u1', fetcher)).rejects.toMatchObject({
+      code: 'api_cache_uncacheable_response',
+    });
+
+    expect(getCachedApiData('forbidden:u1')).toBeUndefined();
+  });
 });

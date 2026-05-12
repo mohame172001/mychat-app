@@ -27,14 +27,15 @@ describe('Admin Console reliability wiring', () => {
     expect(source).toContain('admin:users');
     expect(source).toContain('admin:user-detail');
     expect(source).toContain('admin:members');
-    expect(source).toContain('admin:metrics:reconciliation');
+    expect(source).toContain('admin:metrics');
+    expect(source).toContain("${user?.id || 'anon'}");
   });
 
   test('admin mutations invalidate affected caches', () => {
     expect(source).toContain("invalidateApiCache('admin:overview')");
     expect(source).toContain("invalidateApiCache('admin:users')");
     expect(source).toContain('function invalidateAdminUserCaches');
-    expect(source).toContain('invalidateApiCache(`admin:user-detail:${userId}`)');
+    expect(source).toContain("invalidateApiCache('admin:user-detail')");
     expect(source).toContain("invalidateApiCache('admin:members')");
     expect(source).toContain("invalidateApiCache('admin:metrics')");
   });

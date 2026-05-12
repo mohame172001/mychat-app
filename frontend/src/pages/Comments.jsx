@@ -6,6 +6,7 @@ import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTria
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
 import { cachedApiGet, invalidateApiCache } from '../lib/apiCache';
+import { useAuth } from '../context/AuthContext';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
 const COMMENTS_TTL_MS = 15000;
@@ -43,6 +44,7 @@ function statusBadge(c) {
 }
 
 const Comments = () => {
+  const { user } = useAuth();
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -64,7 +66,8 @@ const Comments = () => {
     else setLoadingMore(true);
 
     try {
-      const cacheKey = `comments:list:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
+      const activeAccountKey = user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
+      const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${statusFilter}:${pageToFetch}`;
       const result = await cachedApiGet(
         cacheKey,
         async () => {
@@ -91,7 +94,7 @@ const Comments = () => {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [unrepliedOnly]);
+  }, [unrepliedOnly, statusFilter, user?.id, user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
 
   const connectWs = useCallback(() => {
     if (wsGaveUp.current) return;

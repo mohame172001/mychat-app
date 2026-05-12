@@ -10,6 +10,7 @@ import api from '../../lib/api';
 import { cachedApiGet, invalidateApiCache } from '../../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../../lib/analytics';
+import { useAuth } from '../../context/AuthContext';
 import {
   PLAN_KEYS, PLAN_DISPLAY,
   hasAnyExceeded, planDistributionRows, planOptions, formatTimestamp,
@@ -89,7 +90,7 @@ function safeList(value) {
 }
 
 function invalidateAdminUserCaches(userId) {
-  invalidateApiCache(`admin:user-detail:${userId}`);
+  invalidateApiCache('admin:user-detail');
   invalidateApiCache('admin:users');
   invalidateApiCache('admin:overview');
 }
@@ -152,6 +153,7 @@ function OverviewTab({ data, onRefresh, loading }) {
 }
 
 function UsersTab({ onSelect }) {
+  const { user } = useAuth();
   const [page, setPage] = useState(1);
   const [pageSize] = useState(25);
   const [search, setSearch] = useState('');
@@ -165,7 +167,7 @@ function UsersTab({ onSelect }) {
       const params = { page, page_size: pageSize };
       if (search.trim()) params.search = search.trim();
       if (planKey) params.plan_key = planKey;
-      const cacheKey = `admin:users:${page}:${pageSize}:${search.trim()}:${planKey || 'all'}`;
+      const cacheKey = `admin:users:${user?.id || 'anon'}:${page}:${pageSize}:${search.trim()}:${planKey || 'all'}`;
       const result = await cachedApiGet(
         cacheKey,
         () => api.get('/admin/users', { params }),
@@ -178,7 +180,7 @@ function UsersTab({ onSelect }) {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, search, planKey]);
+  }, [page, pageSize, search, planKey, user?.id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -287,6 +289,7 @@ function UsersTab({ onSelect }) {
 }
 
 function UserDetailTab({ userId, onBack, me }) {
+  const { user } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [planKey, setPlanKey] = useState('');
@@ -310,7 +313,7 @@ function UserDetailTab({ userId, onBack, me }) {
     setLoading(true);
     setLoadError('');
     try {
-      const cacheKey = `admin:user-detail:${userId}`;
+      const cacheKey = `admin:user-detail:${user?.id || 'anon'}:${userId}`;
       const result = await cachedApiGet(
         cacheKey,
         () => api.get(`/admin/users/${encodeURIComponent(userId)}/detail`),
@@ -326,7 +329,7 @@ function UserDetailTab({ userId, onBack, me }) {
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, user?.id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -481,7 +484,7 @@ function UserDetailTab({ userId, onBack, me }) {
           <AdminErrorCard
             title={loadError}
             onRetry={() => {
-              invalidateApiCache(`admin:user-detail:${userId}`);
+              invalidateApiCache('admin:user-detail');
               load();
             }}
             loading={loading}
@@ -769,6 +772,7 @@ function UserDetailTab({ userId, onBack, me }) {
 }
 
 function AdminsTab({ me }) {
+  const { user } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [addEmail, setAddEmail] = useState('');
@@ -782,7 +786,7 @@ function AdminsTab({ me }) {
     setLoading(true);
     try {
       const result = await cachedApiGet(
-        'admin:members',
+        `admin:members:${user?.id || 'anon'}`,
         () => api.get('/admin/members'),
         { ttlMs: ADMIN_CACHE_TTL_MS },
       );
@@ -793,7 +797,7 @@ function AdminsTab({ me }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -972,6 +976,7 @@ function AdminsTab({ me }) {
 
 
 function ReconciliationTab() {
+  const { user } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -979,7 +984,7 @@ function ReconciliationTab() {
     setLoading(true);
     try {
       const result = await cachedApiGet(
-        'admin:metrics:reconciliation',
+        `admin:metrics:${user?.id || 'anon'}:reconciliation`,
         () => api.get('/admin/metrics/reconciliation'),
         { ttlMs: ADMIN_CACHE_TTL_MS },
       );
@@ -990,7 +995,7 @@ function ReconciliationTab() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1060,6 +1065,7 @@ function ReconciliationTab() {
 
 
 export default function AdminConsole() {
+  const { user } = useAuth();
   const [me, setMe] = useState(null);   // null = loading
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -1083,7 +1089,7 @@ export default function AdminConsole() {
     setOverviewLoading(true);
     try {
       const result = await cachedApiGet(
-        'admin:overview',
+        `admin:overview:${user?.id || 'anon'}`,
         () => api.get('/admin/overview'),
         { ttlMs: ADMIN_CACHE_TTL_MS },
       );
@@ -1094,7 +1100,7 @@ export default function AdminConsole() {
     } finally {
       setOverviewLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     if (me?.is_admin && tab === 'overview' && !overview) loadOverview();

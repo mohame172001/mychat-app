@@ -58,3 +58,17 @@ This checklist is for MyChat operators responding to security incidents. Do not 
 3. Confirm health checks and one low-impact authenticated request.
 4. Never copy real values into commits, screenshots, tests, or docs.
 5. Update `.env.example` only with placeholder names, never values.
+
+## Disable Admin Repair Tools
+
+1. Set `ENABLE_ADMIN_REPAIR_TOOLS=false` or remove the variable.
+2. Redeploy the backend.
+3. Confirm System Health shows repair tools disabled as a boolean only.
+4. Confirm non-admin and normal admin users cannot access repair endpoints unless an owner explicitly re-enables the repair window.
+
+## Pause Automations Globally
+
+1. Prefer targeted user/account suspension first when the blast radius is known.
+2. If a provider abuse event is broad, pause active automations through an owner-approved database/admin operation.
+3. Preserve audit logs and do not delete comments, usage events, or queue history.
+4. Monitor queue depth and provider-proof logs before re-enabling.

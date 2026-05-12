@@ -784,10 +784,35 @@ def _hash_text(text: str) -> str:
 
 def _is_valid_original_url(url: str) -> bool:
     try:
-        parsed = urlparse(str(url or '').strip())
+        raw = str(url or '').strip()
+        if any(ch in raw for ch in ('\r', '\n', '\t', '\x00')):
+            return False
+        parsed = urlparse(raw)
         return parsed.scheme in {'http', 'https'} and bool(parsed.netloc)
     except Exception:
         return False
+
+
+def _reject_unsafe_mongo_keys(value: Any, path: str = 'payload') -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key)
+            if key_text.startswith('$') or '.' in key_text:
+                raise HTTPException(400, f'Invalid field in {path}')
+            _reject_unsafe_mongo_keys(nested, f'{path}.{key_text}')
+    elif isinstance(value, list):
+        for idx, nested in enumerate(value):
+            _reject_unsafe_mongo_keys(nested, f'{path}[{idx}]')
+
+
+def _bounded_search_text(value: Optional[str], *, field: str = 'search',
+                         max_len: int = 80) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) > max_len:
+        raise HTTPException(400, f'{field} is too long')
+    return text or None
 
 
 def _extract_first_url(text: str) -> str:
@@ -6458,15 +6483,14 @@ async def admin_users_list(
     page_size = max(1, min(int(page_size or 25), 100))
 
     query: dict = {}
-    if search:
-        s = str(search).strip()
-        if s:
-            # Match on email or id (sanitized regex).
-            esc = re.escape(s)
-            query['$or'] = [
-                {'email': {'$regex': esc, '$options': 'i'}},
-                {'id': s},
-            ]
+    s = _bounded_search_text(search, field='search', max_len=80)
+    if s:
+        # Match on email or id (sanitized regex).
+        esc = re.escape(s)
+        query['$or'] = [
+            {'email': {'$regex': esc, '$options': 'i'}},
+            {'id': s},
+        ]
 
     # Plan filter requires a join — we resolve in two passes when filtering.
     plan_filter_user_ids: Optional[set] = None
@@ -6493,6 +6517,8 @@ async def admin_users_list(
             query['id'] = {'$in': list(plan_filter_user_ids)}
 
     sort_spec = [('created_at', -1)]
+    if sort not in (None, '', 'created_at_desc', 'email', 'created_at_asc'):
+        raise HTTPException(400, 'Invalid sort')
     if sort == 'email':
         sort_spec = [('email', 1)]
     elif sort == 'created_at_asc':
@@ -14602,7 +14628,8 @@ async def tracked_link_redirect(short_code: str, request: Request):
         'relatedCommentId': link.get('relatedCommentId'),
         'ipHash': _hash_tracking_value(client_ip),
         'userAgentHash': _hash_tracking_value(user_agent),
-        'referrer': referrer[:500],
+        'referrerHash': _hash_tracking_value(referrer),
+        'referrerPresent': bool(referrer),
         'clickedAt': now,
         'createdAt': now,
         'created': now,
@@ -14721,6 +14748,11 @@ async def security_headers_middleware(request, call_next):
     csp_override = os.environ.get('CONTENT_SECURITY_POLICY')
     if csp_override:
         headers.setdefault('Content-Security-Policy', csp_override)
+    elif IS_PRODUCTION:
+        headers.setdefault(
+            'Content-Security-Policy',
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
     if IS_PRODUCTION:
         # HSTS only when we know we're on HTTPS. The X-Forwarded-Proto
         # header is what Railway / most reverse proxies set.

@@ -8,6 +8,7 @@ describe('Billing responsiveness wiring', () => {
     expect(source).toContain('cachedApiGet');
     expect(source).toContain('billing:plan-current');
     expect(source).toContain('billing:plans');
+    expect(source).toContain("${user?.id || 'anon'}");
     expect(source).toContain('force: true');
   });
 });
