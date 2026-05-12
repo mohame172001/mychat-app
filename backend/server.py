@@ -264,8 +264,20 @@ _USAGE_UNSAFE_METADATA_KEYS = {
     'client_secret', 'app_secret', 'secret', 'credential', 'google_credential',
     'id_token', 'google_id_token', 'refresh_token', 'jwt', 'code', 'raw', 'body',
     'payload', 'headers', 'graph_error', 'error_body', 'comment_text',
-    'dm_text', 'message_text', 'text', 'message', 'private_message',
+    'reply_text', 'dm_text', 'message_text', 'text', 'message', 'private_message',
 }
+_USAGE_UNSAFE_METADATA_FRAGMENTS = (
+    'token', 'secret', 'authorization', 'credential', 'id_token',
+    'refresh_token', 'raw', 'comment_text', 'reply_text', 'dm_text',
+    'message_text', 'graph_error', 'error_body', 'webhook_body',
+)
+
+
+def _is_unsafe_usage_metadata_key(key: Any) -> bool:
+    key_s = str(key or '').lower()
+    return key_s in _USAGE_UNSAFE_METADATA_KEYS or any(
+        fragment in key_s for fragment in _USAGE_UNSAFE_METADATA_FRAGMENTS
+    )
 
 
 def _usage_month(dt: datetime) -> str:
@@ -334,7 +346,7 @@ def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
             cleaned = {}
             for key, child in value.items():
                 key_s = str(key)
-                if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+                if _is_unsafe_usage_metadata_key(key_s):
                     continue
                 cleaned[key_s[:80]] = sanitize(child, depth + 1)
             return cleaned
@@ -345,7 +357,7 @@ def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
     cleaned = {}
     for key, value in metadata.items():
         key_s = str(key)
-        if key_s.lower() in _USAGE_UNSAFE_METADATA_KEYS:
+        if _is_unsafe_usage_metadata_key(key_s):
             continue
         cleaned[key_s[:80]] = sanitize(value)
     return cleaned
@@ -663,6 +675,22 @@ ACCOUNT_USAGE_LIMIT_KEYS = {
 }
 
 
+RESERVABLE_LIMIT_EVENTS = {
+    'monthly_comments_processed_limit': 'comment_processed',
+    'monthly_public_replies_sent_limit': 'public_reply_sent',
+    'monthly_dms_sent_limit': 'dm_sent',
+    'monthly_links_clicked_limit': 'link_clicked',
+}
+
+USAGE_RESERVATION_ACTIVE_STATUSES = {'reserved'}
+USAGE_RESERVATION_TTL_SECONDS = int(os.environ.get('USAGE_RESERVATION_TTL_SECONDS', '1800'))
+
+
+def _usage_reservation_key(*parts: Any) -> str:
+    basis = '|'.join(str(p or '') for p in parts)
+    return hashlib.sha256(basis.encode('utf-8', errors='ignore')).hexdigest()
+
+
 async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1,
                            instagram_account_id: Optional[str] = None) -> dict:
     """Return {exceeded, remaining, limit, used, plan_key}. Never raises.
@@ -720,6 +748,330 @@ async def check_plan_limit(user_id: str, limit_key: str, increment: int = 1,
                        user_id, limit_key, str(e)[:120])
         return {'exceeded': False, 'remaining': None, 'limit': None,
                 'used': 0, 'plan_key': _plans.DEFAULT_PLAN_KEY, 'fail_open': True}
+
+
+async def reserve_usage_limit(
+    user_id: str,
+    limit_key: str,
+    *,
+    increment: int = 1,
+    instagram_account_id: Optional[str] = None,
+    source: str = 'runtime',
+    automation_id: Optional[str] = None,
+    ig_comment_id: Optional[str] = None,
+    action_id: Optional[str] = None,
+) -> dict:
+    """Atomically reserve capacity for a limited action.
+
+    The reservation bucket is the concurrency gate. monthly_usage remains the
+    reporting counter and is incremented only when a reservation is confirmed.
+    """
+    amount = max(1, int(increment or 1))
+    event_type = RESERVABLE_LIMIT_EVENTS.get(limit_key)
+    check = await check_plan_limit(
+        user_id,
+        limit_key,
+        increment=amount,
+        instagram_account_id=instagram_account_id,
+    )
+    counter_field = _plans.LIMIT_TO_COUNTER_FIELD.get(limit_key)
+    if not event_type or not counter_field:
+        return {**check, 'allowed': True, 'reserved': False, 'reservation_required': False}
+    if check.get('fail_open'):
+        return {**check, 'allowed': True, 'reserved': False, 'reservation_required': False}
+    limit_value = check.get('limit')
+    if limit_value is None:
+        return {
+            **check,
+            'allowed': True,
+            'reserved': False,
+            'reservation_required': False,
+            'unlimited': True,
+            'event_type': event_type,
+            'metric': counter_field,
+        }
+    subject_type = check.get('limit_subject_type') or 'user'
+    subject_id = str(check.get('limit_subject_id') or user_id)
+    month = _usage_month(datetime.utcnow())
+    idempotency_key = _usage_reservation_key(
+        subject_type,
+        subject_id,
+        month,
+        counter_field,
+        automation_id,
+        ig_comment_id,
+        action_id or event_type,
+    )
+    existing = await db.usage_reservations.find_one({'idempotency_key': idempotency_key})
+    if existing:
+        status = existing.get('status')
+        allowed = status in ('reserved', 'confirmed')
+        return {
+            **check,
+            'allowed': allowed,
+            'reserved': status == 'reserved',
+            'duplicate': True,
+            'reservation_required': True,
+            'reservation': existing,
+            'reservation_id': existing.get('reservation_id'),
+            'event_type': existing.get('event_type') or event_type,
+            'metric': existing.get('metric') or counter_field,
+        }
+
+    now = datetime.utcnow()
+    reservation_id = secrets.token_urlsafe(12)
+    reservation = {
+        '_id': reservation_id,
+        'reservation_id': reservation_id,
+        'idempotency_key': idempotency_key,
+        'user_id': str(user_id),
+        'instagram_account_id': str(instagram_account_id) if instagram_account_id else None,
+        'limit_subject_type': subject_type,
+        'limit_subject_id': subject_id,
+        'metric': counter_field,
+        'event_type': event_type,
+        'amount': amount,
+        'month': month,
+        'status': 'pending',
+        'source': str(source or 'runtime')[:40],
+        'automation_id': str(automation_id) if automation_id else None,
+        'ig_comment_id': str(ig_comment_id) if ig_comment_id else None,
+        'action_id': str(action_id) if action_id else None,
+        'created_at': now,
+        'updated_at': now,
+        'expires_at': now + timedelta(seconds=USAGE_RESERVATION_TTL_SECONDS),
+    }
+    try:
+        await db.usage_reservations.insert_one(reservation)
+    except DuplicateKeyError:
+        existing = await db.usage_reservations.find_one({'idempotency_key': idempotency_key})
+        if existing:
+            status = existing.get('status')
+            return {
+                **check,
+                'allowed': status in ('reserved', 'confirmed'),
+                'reserved': status == 'reserved',
+                'duplicate': True,
+                'reservation_required': True,
+                'reservation': existing,
+                'reservation_id': existing.get('reservation_id'),
+                'event_type': existing.get('event_type') or event_type,
+                'metric': existing.get('metric') or counter_field,
+            }
+        raise
+
+    bucket_query = {
+        'limit_subject_type': subject_type,
+        'limit_subject_id': subject_id,
+        'month': month,
+        'metric': counter_field,
+    }
+    await db.usage_reservation_buckets.update_one(
+        bucket_query,
+        {'$setOnInsert': {
+            '_id': secrets.token_urlsafe(12),
+            'id': secrets.token_urlsafe(12),
+            **bucket_query,
+            'user_id': str(user_id),
+            'instagram_account_id': str(instagram_account_id) if instagram_account_id else None,
+            'confirmed_amount': int(check.get('used') or 0),
+            'reserved_amount': 0,
+            'created_at': now,
+        }},
+        upsert=True,
+    )
+    updated_bucket = await db.usage_reservation_buckets.find_one_and_update(
+        {
+            **bucket_query,
+            '$expr': {
+                '$lte': [
+                    {
+                        '$add': [
+                            {'$ifNull': ['$confirmed_amount', 0]},
+                            {'$ifNull': ['$reserved_amount', 0]},
+                            amount,
+                        ],
+                    },
+                    int(limit_value),
+                ],
+            },
+        },
+        {'$inc': {'reserved_amount': amount}, '$set': {'updated_at': now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated_bucket:
+        denied_at = datetime.utcnow()
+        await db.usage_reservations.update_one(
+            {'reservation_id': reservation_id},
+            {'$set': {
+                'status': 'failed',
+                'failure_reason_sanitized': 'usage_limit_exceeded',
+                'updated_at': denied_at,
+                'released_at': denied_at,
+            }},
+        )
+        logger.info(
+            'reservation_denied_limit user_id=%s metric=%s subject_type=%s subject_id=%s month=%s used=%s limit=%s source=%s',
+            user_id, counter_field, subject_type, _safe_partial_identifier(subject_id),
+            month, check.get('used'), limit_value, source,
+        )
+        return {
+            **check,
+            'allowed': False,
+            'reserved': False,
+            'reservation_required': True,
+            'event_type': event_type,
+            'metric': counter_field,
+        }
+
+    reserved_at = datetime.utcnow()
+    await db.usage_reservations.update_one(
+        {'reservation_id': reservation_id},
+        {'$set': {'status': 'reserved', 'reserved_at': reserved_at, 'updated_at': reserved_at}},
+    )
+    reservation.update({'status': 'reserved', 'reserved_at': reserved_at, 'updated_at': reserved_at})
+    logger.info(
+        'reservation_created user_id=%s metric=%s subject_type=%s subject_id=%s month=%s amount=%s source=%s',
+        user_id, counter_field, subject_type, _safe_partial_identifier(subject_id),
+        month, amount, source,
+    )
+    return {
+        **check,
+        'allowed': True,
+        'reserved': True,
+        'reservation_required': True,
+        'reservation': reservation,
+        'reservation_id': reservation_id,
+        'event_type': event_type,
+        'metric': counter_field,
+    }
+
+
+async def confirm_usage_reservation(
+    reservation_result: Optional[dict],
+    *,
+    user_id: str,
+    event_type: Optional[str] = None,
+    instagram_account_id: Optional[str] = None,
+    automation_id: Optional[str] = None,
+    comment_id: Optional[str] = None,
+    queue_job_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> bool:
+    """Confirm a reservation once and write monthly usage exactly once."""
+    result = reservation_result or {}
+    if not result.get('reservation_required'):
+        event = event_type or result.get('event_type')
+        if event:
+            return await _safe_record_usage_event(
+                user_id=user_id,
+                event_type=event,
+                instagram_account_id=instagram_account_id,
+                automation_id=automation_id,
+                comment_id=comment_id,
+                queue_job_id=queue_job_id,
+                metadata={**(metadata or {}), 'usage_reservation': 'bypassed'},
+            )
+        return False
+    reservation = result.get('reservation') or {}
+    reservation_id = result.get('reservation_id') or reservation.get('reservation_id')
+    if not reservation_id:
+        return False
+    current = await db.usage_reservations.find_one({'reservation_id': reservation_id}) or reservation
+    if current.get('status') == 'confirmed':
+        return False
+    if current.get('status') != 'reserved':
+        return False
+    now = datetime.utcnow()
+    updated = await db.usage_reservations.find_one_and_update(
+        {'reservation_id': reservation_id, 'status': 'reserved'},
+        {'$set': {
+            'status': 'confirmed',
+            'confirmed_at': now,
+            'updated_at': now,
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        return False
+    amount = int(updated.get('amount') or 1)
+    bucket_query = {
+        'limit_subject_type': updated.get('limit_subject_type'),
+        'limit_subject_id': updated.get('limit_subject_id'),
+        'month': updated.get('month'),
+        'metric': updated.get('metric'),
+    }
+    await db.usage_reservation_buckets.update_one(
+        bucket_query,
+        {'$inc': {'reserved_amount': -amount, 'confirmed_amount': amount},
+         '$set': {'updated_at': now}},
+    )
+    ok = await _safe_record_usage_event(
+        user_id=user_id,
+        event_type=event_type or updated.get('event_type'),
+        instagram_account_id=instagram_account_id or updated.get('instagram_account_id'),
+        automation_id=automation_id or updated.get('automation_id'),
+        comment_id=comment_id or updated.get('action_id'),
+        queue_job_id=queue_job_id,
+        metadata={
+            **(metadata or {}),
+            'reservation_id': reservation_id,
+            'reservation_status': 'confirmed',
+        },
+    )
+    logger.info(
+        'reservation_confirmed user_id=%s metric=%s subject_type=%s subject_id=%s month=%s amount=%s recorded=%s',
+        user_id, updated.get('metric'), updated.get('limit_subject_type'),
+        _safe_partial_identifier(updated.get('limit_subject_id')), updated.get('month'),
+        amount, ok,
+    )
+    return ok
+
+
+async def release_usage_reservation(
+    reservation_result: Optional[dict],
+    *,
+    reason: str = 'released_before_send',
+) -> bool:
+    result = reservation_result or {}
+    if not result.get('reservation_required'):
+        return False
+    reservation = result.get('reservation') or {}
+    reservation_id = result.get('reservation_id') or reservation.get('reservation_id')
+    if not reservation_id:
+        return False
+    current = await db.usage_reservations.find_one({'reservation_id': reservation_id}) or reservation
+    if current.get('status') != 'reserved':
+        return False
+    now = datetime.utcnow()
+    updated = await db.usage_reservations.find_one_and_update(
+        {'reservation_id': reservation_id, 'status': 'reserved'},
+        {'$set': {
+            'status': 'released',
+            'released_at': now,
+            'updated_at': now,
+            'failure_reason_sanitized': str(reason or 'released')[:80],
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        return False
+    amount = int(updated.get('amount') or 1)
+    await db.usage_reservation_buckets.update_one(
+        {
+            'limit_subject_type': updated.get('limit_subject_type'),
+            'limit_subject_id': updated.get('limit_subject_id'),
+            'month': updated.get('month'),
+            'metric': updated.get('metric'),
+        },
+        {'$inc': {'reserved_amount': -amount}, '$set': {'updated_at': now}},
+    )
+    logger.info(
+        'reservation_released user_id=%s metric=%s subject_type=%s subject_id=%s month=%s reason=%s',
+        updated.get('user_id'), updated.get('metric'), updated.get('limit_subject_type'),
+        _safe_partial_identifier(updated.get('limit_subject_id')), updated.get('month'), reason,
+    )
+    return True
 
 
 TRACKED_LINK_TTL_DAYS = int(os.environ.get('TRACKED_LINK_TTL_DAYS', '90'))
@@ -2794,39 +3146,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 # Reset the contextvar so we read THIS send's reason, not
                 # a stale value from an earlier send in the same task.
                 _LAST_DM_FAILURE.set({})
-                # Phase 2.2 plan enforcement: skip the DM step BEFORE we
-                # touch Meta when the monthly DM limit is exceeded. The
-                # public reply (if any) is unaffected.
-                dm_limit_check = await check_plan_limit(
-                    user.get('id', ''), 'monthly_dms_sent_limit', increment=1,
-                    instagram_account_id=ig_user_id,
-                )
-                if dm_limit_check.get('exceeded') and not dm_limit_check.get('fail_open'):
-                    flow_results['dm_status'] = 'plan_limited'
-                    flow_results['dm_failure_reason'] = 'plan_limit_exceeded'
-                    if comment_context and comment_context.get('comment_doc_id'):
-                        now_dl = datetime.utcnow()
-                        await db.comments.update_one(
-                            {'id': comment_context['comment_doc_id']},
-                            {'$set': {
-                                'dm_status': 'plan_limited',
-                                'dmStatus': 'plan_limited',
-                                'dm_failure_reason': 'plan_limit_exceeded',
-                                'dm_failure_retryable': False,
-                                'last_attempt_at': now_dl,
-                                'updated': now_dl,
-                            }},
-                        )
-                    logger.warning(
-                        'dm_skipped_plan_limit ig_comment_id=%s rule_id=%s '
-                        'plan_key=%s used=%s limit=%s',
-                        flow_comment_id, automation.get('id'),
-                        dm_limit_check.get('plan_key'),
-                        dm_limit_check.get('used'),
-                        dm_limit_check.get('limit'),
-                    )
-                    ok_all = False
-                    continue
+                dm_reservation = None
                 existing_dm_success = False
                 if comment_context and comment_context.get('comment_doc_id'):
                     existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
@@ -2860,6 +3180,47 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             flow_comment_id, automation.get('id'), False, limit_reason
                         )
                     else:
+                        dm_reservation = await reserve_usage_limit(
+                            user.get('id', ''), 'monthly_dms_sent_limit', increment=1,
+                            instagram_account_id=ig_user_id,
+                            source=flow_source or 'runtime',
+                            automation_id=automation.get('id'),
+                            ig_comment_id=flow_comment_id,
+                            action_id=f"{comment_context.get('comment_doc_id')}:dm" if comment_context else None,
+                        )
+                        if not dm_reservation.get('allowed') or (
+                            dm_reservation.get('exceeded') and not dm_reservation.get('fail_open')
+                        ):
+                            ok = False
+                            dm_result = {
+                                'ok': False,
+                                'failure_reason': 'plan_limit_exceeded',
+                                'retryable': False,
+                            }
+                            flow_results['dm_status'] = 'plan_limited'
+                            flow_results['dm_failure_reason'] = 'plan_limit_exceeded'
+                            if comment_context and comment_context.get('comment_doc_id'):
+                                now_dl = datetime.utcnow()
+                                await db.comments.update_one(
+                                    {'id': comment_context['comment_doc_id']},
+                                    {'$set': {
+                                        'dm_status': 'plan_limited',
+                                        'dmStatus': 'plan_limited',
+                                        'dm_failure_reason': 'plan_limit_exceeded',
+                                        'dm_failure_retryable': False,
+                                        'last_attempt_at': now_dl,
+                                        'updated': now_dl,
+                                    }},
+                                )
+                            logger.warning(
+                                'dm_skipped_plan_limit ig_comment_id=%s rule_id=%s plan_key=%s used=%s limit=%s',
+                                flow_comment_id, automation.get('id'),
+                                dm_reservation.get('plan_key'),
+                                dm_reservation.get('used'),
+                                dm_reservation.get('limit'),
+                            )
+                            ok_all = False
+                            continue
                         logger.info(
                             'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
                             flow_comment_id, automation.get('id'), True, None
@@ -2898,6 +3259,47 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             flow_comment_id, automation.get('id'), False, limit_reason
                         )
                     else:
+                        dm_reservation = await reserve_usage_limit(
+                            user.get('id', ''), 'monthly_dms_sent_limit', increment=1,
+                            instagram_account_id=ig_user_id,
+                            source=flow_source or 'runtime',
+                            automation_id=automation.get('id'),
+                            ig_comment_id=flow_comment_id,
+                            action_id=f"{comment_context.get('comment_doc_id')}:dm" if comment_context else None,
+                        )
+                        if not dm_reservation.get('allowed') or (
+                            dm_reservation.get('exceeded') and not dm_reservation.get('fail_open')
+                        ):
+                            ok = False
+                            dm_result = {
+                                'ok': False,
+                                'failure_reason': 'plan_limit_exceeded',
+                                'retryable': False,
+                            }
+                            flow_results['dm_status'] = 'plan_limited'
+                            flow_results['dm_failure_reason'] = 'plan_limit_exceeded'
+                            if comment_context and comment_context.get('comment_doc_id'):
+                                now_dl = datetime.utcnow()
+                                await db.comments.update_one(
+                                    {'id': comment_context['comment_doc_id']},
+                                    {'$set': {
+                                        'dm_status': 'plan_limited',
+                                        'dmStatus': 'plan_limited',
+                                        'dm_failure_reason': 'plan_limit_exceeded',
+                                        'dm_failure_retryable': False,
+                                        'last_attempt_at': now_dl,
+                                        'updated': now_dl,
+                                    }},
+                                )
+                            logger.warning(
+                                'dm_skipped_plan_limit ig_comment_id=%s rule_id=%s plan_key=%s used=%s limit=%s',
+                                flow_comment_id, automation.get('id'),
+                                dm_reservation.get('plan_key'),
+                                dm_reservation.get('used'),
+                                dm_reservation.get('limit'),
+                            )
+                            ok_all = False
+                            continue
                         logger.info(
                             'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
                             flow_comment_id, automation.get('id'), True, None
@@ -2932,9 +3334,8 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'$set': update},
                     )
                     if ok and not existing_dm_success:
-                        await _record_comment_usage_once(
-                            comment_context['comment_doc_id'],
-                            'usage_dm_sent_recorded',
+                        recorded_dm_usage = await confirm_usage_reservation(
+                            dm_reservation,
                             user_id=user.get('id', ''),
                             event_type='dm_sent',
                             instagram_account_id=ig_user_id,
@@ -2945,6 +3346,14 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                                 'ig_comment_id': flow_comment_id,
                             },
                         )
+                        if recorded_dm_usage:
+                            await db.comments.update_one(
+                                {'id': comment_context['comment_doc_id']},
+                                {'$set': {
+                                    'usage_dm_sent_recorded': True,
+                                    'usage_dm_sent_recorded_at': datetime.utcnow(),
+                                }},
+                            )
                 if flow_source == 'webhook':
                     logger.info(
                         'total_webhook_to_dm_ms=%s ig_comment_id=%s rule_id=%s ok=%s reason=%s',
@@ -2980,39 +3389,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                 msg_text = data.get('text') or data.get('message', '')
             if msg_text and comment_context and comment_context.get('ig_comment_id'):
                 action_attempted = True
-                # Phase 2.2 plan enforcement: skip the public reply step
-                # BEFORE we touch Meta when the monthly public-reply limit
-                # is exceeded. The DM step (if any) runs normally.
-                reply_limit_check = await check_plan_limit(
-                    user.get('id', ''), 'monthly_public_replies_sent_limit', increment=1,
-                    instagram_account_id=ig_user_id,
-                )
-                if reply_limit_check.get('exceeded') and not reply_limit_check.get('fail_open'):
-                    flow_results['reply_status'] = 'plan_limited'
-                    flow_results['reply_failure_reason'] = 'plan_limit_exceeded'
-                    if comment_context.get('comment_doc_id'):
-                        now_rl = datetime.utcnow()
-                        await db.comments.update_one(
-                            {'id': comment_context['comment_doc_id']},
-                            {'$set': {
-                                'reply_status': 'plan_limited',
-                                'replyStatus': 'plan_limited',
-                                'reply_failure_reason': 'plan_limit_exceeded',
-                                'reply_failure_retryable': False,
-                                'last_attempt_at': now_rl,
-                                'updated': now_rl,
-                            }},
-                        )
-                    logger.warning(
-                        'public_reply_skipped_plan_limit ig_comment_id=%s rule_id=%s '
-                        'plan_key=%s used=%s limit=%s',
-                        comment_context['ig_comment_id'], automation.get('id'),
-                        reply_limit_check.get('plan_key'),
-                        reply_limit_check.get('used'),
-                        reply_limit_check.get('limit'),
-                    )
-                    ok_all = False
-                    continue
+                reply_reservation = None
                 already_replied = False
                 if comment_context.get('comment_doc_id'):
                     existing_comment = await db.comments.find_one({'id': comment_context['comment_doc_id']})
@@ -3046,6 +3423,41 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                             flow_comment_id, automation.get('id'), False, limit_reason
                         )
                     else:
+                        reply_reservation = await reserve_usage_limit(
+                            user.get('id', ''), 'monthly_public_replies_sent_limit', increment=1,
+                            instagram_account_id=ig_user_id,
+                            source=flow_source or 'runtime',
+                            automation_id=automation.get('id'),
+                            ig_comment_id=comment_context['ig_comment_id'],
+                            action_id=f"{comment_context.get('comment_doc_id')}:reply",
+                        )
+                        if not reply_reservation.get('allowed') or (
+                            reply_reservation.get('exceeded') and not reply_reservation.get('fail_open')
+                        ):
+                            flow_results['reply_status'] = 'plan_limited'
+                            flow_results['reply_failure_reason'] = 'plan_limit_exceeded'
+                            if comment_context.get('comment_doc_id'):
+                                now_rl = datetime.utcnow()
+                                await db.comments.update_one(
+                                    {'id': comment_context['comment_doc_id']},
+                                    {'$set': {
+                                        'reply_status': 'plan_limited',
+                                        'replyStatus': 'plan_limited',
+                                        'reply_failure_reason': 'plan_limit_exceeded',
+                                        'reply_failure_retryable': False,
+                                        'last_attempt_at': now_rl,
+                                        'updated': now_rl,
+                                    }},
+                                )
+                            logger.warning(
+                                'public_reply_skipped_plan_limit ig_comment_id=%s rule_id=%s plan_key=%s used=%s limit=%s',
+                                comment_context['ig_comment_id'], automation.get('id'),
+                                reply_reservation.get('plan_key'),
+                                reply_reservation.get('used'),
+                                reply_reservation.get('limit'),
+                            )
+                            ok_all = False
+                            continue
                         logger.info(
                             'automation_step_diagnostics comment_id=%s matched_rule_id=%s public_reply_attempted=%s public_reply_skip_reason=%s',
                             flow_comment_id, automation.get('id'), True, None
@@ -3113,9 +3525,8 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         {'$set': update}
                     )
                     if provider_ok and not already_replied:
-                        await _record_comment_usage_once(
-                            comment_context['comment_doc_id'],
-                            'usage_public_reply_sent_recorded',
+                        recorded_reply_usage = await confirm_usage_reservation(
+                            reply_reservation,
                             user_id=user.get('id', ''),
                             event_type='public_reply_sent',
                             instagram_account_id=ig_user_id,
@@ -3127,6 +3538,14 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                                 'provider_comment_id_exists': bool(reply_result.get('provider_comment_id')),
                             },
                         )
+                        if recorded_reply_usage:
+                            await db.comments.update_one(
+                                {'id': comment_context['comment_doc_id']},
+                                {'$set': {
+                                    'usage_public_reply_sent_recorded': True,
+                                    'usage_public_reply_sent_recorded_at': datetime.utcnow(),
+                                }},
+                            )
         elif ntype == 'delay':
             secs = int(data.get('seconds', 0) or data.get('delay', 0))
             if secs > 0:
@@ -4771,6 +5190,39 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
         }},
     )
 
+    reply_reservation = await reserve_usage_limit(
+        user_id,
+        'monthly_public_replies_sent_limit',
+        increment=1,
+        instagram_account_id=comment.get('instagramAccountId') or comment.get('igUserId') or account.get('instagramAccountId'),
+        source='retry',
+        automation_id=comment.get('rule_id') or comment.get('ruleId'),
+        ig_comment_id=ig_comment_id,
+        action_id=f"{cid}:retry_reply",
+    )
+    if not reply_reservation.get('allowed') or (
+        reply_reservation.get('exceeded') and not reply_reservation.get('fail_open')
+    ):
+        await db.comments.update_one(
+            {'id': cid, **_account_scoped_query(user_id, account)},
+            {'$set': {
+                'reply_status': 'plan_limited',
+                'reply_failure_reason': 'plan_limit_exceeded',
+                'next_retry_at': None,
+                'action_status': 'plan_limited' if not comment.get('replied') else comment.get('action_status'),
+                'updated': datetime.utcnow(),
+            }},
+        )
+        return {
+            'queued': False,
+            'action_status': 'plan_limited',
+            'reply_status': 'plan_limited',
+            'dm_status': comment.get('dm_status'),
+            'attempts': attempts,
+            'next_retry_at': None,
+            'reason': 'plan_limit_exceeded',
+        }
+
     result = await reply_to_ig_comment_detailed(access_token, ig_comment_id, reply_text)
     classified_reason = result.get('failure_reason')
     final_now = datetime.utcnow()
@@ -4796,6 +5248,15 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
                 ) else 'success',
                 'updated': final_now,
             }},
+        )
+        await confirm_usage_reservation(
+            reply_reservation,
+            user_id=user_id,
+            event_type='public_reply_sent',
+            instagram_account_id=comment.get('instagramAccountId') or comment.get('igUserId') or account.get('instagramAccountId'),
+            automation_id=comment.get('rule_id') or comment.get('ruleId'),
+            comment_id=cid,
+            metadata={'source': 'retry', 'ig_comment_id': ig_comment_id},
         )
         logger.info(
             'comment_retry_reply_success comment_id=%s ig_comment_id=%s attempts=%s',
@@ -7537,6 +7998,79 @@ async def admin_metrics_reconciliation(
         'metric_sources': DASHBOARD_METRIC_SOURCES,
         'account_usage_reconciliation': account_usage_reconciliation,
         'billing_enabled': False,
+    }
+
+
+@api.get('/admin/limits/usage-reservation-diagnostics')
+async def admin_usage_reservation_diagnostics(
+    month: Optional[str] = None,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Read-only reservation ledger diagnostics. Returns counts only."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', event_month):
+        raise HTTPException(400, 'month must be YYYY-MM')
+    now = datetime.utcnow()
+    statuses = {s: 0 for s in ('pending', 'reserved', 'confirmed', 'released', 'expired', 'failed')}
+    stale_reserved = 0
+    confirmed_by_metric: Dict[str, int] = {}
+    try:
+        cursor = db.usage_reservations.find({'month': event_month}).limit(5000)
+        async for row in cursor:
+            status = str(row.get('status') or 'unknown')
+            statuses[status] = statuses.get(status, 0) + 1
+            if status == 'reserved':
+                expires_at = row.get('expires_at')
+                if isinstance(expires_at, datetime) and expires_at < now:
+                    stale_reserved += 1
+            if status == 'confirmed':
+                metric = str(row.get('metric') or 'unknown')
+                confirmed_by_metric[metric] = confirmed_by_metric.get(metric, 0) + int(row.get('amount') or 1)
+    except Exception:
+        pass
+    monthly_by_metric = {field: 0 for field in USAGE_COUNTER_FIELDS}
+    legacy_user_scoped_rows = 0
+    try:
+        cursor = db.monthly_usage.find({
+            'event_month': event_month,
+            'limit_subject_type': 'instagram_account',
+        }).limit(5000)
+        async for row in cursor:
+            for field in USAGE_COUNTER_FIELDS:
+                monthly_by_metric[field] += int(row.get(field) or 0)
+        legacy_user_scoped_rows = await db.monthly_usage.count_documents({
+            'event_month': event_month,
+            '$or': [
+                {'limit_subject_type': {'$exists': False}},
+                {'limit_subject_type': 'user'},
+            ],
+        })
+    except Exception:
+        pass
+    mismatches = []
+    for metric, confirmed_amount in sorted(confirmed_by_metric.items()):
+        monthly_amount = int(monthly_by_metric.get(metric) or 0)
+        if confirmed_amount != monthly_amount:
+            mismatches.append({
+                'metric': metric,
+                'confirmed_reservations': confirmed_amount,
+                'monthly_usage': monthly_amount,
+                'status': 'mismatch',
+            })
+    return {
+        'month': event_month,
+        'statuses': statuses,
+        'stale_reserved_count': stale_reserved,
+        'confirmed_by_metric': confirmed_by_metric,
+        'monthly_usage_by_metric': monthly_by_metric,
+        'mismatches': mismatches,
+        'mismatch_count': len(mismatches),
+        'legacy_user_scoped_monthly_usage_rows': legacy_user_scoped_rows,
+        'privacy': {
+            'raw_text_returned': False,
+            'tokens_returned': False,
+        },
     }
 
 
@@ -11300,21 +11834,6 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     await ws_manager.send(user_id, {'type': 'comment', 'comment': _strip_mongo({**doc})})
 
     if matched:
-        await _record_comment_usage_once(
-            doc['id'],
-            'usage_comment_processed_recorded',
-            user_id=user_id,
-            event_type='comment_processed',
-            instagram_account_id=ig_account_id,
-            automation_id=rule_id,
-            comment_id=doc['id'],
-            metadata={
-                'source': source,
-                'media_id': media_id,
-                'matched_rule_priority': matched_rule_priority,
-                'matched_rule_scope': matched_rule_scope,
-            },
-        )
         if force_queue:
             await db.comments.update_one(
                 {'id': doc['id']},
@@ -11349,11 +11868,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             # exceeded. The comment doc stays so we don't lose it; the
             # queue does NOT auto-retry — the user must upgrade or wait
             # for next month's reset.
-            comment_limit_check = await check_plan_limit(
+            comment_limit_check = await reserve_usage_limit(
                 user_id, 'monthly_comments_processed_limit', increment=1,
                 instagram_account_id=ig_account_id,
+                source=source or 'runtime',
+                automation_id=rule_id,
+                ig_comment_id=ig_comment_id,
+                action_id=doc['id'],
             )
-            if comment_limit_check.get('exceeded') and not comment_limit_check.get('fail_open'):
+            if not comment_limit_check.get('allowed') or (
+                comment_limit_check.get('exceeded') and not comment_limit_check.get('fail_open')
+            ):
                 now_pl = datetime.utcnow()
                 await db.comments.update_one(
                     {'id': doc['id']},
@@ -11387,6 +11912,28 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         'rule_id': rule_id, 'comment_doc_id': doc['id'],
                         'reason': 'skipped_plan_limit',
                         'plan_key': comment_limit_check.get('plan_key')}
+            confirmed_comment_usage = await confirm_usage_reservation(
+                comment_limit_check,
+                user_id=user_id,
+                event_type='comment_processed',
+                instagram_account_id=ig_account_id,
+                automation_id=rule_id,
+                comment_id=doc['id'],
+                metadata={
+                    'source': source,
+                    'media_id': media_id,
+                    'matched_rule_priority': matched_rule_priority,
+                    'matched_rule_scope': matched_rule_scope,
+                },
+            )
+            if confirmed_comment_usage:
+                await db.comments.update_one(
+                    {'id': doc['id']},
+                    {'$set': {
+                        'usage_comment_processed_recorded': True,
+                        'usage_comment_processed_recorded_at': datetime.utcnow(),
+                    }},
+                )
             ok = await _run_and_record_action(
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
@@ -12131,6 +12678,30 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 'rule_id': rule_id, 'log_id': log_doc['id']}
 
     logger.info('dm_reply_started rule_id=%s dedup_key=%s', rule_id, dedup_key)
+    dm_reservation = await reserve_usage_limit(
+        user_id,
+        'monthly_dms_sent_limit',
+        increment=1,
+        instagram_account_id=ig_account_id,
+        source=source or 'dm_automation',
+        automation_id=rule_id,
+        ig_comment_id=message_id or dedup_key,
+        action_id=f"{log_doc['id']}:dm_rule",
+    )
+    if not dm_reservation.get('allowed') or (
+        dm_reservation.get('exceeded') and not dm_reservation.get('fail_open')
+    ):
+        await db.dm_logs.update_one(
+            {'id': log_doc['id']},
+            {'$set': {'status': 'plan_limited', 'skip_reason': 'plan_limit_exceeded'}}
+        )
+        logger.warning(
+            'dm_reply_skipped_plan_limit rule_id=%s dedup_key=%s plan_key=%s used=%s limit=%s',
+            rule_id, dedup_key, dm_reservation.get('plan_key'),
+            dm_reservation.get('used'), dm_reservation.get('limit'),
+        )
+        return {'processed': True, 'matched': True, 'status': 'plan_limited',
+                'reason': 'plan_limit_exceeded', 'rule_id': rule_id, 'log_id': log_doc['id']}
     ok = False
     err = None
     try:
@@ -12147,6 +12718,15 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         await db.dm_logs.update_one(
             {'id': log_doc['id']},
             {'$set': {'status': 'replied'}}
+        )
+        await confirm_usage_reservation(
+            dm_reservation,
+            user_id=user_id,
+            event_type='dm_sent',
+            instagram_account_id=ig_account_id,
+            automation_id=rule_id,
+            comment_id=log_doc['id'],
+            metadata={'source': source or 'dm_automation', 'message_event_kind': event_kind},
         )
         logger.info('dm_reply_success rule_id=%s dedup_key=%s', rule_id, dedup_key)
         return {'processed': True, 'matched': True, 'status': 'replied',
@@ -14764,8 +15344,24 @@ async def tracked_link_redirect(short_code: str, request: Request):
     client_ip = request.client.host if request.client else ''
     user_agent = request.headers.get('user-agent', '')
     referrer = request.headers.get('referer') or request.headers.get('referrer') or ''
+    event_id = secrets.token_urlsafe(12)
+    link_reservation = await reserve_usage_limit(
+        str(link.get('user_id') or link.get('userId') or ''),
+        'monthly_links_clicked_limit',
+        increment=1,
+        instagram_account_id=link.get('instagramAccountId') or link.get('igUserId'),
+        source='link_redirect',
+        automation_id=link.get('automation_id') or link.get('ruleId'),
+        ig_comment_id=link.get('relatedCommentId'),
+        action_id=f'{short_code}:{event_id}',
+    )
+    if not link_reservation.get('allowed') or (
+        link_reservation.get('exceeded') and not link_reservation.get('fail_open')
+    ):
+        raise HTTPException(402, 'usage_limit_exceeded')
+
     event = {
-        'id': secrets.token_urlsafe(12),
+        'id': event_id,
         'shortCode': short_code,
         'trackedLinkId': link.get('id'),
         'user_id': link.get('user_id') or link.get('userId'),
@@ -14799,7 +15395,8 @@ async def tracked_link_redirect(short_code: str, request: Request):
         {'shortCode': short_code},
         {'$inc': {'clicksCount': 1}, '$set': update},
     )
-    await _safe_record_usage_event(
+    await confirm_usage_reservation(
+        link_reservation,
         user_id=event.get('user_id'),
         event_type='link_clicked',
         instagram_account_id=event.get('instagramAccountId'),
@@ -15061,6 +15658,25 @@ async def _startup():
         await db.usage_events.create_index(
             [('created_at', -1)],
             name='usage_events_created_at',
+        )
+        await db.usage_reservations.create_index(
+            [('idempotency_key', 1)],
+            unique=True,
+            name='usage_reservations_idempotency_unique',
+        )
+        await db.usage_reservations.create_index(
+            [('limit_subject_type', 1), ('limit_subject_id', 1),
+             ('month', 1), ('metric', 1), ('status', 1)],
+            name='usage_reservations_subject_month_metric_status',
+        )
+        await db.usage_reservations.create_index(
+            [('expires_at', 1), ('status', 1)],
+            name='usage_reservations_expires_status',
+        )
+        await db.usage_reservation_buckets.create_index(
+            [('limit_subject_type', 1), ('limit_subject_id', 1), ('month', 1), ('metric', 1)],
+            unique=True,
+            name='usage_reservation_buckets_subject_month_metric_unique',
         )
         try:
             await db.monthly_usage.drop_index('monthly_usage_user_month_unique')

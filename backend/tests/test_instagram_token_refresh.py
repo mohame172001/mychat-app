@@ -56,7 +56,25 @@ class FakeAsyncClient:
 
 
 def _match(doc, query):
+    def _expr_value(expr):
+        if isinstance(expr, str) and expr.startswith('$'):
+            return doc.get(expr[1:])
+        if isinstance(expr, dict):
+            if '$ifNull' in expr:
+                value, fallback = expr['$ifNull']
+                resolved = _expr_value(value)
+                return fallback if resolved is None else resolved
+            if '$add' in expr:
+                return sum(int(_expr_value(item) or 0) for item in expr['$add'])
+        return expr
+
     for key, expected in query.items():
+        if key == '$expr':
+            if '$lte' in expected:
+                left, right = expected['$lte']
+                if not (_expr_value(left) <= _expr_value(right)):
+                    return False
+            continue
         if key == '$and':
             if not all(_match(doc, item) for item in expected):
                 return False
@@ -168,7 +186,10 @@ class FakeCollection:
         doc = await self.find_one(query)
         if not doc:
             return None
-        await self.update_one({'id': doc['id']}, update)
+        for key, value in update.get('$set', {}).items():
+            doc[key] = value
+        for key, value in update.get('$inc', {}).items():
+            doc[key] = int(doc.get(key) or 0) + value
         return doc
 
 
@@ -189,6 +210,8 @@ class FakeDB:
         self.link_click_events = FakeCollection(collections.get('link_click_events', []))
         self.usage_events = FakeCollection(collections.get('usage_events', []))
         self.monthly_usage = FakeCollection(collections.get('monthly_usage', []))
+        self.usage_reservations = FakeCollection(collections.get('usage_reservations', []))
+        self.usage_reservation_buckets = FakeCollection(collections.get('usage_reservation_buckets', []))
         self.user_plans = FakeCollection(collections.get('user_plans', []))
         self.admin_audit_logs = FakeCollection(collections.get('admin_audit_logs', []))
         self.admin_members = FakeCollection(collections.get('admin_members', []))
