@@ -3319,18 +3319,25 @@ async def meta_data_deletion_callback(request: Request):
 @api.post('/auth/signup', response_model=AuthOut)
 async def signup(data: SignupIn, request: Request):
     ip = _client_ip(request)
+    normalized_email = _normalize_email_value(data.email)
     if _rate_limited('signup', ip,
                      limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
         logger.warning('rate_limit_hit bucket=signup ip=%s', ip)
         raise HTTPException(429, 'Too many signups from this IP. Try again later.')
+    email_hash = _hash_identifier(normalized_email)
+    if email_hash and _rate_limited('signup_email', email_hash,
+                                    limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
+        logger.warning('rate_limit_hit bucket=signup_email email_hash=%s', email_hash[:12])
+        raise HTTPException(429, 'Too many signups for this email. Try again later.')
     if await db.users.find_one({'username': data.username}):
         raise HTTPException(400, 'Username already taken')
-    if await db.users.find_one({'email': data.email}):
+    if await _find_user_by_email(normalized_email):
         raise HTTPException(400, 'Email already registered')
     import uuid
     user_id = str(uuid.uuid4())
     user_doc = {
-        'id': user_id, 'username': data.username, 'email': data.email,
+        'id': user_id, 'username': data.username, 'email': normalized_email,
+        'normalized_email': normalized_email,
         'name': data.username.capitalize(),
         'password_hash': hash_password(data.password),
         'avatar': f'https://i.pravatar.cc/150?u={data.username}',
@@ -3345,11 +3352,20 @@ async def signup(data: SignupIn, request: Request):
 @api.post('/auth/login', response_model=AuthOut)
 async def login(data: LoginIn, request: Request):
     ip = _client_ip(request)
+    normalized_identifier = _normalize_email_value(data.username)
     if _rate_limited('login', ip,
                      limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=login ip=%s', ip)
         raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
-    u = await db.users.find_one({'username': data.username})
+    identifier_hash = _hash_identifier(normalized_identifier)
+    if identifier_hash and _rate_limited('login_identifier', identifier_hash,
+                                         limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
+        logger.warning('rate_limit_hit bucket=login_identifier identifier_hash=%s', identifier_hash[:12])
+        raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
+    if '@' in normalized_identifier:
+        u = await _find_user_by_email(normalized_identifier)
+    else:
+        u = await db.users.find_one({'username': data.username})
     if not u or not verify_password(data.password, u['password_hash']):
         raise HTTPException(401, 'Invalid username or password')
     # Phase 2.8: block login for suspended/deleted users.
@@ -3372,6 +3388,32 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
 # same code path.
 
 GOOGLE_AUTH_PROVIDER_KEY = 'google'
+
+
+def _normalize_email_value(email: Optional[str]) -> str:
+    """Canonical email identity for lookup and admin-member matching.
+
+    We intentionally do not strip plus-address tags here. Plus-addressing
+    remains a distinct mailbox identity for now; this only closes casing and
+    surrounding-whitespace duplicates without silently merging accounts.
+    """
+    return str(email or '').strip().lower()
+
+
+async def _find_user_by_email(email: Optional[str]) -> Optional[dict]:
+    normalized = _normalize_email_value(email)
+    if not normalized:
+        return None
+    user = await db.users.find_one({'normalized_email': normalized})
+    if user:
+        return user
+    user = await db.users.find_one({'email': normalized})
+    if user:
+        return user
+    # Legacy rows may have mixed-case email and no normalized_email field.
+    return await db.users.find_one({
+        'email': {'$regex': f'^{re.escape(normalized)}$', '$options': 'i'}
+    })
 
 
 @api.get('/auth/google/config')
@@ -3439,7 +3481,7 @@ def _google_claims_safe(claims: dict) -> dict:
     """Strict allow-list extraction. Drops anything else."""
     return {
         'sub': str(claims.get('sub') or ''),
-        'email': (claims.get('email') or '').strip().lower(),
+        'email': _normalize_email_value(claims.get('email')),
         'email_verified': bool(claims.get('email_verified')),
         'name': claims.get('name'),
         'picture': claims.get('picture'),
@@ -3477,7 +3519,7 @@ async def auth_google(data: dict = Body(...), request: Request = None):
     is_new_user = False
 
     by_sub = await db.users.find_one({'google_sub': safe['sub']})
-    by_email = await db.users.find_one({'email': safe['email']})
+    by_email = await _find_user_by_email(safe['email'])
 
     if by_sub and by_email and by_sub.get('id') != by_email.get('id'):
         # Different user_id rows for sub vs email — never auto-merge.
@@ -3513,6 +3555,7 @@ async def auth_google(data: dict = Body(...), request: Request = None):
             {'id': user['id']},
             {'$set': {
                 'google_sub': safe['sub'],
+                'normalized_email': safe['email'],
                 'email_verified': True,
                 'linked_providers': providers,
                 'updated_at': now,
@@ -3537,6 +3580,7 @@ async def auth_google(data: dict = Body(...), request: Request = None):
             'id': user_id,
             'username': username,
             'email': safe['email'],
+            'normalized_email': safe['email'],
             'name': safe.get('name') or base_username.capitalize(),
             'password_hash': None,
             'avatar': safe.get('picture') or f'https://i.pravatar.cc/150?u={username}',
@@ -6308,7 +6352,7 @@ async def _resolve_admin_role(user: Optional[dict]) -> tuple[Optional[str], bool
     """
     if not user:
         return None, False
-    email = (user.get('email') or '').lower()
+    email = _normalize_email_value(user.get('normalized_email') or user.get('email'))
     user_id = user.get('id')
     bootstrap_owner = bool(email and email in ADMIN_EMAILS)
     member = None
@@ -6942,7 +6986,7 @@ async def admin_members_add(
 ):
     """Add a user to the admin team. Owner-only (admin.members.manage)."""
     actor, actor_role = await _require_admin_permission(user_id, _admin_roles.PERM_MEMBERS_MANAGE)
-    target_email = ((body or {}).get('email') or '').strip().lower()
+    target_email = _normalize_email_value((body or {}).get('email'))
     new_role = (body or {}).get('role') or _admin_roles.ROLE_VIEWER
     reason = ((body or {}).get('reason') or '')[:200]
     if not target_email:
@@ -6951,7 +6995,7 @@ async def admin_members_add(
         raise HTTPException(400, f'role must be one of: {", ".join(_admin_roles.ASSIGNABLE_ROLE_KEYS)}')
     if not _admin_roles.can_manage_role(actor_role, None, new_role):
         raise HTTPException(403, 'Insufficient role to assign that role')
-    target_user = await db.users.find_one({'email': target_email})
+    target_user = await _find_user_by_email(target_email)
     if not target_user:
         raise HTTPException(404, 'User not found for that email')
     target_uid = target_user.get('id')
@@ -15060,6 +15104,12 @@ async def _startup():
         await db.users.create_index(
             [('google_sub', 1)], unique=True, sparse=True,
             name='users_google_sub_unique',
+        )
+        # Phase 2.12G: normalized email lookup. This is intentionally
+        # non-unique until legacy duplicate diagnostics can be reviewed.
+        await db.users.create_index(
+            [('normalized_email', 1)], sparse=True,
+            name='users_normalized_email_lookup',
         )
         # Phase 2.8: user_limit_overrides indexes.
         await db.user_limit_overrides.create_index(

@@ -22,6 +22,8 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 - `ENABLE_ADMIN_REPAIR_TOOLS=false` or unset except during an explicitly approved repair window.
 - `ADMIN_EMAILS` contains at least one owner escape-hatch email.
 - Google Sign-In only needs public client IDs in frontend/backend env; no Google client secret should be in frontend env.
+- Login and signup rate limits enabled for IP and normalized identifier/email-hash buckets.
+- `ADMIN_EMAILS` reviewed: it should contain only intended owner escape-hatch emails, and removing a bootstrap owner fully requires removing the env email as well as disabling/removing the member row.
 
 ## API and Browser Security
 
@@ -48,6 +50,9 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 - System Health may show booleans such as HMAC configured and repair tools enabled, but never secret values.
 - Admin repair/debug endpoints are unavailable to normal users and audited when enabled.
 - Webhook logs store safe metadata only: counts, status, hashes, and timestamps. No raw webhook body.
+- Admin role changes are DB-backed and should take effect without waiting for JWT expiry.
+- Suspended/deleted users with an old JWT should be blocked from normal app APIs with `account_suspended` or `account_deleted`.
+- Logout, login, signup, Google login, and `401` auth resets should clear user-specific frontend API cache.
 
 ## Manual Checks
 
@@ -57,3 +62,5 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 4. Confirm a bad webhook verify token returns `403`.
 5. Confirm production logs do not contain access tokens, raw comments, raw replies, raw DMs, raw Graph bodies, Google credentials, Authorization headers, cookies, or raw webhook bodies.
 6. Confirm Mongo backups and restore process are configured outside the app before billing launch.
+7. Confirm password signup/email login casing behavior: `Test@Example.com` and `test@example.com` resolve to the same account identity.
+8. Confirm no Google client secret or password reset token is present in frontend env, build output, logs, docs, or screenshots.
