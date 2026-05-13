@@ -24,6 +24,8 @@ const billingFn = () => import('./pages/Billing');
 const adminFn = () => import('./pages/admin/AdminConsole');
 const specificReplyDebugFn = () => import('./pages/admin/SpecificReplyDebug');
 const notFoundFn = () => import('./pages/NotFound');
+const forgotPasswordFn = () => import('./pages/ForgotPassword');
+const resetPasswordFn = () => import('./pages/ResetPassword');
 
 const Landing = lazy(landingFn);
 const Login = lazy(loginFn);
@@ -41,6 +43,8 @@ const Billing = lazy(billingFn);
 const AdminConsole = lazy(adminFn);
 const SpecificReplyDebug = lazy(specificReplyDebugFn);
 const NotFound = lazy(notFoundFn);
+const ForgotPassword = lazy(forgotPasswordFn);
+const ResetPassword = lazy(resetPasswordFn);
 
 registerRoute('Dashboard', dashboardFn);
 registerRoute('Automations', automationsFn);
@@ -87,6 +91,8 @@ function App() {
               <Route path="/" element={<Landing />} />
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<Signup />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/privacy" element={<PrivacyPolicy />} />
               <Route path="/terms" element={<Terms />} />
               <Route path="/data-deletion" element={<DataDeletion />} />

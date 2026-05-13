@@ -19,6 +19,15 @@ This gate intentionally does not add Paddle, Paymob, Stripe, checkout, subscript
 
 Conclusion: Billing can start from a security-readiness standpoint. Future billing work must add provider-specific webhook signature verification, idempotency keys, raw payload redaction, server-side plan mutation only, and reconciliation tests before accepting real payments.
 
+### Phase 2.14 product-functional gate (added)
+
+Even with the security gate green, billing remains **BLOCKED** on product-functional verification:
+
+- Password change E2E: code shipped in `a238d6a`, real authenticated E2E **still pending**.
+- Password reset E2E: code shipped in Phase 2.14 (this commit), real email-delivery E2E **still pending**. See `docs/auth-recovery-notes.md`.
+
+Billing must not start until both above E2Es pass on the live host with the production email webhook.
+
 ## Red-Team Billing Abuse Delta
 
 | Check | Result | Evidence |

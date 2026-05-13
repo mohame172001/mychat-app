@@ -154,17 +154,29 @@ class FakeCollection:
             doc = dict(query)
             self.docs.append(doc)
         if not doc:
-            return None
+            # Match real Motor: return an UpdateResult-like object with
+            # matched_count=0 / modified_count=0 so callers checking these
+            # don't crash on AttributeError.
+            return SimpleNamespace(matched_count=0, modified_count=0,
+                                   upserted_id=None)
         if '$setOnInsert' in update and upsert:
             for key, value in update['$setOnInsert'].items():
                 doc.setdefault(key, value)
+        modified = False
         for key, value in update.get('$set', {}).items():
+            if doc.get(key) != value:
+                modified = True
             doc[key] = value
         for key in update.get('$unset', {}).keys():
+            if key in doc:
+                modified = True
             doc.pop(key, None)
         for key, value in update.get('$inc', {}).items():
             doc[key] = int(doc.get(key) or 0) + value
-        return None
+            modified = True
+        return SimpleNamespace(matched_count=1,
+                               modified_count=1 if modified else 0,
+                               upserted_id=None)
 
     async def update_many(self, query, update):
         count = 0

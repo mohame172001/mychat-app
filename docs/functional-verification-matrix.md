@@ -24,12 +24,19 @@ Phase: 2.14
 | A5 | Case-insensitive email login | anonymous | User created with email | verified | P1 | backend | |
 | A6 | Logout | authenticated | Logged in | verified | P1 | E2E | |
 | A7 | Google Sign-In | anonymous | Google OAuth configured | blocked | P1 | backend | Requires Google client ID |
-| A8 | Password change from Settings | authenticated | Logged in, has password | **failed** | **P0** | none | **No backend endpoint exists. Frontend shows fake "success" toast.** |
-| A9 | Old password fails after change | authenticated | Password changed | **failed** | **P0** | none | Cannot test — no endpoint |
-| A10 | New password succeeds after change | authenticated | Password changed | **failed** | **P0** | none | Cannot test — no endpoint |
-| A11 | Browser autocomplete: login | anonymous | Login form shown | **failed** | P1 | manual | Missing autocomplete="username" and autocomplete="current-password" |
-| A12 | Browser autocomplete: signup | anonymous | Signup form shown | **failed** | P1 | manual | Missing autocomplete="new-password" |
-| A13 | Browser autocomplete: password change | authenticated | Settings security tab | **failed** | P1 | manual | Missing autocomplete="current-password"/"new-password" |
+| A8 | Password change from Settings | authenticated | Logged in, has password | implemented | **P0** | backend, frontend grep | Phase 2.14 a238d6a. Pending real E2E. |
+| A9 | Old password fails after change | authenticated | Password changed | implemented | **P0** | backend | Pending real E2E. |
+| A10 | New password succeeds after change | authenticated | Password changed | implemented | **P0** | backend | Pending real E2E. |
+| A11 | Browser autocomplete: login | anonymous | Login form shown | implemented | P1 | frontend grep | `username` + `current-password` attrs present. Browser-prompt is browser-dependent. |
+| A12 | Browser autocomplete: signup | anonymous | Signup form shown | implemented | P1 | frontend grep | `email` + `new-password` + `username` attrs present. |
+| A13 | Browser autocomplete: password change | authenticated | Settings security tab | implemented | P1 | frontend grep | `current-password` + `new-password` attrs present. |
+| A18 | Forgot password — issue reset email | anonymous | None | implemented | **P0** | backend, frontend | Phase 2.14. Generic response, no enumeration. Pending real-email E2E. |
+| A19 | Reset password — consume token | anonymous | Valid reset token | implemented | **P0** | backend, frontend | Phase 2.14. Single-use, expires 1h, session_version bump. Pending real-email E2E. |
+| A20 | Reset token cannot be reused | anonymous | Token already used | implemented | **P0** | backend | |
+| A21 | Expired reset token rejected | anonymous | Token > 1h old | implemented | **P0** | backend | |
+| A22 | Old JWTs revoked after reset | authenticated | Password reset | implemented | **P0** | backend | session_version invalidation. |
+| A23 | Forgot password rate limit | anonymous | None | implemented | P1 | backend | 5/h/IP, 3/h/email-hash. |
+| A24 | Google-only account forgot-password | anonymous | Google-only user | implemented | P1 | backend | Generic success, no token issued (no password to reset). |
 | A14 | Suspended user blocked | authenticated | Account suspended | verified | P0 | backend | |
 | A15 | Soft-deleted user blocked | authenticated | Account deleted | verified | P0 | backend | |
 | A16 | Admin demotion/session freshness | admin | Role changed | verified | P0 | backend | |
@@ -41,11 +48,11 @@ Phase: 2.14
 |---|---------|------|-------------|--------|------|----------|-------|
 | B1 | Profile display | authenticated | Logged in | verified | P2 | manual | |
 | B2 | Name/email display | authenticated | Logged in | verified | P2 | manual | |
-| B3 | Password change | authenticated | Logged in | **failed** | **P0** | none | **Same as A8** |
-| B4 | Password validation errors | authenticated | Password change form | **failed** | P1 | none | Form is fake, no validation runs |
-| B5 | Success only after real backend update | authenticated | Password change | **failed** | **P0** | none | Toast shows without API call |
-| B6 | No plaintext password in response | — | All password flows | n/a | — | — | |
-| B7 | UI does not claim success if update failed | — | All password flows | **failed** | **P0** | none | Frontend calls no API |
+| B3 | Password change | authenticated | Logged in | implemented | **P0** | backend, frontend grep | Same as A8. |
+| B4 | Password validation errors | authenticated | Password change form | implemented | P1 | frontend grep | Real client-side length + match validation. |
+| B5 | Success only after real backend update | authenticated | Password change | implemented | **P0** | frontend grep | `toast.success` strictly after `await api.post`. |
+| B6 | No plaintext password in response | — | All password flows | implemented | — | backend | Backend never echoes password values. |
+| B7 | UI does not claim success if update failed | — | All password flows | implemented | **P0** | frontend grep | `catch → toast.error` branch present. |
 
 ## Instagram Connection
 

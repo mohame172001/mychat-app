@@ -187,6 +187,10 @@ EMAIL_VERIFICATION_TOKEN_TTL_HOURS = int(os.environ.get('EMAIL_VERIFICATION_TOKE
 EMAIL_VERIFICATION_WEBHOOK_URL = (os.environ.get('EMAIL_VERIFICATION_WEBHOOK_URL') or '').strip()
 EMAIL_VERIFICATION_WEBHOOK_TOKEN = (os.environ.get('EMAIL_VERIFICATION_WEBHOOK_TOKEN') or '').strip()
 
+# Phase 2.14 password reset. Reuses the email-verification webhook
+# transport — same env vars, different template name. TTL defaults to 1h.
+PASSWORD_RESET_TOKEN_TTL_HOURS = int(os.environ.get('PASSWORD_RESET_TOKEN_TTL_HOURS', '1'))
+
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
@@ -4030,6 +4034,175 @@ async def verify_email(body: dict = Body(...)):
 @api.get('/auth/verify-email')
 async def verify_email_get(token: str = Query('')):
     return await _verify_email_token_value(token)
+
+
+# ---------------- Phase 2.14 password reset ----------------
+# Mirrors the email-verification token primitive: cryptographically
+# random token, only the HMAC-SHA256 hash is stored on the user row,
+# single-use, expiring, generic responses so no user enumeration.
+# Reuses EMAIL_VERIFICATION_WEBHOOK_URL transport with a distinct
+# template name. Raw token NEVER logged, returned, or stored.
+
+GENERIC_FORGOT_PASSWORD_RESPONSE = {'ok': True, 'status': 'sent_if_account_exists'}
+
+
+def _hash_password_reset_token(token: str) -> str:
+    return hmac.new(
+        JWT_SECRET.encode('utf-8'),
+        str(token or '').encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _password_reset_link(token: str) -> str:
+    base = (FRONTEND_URL or '').rstrip('/')
+    return f"{base}/reset-password?token={token}"
+
+
+async def _deliver_password_reset(user: dict, token: str) -> bool:
+    """Send the reset link via the same webhook the verification flow uses.
+    Never logs the token. Returns True iff webhook responded 2xx."""
+    if not EMAIL_VERIFICATION_WEBHOOK_URL:
+        return False
+    payload = {
+        'to': _normalize_email_value(user.get('email')),
+        'template': 'mychat_password_reset',
+        'reset_url': _password_reset_link(token),
+    }
+    headers = {'content-type': 'application/json'}
+    if EMAIL_VERIFICATION_WEBHOOK_TOKEN:
+        headers['authorization'] = f'Bearer {EMAIL_VERIFICATION_WEBHOOK_TOKEN}'
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                EMAIL_VERIFICATION_WEBHOOK_URL, json=payload, headers=headers,
+            )
+        return 200 <= response.status_code < 300
+    except Exception as exc:
+        # Never echo the request body — token is in there.
+        logger.warning('password_reset_delivery_failed reason=%s', type(exc).__name__)
+        return False
+
+
+async def _issue_password_reset(user: dict) -> dict:
+    """Generate, hash, and persist a one-shot reset token. Never returns
+    the raw token to anyone except the email-delivery layer."""
+    token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    expires_at = now + timedelta(hours=PASSWORD_RESET_TOKEN_TTL_HOURS)
+    await db.users.update_one(
+        {'id': user.get('id')},
+        {'$set': {
+            'password_reset_token_hash': _hash_password_reset_token(token),
+            'password_reset_sent_at': now,
+            'password_reset_expires_at': expires_at,
+            'password_reset_used_at': None,
+            'updated_at': now,
+        }},
+    )
+    sent = await _deliver_password_reset(user, token)
+    return {'sent': sent, 'expires_at': expires_at}
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str
+
+
+@api.post('/auth/forgot-password')
+async def auth_forgot_password(
+    data: ForgotPasswordIn = Body(...),
+    request: Request = None,
+):
+    """Start a password reset. Always returns the same generic response so
+    callers cannot enumerate registered emails. Rate-limited per IP and
+    per email-hash, mirroring /auth/resend-verification."""
+    ip = _client_ip(request) if request is not None else 'unknown'
+    if _rate_limited('password_reset_request_ip', ip, limit=5, window_seconds=3600):
+        # Generic — 429 is acceptable; the response shape never reveals
+        # whether the email is known.
+        raise HTTPException(429, 'Too many password reset requests. Try again later.')
+    email = _normalize_email_value(data.email)
+    email_hash = _hash_identifier(email)
+    if email_hash and _rate_limited('password_reset_request_email', email_hash,
+                                    limit=3, window_seconds=3600):
+        raise HTTPException(429, 'Too many password reset requests. Try again later.')
+    if not email:
+        return GENERIC_FORGOT_PASSWORD_RESPONSE
+    user = await _find_user_by_email(email)
+    if not user:
+        # Unknown account — generic success, no enumeration. Sanitized log.
+        logger.info('password_reset_request_unknown email_hash=%s',
+                    (email_hash or '')[:12])
+        return GENERIC_FORGOT_PASSWORD_RESPONSE
+    if not user.get('password_hash'):
+        # Google-only account: no password to reset. Same generic response.
+        # Documented behaviour: users in this state should sign in via
+        # /auth/google and set a password from Settings later (out of
+        # scope for this phase).
+        logger.info('password_reset_request_no_password_user_id=%s', user.get('id'))
+        return GENERIC_FORGOT_PASSWORD_RESPONSE
+    issued = await _issue_password_reset(user)
+    logger.info(
+        'password_reset_issued user_id=%s sent=%s',
+        user.get('id'), bool(issued.get('sent')),
+    )
+    return GENERIC_FORGOT_PASSWORD_RESPONSE
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+
+@api.post('/auth/reset-password')
+async def auth_reset_password(data: ResetPasswordIn = Body(...)):
+    """Consume a one-shot reset token and set a new password.
+
+    Token verification rules:
+      - lookup by hashed token only (raw never compared)
+      - not previously used
+      - not expired
+    On success:
+      - hash + store new password
+      - clear token fields
+      - increment session_version (all old JWTs become 401 session_revoked)
+    """
+    token = data.token if isinstance(data.token, str) else ''
+    if not token or len(token) > 256:
+        raise HTTPException(400, 'invalid_password_reset_token')
+    new_password = data.new_password if isinstance(data.new_password, str) else ''
+    # Same minimum-length policy as the Settings password change form.
+    if len(new_password) < 6:
+        raise HTTPException(400, 'password_too_short')
+    token_hash = _hash_password_reset_token(token)
+    user = await db.users.find_one({'password_reset_token_hash': token_hash})
+    if not user:
+        raise HTTPException(400, 'invalid_password_reset_token')
+    if user.get('password_reset_used_at'):
+        raise HTTPException(400, 'password_reset_token_used')
+    expires_at = user.get('password_reset_expires_at')
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        raise HTTPException(400, 'password_reset_token_expired')
+    now = datetime.utcnow()
+    new_hashed = hash_password(new_password)
+    result = await db.users.update_one(
+        {'id': user.get('id'), 'password_reset_token_hash': token_hash},
+        {'$set': {
+            'password_hash': new_hashed,
+            'password_reset_used_at': now,
+            'session_version': _user_session_version(user) + 1,
+            'session_revoked_at': now,
+            'session_revocation_reason': 'password_reset',
+            'updated_at': now,
+        }, '$unset': {
+            'password_reset_token_hash': '',
+        }},
+    )
+    if result.matched_count == 0:
+        # Race: token was used between SELECT and UPDATE.
+        raise HTTPException(400, 'password_reset_token_used')
+    logger.info('password_reset_completed user_id=%s', user.get('id'))
+    return {'ok': True, 'status': 'password_reset'}
 
 
 # ---------------- Phase 2.7 Google Sign-In ----------------
