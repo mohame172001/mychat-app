@@ -121,3 +121,9 @@ No unauthenticated sensitive mutation route was identified in this inventory. Pu
 | GET | /api/instagram/token-refresh/status | yes | n/a | current user scoped | yes/bounded | yes/basic | yes, sanitized | smoke/security tests |
 | GET | /api/ | no/public constrained | n/a | n/a or token/signature/short-code scoped | bounded | yes/basic | low | smoke/security tests |
 | GET | /r/{short_code} | no/public constrained | n/a | n/a or token/signature/short-code scoped | bounded | yes | low | redirect tests |
+
+## API9 Inventory Management Delta
+
+- Public, auth, admin, diagnostics, webhook, billing-placeholder, data-deletion, redirect/link, Instagram OAuth, and repair/debug routes are included in the table above.
+- Each route row records auth requirement, admin permission, ownership model, rate-limit/boundedness, input validation, sensitive-output risk, and test coverage.
+- Production exposure is represented by auth requirement plus public-route constraints; public routes are constrained by generic responses, signed/HMAC/token checks, or short-code lookup.

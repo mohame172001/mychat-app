@@ -33,3 +33,10 @@ Conclusion: Billing can start from a security-readiness standpoint. Future billi
 | Provider raw payload storage prohibited | yes | Scrubber policy and matrix LOG/BILL checks. |
 | Checkout success page will not activate plan directly | yes | Billing gate requires server-side provider webhook confirmation in future phase. |
 | Billing status endpoint must be auth-protected | yes | API inventory and billing gate requirement; no public billing mutation exists. |
+
+## 2026 Security Standards Billing Delta
+
+- OWASP API6 business-flow abuse: future billing status endpoints must be auth-protected and rate-limited.
+- OWASP API10 third-party consumption: payment provider webhooks must verify signatures, use event idempotency, and never let checkout success pages activate plans directly.
+- CISA Secure by Design: checkout remains disabled until provider integration is implemented and tested server-side.
+- NIST SSDF: dependency and vulnerability response process is documented before adding payment code.
