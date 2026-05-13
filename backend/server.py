@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -3926,6 +3927,40 @@ async def login(data: LoginIn, request: Request):
     if _email_verification_required(u):
         raise HTTPException(403, 'email_verification_required')
     return AuthOut(token=create_token(u['id'], session_version=_user_session_version(u)), user=_public_user(u))
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@api.post('/auth/password')
+async def change_password(
+    data: PasswordChangeIn,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'User not found')
+    if not u.get('password_hash'):
+        raise HTTPException(400, 'Password login not configured for this account')
+    if not verify_password(data.current_password, u['password_hash']):
+        raise HTTPException(401, 'Current password is incorrect')
+    new_hashed = hash_password(data.new_password)
+    result = await db.users.update_one(
+        {'id': user_id},
+        {'$set': {
+            'password_hash': new_hashed,
+            'session_version': _user_session_version(u) + 1,
+            'updated_at': datetime.utcnow(),
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(500, 'Failed to update password — user not found')
+    if result.modified_count == 0:
+        logger.warning('password_change_no_modify user_id=%s', user_id)
+    logger.info('password_changed user_id=%s', user_id)
+    return {'ok': True, 'detail': 'Password changed successfully'}
 
 
 @api.get('/auth/me', response_model=UserPublic)

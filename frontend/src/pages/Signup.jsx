@@ -52,15 +52,15 @@ const Signup = () => {
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
-                <Input id="username" placeholder="yourname" value={username} onChange={e => setUsername(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="username" autoComplete="username" placeholder="yourname" value={username} onChange={e => setUsername(e.target.value)} className="h-12 rounded-xl" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
-                <Input id="email" type="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="email" type="email" autoComplete="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} className="h-12 rounded-xl" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
-                <Input id="password" type="password" placeholder="At least 6 characters" value={password} onChange={e => setPassword(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="password" type="password" autoComplete="new-password" placeholder="At least 6 characters" value={password} onChange={e => setPassword(e.target.value)} className="h-12 rounded-xl" />
               </div>
               <Button type="submit" disabled={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? 'Creating account...' : 'Create Account'}

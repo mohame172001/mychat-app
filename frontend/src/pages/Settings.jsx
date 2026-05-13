@@ -27,6 +27,10 @@ const Settings = () => {
   const [tab, setTab] = useState('profile');
   const [notif, setNotif] = useState({ email: true, push: true, weekly: false });
   const [igConnecting, setIgConnecting] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
 
 
   useEffect(() => {
@@ -215,12 +219,81 @@ const Settings = () => {
           {tab === 'security' && (
             <Card className="p-6 rounded-2xl border-slate-100">
               <h3 className="font-display font-bold text-lg">Security</h3>
-              <div className="mt-6 space-y-4">
-                <div className="space-y-2"><Label>Current password</Label><Input type="password" className="h-11 rounded-xl" /></div>
-                <div className="space-y-2"><Label>New password</Label><Input type="password" className="h-11 rounded-xl" /></div>
-                <div className="space-y-2"><Label>Confirm new password</Label><Input type="password" className="h-11 rounded-xl" /></div>
-              </div>
-              <Button onClick={() => toast.success('Password updated')} className="mt-6 bg-slate-900 text-white rounded-xl">Update password</Button>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!currentPassword || !newPassword || !confirmPassword) {
+                    toast.error('Please fill in all password fields');
+                    return;
+                  }
+                  if (newPassword.length < 6) {
+                    toast.error('New password must be at least 6 characters');
+                    return;
+                  }
+                  if (newPassword !== confirmPassword) {
+                    toast.error('New passwords do not match');
+                    return;
+                  }
+                  setChangingPassword(true);
+                  try {
+                    await api.post('/auth/password', {
+                      current_password: currentPassword,
+                      new_password: newPassword,
+                    });
+                    toast.success('Password changed successfully. Use the new password next time you sign in.');
+                    setCurrentPassword('');
+                    setNewPassword('');
+                    setConfirmPassword('');
+                  } catch (err) {
+                    const detail = err?.response?.data?.detail || 'Failed to change password';
+                    toast.error(typeof detail === 'string' ? detail : 'Failed to change password');
+                  } finally {
+                    setChangingPassword(false);
+                  }
+                }}
+                className="mt-6 space-y-4"
+              >
+                <div className="space-y-2">
+                  <Label htmlFor="current-password">Current password</Label>
+                  <Input
+                    id="current-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={e => setCurrentPassword(e.target.value)}
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="new-password">New password</Label>
+                  <Input
+                    id="new-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="confirm-password">Confirm new password</Label>
+                  <Input
+                    id="confirm-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={e => setConfirmPassword(e.target.value)}
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  disabled={changingPassword}
+                  className="bg-slate-900 text-white rounded-xl"
+                >
+                  {changingPassword ? 'Updating...' : 'Update password'}
+                </Button>
+              </form>
             </Card>
           )}
         </div>
