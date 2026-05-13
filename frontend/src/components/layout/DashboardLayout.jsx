@@ -1,14 +1,24 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { NavLink, Outlet, Link } from 'react-router-dom';
 import { LogOut, MessageCircle } from 'lucide-react';
 import Sidebar, { navItems } from './Sidebar';
 import Topbar from './Topbar';
 import { useAuth } from '../../context/AuthContext';
+import { useIsAdmin } from '../../lib/useIsAdmin';
+import { preloadRoutes } from '../../lib/routePreloader';
 import { Button } from '../ui/button';
 import { BUILD_SHA } from '../../buildInfo.generated';
 
+const commonRoutes = ['Automations', 'Comments', 'Billing', 'Settings'];
+
 const DashboardLayout = () => {
   const { logout } = useAuth();
+  const { isAdmin } = useIsAdmin();
+
+  useEffect(() => {
+    preloadRoutes(commonRoutes);
+    if (isAdmin) preloadRoutes(['Admin']);
+  }, [isAdmin]);
 
   return (
     <div className="h-[100dvh] flex bg-slate-50 overflow-hidden">

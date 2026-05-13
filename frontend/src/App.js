@@ -4,36 +4,65 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Toaster } from './components/ui/sonner';
 import analytics from './lib/analytics';
+import { registerRoute, preloadAfterPaint } from './lib/routePreloader';
 
 import DashboardLayout from './components/layout/DashboardLayout';
 
-// Phase 2.5: emit page_view on every route change. analytics.pageView is
-// a no-op when PostHog isn't configured. The route is sanitized — OAuth
-// code/state and tokens are stripped before send.
+const landingFn = () => import('./pages/Landing');
+const loginFn = () => import('./pages/Login');
+const signupFn = () => import('./pages/Signup');
+const dashboardFn = () => import('./pages/Dashboard');
+const automationsFn = () => import('./pages/Automations');
+const flowBuilderFn = () => import('./pages/FlowBuilder');
+const commentsFn = () => import('./pages/Comments');
+const settingsFn = () => import('./pages/Settings');
+const dmAutomationFn = () => import('./pages/DmAutomation');
+const privacyFn = () => import('./pages/PrivacyPolicy');
+const termsFn = () => import('./pages/Terms');
+const dataDeletionFn = () => import('./pages/DataDeletion');
+const billingFn = () => import('./pages/Billing');
+const adminFn = () => import('./pages/admin/AdminConsole');
+const specificReplyDebugFn = () => import('./pages/admin/SpecificReplyDebug');
+const notFoundFn = () => import('./pages/NotFound');
+
+const Landing = lazy(landingFn);
+const Login = lazy(loginFn);
+const Signup = lazy(signupFn);
+const Dashboard = lazy(dashboardFn);
+const Automations = lazy(automationsFn);
+const FlowBuilder = lazy(flowBuilderFn);
+const Comments = lazy(commentsFn);
+const Settings = lazy(settingsFn);
+const DmAutomation = lazy(dmAutomationFn);
+const PrivacyPolicy = lazy(privacyFn);
+const Terms = lazy(termsFn);
+const DataDeletion = lazy(dataDeletionFn);
+const Billing = lazy(billingFn);
+const AdminConsole = lazy(adminFn);
+const SpecificReplyDebug = lazy(specificReplyDebugFn);
+const NotFound = lazy(notFoundFn);
+
+registerRoute('Dashboard', dashboardFn);
+registerRoute('Automations', automationsFn);
+registerRoute('FlowBuilder', flowBuilderFn);
+registerRoute('Comments', commentsFn);
+registerRoute('DmAutomation', dmAutomationFn);
+registerRoute('Settings', settingsFn);
+registerRoute('Billing', billingFn);
+registerRoute('Admin', adminFn);
+registerRoute('SpecificReplyDebug', specificReplyDebugFn);
+
 function PageViewTracker() {
   const location = useLocation();
+  const navStart = React.useRef(performance.now());
   useEffect(() => {
+    const elapsed = (performance.now() - navStart.current).toFixed(0);
+    if (elapsed > 200) console.log(`[route] ${location.pathname}${location.search} rendered in ${elapsed}ms`);
+    navStart.current = performance.now();
     analytics.pageView(location.pathname + (location.search || ''));
   }, [location.pathname, location.search]);
   return null;
 }
-
-const Landing = lazy(() => import('./pages/Landing'));
-const Login = lazy(() => import('./pages/Login'));
-const Signup = lazy(() => import('./pages/Signup'));
-const Dashboard = lazy(() => import('./pages/Dashboard'));
-const Automations = lazy(() => import('./pages/Automations'));
-const FlowBuilder = lazy(() => import('./pages/FlowBuilder'));
-const Comments = lazy(() => import('./pages/Comments'));
-const Settings = lazy(() => import('./pages/Settings'));
-const DmAutomation = lazy(() => import('./pages/DmAutomation'));
-const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
-const Terms = lazy(() => import('./pages/Terms'));
-const DataDeletion = lazy(() => import('./pages/DataDeletion'));
-const Billing = lazy(() => import('./pages/Billing'));
-const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
-const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
-const NotFound = lazy(() => import('./pages/NotFound'));
 
 const PageLoading = () => (
   <div className="w-full p-6 text-sm text-slate-500">Loading...</div>

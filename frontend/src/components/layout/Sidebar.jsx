@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
 import { useIsAdmin } from '../../lib/useIsAdmin';
 import { invalidateApiCache } from '../../lib/apiCache';
+import { preloadRoute } from '../../lib/routePreloader';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -104,6 +105,8 @@ const Sidebar = () => {
             key={to}
             to={to}
             end={end}
+            onMouseEnter={() => preloadRoute(label)}
+            onFocus={() => preloadRoute(label)}
             className={({ isActive }) => `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
           >
             <Icon className="w-4 h-4" />
@@ -114,6 +117,8 @@ const Sidebar = () => {
           <NavLink
             to="/app/admin"
             data-testid="sidebar-admin-link"
+            onMouseEnter={() => preloadRoute('Admin')}
+            onFocus={() => preloadRoute('Admin')}
             className={({ isActive }) => `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors border-t border-slate-100 mt-2 pt-3 ${isActive ? 'bg-slate-900 text-white' : 'text-blue-700 hover:bg-blue-50'}`}
           >
             <ShieldCheck className="w-4 h-4" />
