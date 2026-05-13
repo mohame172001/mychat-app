@@ -40,3 +40,11 @@ Conclusion: Billing can start from a security-readiness standpoint. Future billi
 - OWASP API10 third-party consumption: payment provider webhooks must verify signatures, use event idempotency, and never let checkout success pages activate plans directly.
 - CISA Secure by Design: checkout remains disabled until provider integration is implemented and tested server-side.
 - NIST SSDF: dependency and vulnerability response process is documented before adding payment code.
+
+## Cross-Domain Payment Readiness Delta
+
+- PCI DSS future-payment boundary: MyChat must not collect card numbers, CVV, or payment method secrets.
+- Paddle/Paymob can start only after a Billing abstraction defines server-side plan mutation, provider webhook signature verification, provider event idempotency, replay handling, and raw payload redaction.
+- Checkout success pages must never activate plans directly.
+- No PCI compliance claim may be made unless formally assessed.
+- Refund, chargeback, canceled, and past_due behavior must be defined before accepting real payments.
