@@ -112,7 +112,7 @@ def test_comment_poller_exits_on_shutdown_event(monkeypatch):
     class FakeDB:
         class users:
             @staticmethod
-            def find(q):
+            def find(q, **projection_kw):
                 return FakeCursor()
 
     monkeypatch.setattr(server, 'db', FakeDB())
@@ -151,7 +151,7 @@ def test_follow_verifier_exits_on_shutdown_event(monkeypatch):
             return []
 
     class FakeSessionsCollection:
-        def find(self, q):
+        def find(self, q, **projection_kw):
             return FakeCursor()
 
     class FakeDB:

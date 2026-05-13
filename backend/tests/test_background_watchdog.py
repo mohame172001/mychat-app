@@ -22,7 +22,7 @@ class FakeCollection:
         self.docs = list(docs or [])
         self.find_one_calls = 0
 
-    def find(self, query=None):  # noqa: ARG002
+    def find(self, query=None, **projection_kw):  # noqa: ARG002
         return _Cursor(self.docs)
 
     async def find_one(self, query):  # noqa: ARG002

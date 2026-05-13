@@ -145,7 +145,7 @@ class FakeCollection:
     async def find_one(self, query):
         return next((doc for doc in self.docs if _match(doc, query)), None)
 
-    def find(self, query=None):
+    def find(self, query=None, **projection_kw):
         return FakeCursor([doc for doc in self.docs if _match(doc, query or {})])
 
     async def update_one(self, query, update, upsert=False):

@@ -90,7 +90,7 @@ class FakeCollection:
     async def find_one(self, query, sort=None):
         return next((d for d in self.docs if _match(d, query)), None)
 
-    def find(self, query=None):
+    def find(self, query=None, **projection_kw):
         if query is None:
             return _Cursor(list(self.docs))
         return _Cursor([d for d in self.docs if _match(d, query)])

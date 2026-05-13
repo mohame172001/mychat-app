@@ -6070,16 +6070,19 @@ async def _dashboard_include_unscoped(user_id: str) -> bool:
 
 
 async def _dashboard_scoped_docs(collection_name: str, user_id: str, account: Optional[dict],
-                                 include_unscoped: bool, limit: int = 5000) -> list:
+                                 include_unscoped: bool, limit: int = 5000,
+                                 projection: Optional[dict] = None) -> list:
     collection = getattr(db, collection_name)
     docs: list = []
     seen: set = set()
 
     async def add_many(query: dict):
         try:
-            rows = await collection.find(query).sort('created', -1).to_list(limit)
+            cursor = collection.find(query, projection=projection).sort('created', -1)
+            rows = await cursor.to_list(limit)
         except Exception:
-            rows = await collection.find(query).to_list(limit)
+            cursor = collection.find(query, projection=projection)
+            rows = await cursor.to_list(limit)
         for row in rows:
             key = row.get('id') or str(row.get('_id') or id(row))
             if key not in seen:
@@ -6377,6 +6380,10 @@ async def _dashboard_usage_events_for_window(user_id: str, event_types: list, st
             'user_id': str(user_id),
             'event_month': {'$in': months},
             'event_type': {'$in': event_types},
+        }, projection={
+            'event_type': 1, 'event_date': 1, 'event_month': 1,
+            'instagramAccountId': 1, 'instagram_account_id': 1,
+            'igUserId': 1, 'ig_user_id': 1, 'accountId': 1,
         }).sort('event_date', -1).limit(5000)
         return await cursor.to_list(5000)
     except Exception:
@@ -6424,6 +6431,7 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
         if e.status_code != 400:
             raise
         account = None
+    t_after_account = datetime.utcnow()
 
     include_unscoped = await _dashboard_include_unscoped(user_id)
     instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
@@ -6431,15 +6439,18 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
     start_day = datetime.fromisoformat(next(iter(buckets.keys()))).date()
     current_month = _usage_month(datetime.utcnow())
     month_start, month_end = _dashboard_month_bounds(current_month)
+    t_after_meta = datetime.utcnow()
 
     usage_summary = await get_current_usage_with_limits(user_id)
     counters = usage_summary.get('counters') or {}
+    t_after_usage = datetime.utcnow()
 
     events = await _dashboard_usage_events_for_window(
         user_id,
         ['comment_processed', 'public_reply_sent', 'dm_sent', 'link_clicked'],
         start_day,
     )
+    t_after_events = datetime.utcnow()
 
     usage_comments_processed = 0
     usage_public_replies = 0
@@ -6469,11 +6480,16 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
             if in_current_month:
                 usage_link_clicks += 1
 
-    autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 1000)
+    autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 1000,
+        projection={'id': 1, 'name': 1, 'status': 1, 'created': 1, 'updated': 1, 'sent': 1,
+                    'post_scope': 1, 'media_id': 1, 'createdAt': 1})
     active_autos = [auto for auto in autos if _automation_active(auto)]
     top_automations = [_dashboard_auto_out(auto) for auto in autos[:6]]
+    t_after_autos = datetime.utcnow()
 
-    contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 2000)
+    contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 2000,
+        projection={'id': 1, 'ig_id': 1, 'instagramUserId': 1, 'instagram_user_id': 1,
+                    'username': 1, 'contact_id': 1, 'user_id': 1})
     ig_owner_id = _dashboard_key(instagram_account_id)
     contact_keys = set()
     for contact in contacts:
@@ -6486,12 +6502,18 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
         )
         if key and key != ig_owner_id:
             contact_keys.add(key)
+    t_after_contacts = datetime.utcnow()
 
     converted_contacts = set()
     tracked_month_link_clicks = 0
     try:
         clicks = await db.link_click_events.find({
             '$or': [{'userId': user_id}, {'user_id': user_id}],
+        }, projection={
+            'clickedAt': 1, 'createdAt': 1, 'created': 1,
+            'instagramUserId': 1, 'instagram_user_id': 1,
+            'recipient_id': 1, 'sender_id': 1,
+            'user_id': 1, 'userId': 1,
         }).sort('clickedAt', -1).limit(5000).to_list(5000)
     except Exception:
         clicks = []
@@ -6509,8 +6531,19 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
         if key and key != ig_owner_id:
             converted_contacts.add(key)
             contact_keys.add(key)
-
-    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 5000)
+    t_after_clicks = datetime.utcnow()
+    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 5000,
+        projection={'id': 1, 'commenter_id': 1, 'commenterId': 1, 'commenter_username': 1,
+                    'sender_id': 1, 'instagramUserId': 1,
+                    'reply_status': 1, 'replyStatus': 1, 'reply_provider_response_ok': 1,
+                    'dm_status': 1, 'dmStatus': 1, 'dm_provider_response_ok': 1,
+                    'action_status': 1, 'actionStatus': 1,
+                    'created': 1, 'createdAt': 1, 'updated': 1, 'updatedAt': 1,
+                    'ig_comment_id': 1, 'media_id': 1, 'mediaId': 1,
+                    'attempts': 1, 'skip_reason': 1, 'skipReason': 1,
+                    'reply_failure_reason': 1, 'dm_failure_reason': 1,
+                    'next_retry_at': 1, 'replied': 1, 'reply_text': 1,
+                    'user_id': 1})
     provider_comments_processed = 0
     provider_public_replies = 0
     provider_dms = 0
@@ -6606,7 +6639,8 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
         elif status == 'partial_success':
             queue_summary['partialSuccess'] += 1
 
-    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    now = datetime.utcnow()
+    duration_ms = int((now - started).total_seconds() * 1000)
     logger.info(
         'dashboard_summary_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
         'messagesSent=%s publicRepliesSent=%s dmsSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
@@ -6618,6 +6652,21 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
         dms_sent,
         len(active_autos),
         total_contacts,
+        duration_ms,
+    )
+    logger.info(
+        'dashboard_summary_breakdown user_id=%s '
+        'accountMs=%s metaMs=%s usageMs=%s eventsMs=%s autosMs=%s contactsMs=%s '
+        'clicksMs=%s commentsMs=%s totalMs=%s',
+        user_id,
+        int((t_after_account - started).total_seconds() * 1000),
+        int((t_after_meta - t_after_account).total_seconds() * 1000),
+        int((t_after_usage - t_after_meta).total_seconds() * 1000),
+        int((t_after_events - t_after_usage).total_seconds() * 1000),
+        int((t_after_autos - t_after_events).total_seconds() * 1000),
+        int((t_after_contacts - t_after_autos).total_seconds() * 1000),
+        int((t_after_clicks - t_after_contacts).total_seconds() * 1000),
+        int((now - t_after_clicks).total_seconds() * 1000),
         duration_ms,
     )
 
