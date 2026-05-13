@@ -12,7 +12,7 @@ describe('Dashboard performance wiring', () => {
 
   test('uses cache and localized loading states', () => {
     expect(source).toContain('cachedApiGet');
-    expect(source).toContain('timeout: 8000');
+    expect(source).not.toContain('timeout: 8000');
     expect(source).toContain('dashboard-skeleton');
     expect(source).toContain('dashboard-chart-skeleton');
     expect(source).toContain('dashboard-refresh');

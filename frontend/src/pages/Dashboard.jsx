@@ -36,11 +36,21 @@ const Dashboard = () => {
       setLoading(true);
     }
 
+    const classifyError = (err) => {
+      if (!err) return 'Dashboard data could not be loaded.';
+      if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return 'Dashboard request timed out. Please try again.';
+      const status = err?.response?.status;
+      if (status === 401 || status === 403) return 'Session expired. Please log in again.';
+      if (status && status >= 500) return 'Dashboard server error. Please try again later.';
+      if (!status && err.message?.includes?.('Network')) return 'Network error. Please check your connection.';
+      return 'Dashboard data could not be loaded.';
+    };
+
     const load = async () => {
       try {
         const result = await cachedApiGetSWR(
           cacheKey,
-          () => api.get('/dashboard/summary', { timeout: 8000 }),
+          () => api.get('/dashboard/summary'),
           {
             ttlMs: DASHBOARD_TTL_MS,
             maxStaleMs: 5 * 60 * 1000,
@@ -54,10 +64,16 @@ const Dashboard = () => {
         );
         if (!alive) return;
         setStats(result.data);
-        setError(result.error ? 'Showing cached dashboard data. Refresh failed.' : result.stale ? 'Refreshing dashboard data...' : '');
+        if (result.error) {
+          setError('Showing cached dashboard data. Refresh failed.');
+        } else if (result.stale) {
+          setError('Refreshing dashboard data...');
+        } else {
+          setError('');
+        }
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
-        if (alive) setError('Dashboard data could not be loaded.');
+        if (alive) setError(classifyError(err));
       } finally {
         if (alive) setLoading(false);
       }
@@ -74,13 +90,13 @@ const Dashboard = () => {
     try {
       const result = await cachedApiGet(
         cacheKey,
-        () => api.get('/dashboard/summary', { timeout: 8000 }),
+        () => api.get('/dashboard/summary'),
         { ttlMs: DASHBOARD_TTL_MS, force: true }
       );
       setStats(result.data);
     } catch (err) {
       console.error('[Dashboard] Refresh failed:', err);
-      setError('Refresh failed. Please try again.');
+      setError(classifyError(err));
     } finally {
       setRefreshing(false);
       setLoading(false);

@@ -15938,6 +15938,10 @@ async def _startup():
             [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
             name='link_click_events_user_ig_contact',
         )
+        await db.link_click_events.create_index(
+            [('userId', 1)],
+            name='link_click_events_user_id',
+        )
         await db.usage_events.create_index(
             [('user_id', 1), ('event_month', 1)],
             name='usage_events_user_month',
@@ -15945,6 +15949,10 @@ async def _startup():
         await db.usage_events.create_index(
             [('user_id', 1), ('event_type', 1), ('event_month', 1)],
             name='usage_events_user_type_month',
+        )
+        await db.usage_events.create_index(
+            [('user_id', 1), ('event_type', 1), ('event_date', -1)],
+            name='usage_events_user_type_date',
         )
         await db.usage_events.create_index(
             [('instagram_account_id', 1), ('event_month', 1)],
@@ -16109,6 +16117,10 @@ async def _startup():
                 'isActive': True,
                 'connectionValid': True,
             },
+        )
+        await db.instagram_accounts.create_index(
+            [('userId', 1), ('isActive', 1)],
+            name='instagram_accounts_user_active',
         )
         await db.instagram_account_trial_claims.create_index(
             [('instagram_account_id', 1), ('plan_trial_identifier', 1)],
