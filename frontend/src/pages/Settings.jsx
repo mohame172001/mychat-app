@@ -73,19 +73,19 @@ const Settings = () => {
           {tab === 'profile' && (
             <Card className="p-6 rounded-2xl border-slate-100">
               <h3 className="font-display font-bold text-lg">Profile</h3>
-              <p className="text-sm text-slate-500">Update your personal information.</p>
+              <p className="text-sm text-slate-500">Your account profile (read-only for now).</p>
               <div className="mt-6 flex items-center gap-4">
                 <img src={user?.avatar} alt="avatar" className="w-16 h-16 rounded-full object-cover" />
-                <Button variant="outline" className="rounded-xl">Change photo</Button>
               </div>
               <div className="mt-6 grid sm:grid-cols-2 gap-4">
-                <div className="space-y-2"><Label>Full name</Label><Input defaultValue={user?.name} className="h-11 rounded-xl" /></div>
-                <div className="space-y-2"><Label>Username</Label><Input defaultValue={user?.username} className="h-11 rounded-xl" /></div>
-                <div className="space-y-2 sm:col-span-2"><Label>Email</Label><Input defaultValue={user?.email} className="h-11 rounded-xl" /></div>
+                <div className="space-y-2"><Label>Full name</Label><Input value={user?.name || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
+                <div className="space-y-2"><Label>Username</Label><Input value={user?.username || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
+                <div className="space-y-2 sm:col-span-2"><Label>Email</Label><Input value={user?.email || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
               </div>
-              <div className="mt-6 flex justify-end">
-                <Button onClick={() => toast.success('Profile updated')} className="bg-slate-900 text-white rounded-xl">Save changes</Button>
-              </div>
+              <p className="mt-4 text-xs text-slate-500">
+                Editing profile fields will be available in a future update. Use the
+                Security tab to change your password.
+              </p>
             </Card>
           )}
 
