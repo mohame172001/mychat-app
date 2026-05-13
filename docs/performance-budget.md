@@ -16,7 +16,8 @@ These are operating targets for MyChat before Billing. They are not hard CI gate
 
 ## API Targets
 
-- Dashboard summary: under 2s target.
+- Dashboard summary warm p50: under 500ms target.
+- Dashboard summary warm p95: under 1200ms target.
 - Automations summary: under 2s target.
 - Comments list: under 2s target for a bounded page.
 - Admin users list: under 3s target for bounded search/page.
@@ -42,3 +43,14 @@ After frontend deploys:
 4. Verify protected API routes return 403 unauthenticated.
 5. For authenticated smoke, compare first load vs second navigation for dashboard, automations, comments, admin users, and admin detail.
 
+## Phase 2.16 Dashboard Timing Gate
+
+`GET /api/dashboard/summary` must be measured with the safe timing headers before Billing:
+
+- `X-Dashboard-Summary-Time`
+- `X-Dashboard-Summary-Slowest`
+- `X-Dashboard-Summary-Source`
+
+The frontend also logs a safe `[perf] api GET /dashboard/summary ...` line containing client duration, backend response time, dashboard total time, source, slowest section, and status. It must not log response bodies, tokens, comments, DMs, emails, or passwords.
+
+If warm dashboard p95 is above 1200ms, the next fix is a dashboard read model or equivalent backend optimization. If warm dashboard is green but first request after idle is slow, the required fix is production always-on infrastructure rather than UI polish.

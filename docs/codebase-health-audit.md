@@ -187,3 +187,16 @@ In recommended order:
 4. **Phase 3.0** — billing abstraction. Only after #1 + #2 close.
 
 See also `docs/cleanup-deferred-items.md` for non-urgent technical debt.
+
+## Phase 2.16 Performance Addendum
+
+Generated: 2026-05-14
+
+The dashboard remains the primary performance-sensitive route. Phase 2.16 added safe timing instrumentation instead of guessing at perceived slowness:
+
+- Backend `GET /api/dashboard/summary` now emits `X-Dashboard-Summary-Time`, `X-Dashboard-Summary-Slowest`, and `X-Dashboard-Summary-Source`.
+- Backend `dashboard_summary_breakdown` logs section timings and bounded document counts without tokens, raw comments, raw DMs, raw Graph bodies, emails, or passwords.
+- Frontend `api.js` logs a safe dashboard-summary timing line with client/backend/dashboard milliseconds and section/source metadata only.
+- A regression test verifies the dashboard timing headers are present and do not expose token fields.
+
+Current dashboard implementation still computes from bounded live collections (`usage_events`, `automations`, `contacts`, `link_click_events`, and `comments`) rather than a persisted dashboard read model. If production warm dashboard p95 is over 1200 ms, the next required change is a dashboard read model keyed by user, active Instagram account, and UTC month. If warm dashboard is within budget but first request after idle is slow, the required change is Railway always-on infrastructure.

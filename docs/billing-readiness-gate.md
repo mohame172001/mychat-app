@@ -28,6 +28,19 @@ Even with the security gate green, billing remains **BLOCKED** on product-functi
 
 Billing must not start until password reset email delivery, reset-link consumption, old-password rejection after reset, new-password login after reset, and token-reuse rejection all pass on the live host with the production email webhook.
 
+### Phase 2.16 performance gate (added)
+
+Billing also remains **BLOCKED** on final production performance proof:
+
+- Backend health measured warm at 180-183 ms after an initial 477 ms request from the workstation.
+- `GET /api/dashboard/summary` now emits safe timing headers and safe frontend perf logs so authenticated dashboard timing can be measured without exposing sensitive data.
+- Railway CLI access was unavailable locally (`invalid_grant`), so App Sleeping / always-on status must be verified in the Railway dashboard by the operator.
+- Billing must not start until either:
+  - authenticated dashboard warm p50 <= 500 ms and p95 <= 1200 ms with route usable render <= 2s, or
+  - any remaining cold-start delay is explicitly accepted only after the backend is moved to an always-on service/plan.
+
+See `docs/production-infrastructure-performance.md`.
+
 ## Red-Team Billing Abuse Delta
 
 | Check | Result | Evidence |

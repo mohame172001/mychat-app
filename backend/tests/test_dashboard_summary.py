@@ -3,6 +3,8 @@ from pathlib import Path
 import os
 import sys
 
+from fastapi import Response
+
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
 os.environ.setdefault('BACKEND_PUBLIC_URL', 'https://example.com')
@@ -145,6 +147,32 @@ def test_dashboard_summary_does_not_expose_tokens(monkeypatch):
     assert 'old-token' not in payload
     assert 'accessToken' not in payload
     assert 'meta_access_token' not in payload
+
+
+def test_dashboard_summary_sets_safe_timing_headers(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+
+    result = _run(server.dashboard_summary(user_id='u1', response=response))
+
+    assert result['instagram']['instagramAccountId'] == 'igA'
+    assert response.headers['X-Dashboard-Summary-Source'] == 'live'
+    assert response.headers['X-Dashboard-Summary-Time'].isdigit()
+    assert response.headers['X-Dashboard-Summary-Slowest'] in {
+        'active_account',
+        'meta',
+        'usage_limits',
+        'usage_events',
+        'automations',
+        'contacts',
+        'link_clicks',
+        'comments',
+    }
+    header_payload = str(dict(response.headers))
+    assert 'old-token' not in header_payload
+    assert 'accessToken' not in header_payload
+    assert 'meta_access_token' not in header_payload
 
 
 def test_dashboard_summary_prefers_provider_proof_for_active_account(monkeypatch):

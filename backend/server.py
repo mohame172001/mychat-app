@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, Response, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -6658,7 +6658,10 @@ async def dashboard_metric_sources(user_id: str = Depends(get_current_active_use
 
 
 @api.get('/dashboard/summary')
-async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
+async def dashboard_summary(
+    user_id: str = Depends(get_current_active_user_id),
+    response: Response = None,
+):
     """Compact dashboard payload for fast route transitions.
 
     The legacy /dashboard/stats endpoint intentionally remains available for
@@ -6884,6 +6887,29 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
 
     now = datetime.utcnow()
     duration_ms = int((now - started).total_seconds() * 1000)
+    section_timings = {
+        'active_account': int((t_after_account - started).total_seconds() * 1000),
+        'meta': int((t_after_meta - t_after_account).total_seconds() * 1000),
+        'usage_limits': int((t_after_usage - t_after_meta).total_seconds() * 1000),
+        'usage_events': int((t_after_events - t_after_usage).total_seconds() * 1000),
+        'automations': int((t_after_autos - t_after_events).total_seconds() * 1000),
+        'contacts': int((t_after_contacts - t_after_autos).total_seconds() * 1000),
+        'link_clicks': int((t_after_clicks - t_after_contacts).total_seconds() * 1000),
+        'comments': int((now - t_after_clicks).total_seconds() * 1000),
+    }
+    slowest_section = max(section_timings, key=section_timings.get)
+    section_counts = {
+        'usage_events': len(events),
+        'automations': len(autos),
+        'contacts': len(contacts),
+        'link_clicks': len(clicks),
+        'comments': len(recent_comments),
+    }
+    if response is not None:
+        response.headers['X-Dashboard-Summary-Time'] = str(duration_ms)
+        response.headers['X-Dashboard-Summary-Slowest'] = slowest_section
+        response.headers['X-Dashboard-Summary-Source'] = 'live'
+
     logger.info(
         'dashboard_summary_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
         'messagesSent=%s publicRepliesSent=%s dmsSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
@@ -6900,17 +6926,19 @@ async def dashboard_summary(user_id: str = Depends(get_current_active_user_id)):
     logger.info(
         'dashboard_summary_breakdown user_id=%s '
         'accountMs=%s metaMs=%s usageMs=%s eventsMs=%s autosMs=%s contactsMs=%s '
-        'clicksMs=%s commentsMs=%s totalMs=%s',
+        'clicksMs=%s commentsMs=%s totalMs=%s slowest=%s counts=%s',
         user_id,
-        int((t_after_account - started).total_seconds() * 1000),
-        int((t_after_meta - t_after_account).total_seconds() * 1000),
-        int((t_after_usage - t_after_meta).total_seconds() * 1000),
-        int((t_after_events - t_after_usage).total_seconds() * 1000),
-        int((t_after_autos - t_after_events).total_seconds() * 1000),
-        int((t_after_contacts - t_after_autos).total_seconds() * 1000),
-        int((t_after_clicks - t_after_contacts).total_seconds() * 1000),
-        int((now - t_after_clicks).total_seconds() * 1000),
+        section_timings['active_account'],
+        section_timings['meta'],
+        section_timings['usage_limits'],
+        section_timings['usage_events'],
+        section_timings['automations'],
+        section_timings['contacts'],
+        section_timings['link_clicks'],
+        section_timings['comments'],
         duration_ms,
+        slowest_section,
+        json.dumps(section_counts, sort_keys=True),
     )
 
     weekly_performance = list(buckets.values())

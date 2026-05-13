@@ -19,7 +19,17 @@ api.interceptors.response.use(
     if (start) {
       const duration = Date.now() - start;
       const backendTime = r.headers['x-response-time'];
-      if (duration > 2000 || (backendTime && Number(backendTime) > 3000)) {
+      const isDashboardSummary = String(r.config.url || '').includes('/dashboard/summary');
+      if (isDashboardSummary) {
+        console.log(
+          `[perf] api ${r.config.method?.toUpperCase()} ${r.config.url} ` +
+          `client=${duration}ms backend=${backendTime || '?'}ms ` +
+          `dashboard=${r.headers['x-dashboard-summary-time'] || '?'}ms ` +
+          `source=${r.headers['x-dashboard-summary-source'] || '?'} ` +
+          `slowest=${r.headers['x-dashboard-summary-slowest'] || '?'} ` +
+          `status=${r.status}`
+        );
+      } else if (duration > 2000 || (backendTime && Number(backendTime) > 3000)) {
         console.log(
           `[api] SLOW ${r.config.method?.toUpperCase()} ${r.config.url} ` +
           `client=${duration}ms backend=${backendTime || '?'}ms status=${r.status}`
