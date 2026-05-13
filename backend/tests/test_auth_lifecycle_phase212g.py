@@ -34,6 +34,18 @@ async def _no_seed(*_a, **_k):
     return None
 
 
+def _capture_verification(monkeypatch):
+    tokens = []
+    monkeypatch.setattr(server, '_email_verification_delivery_configured', lambda: True)
+
+    async def _deliver(_user, token):
+        tokens.append(token)
+        return True
+
+    monkeypatch.setattr(server, '_deliver_email_verification', _deliver)
+    return tokens
+
+
 def _setup(monkeypatch, *, users=None, members=None, admin_emails=None):
     db = FakeDB(
         _account(id='accA', userId=(users or [{}])[0].get('id', 'u1'),
@@ -69,13 +81,17 @@ def test_email_signup_normalizes_and_blocks_case_duplicate(monkeypatch):
     db = _setup(monkeypatch)
     monkeypatch.setattr(server, '_seed_user', _no_seed)
     monkeypatch.setattr(server, 'RATE_LIMIT_SIGNUP_PER_HOUR', 100)
+    _capture_verification(monkeypatch)
 
-    res = _run(server.signup(
-        SignupIn(username='caseuser', email='Case@Example.COM', password='Password123!'),
-        _request('1.1.1.1'),
-    ))
-    assert res.user.email == 'case@example.com'
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.signup(
+            SignupIn(username='caseuser', email='Case@Example.COM', password='Password123!'),
+            _request('1.1.1.1'),
+        ))
+    assert exc.value.status_code == 403
+    assert exc.value.detail == 'email_verification_required'
     assert db.users.docs[0]['normalized_email'] == 'case@example.com'
+    assert db.users.docs[0]['email_verified'] is False
 
     with pytest.raises(server.HTTPException) as exc:
         _run(server.signup(
@@ -202,11 +218,14 @@ def test_signup_rate_limit_uses_normalized_email_hash_across_ips(monkeypatch):
     _setup(monkeypatch)
     monkeypatch.setattr(server, '_seed_user', _no_seed)
     monkeypatch.setattr(server, 'RATE_LIMIT_SIGNUP_PER_HOUR', 1)
+    _capture_verification(monkeypatch)
 
-    _run(server.signup(
-        SignupIn(username='first', email='limit@example.com', password='Password123!'),
-        _request('20.0.0.1'),
-    ))
+    with pytest.raises(server.HTTPException) as first:
+        _run(server.signup(
+            SignupIn(username='first', email='limit@example.com', password='Password123!'),
+            _request('20.0.0.1'),
+        ))
+    assert first.value.status_code == 403
 
     with pytest.raises(server.HTTPException) as exc:
         _run(server.signup(

@@ -22,6 +22,9 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 - `ENABLE_ADMIN_REPAIR_TOOLS=false` or unset except during an explicitly approved repair window.
 - `ADMIN_EMAILS` contains at least one owner escape-hatch email.
 - Google Sign-In only needs public client IDs in frontend/backend env; no Google client secret should be in frontend env.
+- `PASSWORD_EMAIL_VERIFICATION_REQUIRED=true` before billing/public launch.
+- `EMAIL_VERIFICATION_WEBHOOK_URL` configured for password signup verification delivery. If unset while verification is required, password signup fails closed with `email_verification_not_configured`.
+- `EMAIL_VERIFICATION_WEBHOOK_TOKEN` set if the email delivery webhook requires authentication. Do not print the value.
 - Login and signup rate limits enabled for IP and normalized identifier/email-hash buckets.
 - `ADMIN_EMAILS` reviewed: it should contain only intended owner escape-hatch emails, and removing a bootstrap owner fully requires removing the env email as well as disabling/removing the member row.
 
@@ -52,6 +55,8 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 - Webhook logs store safe metadata only: counts, status, hashes, and timestamps. No raw webhook body.
 - Admin role changes are DB-backed and should take effect without waiting for JWT expiry.
 - Suspended/deleted users with an old JWT should be blocked from normal app APIs with `account_suspended` or `account_deleted`.
+- Per-user session revocation is active: JWTs carry `session_version`, and DB changes can invalidate old tokens with `session_revoked`.
+- Admin session revocation endpoint: `POST /api/admin/users/{user_id}/revoke-sessions`, audit logged and admin-only.
 - Logout, login, signup, Google login, and `401` auth resets should clear user-specific frontend API cache.
 
 ## Manual Checks
@@ -64,3 +69,6 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 6. Confirm Mongo backups and restore process are configured outside the app before billing launch.
 7. Confirm password signup/email login casing behavior: `Test@Example.com` and `test@example.com` resolve to the same account identity.
 8. Confirm no Google client secret or password reset token is present in frontend env, build output, logs, docs, or screenshots.
+9. Confirm password signup verification delivery works in production before enabling billing.
+10. Run `GET /api/admin/auth/normalized-email-diagnostics` as an admin and review duplicate hashes before any future strict unique `normalized_email` index.
+11. Confirm old JWTs return `session_revoked` after an admin session revocation on a disposable user.

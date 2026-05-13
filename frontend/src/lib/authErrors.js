@@ -3,6 +3,9 @@ const AUTH_MESSAGES = {
     account_suspended: 'Your account is suspended. Contact support.',
     account_deleted: 'Your account has been deleted or disabled. Contact support.',
     invalid_credentials: 'Invalid email or password.',
+    email_verification_required: 'Please verify your email before continuing.',
+    email_verification_not_configured: 'Email verification is not configured. Contact support.',
+    session_revoked: 'Your session expired. Please sign in again.',
     generic: 'Could not sign in. Please try again.',
   },
   ar: {
@@ -27,6 +30,9 @@ export function authErrorCode(detail) {
   if (!s) return 'generic';
   if (s.includes('account_suspended')) return 'account_suspended';
   if (s.includes('account_deleted')) return 'account_deleted';
+  if (s.includes('email_verification_required')) return 'email_verification_required';
+  if (s.includes('email_verification_not_configured')) return 'email_verification_not_configured';
+  if (s.includes('session_revoked')) return 'session_revoked';
   if (
     s.includes('invalid_credentials')
     || s.includes('invalid username or password')
@@ -54,4 +60,3 @@ export function authErrorMessageFromApiError(err, options = {}) {
   const data = err?.response?.data || {};
   return authErrorMessage(data.detail || data.error || data.code || err?.message, options);
 }
-

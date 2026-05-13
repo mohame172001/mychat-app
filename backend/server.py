@@ -29,7 +29,15 @@ from models import (
     MessageIn, Conversation,
     DmRuleIn, DmRulePatch, DmTestIn,
 )
-from auth_utils import hash_password, verify_password, create_token, get_current_user_id, decode_token, JWT_SECRET
+from auth_utils import (
+    hash_password,
+    verify_password,
+    create_token,
+    get_current_user_id,
+    get_current_session_version,
+    decode_token,
+    JWT_SECRET,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -170,6 +178,13 @@ GOOGLE_CLIENT_ID = (os.environ.get('GOOGLE_CLIENT_ID') or '').strip() or None
 TOKEN_REFRESH_LOOKAHEAD_DAYS = int(os.environ.get('IG_TOKEN_REFRESH_LOOKAHEAD_DAYS', '15'))
 TOKEN_REFRESH_MIN_AGE_HOURS = int(os.environ.get('IG_TOKEN_REFRESH_MIN_AGE_HOURS', '24'))
 TOKEN_REFRESH_LOCK_MINUTES = int(os.environ.get('IG_TOKEN_REFRESH_LOCK_MINUTES', '5'))
+PASSWORD_EMAIL_VERIFICATION_REQUIRED = (
+    os.environ.get('PASSWORD_EMAIL_VERIFICATION_REQUIRED', 'true').strip().lower()
+    not in ('0', 'false', 'no', 'off')
+)
+EMAIL_VERIFICATION_TOKEN_TTL_HOURS = int(os.environ.get('EMAIL_VERIFICATION_TOKEN_TTL_HOURS', '24'))
+EMAIL_VERIFICATION_WEBHOOK_URL = (os.environ.get('EMAIL_VERIFICATION_WEBHOOK_URL') or '').strip()
+EMAIL_VERIFICATION_WEBHOOK_TOKEN = (os.environ.get('EMAIL_VERIFICATION_WEBHOOK_TOKEN') or '').strip()
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -193,7 +208,105 @@ for _noisy in ('httpx', 'httpcore', 'httpcore.http11', 'httpcore.connection'):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
-async def get_current_active_user_id(user_id: str = Depends(get_current_user_id)) -> str:
+def _user_session_version(user: Optional[dict]) -> int:
+    try:
+        return int((user or {}).get('session_version') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _email_verification_required(user: Optional[dict]) -> bool:
+    if not PASSWORD_EMAIL_VERIFICATION_REQUIRED:
+        return False
+    if not user:
+        return False
+    providers = set(user.get('linked_providers') or [])
+    if user.get('auth_provider') == GOOGLE_AUTH_PROVIDER_KEY or GOOGLE_AUTH_PROVIDER_KEY in providers:
+        return False
+    if user.get('google_sub'):
+        return False
+    # Legacy password users may not have email verification fields yet.
+    # Enforce only when the row is explicitly marked as requiring verification,
+    # which new password signups are.
+    return bool(user.get('email_verification_required')) and not bool(user.get('email_verified'))
+
+
+async def _increment_user_session_version(user_id: str, *, reason: str) -> int:
+    now = datetime.utcnow()
+    await db.users.update_one(
+        {'id': user_id},
+        {'$inc': {'session_version': 1}, '$set': {
+            'session_revoked_at': now,
+            'session_revocation_reason': str(reason or 'security_update')[:80],
+            'updated_at': now,
+        }},
+    )
+    refreshed = await db.users.find_one({'id': user_id}) or {}
+    return _user_session_version(refreshed)
+
+
+def _hash_email_verification_token(token: str) -> str:
+    return hmac.new(
+        JWT_SECRET.encode('utf-8'),
+        str(token or '').encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _email_verification_delivery_configured() -> bool:
+    return bool(EMAIL_VERIFICATION_WEBHOOK_URL)
+
+
+def _email_verification_url(token: str) -> str:
+    return f"{BACKEND_PUBLIC_URL.rstrip('/')}/api/auth/verify-email?token={token}"
+
+
+async def _deliver_email_verification(user: dict, token: str) -> bool:
+    """Deliver verification through a configured webhook without logging the token."""
+    if not EMAIL_VERIFICATION_WEBHOOK_URL:
+        return False
+    payload = {
+        'to': _normalize_email_value(user.get('email')),
+        'template': 'mychat_email_verification',
+        'verification_url': _email_verification_url(token),
+    }
+    headers = {'content-type': 'application/json'}
+    if EMAIL_VERIFICATION_WEBHOOK_TOKEN:
+        headers['authorization'] = f'Bearer {EMAIL_VERIFICATION_WEBHOOK_TOKEN}'
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(EMAIL_VERIFICATION_WEBHOOK_URL, json=payload, headers=headers)
+        return 200 <= response.status_code < 300
+    except Exception as exc:
+        logger.warning('email_verification_delivery_failed reason=%s', type(exc).__name__)
+        return False
+
+
+async def _issue_email_verification(user: dict, *, reason: str = 'signup') -> dict:
+    token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    expires_at = now + timedelta(hours=EMAIL_VERIFICATION_TOKEN_TTL_HOURS)
+    await db.users.update_one(
+        {'id': user.get('id')},
+        {'$set': {
+            'email_verified': False,
+            'email_verification_required': True,
+            'email_verification_token_hash': _hash_email_verification_token(token),
+            'email_verification_sent_at': now,
+            'email_verification_expires_at': expires_at,
+            'email_verification_used_at': None,
+            'email_verification_reason': str(reason or 'signup')[:40],
+            'updated_at': now,
+        }},
+    )
+    sent = await _deliver_email_verification(user, token)
+    return {'sent': sent, 'expires_at': expires_at}
+
+
+async def get_current_active_user_id(
+    user_id: str = Depends(get_current_user_id),
+    token_session_version: Any = Depends(get_current_session_version),
+) -> str:
     """JWT dependency for normal app/admin APIs.
 
     Auth login already blocks suspended/deleted users, but long-lived JWTs can
@@ -203,11 +316,20 @@ async def get_current_active_user_id(user_id: str = Depends(get_current_user_id)
     user = await db.users.find_one({'id': user_id})
     if not user:
         raise HTTPException(401, 'Invalid token')
+    try:
+        token_sv = int(token_session_version or 0)
+    except (TypeError, ValueError):
+        token_sv = 0
+    current_sv = _user_session_version(user)
+    if token_sv != current_sv:
+        raise HTTPException(401, 'session_revoked')
     status_value = str(user.get('status') or 'active').lower()
     if status_value == 'suspended':
         raise HTTPException(403, 'account_suspended')
     if status_value == 'deleted':
         raise HTTPException(403, 'account_deleted')
+    if _email_verification_required(user):
+        raise HTTPException(403, 'email_verification_required')
     return user_id
 
 
@@ -3752,6 +3874,8 @@ async def signup(data: SignupIn, request: Request):
         raise HTTPException(400, 'Username already taken')
     if await _find_user_by_email(normalized_email):
         raise HTTPException(400, 'Email already registered')
+    if PASSWORD_EMAIL_VERIFICATION_REQUIRED and not _email_verification_delivery_configured():
+        raise HTTPException(503, 'email_verification_not_configured')
     import uuid
     user_id = str(uuid.uuid4())
     user_doc = {
@@ -3761,11 +3885,21 @@ async def signup(data: SignupIn, request: Request):
         'password_hash': hash_password(data.password),
         'avatar': f'https://i.pravatar.cc/150?u={data.username}',
         'instagramConnected': False, 'instagramHandle': None,
+        'session_version': 0,
+        'email_verified': not PASSWORD_EMAIL_VERIFICATION_REQUIRED,
+        'email_verification_required': bool(PASSWORD_EMAIL_VERIFICATION_REQUIRED),
+        'auth_provider': 'password',
+        'linked_providers': ['password'],
         'created': datetime.utcnow(),
     }
     await db.users.insert_one(user_doc)
     await _seed_user(user_id)
-    return AuthOut(token=create_token(user_id), user=_public_user(user_doc))
+    if PASSWORD_EMAIL_VERIFICATION_REQUIRED:
+        issued = await _issue_email_verification(user_doc, reason='signup')
+        if not issued.get('sent'):
+            raise HTTPException(503, 'email_verification_not_configured')
+        raise HTTPException(403, 'email_verification_required')
+    return AuthOut(token=create_token(user_id, session_version=0), user=_public_user(user_doc))
 
 
 @api.post('/auth/login', response_model=AuthOut)
@@ -3789,7 +3923,9 @@ async def login(data: LoginIn, request: Request):
         raise HTTPException(401, 'Invalid username or password')
     # Phase 2.8: block login for suspended/deleted users.
     _ensure_user_active(u)
-    return AuthOut(token=create_token(u['id']), user=_public_user(u))
+    if _email_verification_required(u):
+        raise HTTPException(403, 'email_verification_required')
+    return AuthOut(token=create_token(u['id'], session_version=_user_session_version(u)), user=_public_user(u))
 
 
 @api.get('/auth/me', response_model=UserPublic)
@@ -3798,6 +3934,67 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
     if not u:
         raise HTTPException(404, 'User not found')
     return _public_user(u)
+
+
+@api.post('/auth/resend-verification')
+async def resend_email_verification(body: dict = Body(...), request: Request = None):
+    ip = _client_ip(request) if request is not None else 'unknown'
+    email = _normalize_email_value((body or {}).get('email'))
+    email_hash = _hash_identifier(email)
+    if _rate_limited('email_verification_resend_ip', ip, limit=5, window_seconds=3600):
+        raise HTTPException(429, 'Too many verification requests. Try again later.')
+    if email_hash and _rate_limited('email_verification_resend_email', email_hash, limit=3, window_seconds=3600):
+        raise HTTPException(429, 'Too many verification requests. Try again later.')
+    # Unknown/verified accounts get the same generic success to prevent enumeration.
+    generic = {'ok': True, 'status': 'sent_if_account_exists'}
+    user = await _find_user_by_email(email)
+    if not user or user.get('email_verified') or not _email_verification_required(user):
+        return generic
+    if not _email_verification_delivery_configured():
+        raise HTTPException(503, 'email_verification_not_configured')
+    issued = await _issue_email_verification(user, reason='resend')
+    if not issued.get('sent'):
+        raise HTTPException(503, 'email_verification_not_configured')
+    return generic
+
+
+async def _verify_email_token_value(token: str) -> dict:
+    if not token or not isinstance(token, str) or len(token) > 256:
+        raise HTTPException(400, 'invalid_email_verification_token')
+    token_hash = _hash_email_verification_token(token)
+    user = await db.users.find_one({'email_verification_token_hash': token_hash})
+    if not user:
+        raise HTTPException(400, 'invalid_email_verification_token')
+    if user.get('email_verification_used_at'):
+        raise HTTPException(400, 'email_verification_token_used')
+    expires_at = user.get('email_verification_expires_at')
+    if isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+        raise HTTPException(400, 'email_verification_token_expired')
+    now = datetime.utcnow()
+    await db.users.update_one(
+        {'id': user.get('id'), 'email_verification_token_hash': token_hash},
+        {'$set': {
+            'email_verified': True,
+            'email_verification_required': False,
+            'email_verified_at': now,
+            'email_verification_used_at': now,
+            'updated_at': now,
+        }, '$unset': {
+            'email_verification_token_hash': '',
+        }},
+    )
+    await _increment_user_session_version(user.get('id'), reason='email_verified')
+    return {'ok': True, 'status': 'email_verified'}
+
+
+@api.post('/auth/verify-email')
+async def verify_email(body: dict = Body(...)):
+    return await _verify_email_token_value((body or {}).get('token'))
+
+
+@api.get('/auth/verify-email')
+async def verify_email_get(token: str = Query('')):
+    return await _verify_email_token_value(token)
 
 
 # ---------------- Phase 2.7 Google Sign-In ----------------
@@ -3972,16 +4169,18 @@ async def auth_google(data: dict = Body(...), request: Request = None):
             providers = providers + [GOOGLE_AUTH_PROVIDER_KEY]
         await db.users.update_one(
             {'id': user['id']},
-            {'$set': {
+            {'$inc': {'session_version': 1}, '$set': {
                 'google_sub': safe['sub'],
                 'normalized_email': safe['email'],
                 'email_verified': True,
+                'email_verification_required': False,
+                'email_verified_at': now,
                 'linked_providers': providers,
                 'updated_at': now,
                 'last_seen_at': now,
                 **({'avatar': safe['picture']} if safe.get('picture') and not user.get('avatar') else {}),
                 **({'name': safe['name']} if safe.get('name') and not user.get('name') else {}),
-            }},
+            }, '$unset': {'email_verification_token_hash': ''}},
         )
         user = await db.users.find_one({'id': user['id']}) or user
     else:
@@ -4010,6 +4209,9 @@ async def auth_google(data: dict = Body(...), request: Request = None):
             'updated_at': now,
             'google_sub': safe['sub'],
             'email_verified': True,
+            'email_verification_required': False,
+            'email_verified_at': now,
+            'session_version': 0,
             'auth_provider': GOOGLE_AUTH_PROVIDER_KEY,
             'linked_providers': [GOOGLE_AUTH_PROVIDER_KEY],
         }
@@ -4024,7 +4226,7 @@ async def auth_google(data: dict = Body(...), request: Request = None):
         'google_auth_success user_id=%s new_user=%s',
         user.get('id'), is_new_user,
     )
-    return AuthOut(token=create_token(user['id']), user=_public_user(user))
+    return AuthOut(token=create_token(user['id'], session_version=_user_session_version(user)), user=_public_user(user))
 
 
 # ---------------- automations ----------------
@@ -7750,6 +7952,94 @@ async def admin_user_effective_limits(
     }
 
 
+@api.post('/admin/users/{target_user_id}/revoke-sessions')
+async def admin_revoke_user_sessions(
+    target_user_id: str,
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    if user_id == target_user_id:
+        raise HTTPException(403, 'cannot_revoke_self')
+    target = await db.users.find_one({'id': target_user_id})
+    if not target:
+        raise HTTPException(404, 'User not found')
+    reason = str((body or {}).get('reason') or '')[:500]
+    new_version = await _increment_user_session_version(target_user_id, reason='admin_revoke_sessions')
+    await _record_admin_action(
+        actor,
+        action='user_sessions_revoked',
+        target_user_id=target_user_id,
+        metadata={'reason_length': len(reason)},
+    )
+    return {'ok': True, 'user_id': target_user_id, 'session_version': new_version}
+
+
+def _email_hash_for_diagnostics(email: str) -> str:
+    return _hash_identifier(_normalize_email_value(email))[:16]
+
+
+@api.get('/admin/auth/normalized-email-diagnostics')
+async def admin_normalized_email_diagnostics(
+    user_id: str = Depends(get_current_active_user_id),
+):
+    await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
+    groups: Dict[str, int] = {}
+    missing = 0
+    cursor = db.users.find({}).limit(10000)
+    async for user in cursor:
+        normalized = _normalize_email_value(user.get('normalized_email') or '')
+        if not normalized:
+            missing += 1
+            normalized = _normalize_email_value(user.get('email') or '')
+        if normalized:
+            groups[normalized] = groups.get(normalized, 0) + 1
+    duplicate_emails = [email for email, count in groups.items() if count > 1]
+    return {
+        'duplicate_normalized_email_count': sum(groups[email] for email in duplicate_emails),
+        'duplicate_groups_count': len(duplicate_emails),
+        'sample_hashes': [_email_hash_for_diagnostics(email) for email in duplicate_emails[:10]],
+        'users_missing_normalized_email_count': missing,
+        'raw_emails_returned': False,
+    }
+
+
+@api.post('/admin/auth/backfill-normalized-email')
+async def admin_backfill_normalized_email(
+    body: Optional[dict] = Body(None),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    dry_run = bool((body or {}).get('dry_run', True))
+    candidates = []
+    groups: Dict[str, int] = {}
+    cursor = db.users.find({}).limit(10000)
+    async for user in cursor:
+        normalized = _normalize_email_value(user.get('normalized_email') or user.get('email') or '')
+        if normalized:
+            groups[normalized] = groups.get(normalized, 0) + 1
+        if not user.get('normalized_email') and normalized:
+            candidates.append({'id': user.get('id'), 'normalized_email': normalized})
+    conflicts = [email for email, count in groups.items() if count > 1]
+    updated = 0
+    if not dry_run:
+        for item in candidates:
+            await db.users.update_one(
+                {'id': item['id'], 'normalized_email': {'$exists': False}},
+                {'$set': {'normalized_email': item['normalized_email'], 'updated_at': datetime.utcnow()}},
+            )
+            updated += 1
+    return {
+        'ok': True,
+        'dry_run': dry_run,
+        'candidates_count': len(candidates),
+        'updated_count': updated,
+        'conflict_groups_count': len(conflicts),
+        'conflict_hashes': [_email_hash_for_diagnostics(email) for email in conflicts[:10]],
+        'raw_emails_returned': False,
+    }
+
+
 # ---- suspend / soft delete ------------------------------------------------
 
 async def _admin_user_status_change(
@@ -7785,7 +8075,6 @@ async def _admin_user_status_change(
         # Unsuspend: clear suspension fields but keep history in audit log.
         update['suspended_at'] = None
         update['suspended_by'] = None
-    await db.users.update_one({'id': target_user_id}, {'$set': update})
     if status == 'deleted':
         # Soft delete pauses all the user's automations to stop further
         # Meta calls. Comments / usage / audit are preserved.
@@ -7805,6 +8094,11 @@ async def _admin_user_status_change(
                 'updatedAt': now,
             }},
         )
+    session_revoke_statuses = {'suspended', 'deleted', 'active'}
+    update_op = {'$set': update}
+    if status in session_revoke_statuses:
+        update_op['$inc'] = {'session_version': 1}
+    await db.users.update_one({'id': target_user_id}, update_op)
     await _record_admin_action(
         actor, action=action_name, target_user_id=target_user_id,
         metadata={'reason_length': len(reason or ''), 'new_status': status},
@@ -15726,6 +16020,11 @@ async def _startup():
         await db.users.create_index(
             [('normalized_email', 1)], sparse=True,
             name='users_normalized_email_lookup',
+        )
+        await db.users.create_index(
+            [('email_verification_token_hash', 1)],
+            sparse=True,
+            name='users_email_verification_token_hash',
         )
         # Phase 2.8: user_limit_overrides indexes.
         await db.user_limit_overrides.create_index(

@@ -7,6 +7,7 @@ import { MessageCircle, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import GoogleSignInButton from '../components/auth/GoogleSignInButton';
+import { authErrorMessageFromApiError } from '../lib/authErrors';
 
 const Signup = () => {
   const [username, setUsername] = useState('');
@@ -26,7 +27,7 @@ const Signup = () => {
       toast.success('Account created! Welcome to mychat');
       navigate('/app');
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Signup failed');
+      toast.error(authErrorMessageFromApiError(err) || 'Signup failed');
     } finally {
       setLoading(false);
     }

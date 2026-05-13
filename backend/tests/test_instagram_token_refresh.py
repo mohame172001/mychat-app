@@ -160,6 +160,8 @@ class FakeCollection:
                 doc.setdefault(key, value)
         for key, value in update.get('$set', {}).items():
             doc[key] = value
+        for key in update.get('$unset', {}).keys():
+            doc.pop(key, None)
         for key, value in update.get('$inc', {}).items():
             doc[key] = int(doc.get(key) or 0) + value
         return None
@@ -188,6 +190,8 @@ class FakeCollection:
             return None
         for key, value in update.get('$set', {}).items():
             doc[key] = value
+        for key in update.get('$unset', {}).keys():
+            doc.pop(key, None)
         for key, value in update.get('$inc', {}).items():
             doc[key] = int(doc.get(key) or 0) + value
         return doc

@@ -13,8 +13,12 @@ These notes document MyChat's current authentication and session safety posture.
 - Normal app APIs resolve the user from the database on each request through the active-user dependency.
 - If a user is suspended after a JWT is issued, normal APIs return `403 account_suspended`.
 - If a user is soft-deleted after a JWT is issued, normal APIs return `403 account_deleted`.
+- JWTs include `session_version`, copied from `users.session_version` at issue time.
+- Normal app APIs compare the JWT `session_version` against the current user row. A mismatch returns `401 session_revoked`.
+- Admins can force per-user session invalidation with `POST /api/admin/users/{user_id}/revoke-sessions`; the action is audit logged with reason length only.
+- Suspend, unsuspend, soft delete, email verification, and Google linking increment `session_version` so stale tokens stop working.
 - Admin endpoints still allow an active admin to view suspended/deleted target users. The target user's status does not block admin visibility.
-- JWT invalidation is currently coarse-grained. Rotating `JWT_SECRET` invalidates all sessions. Per-user session revocation remains a future hardening item.
+- Rotating `JWT_SECRET` remains the global emergency invalidation method.
 
 ## Suspended and Deleted Login Behavior
 
@@ -54,12 +58,15 @@ These notes document MyChat's current authentication and session safety posture.
 - Login is rate-limited by IP and normalized identifier hash.
 - Signup is rate-limited by IP and normalized email hash.
 - Rate-limit logs use hashes or IPs only; passwords and submitted credentials are not logged.
-- Email/password signup currently does not require email verification. Add verification before large-scale public acquisition or higher-risk billing flows.
+- Email/password signup requires email verification before protected app access.
+- Password signup creates an unverified account, sends a short-lived single-use verification token through the configured email webhook, and does not return an authenticated session until verification completes.
+- The raw verification token is never stored. The database stores only `email_verification_token_hash`, timestamps, and status fields.
+- If `EMAIL_VERIFICATION_WEBHOOK_URL` is not configured while password verification is required, password signup/resend fails closed with `email_verification_not_configured`. Google Sign-In remains available for verified Google identities.
 
 ## Password Reset Status
 
 - Password reset is not currently implemented.
-- Future password reset must use random tokens, hash tokens at rest, keep a short TTL, be single-use, return generic responses for existing/non-existing emails, rate-limit by IP and email hash, avoid logging raw tokens, and invalidate active sessions where the session model supports it.
+- Future password reset must use random tokens, hash tokens at rest, keep a short TTL, be single-use, return generic responses for existing/non-existing emails, rate-limit by IP and email hash, avoid logging raw tokens, and increment `session_version` after success.
 
 ## Logout and Browser Session Storage
 
@@ -71,7 +78,5 @@ These notes document MyChat's current authentication and session safety posture.
 
 ## Deferred Risks
 
-- P2: exact atomic plan-limit reservation under very high concurrency remains deferred from Phase 2.12D.
-- P2: per-user session revocation/session versioning is not implemented; `JWT_SECRET` rotation is the current global invalidation method.
-- P2: email verification for password signup is not implemented.
+- P3: stale usage reservations should be monitored after rollout through the admin reservation diagnostics endpoint.
 - P3: strict unique `normalized_email` index should wait until legacy duplicate diagnostics are reviewed.

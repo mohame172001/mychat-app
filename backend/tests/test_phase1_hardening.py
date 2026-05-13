@@ -475,6 +475,7 @@ def test_docs_disabled_when_production_env_set():
 def test_rate_limit_signup_per_ip(monkeypatch):
     _reset_rate_limits()
     monkeypatch.setattr(server, 'RATE_LIMIT_SIGNUP_PER_HOUR', 2)
+    monkeypatch.setattr(server, 'PASSWORD_EMAIL_VERIFICATION_REQUIRED', False)
 
     class _Users:
         async def find_one(self, _q):

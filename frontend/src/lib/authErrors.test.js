@@ -35,10 +35,19 @@ describe('auth login error mapping', () => {
       .toBe('تعذر تسجيل الدخول. حاول مرة أخرى.');
   });
 
+  test('maps session revocation and email verification controls', () => {
+    expect(authErrorCode('session_revoked')).toBe('session_revoked');
+    expect(authErrorMessage('session_revoked', { locale: 'en' }))
+      .toBe('Your session expired. Please sign in again.');
+    expect(authErrorCode('email_verification_required')).toBe('email_verification_required');
+    expect(authErrorMessage('email_verification_required', { locale: 'en' }))
+      .toBe('Please verify your email before continuing.');
+    expect(authErrorCode('email_verification_not_configured')).toBe('email_verification_not_configured');
+  });
+
   test('extracts error code from axios-style response data', () => {
     const err = { response: { data: { detail: 'account_suspended' } } };
     expect(authErrorMessageFromApiError(err, { locale: 'en' }))
       .toBe('Your account is suspended. Contact support.');
   });
 });
-
