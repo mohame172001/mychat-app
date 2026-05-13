@@ -13,7 +13,8 @@ describe('auth cache isolation wiring', () => {
     const source = fs.readFileSync(path.join(__dirname, '../lib/api.js'), 'utf8');
 
     expect(source).toContain("import { clearApiCache } from './apiCache';");
-    expect(source).toContain('if (err?.response?.status === 401)');
+    expect(source).toContain('if (status === 401)');
     expect(source).toContain('clearApiCache();');
+    expect(source).toContain("window.location.href = '/login'");
   });
 });

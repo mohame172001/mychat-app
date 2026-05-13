@@ -390,7 +390,7 @@ def test_security_headers_applied_to_response(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(server, 'IS_PRODUCTION', False)
-    res = _run(server.security_headers_middleware(_FakeRequest(), fake_next))
+    res = _run(server.response_timing_middleware(_FakeRequest(), fake_next))
     h = res.headers
     assert h['X-Content-Type-Options'] == 'nosniff'
     assert h['X-Frame-Options'] == 'DENY'
@@ -410,11 +410,11 @@ def test_hsts_only_in_production_https(monkeypatch):
 
     monkeypatch.setattr(server, 'IS_PRODUCTION', True)
     req_https = _FakeRequest(headers={'x-forwarded-proto': 'https'})
-    res = _run(server.security_headers_middleware(req_https, fake_next))
+    res = _run(server.response_timing_middleware(req_https, fake_next))
     assert 'Strict-Transport-Security' in res.headers
 
     req_http = _FakeRequest(headers={'x-forwarded-proto': 'http'})
-    res2 = _run(server.security_headers_middleware(req_http, fake_next))
+    res2 = _run(server.response_timing_middleware(req_http, fake_next))
     assert 'Strict-Transport-Security' not in res2.headers
 
 
@@ -429,7 +429,7 @@ def test_default_api_csp_in_production(monkeypatch):
     monkeypatch.setattr(server, 'IS_PRODUCTION', True)
     monkeypatch.delenv('CONTENT_SECURITY_POLICY', raising=False)
 
-    res = _run(server.security_headers_middleware(
+    res = _run(server.response_timing_middleware(
         _FakeRequest(headers={'x-forwarded-proto': 'https'}),
         fake_next,
     ))

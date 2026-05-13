@@ -15773,15 +15773,21 @@ app.add_middleware(
 
 
 @app.middleware('http')
-async def security_headers_middleware(request, call_next):
-    """Apply baseline security headers to every response.
+async def response_timing_middleware(request, call_next):
+    """Apply security headers and measure per-request timing.
 
-    HSTS is only sent on HTTPS in production to avoid breaking localhost
-    HTTP development. CSP is conservative: allow same-origin + the API's
-    own resources. Tighten via CONTENT_SECURITY_POLICY env if desired.
+    Phase 2.13C: Adds X-Response-Time header and logs slow requests
+    (>3s) for production performance diagnosis.
     """
+    started = datetime.utcnow()
+    try:
+        path = str(request.url.path)
+    except Exception:
+        path = getattr(request, 'url', 'unknown')
     response = await call_next(request)
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     headers = response.headers
+    headers['X-Response-Time'] = str(duration_ms)
     headers.setdefault('X-Content-Type-Options', 'nosniff')
     headers.setdefault('X-Frame-Options', 'DENY')
     headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
@@ -15798,14 +15804,17 @@ async def security_headers_middleware(request, call_next):
             "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
     if IS_PRODUCTION:
-        # HSTS only when we know we're on HTTPS. The X-Forwarded-Proto
-        # header is what Railway / most reverse proxies set.
         proto = (request.headers.get('x-forwarded-proto') or request.url.scheme).lower()
         if proto == 'https':
             headers.setdefault(
                 'Strict-Transport-Security',
                 'max-age=31536000; includeSubDomains',
             )
+    if duration_ms > 3000:
+        logger.warning(
+            'slow_request path=%s durationMs=%s',
+            path, duration_ms,
+        )
     return response
 
 

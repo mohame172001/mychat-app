@@ -9,13 +9,39 @@ const api = axios.create({ baseURL: API_BASE, timeout: 20000 });
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('mychat_token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  config.metadata = { startTime: Date.now() };
   return config;
 });
 
 api.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    const start = r.config?.metadata?.startTime;
+    if (start) {
+      const duration = Date.now() - start;
+      const backendTime = r.headers['x-response-time'];
+      if (duration > 2000 || (backendTime && Number(backendTime) > 3000)) {
+        console.log(
+          `[api] SLOW ${r.config.method?.toUpperCase()} ${r.config.url} ` +
+          `client=${duration}ms backend=${backendTime || '?'}ms status=${r.status}`
+        );
+      }
+    }
+    return r;
+  },
   (err) => {
-    if (err?.response?.status === 401) {
+    const start = err?.config?.metadata?.startTime;
+    const duration = start ? Date.now() - start : 0;
+    const resp = err?.response;
+    const status = resp?.status || 'network';
+    const backendTime = resp?.headers?.['x-response-time'];
+    if (duration > 1000 || status === 'network') {
+      console.warn(
+        `[api] FAIL ${err?.config?.method?.toUpperCase()} ${err?.config?.url} ` +
+        `client=${duration}ms backend=${backendTime || '?'}s status=${status}` +
+        (resp?.data?.detail ? ` body=${String(resp.data.detail).slice(0, 100)}` : '')
+      );
+    }
+    if (status === 401) {
       localStorage.removeItem('mychat_token');
       localStorage.removeItem('mychat_user');
       clearApiCache();
