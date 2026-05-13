@@ -33,6 +33,7 @@ const DataDeletion = lazy(() => import('./pages/DataDeletion'));
 const Billing = lazy(() => import('./pages/Billing'));
 const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
 const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
+const NotFound = lazy(() => import('./pages/NotFound'));
 
 const PageLoading = () => (
   <div className="w-full p-6 text-sm text-slate-500">Loading...</div>
@@ -53,7 +54,7 @@ function App() {
           <Toaster position="top-right" />
           <PageViewTracker />
           <Suspense fallback={<PageLoading />}>
-            <Routes>
+<Routes>
               <Route path="/" element={<Landing />} />
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<Signup />} />
@@ -70,7 +71,9 @@ function App() {
                 <Route path="billing" element={<Billing />} />
                 <Route path="admin" element={<AdminConsole />} />
                 <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
+                <Route path="*" element={<Navigate to="/app" replace />} />
               </Route>
+              <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>
         </BrowserRouter>
