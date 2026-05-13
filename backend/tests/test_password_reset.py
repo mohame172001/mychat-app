@@ -380,6 +380,91 @@ def test_raw_token_never_stored(monkeypatch):
     # caplog in another test below).
 
 
+class _FakeDeliveryResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _FakeDeliveryClient:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+        self.posts = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.posts.append({'url': url, 'json': json or {}, 'headers': headers or {}})
+        return _FakeDeliveryResponse(self.status_code)
+
+
+def test_password_reset_delivery_payload_shape(monkeypatch):
+    fake_client = _FakeDeliveryClient(status_code=200)
+    monkeypatch.setattr(server, 'EMAIL_VERIFICATION_WEBHOOK_URL', 'https://email.example/webhook')
+    monkeypatch.setattr(server, 'EMAIL_VERIFICATION_WEBHOOK_TOKEN', 'delivery-secret')
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=10: fake_client)
+    user = {
+        'id': 'u1',
+        'email': 'User@Example.com',
+    }
+
+    ok = _run(server._deliver_password_reset(user, 'raw-reset-token-for-test'))
+
+    assert ok is True
+    assert len(fake_client.posts) == 1
+    post = fake_client.posts[0]
+    payload = post['json']
+    assert post['url'] == 'https://email.example/webhook'
+    assert post['headers']['authorization'] == 'Bearer delivery-secret'
+    assert payload['to'] == 'user@example.com'
+    assert payload['template'] == server.PASSWORD_RESET_EMAIL_TEMPLATE
+    assert payload['reset_url'].startswith(server.FRONTEND_URL.rstrip() + '/reset-password?token=')
+    assert payload['reset_url'] == payload['resetUrl'] == payload['url'] == payload['link']
+    assert payload['app_name'] == 'mychat'
+    assert payload['expires_in_minutes'] == server.PASSWORD_RESET_TOKEN_TTL_HOURS * 60
+    assert 'password' not in payload
+
+
+def test_password_reset_delivery_non_2xx_logged_safely(monkeypatch, caplog):
+    import logging as _logging
+    fake_client = _FakeDeliveryClient(status_code=500)
+    monkeypatch.setattr(server, 'EMAIL_VERIFICATION_WEBHOOK_URL', 'https://email.example/webhook')
+    monkeypatch.setattr(server, 'EMAIL_VERIFICATION_WEBHOOK_TOKEN', '')
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=10: fake_client)
+
+    with caplog.at_level(_logging.WARNING, logger='mychat'):
+        ok = _run(server._deliver_password_reset(
+            {'id': 'u1', 'email': 'user@example.com'},
+            'raw-reset-token-for-test',
+        ))
+
+    assert ok is False
+    assert 'password_reset_email_delivery_failed' in caplog.text
+    assert 'status_code=500' in caplog.text
+    assert 'raw-reset-token-for-test' not in caplog.text
+    assert '/reset-password?token=' not in caplog.text
+
+
+def test_password_reset_delivery_missing_env_logged_safely(monkeypatch, caplog):
+    import logging as _logging
+    monkeypatch.setattr(server, 'EMAIL_VERIFICATION_WEBHOOK_URL', '')
+
+    with caplog.at_level(_logging.WARNING, logger='mychat'):
+        ok = _run(server._deliver_password_reset(
+            {'id': 'u1', 'email': 'user@example.com'},
+            'raw-reset-token-for-test',
+        ))
+
+    assert ok is False
+    assert 'password_reset_email_delivery_skipped' in caplog.text
+    assert 'EMAIL_VERIFICATION_WEBHOOK_URL' in caplog.text
+    assert 'raw-reset-token-for-test' not in caplog.text
+    assert '/reset-password?token=' not in caplog.text
+
+
 def test_password_reset_logs_do_not_leak_token(monkeypatch, caplog):
     import logging as _logging
     db, _token = _issue_token_for(monkeypatch)

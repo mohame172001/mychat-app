@@ -190,6 +190,10 @@ EMAIL_VERIFICATION_WEBHOOK_TOKEN = (os.environ.get('EMAIL_VERIFICATION_WEBHOOK_T
 # Phase 2.14 password reset. Reuses the email-verification webhook
 # transport — same env vars, different template name. TTL defaults to 1h.
 PASSWORD_RESET_TOKEN_TTL_HOURS = int(os.environ.get('PASSWORD_RESET_TOKEN_TTL_HOURS', '1'))
+PASSWORD_RESET_EMAIL_TEMPLATE = (
+    os.environ.get('PASSWORD_RESET_EMAIL_TEMPLATE', 'mychat_password_reset').strip()
+    or 'mychat_password_reset'
+)
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -4062,25 +4066,56 @@ def _password_reset_link(token: str) -> str:
 async def _deliver_password_reset(user: dict, token: str) -> bool:
     """Send the reset link via the same webhook the verification flow uses.
     Never logs the token. Returns True iff webhook responded 2xx."""
+    user_id = user.get('id')
     if not EMAIL_VERIFICATION_WEBHOOK_URL:
+        logger.warning(
+            'password_reset_email_delivery_skipped user_id=%s reason=missing_env env=EMAIL_VERIFICATION_WEBHOOK_URL',
+            user_id,
+        )
         return False
+    reset_link = _password_reset_link(token)
     payload = {
         'to': _normalize_email_value(user.get('email')),
-        'template': 'mychat_password_reset',
-        'reset_url': _password_reset_link(token),
+        'template': PASSWORD_RESET_EMAIL_TEMPLATE,
+        # Keep reset_url for the original contract, and include common
+        # aliases so webhook/template adapters do not silently drop the link.
+        'reset_url': reset_link,
+        'resetUrl': reset_link,
+        'url': reset_link,
+        'link': reset_link,
+        'app_name': 'mychat',
+        'expires_in_minutes': PASSWORD_RESET_TOKEN_TTL_HOURS * 60,
     }
     headers = {'content-type': 'application/json'}
     if EMAIL_VERIFICATION_WEBHOOK_TOKEN:
         headers['authorization'] = f'Bearer {EMAIL_VERIFICATION_WEBHOOK_TOKEN}'
     try:
+        logger.info(
+            'password_reset_email_delivery_attempt user_id=%s provider=EMAIL_VERIFICATION_WEBHOOK_URL template=%s',
+            user_id, PASSWORD_RESET_EMAIL_TEMPLATE,
+        )
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(
                 EMAIL_VERIFICATION_WEBHOOK_URL, json=payload, headers=headers,
             )
-        return 200 <= response.status_code < 300
+        ok = 200 <= response.status_code < 300
+        if ok:
+            logger.info(
+                'password_reset_email_delivery_success user_id=%s status_code=%s template=%s',
+                user_id, response.status_code, PASSWORD_RESET_EMAIL_TEMPLATE,
+            )
+        else:
+            logger.warning(
+                'password_reset_email_delivery_failed user_id=%s reason=non_2xx status_code=%s template=%s',
+                user_id, response.status_code, PASSWORD_RESET_EMAIL_TEMPLATE,
+            )
+        return ok
     except Exception as exc:
         # Never echo the request body — token is in there.
-        logger.warning('password_reset_delivery_failed reason=%s', type(exc).__name__)
+        logger.warning(
+            'password_reset_email_delivery_exception user_id=%s reason=%s template=%s',
+            user_id, type(exc).__name__, PASSWORD_RESET_EMAIL_TEMPLATE,
+        )
         return False
 
 

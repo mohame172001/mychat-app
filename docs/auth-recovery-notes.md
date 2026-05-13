@@ -66,6 +66,15 @@ Reuses the existing email-verification webhook transport (`EMAIL_VERIFICATION_WE
 
 If the webhook isn't configured, the issuance branch logs `sent=false` and the user gets the same generic success response — there is no `503` leak.
 
+Phase 2.14F delivery contract update:
+
+- `PASSWORD_RESET_EMAIL_TEMPLATE` optionally overrides the template name and defaults to `mychat_password_reset`.
+- The password-reset payload includes `reset_url`, `resetUrl`, `url`, and `link` with the same reset link so provider/template adapters can use the variable name they expect.
+- The payload also includes `app_name: "mychat"` and `expires_in_minutes`.
+- Safe production diagnostics log only missing env var name, template name, user id, status code, and exception type. They must never log the raw reset token, reset URL, email body, or plaintext password.
+
+Provider template requirement: the reset template must render one of `reset_url`, `resetUrl`, `url`, or `link` as the clickable reset link.
+
 ## Google-only accounts
 
 Users created via Google Sign-In have `password_hash = None`. The forgot-password path short-circuits with the generic response and never issues a token. If those users want a password later, the intended UX is: log in via Google → Settings → "Set a password" (out of scope for Phase 2.14).
@@ -80,7 +89,7 @@ Latest Phase 2.14E production observation:
 
 Remaining reset-specific checks:
 
-1. Confirm a real reset email is delivered when `EMAIL_VERIFICATION_WEBHOOK_URL` is set.
+1. Confirm a real reset email is delivered when `EMAIL_VERIFICATION_WEBHOOK_URL` is set, `PASSWORD_RESET_EMAIL_TEMPLATE` matches the provider template if overridden, and the provider accepts one of `reset_url`, `resetUrl`, `url`, or `link` as the reset-link variable.
 2. Click the link, set a new password, confirm login with new password works.
 3. Confirm a second login with the old password is rejected.
 4. Confirm any other JWT for that user returns 401 `session_revoked`.

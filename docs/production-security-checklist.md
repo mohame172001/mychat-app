@@ -25,6 +25,8 @@ Use this checklist before public launch, Meta review updates, and billing rollou
 - `PASSWORD_EMAIL_VERIFICATION_REQUIRED=true` before billing/public launch.
 - `EMAIL_VERIFICATION_WEBHOOK_URL` configured for password signup verification delivery. If unset while verification is required, password signup fails closed with `email_verification_not_configured`.
 - `EMAIL_VERIFICATION_WEBHOOK_TOKEN` set if the email delivery webhook requires authentication. Do not print the value.
+- `PASSWORD_RESET_EMAIL_TEMPLATE` optional; defaults to `mychat_password_reset`. If the provider template has a different name, set this env var on the backend service.
+- Password reset delivery uses the same webhook as email verification and sends reset-link variables as `reset_url`, `resetUrl`, `url`, and `link`. Confirm the provider template uses one of these variables and that the sender/domain is verified.
 - Login and signup rate limits enabled for IP and normalized identifier/email-hash buckets.
 - `ADMIN_EMAILS` reviewed: it should contain only intended owner escape-hatch emails, and removing a bootstrap owner fully requires removing the env email as well as disabling/removing the member row.
 
