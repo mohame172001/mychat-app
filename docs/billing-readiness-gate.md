@@ -23,10 +23,10 @@ Conclusion: Billing can start from a security-readiness standpoint. Future billi
 
 Even with the security gate green, billing remains **BLOCKED** on product-functional verification:
 
-- Password change E2E: code shipped in `a238d6a`, real authenticated E2E **still pending**.
-- Password reset E2E: code shipped in Phase 2.14 (this commit), real email-delivery E2E **still pending**. See `docs/auth-recovery-notes.md`.
+- Password change E2E: **verified on production** in Phase 2.14E. Settings Security rendered for an authenticated temporary production test account, show/hide toggles worked, autocomplete attributes were correct, password change succeeded only after the backend call, the current session was revoked on the next protected navigation, the previous password failed, and the new password succeeded.
+- Password reset E2E: code shipped in Phase 2.14, public UI and backend generic response are live, but real email-delivery E2E is **blocked/failed** because the reset email did not arrive for the temporary production test account. See `docs/auth-recovery-notes.md`.
 
-Billing must not start until both above E2Es pass on the live host with the production email webhook.
+Billing must not start until password reset email delivery, reset-link consumption, old-password rejection after reset, new-password login after reset, and token-reuse rejection all pass on the live host with the production email webhook.
 
 ## Red-Team Billing Abuse Delta
 

@@ -24,17 +24,17 @@ Phase: 2.14
 | A5 | Case-insensitive email login | anonymous | User created with email | verified | P1 | backend | |
 | A6 | Logout | authenticated | Logged in | verified | P1 | E2E | |
 | A7 | Google Sign-In | anonymous | Google OAuth configured | blocked | P1 | backend | Requires Google client ID |
-| A8 | Password change from Settings | authenticated | Logged in, has password | implemented | **P0** | backend, frontend grep | Phase 2.14 a238d6a. Pending real E2E. |
-| A9 | Old password fails after change | authenticated | Password changed | implemented | **P0** | backend | Pending real E2E. |
-| A10 | New password succeeds after change | authenticated | Password changed | implemented | **P0** | backend | Pending real E2E. |
-| A11 | Browser autocomplete: login | anonymous | Login form shown | implemented | P1 | frontend grep | `username` + `current-password` attrs present. Browser-prompt is browser-dependent. |
+| A8 | Password change from Settings | authenticated | Logged in, has password | verified | **P0** | backend, frontend, production E2E | Phase 2.14E verified against production temporary account. |
+| A9 | Old password fails after change | authenticated | Password changed | verified | **P0** | backend, production E2E | Phase 2.14E verified: previous password rejected after Settings change. |
+| A10 | New password succeeds after change | authenticated | Password changed | verified | **P0** | backend, production E2E | Phase 2.14E verified: new Settings password logged in successfully. |
+| A11 | Browser autocomplete: login | anonymous | Login form shown | verified | P1 | frontend, production E2E | `username` + `current-password` attributes verified in production login form. Browser-prompt behavior remains browser-dependent. |
 | A12 | Browser autocomplete: signup | anonymous | Signup form shown | implemented | P1 | frontend grep | `email` + `new-password` + `username` attrs present. |
-| A13 | Browser autocomplete: password change | authenticated | Settings security tab | implemented | P1 | frontend grep | `current-password` + `new-password` attrs present. |
-| A18 | Forgot password — issue reset email | anonymous | None | implemented | **P0** | backend, frontend | Phase 2.14. Generic response, no enumeration. Pending real-email E2E. |
-| A19 | Reset password — consume token | anonymous | Valid reset token | implemented | **P0** | backend, frontend | Phase 2.14. Single-use, expires 1h, session_version bump. Pending real-email E2E. |
-| A20 | Reset token cannot be reused | anonymous | Token already used | implemented | **P0** | backend | |
+| A13 | Browser autocomplete: password change | authenticated | Settings security tab | verified | P1 | frontend, production E2E | `current-password` + `new-password` attributes verified in production Settings Security tab. |
+| A18 | Forgot password — issue reset email | anonymous | None | failed | **P0** | backend, frontend, production E2E | Generic success visible in production, but reset email did not arrive. Billing remains blocked. |
+| A19 | Reset password — consume token | anonymous | Valid reset token | blocked | **P0** | backend, frontend | Cannot complete real reset-link E2E until email delivery works. |
+| A20 | Reset token cannot be reused | anonymous | Token already used | blocked | **P0** | backend | Cannot complete production token-reuse E2E until email delivery works. |
 | A21 | Expired reset token rejected | anonymous | Token > 1h old | implemented | **P0** | backend | |
-| A22 | Old JWTs revoked after reset | authenticated | Password reset | implemented | **P0** | backend | session_version invalidation. |
+| A22 | Old JWTs revoked after reset/change | authenticated | Password reset or password change | verified | **P0** | backend, production E2E | Settings password change revoked current session on next protected navigation; reset-specific E2E remains blocked by email delivery. |
 | A23 | Forgot password rate limit | anonymous | None | implemented | P1 | backend | 5/h/IP, 3/h/email-hash. |
 | A24 | Google-only account forgot-password | anonymous | Google-only user | implemented | P1 | backend | Generic success, no token issued (no password to reset). |
 | A14 | Suspended user blocked | authenticated | Account suspended | verified | P0 | backend | |
@@ -48,9 +48,9 @@ Phase: 2.14
 |---|---------|------|-------------|--------|------|----------|-------|
 | B1 | Profile display | authenticated | Logged in | verified | P2 | manual | |
 | B2 | Name/email display | authenticated | Logged in | verified | P2 | manual | |
-| B3 | Password change | authenticated | Logged in | implemented | **P0** | backend, frontend grep | Same as A8. |
+| B3 | Password change | authenticated | Logged in | verified | **P0** | backend, frontend, production E2E | Same as A8. |
 | B4 | Password validation errors | authenticated | Password change form | implemented | P1 | frontend grep | Real client-side length + match validation. |
-| B5 | Success only after real backend update | authenticated | Password change | implemented | **P0** | frontend grep | `toast.success` strictly after `await api.post`. |
+| B5 | Success only after real backend update | authenticated | Password change | verified | **P0** | frontend, production E2E | `toast.success` occurs only after `await api.post`; production password actually changed. |
 | B6 | No plaintext password in response | — | All password flows | implemented | — | backend | Backend never echoes password values. |
 | B7 | UI does not claim success if update failed | — | All password flows | implemented | **P0** | frontend grep | `catch → toast.error` branch present. |
 
@@ -186,10 +186,10 @@ Phase: 2.14
 | # | Feature | Precondition | Status | Risk | Coverage | Notes |
 |---|---------|-------------|--------|------|----------|-------|
 | K1 | Proper input types | Forms exist | verified | P2 | manual | |
-| K2 | Browser autocomplete attributes | Forms exist | **failed** | P1 | manual | **A11, A13 — login and password change** |
+| K2 | Browser autocomplete attributes | Forms exist | verified | P1 | production E2E | Login, signup, reset, and Settings password autocomplete attributes verified in production. |
 | K3 | Password manager detects forms | Forms exist | **failed** | P1 | manual | **No <form> element, no autocomplete** |
 | K4 | Loading states don't hide failures | API calls | verified | P2 | E2E | |
-| K5 | Success only after confirmed backend | Forms submit | **failed** | **P0** | manual | **Password change shows fake success** |
+| K5 | Success only after confirmed backend | Forms submit | verified | **P0** | production E2E | Settings password change succeeded only after backend update; previous password then failed and new password succeeded. |
 | K6 | Error messages map to real errors | API failures | verified | P2 | E2E | |
 | K7 | No window.location.assign | Navigation | verified | P1 | E2E | |
 | K8 | No full reload on navigation | SPA | verified | P1 | E2E | |
@@ -214,26 +214,17 @@ Phase: 2.14
 | Metric | Count |
 |--------|-------|
 | Total features checked | 98 |
-| Verified | 86 |
-| **Failed** | **9** |
-| Blocked | 6 |
+| Verified | 95 |
+| **Failed** | **2** |
+| Blocked | 8 |
 | N/A | 1 |
 
 ## Failed Items — Action Required
 
 | # | Feature | Risk | Root Cause | Fix Status |
 |---|---------|------|------------|------------|
-| A8 | Password change from Settings | P0 | No backend endpoint; frontend shows fake success | **Unfixed** |
-| A9 | Old password fails after change | P0 | Same as A8 | **Unfixed** |
-| A10 | New password succeeds after change | P0 | Same as A8 | **Unfixed** |
-| A11 | Login autocomplete | P1 | Missing autocomplete attributes | **Unfixed** |
-| A13 | Password change autocomplete | P1 | Missing autocomplete and form tag | **Unfixed** |
-| B3 | Password change (Settings) | P0 | Same as A8 | **Unfixed** |
-| B5 | Success only after real update | P0 | Same as A8 | **Unfixed** |
-| B7 | No fake success | P0 | Same as A8 | **Unfixed** |
-| K2 | Browser autocomplete attributes | P1 | Same as A11/A13 | **Unfixed** |
+| A18 | Forgot password reset email delivery | P0 | Production reset email did not arrive for the temporary test account | **Blocked on email delivery/provider configuration** |
 | K3 | Password manager form detection | P1 | Missing `<form>`, action, autocomplete | **Unfixed** |
-| K5 | Success after confirmed backend | P0 | Same as A8 | **Unfixed** |
 
 ## Blocked Items
 
@@ -241,6 +232,8 @@ Phase: 2.14
 |---|---------|-------------|
 | A2 | Email verification | Requires email delivery configuration |
 | A7 | Google Sign-In | Requires Google client ID |
+| A19 | Reset password link consumption | Blocked until reset email delivery works |
+| A20 | Reset token reuse rejection | Blocked until reset email delivery works |
 | F8 | dashboard_summary_breakdown logs | Requires Railway log access |
 | G2 | Contacts search | Feature may not be fully implemented |
 | G4 | Contacts pagination | Feature may not be fully implemented |

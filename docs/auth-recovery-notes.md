@@ -1,6 +1,6 @@
 # Account recovery notes — Phase 2.14
 
-Status: implemented in commit after `a238d6a`. Pending production email-delivery E2E before billing can start.
+Status: implemented in commit after `a238d6a`. Public UI and backend endpoints are live, but production email-delivery E2E is still blocked before billing can start.
 
 ## Endpoints
 
@@ -71,6 +71,14 @@ If the webhook isn't configured, the issuance branch logs `sent=false` and the u
 Users created via Google Sign-In have `password_hash = None`. The forgot-password path short-circuits with the generic response and never issues a token. If those users want a password later, the intended UX is: log in via Google → Settings → "Set a password" (out of scope for Phase 2.14).
 
 ## E2E checks that still require operator action
+
+Latest Phase 2.14E production observation:
+
+- Forgot-password UI rendered and showed the generic success message.
+- The reset email did not arrive for the temporary production test account.
+- Settings password-change E2E passed independently: authenticated Settings Security rendered, toggles and autocomplete worked, the password change succeeded, the current session was revoked on the next protected navigation, the previous password failed, and the new password succeeded.
+
+Remaining reset-specific checks:
 
 1. Confirm a real reset email is delivered when `EMAIL_VERIFICATION_WEBHOOK_URL` is set.
 2. Click the link, set a new password, confirm login with new password works.
