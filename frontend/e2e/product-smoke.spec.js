@@ -95,4 +95,19 @@ test.describe('authenticated product smoke with mocked API', () => {
     await expect(page.getByTestId('upgrade-btn-pro')).toBeDisabled();
     await expect(page.locator('body')).not.toContainText(/stripe|paddle|paymob/i);
   });
+
+  test('settings password fields have accessible show-hide controls', async ({ page }) => {
+    await page.goto('/app/settings?tab=security');
+
+    await expect(page.getByRole('heading', { name: /settings/i })).toBeVisible();
+    await expect(page.locator('#current-password')).toHaveAttribute('autocomplete', 'current-password');
+    await expect(page.locator('#new-password')).toHaveAttribute('autocomplete', 'new-password');
+    await expect(page.locator('#confirm-password')).toHaveAttribute('autocomplete', 'new-password');
+    await expect(page.getByRole('button', { name: 'Show password' })).toHaveCount(3);
+    await page.locator('#current-password').fill('old-secret');
+    await page.getByRole('button', { name: 'Show password' }).first().click();
+    await expect(page.locator('#current-password')).toHaveAttribute('type', 'text');
+    await page.getByRole('button', { name: 'Hide password' }).click();
+    await expect(page.locator('#current-password')).toHaveAttribute('type', 'password');
+  });
 });

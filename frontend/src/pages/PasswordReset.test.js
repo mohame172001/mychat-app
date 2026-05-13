@@ -20,6 +20,7 @@ describe('Phase 2.14 account recovery — wiring', () => {
     // Existing autocomplete contract preserved.
     expect(loginSrc).toContain('autoComplete="username"');
     expect(loginSrc).toContain('autoComplete="current-password"');
+    expect(loginSrc).toContain('PasswordInput');
   });
 });
 
@@ -52,6 +53,7 @@ describe('ResetPassword page', () => {
     expect(resetSrc.match(/autoComplete="new-password"/g) || []).toHaveLength(2);
     expect(resetSrc).toContain('id="new-password"');
     expect(resetSrc).toContain('id="confirm-password"');
+    expect(resetSrc).toContain('PasswordInput');
   });
 
   test('reads token from query string and immediately scrubs it from URL', () => {

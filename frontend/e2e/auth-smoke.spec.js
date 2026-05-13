@@ -15,10 +15,19 @@ test.describe('unauthenticated auth smoke', () => {
     await expect(page.getByText(/google sign-in is not configured/i)).toBeVisible();
     await expect(page.getByRole('link', { name: /data deletion/i })).toBeVisible();
     await expect(page.getByLabel(/username/i)).toBeVisible();
-    await expect(page.getByLabel(/password/i)).toBeVisible();
+    await expect(page.locator('#password')).toBeVisible();
+    await expect(page.getByRole('link', { name: /forgot password/i })).toBeVisible();
+
+    const passwordInput = page.locator('#password');
+    await expect(passwordInput).toHaveAttribute('type', 'password');
+    await expect(passwordInput).toHaveAttribute('autocomplete', 'current-password');
+    await page.getByRole('button', { name: 'Show password' }).click();
+    await expect(passwordInput).toHaveAttribute('type', 'text');
+    await page.getByRole('button', { name: 'Hide password' }).click();
+    await expect(passwordInput).toHaveAttribute('type', 'password');
 
     await page.getByLabel(/username/i).fill('missing-user');
-    await page.getByLabel(/password/i).fill('wrong-password');
+    await page.locator('#password').fill('wrong-password');
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page.getByText(/invalid email or password/i)).toBeVisible();
@@ -33,8 +42,39 @@ test.describe('unauthenticated auth smoke', () => {
     await expect(page.getByRole('button', { name: /continue with google/i })).toBeVisible();
     await expect(page.getByLabel(/username/i)).toBeVisible();
     await expect(page.getByLabel(/email/i)).toBeVisible();
-    await expect(page.getByLabel(/password/i)).toBeVisible();
+    await expect(page.locator('#password')).toBeVisible();
+    const passwordInput = page.locator('#password');
+    await expect(passwordInput).toHaveAttribute('type', 'password');
+    await expect(passwordInput).toHaveAttribute('autocomplete', 'new-password');
+    await page.getByRole('button', { name: 'Show password' }).click();
+    await expect(passwordInput).toHaveAttribute('type', 'text');
+    await page.getByRole('button', { name: 'Hide password' }).click();
+    await expect(passwordInput).toHaveAttribute('type', 'password');
     await expect(page.getByRole('button', { name: /create account/i })).toBeVisible();
+  });
+
+  test('forgot and reset password pages render usable recovery forms', async ({ page }) => {
+    await page.goto('/forgot-password');
+
+    await expect(page.getByRole('heading', { name: /reset your password/i })).toBeVisible();
+    await expect(page.getByLabel('Email')).toBeVisible();
+    await expect(page.getByRole('button', { name: /send reset link/i })).toBeVisible();
+
+    await page.goto('/reset-password?token=test-token');
+    await expect(page.getByRole('heading', { name: /set a new password/i })).toBeVisible();
+    const newPassword = page.locator('#new-password');
+    const confirmPassword = page.locator('#confirm-password');
+    await expect(newPassword).toHaveAttribute('type', 'password');
+    await expect(confirmPassword).toHaveAttribute('type', 'password');
+    await expect(newPassword).toHaveAttribute('autocomplete', 'new-password');
+    await expect(confirmPassword).toHaveAttribute('autocomplete', 'new-password');
+    await expect(page.getByRole('button', { name: 'Show password' })).toHaveCount(2);
+    await newPassword.fill('new-secret');
+    await page.getByRole('button', { name: 'Show password' }).first().click();
+    await expect(newPassword).toHaveAttribute('type', 'text');
+    await page.getByRole('button', { name: 'Hide password' }).click();
+    await expect(newPassword).toHaveAttribute('type', 'password');
+    await expect(page.getByRole('button', { name: /reset password/i })).toBeVisible();
   });
 
   test('public data deletion page renders and submits safe request', async ({ page }) => {
