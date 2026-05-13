@@ -253,15 +253,15 @@ const Comments = () => {
         </div>
       </div>
 
-      {/* Status filter bar — client-side filtering over the current page. */}
-      <div className="mb-5 flex flex-wrap gap-2 rounded-2xl border border-slate-100 bg-white p-2">
+      {/* Status filter bar — compact and clean */}
+      <div className="mb-4 flex flex-wrap gap-1.5">
         {STATUS_FILTERS.map(filter => (
           <Button
             key={filter.key}
             type="button"
-            variant={statusFilter === filter.key ? 'default' : 'ghost'}
+            variant={statusFilter === filter.key ? 'default' : 'outline'}
             size="sm"
-            className="rounded-full"
+            className="h-7 text-xs px-3"
             onClick={() => setStatusFilter(filter.key)}
           >
             {filter.label}
@@ -270,7 +270,18 @@ const Comments = () => {
       </div>
 
       {loading && comments.length === 0 && (
-        <div className="text-center py-20 text-slate-500">Loading…</div>
+        <div className="space-y-3">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="bg-white rounded-xl border border-slate-100 p-4 animate-pulse">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="h-4 w-24 bg-slate-200 rounded"></div>
+                <div className="h-4 w-20 bg-slate-200 rounded"></div>
+              </div>
+              <div className="h-4 w-full bg-slate-100 rounded mb-2"></div>
+              <div className="h-3 w-32 bg-slate-100 rounded"></div>
+            </div>
+          ))}
+        </div>
       )}
 
       {!loading && filteredComments.length === 0 && (
@@ -290,87 +301,76 @@ const Comments = () => {
         </div>
       )}
 
-      <div className="space-y-4">
+      <div className="space-y-3">
         {filteredComments.map(c => {
           const badge = statusBadge(c);
           const BadgeIcon = badge.Icon;
           const status = normalizeStatus(c);
           return (
-          <div key={c.id} className="bg-white rounded-2xl border border-slate-100 p-5">
+          <div key={c.id} className="bg-white rounded-xl border border-slate-100 p-4">
             <div className="flex items-start justify-between gap-3">
-              <div className="flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="font-semibold">@{c.commenter_username}</div>
-                  <Badge className={`${badge.cn} border-0`}>
+              <div className="flex-1 min-w-0">
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="font-semibold text-slate-900">@{c.commenter_username}</span>
+                  <Badge className={`${badge.cn} border-0 text-xs`}>
                     <BadgeIcon className="w-3 h-3 mr-1" /> {badge.label}
                   </Badge>
-                  {/* Surface classified failure reasons so support staff
-                      can see WHY a DM failed without opening the diagnostics
-                      endpoint. Never leak raw Graph error bodies. */}
-                  {c.dm_failure_reason && (
-                    <span className="text-xs text-amber-700">
-                      DM: <span className="font-mono">{c.dm_failure_reason}</span>
-                    </span>
-                  )}
-                  {c.reply_failure_reason && (
-                    <span className="text-xs text-rose-700">
-                      Reply: <span className="font-mono">{c.reply_failure_reason}</span>
-                    </span>
-                  )}
-                  <Badge variant="outline" className="capitalize">
-                    {statusLabel(status)}
-                  </Badge>
-                </div>
-                <div className="text-slate-700 mt-1">{c.text}</div>
-                <div className="text-xs text-slate-400 mt-1">
-                  {c.created && new Date(c.created).toLocaleString()}
-                  {c.media_id && <> • on media <span className="font-mono">{c.media_id}</span></>}
-                  {typeof c.attempts === 'number' && c.attempts > 1 && (
-                    <> • {c.attempts} attempts</>
-                  )}
-                  {c.next_retry_at && (
-                    <> • next retry {new Date(c.next_retry_at).toLocaleString()}</>
+                  {status === 'success' && c.dm_sent && (
+                    <Badge variant="outline" className="text-xs bg-blue-50">DM sent</Badge>
                   )}
                 </div>
+                <p className="text-slate-700 text-sm line-clamp-2">{c.text}</p>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-xs text-slate-500">
+                  <span>{c.created && new Date(c.created).toLocaleString()}</span>
+                  {c.media_id && <span>Media: {c.media_id.slice(0, 8)}...</span>}
+                  {typeof c.attempts === 'number' && c.attempts > 1 && <span>{c.attempts} attempts</span>}
+                  {c.next_retry_at && <span>Retry: {new Date(c.next_retry_at).toLocaleTimeString()}</span>}
+                </div>
+                {(c.dm_failure_reason || c.reply_failure_reason) && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    {c.dm_failure_reason && (
+                      <span className="text-amber-600 bg-amber-50 px-2 py-0.5 rounded">DM: {c.dm_failure_reason}</span>
+                    )}
+                    {c.reply_failure_reason && (
+                      <span className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded">Reply: {c.reply_failure_reason}</span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
             {c.replied && c.reply_text && (
-              <div className="mt-3 pl-4 border-l-2 border-emerald-200 text-sm">
-                <div className="text-xs text-emerald-700 font-semibold">Your reply</div>
-                <div className="text-slate-700">{c.reply_text}</div>
+              <div className="mt-3 pl-3 border-l-2 border-emerald-300 text-sm bg-emerald-50 -mx-4 px-4 pb-3">
+                <div className="text-xs text-emerald-700 font-semibold mb-1">Your reply</div>
+                <p className="text-slate-700">{c.reply_text}</p>
               </div>
             )}
 
             {!c.replied && (
               <form
-                className="mt-3 flex flex-col gap-2 sm:flex-row"
+                className="mt-3 flex gap-2"
                 onSubmit={(e) => { e.preventDefault(); handleReply(c); }}
               >
                 <Input
-                  placeholder="Reply to this comment…"
+                  placeholder="Reply…"
+                  className="text-sm"
                   value={replyText[c.id] || ''}
                   onChange={(e) => setReplyText(prev => ({ ...prev, [c.id]: e.target.value }))}
                   disabled={!!sending[c.id]}
                 />
-                <Button type="submit" className="sm:w-auto" disabled={!!sending[c.id] || !(replyText[c.id] || '').trim()}>
-                  <Send className="w-4 h-4 mr-2" />
-                  {sending[c.id] ? 'Sending…' : 'Reply'}
+                <Button type="submit" size="sm" disabled={!!sending[c.id] || !(replyText[c.id] || '').trim()}>
+                  {sending[c.id] ? '...' : <Send className="w-4 h-4" />}
                 </Button>
-                {/* Safe Retry Reply: hits the dedicated /retry-reply
-                    endpoint, which enforces account scope + provider-
-                    proof + permanent-failure rejection on the server.
-                    Hidden client-side too when canRetryReply is false. */}
                 {canRetryReply(c) && (replyText[c.id] || '').trim() === '' && (
                   <Button
                     type="button"
                     variant="outline"
+                    size="sm"
                     onClick={() => handleRetryReply(c)}
                     disabled={!!sending[c.id]}
-                    className="sm:w-auto"
+                    aria-label="Retry reply"
                   >
-                    <Repeat className="w-4 h-4 mr-2" />
-                    {sending[c.id] ? 'Retrying…' : 'Retry reply'}
+                    <Repeat className="w-4 h-4" />
                   </Button>
                 )}
               </form>

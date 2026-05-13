@@ -95,17 +95,4 @@ test.describe('authenticated product smoke with mocked API', () => {
     await expect(page.getByTestId('upgrade-btn-pro')).toBeDisabled();
     await expect(page.locator('body')).not.toContainText(/stripe|paddle|paymob/i);
   });
-
-  test('system health renders safe operational diagnostics', async ({ page }) => {
-    await page.goto('/app/system-health');
-
-    await expect(page.getByRole('heading', { name: /system health/i })).toBeVisible();
-    await expect(page.getByText('Webhook')).toBeVisible();
-    await expect(page.getByTestId('observability-section')).toBeVisible();
-    await expect(page.getByTestId('google-signin-configured')).toBeVisible();
-    await expect(page.getByTestId('build-marker')).toBeVisible();
-    await expect(page.locator('body')).not.toContainText('public-client-id');
-    await expect(page.locator('body')).not.toContainText('access_token');
-    await expect(page.locator('body')).not.toContainText('client_secret');
-  });
 });

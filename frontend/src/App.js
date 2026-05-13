@@ -24,14 +24,12 @@ const Signup = lazy(() => import('./pages/Signup'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Automations = lazy(() => import('./pages/Automations'));
 const FlowBuilder = lazy(() => import('./pages/FlowBuilder'));
-const Broadcasting = lazy(() => import('./pages/Broadcasting'));
 const Comments = lazy(() => import('./pages/Comments'));
 const Settings = lazy(() => import('./pages/Settings'));
 const DmAutomation = lazy(() => import('./pages/DmAutomation'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
 const Terms = lazy(() => import('./pages/Terms'));
 const DataDeletion = lazy(() => import('./pages/DataDeletion'));
-const SystemHealth = lazy(() => import('./pages/SystemHealth'));
 const Billing = lazy(() => import('./pages/Billing'));
 const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
 const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
@@ -66,11 +64,9 @@ function App() {
                 <Route index element={<Dashboard />} />
                 <Route path="automations" element={<Automations />} />
                 <Route path="automations/:id" element={<FlowBuilder />} />
-                <Route path="broadcasting" element={<Broadcasting />} />
                 <Route path="comments" element={<Comments />} />
                 <Route path="dm-automation" element={<DmAutomation />} />
                 <Route path="settings" element={<Settings />} />
-                <Route path="system-health" element={<SystemHealth />} />
                 <Route path="billing" element={<Billing />} />
                 <Route path="admin" element={<AdminConsole />} />
                 <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
