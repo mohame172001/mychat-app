@@ -18,3 +18,18 @@ This gate intentionally does not add Paddle, Paymob, Stripe, checkout, subscript
 | Is there any P0/P1/P2 blocker before Billing? | no | no | docs/security-verification-matrix.md | Only P3 operational follow-ups remain. |
 
 Conclusion: Billing can start from a security-readiness standpoint. Future billing work must add provider-specific webhook signature verification, idempotency keys, raw payload redaction, server-side plan mutation only, and reconciliation tests before accepting real payments.
+
+## Red-Team Billing Abuse Delta
+
+| Check | Result | Evidence |
+|---|---:|---|
+| Frontend cannot set plan | yes | Admin/server-only plan mutation tests and placeholder-only billing smoke. |
+| Admin manual override precedence documented | yes | docs/billing-readiness-gate.md and effective limits tests. |
+| Custom allowance precedence documented | yes | backend/limit_overrides.py and admin allowance tests. |
+| Usage ledger/reservations authoritative | yes | usage reservation ledger tests. |
+| Plan downgrade behavior planned before provider integration | yes | Future billing note in this gate. |
+| Canceled/past_due/refund behavior planned before provider integration | yes | Future billing note in this gate. |
+| Webhook event idempotency pattern documented | yes | Webhook and reservation idempotency tests. |
+| Provider raw payload storage prohibited | yes | Scrubber policy and matrix LOG/BILL checks. |
+| Checkout success page will not activate plan directly | yes | Billing gate requires server-side provider webhook confirmation in future phase. |
+| Billing status endpoint must be auth-protected | yes | API inventory and billing gate requirement; no public billing mutation exists. |
