@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
-import { cachedApiGet, getCachedApiData } from '../lib/apiCache';
+import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 
 const DASHBOARD_TTL_MS = 45000;
@@ -38,14 +38,23 @@ const Dashboard = () => {
 
     const load = async () => {
       try {
-        const result = await cachedApiGet(
+        const result = await cachedApiGetSWR(
           cacheKey,
           () => api.get('/dashboard/summary', { timeout: 8000 }),
-          { ttlMs: DASHBOARD_TTL_MS }
+          {
+            ttlMs: DASHBOARD_TTL_MS,
+            maxStaleMs: 5 * 60 * 1000,
+            onUpdate: (data, updateResult) => {
+              if (alive) {
+                setStats(data);
+                setError(updateResult?.error ? 'Showing cached dashboard data. Refresh failed.' : '');
+              }
+            },
+          }
         );
         if (!alive) return;
         setStats(result.data);
-        setError(result.error ? 'Showing cached dashboard data. Refresh failed.' : '');
+        setError(result.error ? 'Showing cached dashboard data. Refresh failed.' : result.stale ? 'Refreshing dashboard data...' : '');
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
         if (alive) setError('Dashboard data could not be loaded.');

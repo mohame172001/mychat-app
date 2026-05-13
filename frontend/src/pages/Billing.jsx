@@ -5,7 +5,7 @@ import {
   CreditCard, RefreshCw, CheckCircle2, AlertTriangle, XCircle, Lock, Info,
 } from 'lucide-react';
 import api from '../lib/api';
-import { cachedApiGet, getCachedApiData } from '../lib/apiCache';
+import { cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../lib/analytics';
 import { useAuth } from '../context/AuthContext';
@@ -164,13 +164,17 @@ export default function Billing() {
     setError(null);
     try {
       const [planResp, plansResp] = await Promise.all([
-        cachedApiGet(billingCacheKey, () => api.get('/plan/current', { timeout: 8000 }), {
+        cachedApiGetSWR(billingCacheKey, () => api.get('/plan/current', { timeout: 8000 }), {
           ttlMs: 60000,
+          maxStaleMs: 5 * 60 * 1000,
           force,
+          onUpdate: setCurrent,
         }),
-        cachedApiGet(plansCacheKey, () => api.get('/plans', { timeout: 8000 }), {
+        cachedApiGetSWR(plansCacheKey, () => api.get('/plans', { timeout: 8000 }), {
           ttlMs: 300000,
+          maxStaleMs: 30 * 60 * 1000,
           force,
+          onUpdate: (data) => setPlans(data?.plans || []),
         }),
       ]);
       setCurrent(planResp.data);

@@ -5,7 +5,7 @@ import { Badge } from '../components/ui/badge';
 import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
-import { cachedApiGet, invalidateApiCache } from '../lib/apiCache';
+import { cachedApiGetSWR, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
@@ -68,7 +68,14 @@ const Comments = () => {
     try {
       const activeAccountKey = user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
       const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${statusFilter}:${pageToFetch}`;
-      const result = await cachedApiGet(
+      const applyData = (data) => {
+        const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
+        const incomingHasMore = data?.has_more ?? false;
+        setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);
+        setHasMore(incomingHasMore);
+        setPage(pageToFetch);
+      };
+      const result = await cachedApiGetSWR(
         cacheKey,
         async () => {
           const response = await api.get('/comments', {
@@ -76,17 +83,14 @@ const Comments = () => {
           });
           return response.data;
         },
-        { ttlMs: COMMENTS_TTL_MS, force: options.force === true },
+        {
+          ttlMs: COMMENTS_TTL_MS,
+          maxStaleMs: 2 * 60 * 1000,
+          force: options.force === true,
+          onUpdate: applyData,
+        },
       );
-      const data = result.data;
-      
-      // Fallback for older backend cache just in case
-      const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
-      const incomingHasMore = data.has_more ?? false;
-
-      setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);
-      setHasMore(incomingHasMore);
-      setPage(pageToFetch);
+      applyData(result.data);
     } catch (err) {
       console.error('[Comments] load failed', err);
       toast.error('Failed to load comments');

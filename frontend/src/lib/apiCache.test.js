@@ -1,5 +1,6 @@
 import {
   cachedApiGet,
+  cachedApiGetSWR,
   clearApiCache,
   getCachedApiData,
   invalidateApiCache,
@@ -97,5 +98,54 @@ describe('cachedApiGet', () => {
     });
 
     expect(getCachedApiData('forbidden:u1')).toBeUndefined();
+  });
+
+  test('SWR returns stale cached data immediately and refreshes in background', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1000);
+    const fetcher = jest
+      .fn()
+      .mockResolvedValueOnce({ data: { count: 1 } })
+      .mockResolvedValueOnce({ data: { count: 2 } });
+    const onUpdate = jest.fn();
+
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', fetcher, { ttlMs: 1000 });
+    jest.setSystemTime(2500);
+    const result = await cachedApiGetSWR('dashboard-summary:u1:acc1', fetcher, {
+      ttlMs: 1000,
+      maxStaleMs: 10000,
+      onUpdate,
+    });
+
+    expect(result.data).toEqual({ count: 1 });
+    expect(result.cached).toBe(true);
+    expect(result.stale).toBe(true);
+    expect(result.refreshing).toBe(true);
+    await result.promise;
+    expect(onUpdate).toHaveBeenCalledWith({ count: 2 }, expect.objectContaining({ cached: false }));
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toEqual({ count: 2 });
+    jest.useRealTimers();
+  });
+
+  test('SWR dedupes background refreshes for the same stale key', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1000);
+    const fetcher = jest
+      .fn()
+      .mockResolvedValueOnce({ data: { count: 1 } })
+      .mockResolvedValueOnce({ data: { count: 2 } });
+
+    await cachedApiGetSWR('comments:u1:acc1', fetcher, { ttlMs: 1000 });
+    jest.setSystemTime(2500);
+    const [a, b] = await Promise.all([
+      cachedApiGetSWR('comments:u1:acc1', fetcher, { ttlMs: 1000, maxStaleMs: 10000 }),
+      cachedApiGetSWR('comments:u1:acc1', fetcher, { ttlMs: 1000, maxStaleMs: 10000 }),
+    ]);
+
+    expect(a.data).toEqual({ count: 1 });
+    expect(b.data).toEqual({ count: 1 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await a.promise;
+    jest.useRealTimers();
   });
 });

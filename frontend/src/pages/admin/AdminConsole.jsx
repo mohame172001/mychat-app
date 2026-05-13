@@ -7,7 +7,7 @@ import {
   CheckCircle2, AlertTriangle, Lock, UserCog, BarChart3,
 } from 'lucide-react';
 import api from '../../lib/api';
-import { cachedApiGet, invalidateApiCache } from '../../lib/apiCache';
+import { cachedApiGetSWR, invalidateApiCache } from '../../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../../lib/analytics';
 import { useAuth } from '../../context/AuthContext';
@@ -168,10 +168,10 @@ function UsersTab({ onSelect }) {
       if (search.trim()) params.search = search.trim();
       if (planKey) params.plan_key = planKey;
       const cacheKey = `admin:users:${user?.id || 'anon'}:${page}:${pageSize}:${search.trim()}:${planKey || 'all'}`;
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get('/admin/users', { params }),
-        { ttlMs: ADMIN_CACHE_TTL_MS },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -314,10 +314,10 @@ function UserDetailTab({ userId, onBack, me }) {
     setLoadError('');
     try {
       const cacheKey = `admin:user-detail:${user?.id || 'anon'}:${userId}`;
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get(`/admin/users/${encodeURIComponent(userId)}/detail`),
-        { ttlMs: ADMIN_CACHE_TTL_MS },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
       );
       setData(result.data);
       setPlanKey(result.data?.plan?.plan_key || 'free');
@@ -785,10 +785,10 @@ function AdminsTab({ me }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         `admin:members:${user?.id || 'anon'}`,
         () => api.get('/admin/members'),
-        { ttlMs: ADMIN_CACHE_TTL_MS },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -983,10 +983,10 @@ function ReconciliationTab() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         `admin:metrics:${user?.id || 'anon'}:reconciliation`,
         () => api.get('/admin/metrics/reconciliation'),
-        { ttlMs: ADMIN_CACHE_TTL_MS },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -1088,10 +1088,10 @@ export default function AdminConsole() {
   const loadOverview = useCallback(async () => {
     setOverviewLoading(true);
     try {
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         `admin:overview:${user?.id || 'anon'}`,
         () => api.get('/admin/overview'),
-        { ttlMs: ADMIN_CACHE_TTL_MS },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setOverview },
       );
       setOverview(result.data);
     } catch (err) {

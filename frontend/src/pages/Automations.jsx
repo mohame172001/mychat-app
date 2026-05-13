@@ -12,7 +12,7 @@ import {
   Pencil, Trash2, UserPlus, Zap,
 } from 'lucide-react';
 import api from '../lib/api';
-import { cachedApiGet, getCachedApiData, invalidateApiCache } from '../lib/apiCache';
+import { cachedApiGet, cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
@@ -371,13 +371,22 @@ const Automations = () => {
     setRefreshing(Boolean(force));
     setLoadError('');
     try {
-      const result = await cachedApiGet(
+      const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get('/automations/summary', { timeout: 8000 }),
-        { ttlMs: AUTOMATIONS_TTL_MS, force }
+        {
+          ttlMs: AUTOMATIONS_TTL_MS,
+          maxStaleMs: 5 * 60 * 1000,
+          force,
+          onUpdate: (data, updateResult) => {
+            setList(data?.items || []);
+            setLoadError(updateResult?.error ? 'Showing cached automations. Refresh failed.' : '');
+          },
+        }
       );
       setList(result.data?.items || []);
       if (result.error) setLoadError('Showing cached automations. Refresh failed.');
+      else if (result.stale) setLoadError('Refreshing automations...');
     } catch (err) {
       setLoadError('Failed to load automations.');
       toast.error('Failed to load automations');

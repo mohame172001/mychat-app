@@ -19,6 +19,17 @@ export function getCachedApiData(key) {
   return entry?.data;
 }
 
+export function getApiCacheEntry(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  return {
+    data: entry.data,
+    updatedAt: entry.updatedAt || 0,
+    hasInFlightRequest: Boolean(entry.promise),
+    ageMs: entry.updatedAt ? now() - entry.updatedAt : null,
+  };
+}
+
 export function invalidateApiCache(prefix = '') {
   for (const key of cache.keys()) {
     if (!prefix || key.startsWith(prefix)) {
@@ -72,6 +83,46 @@ export async function cachedApiGet(key, fetcher, options = {}) {
     promise,
   });
   return promise;
+}
+
+export async function cachedApiGetSWR(key, fetcher, options = {}) {
+  const ttlMs = Number(options.ttlMs ?? 30000);
+  const maxStaleMs = Number(options.maxStaleMs ?? 300000);
+  const force = Boolean(options.force);
+  const onUpdate = typeof options.onUpdate === 'function' ? options.onUpdate : null;
+  const existing = cache.get(key);
+  const hasData = existing?.data !== undefined;
+  const ageMs = existing?.updatedAt ? now() - existing.updatedAt : Number.POSITIVE_INFINITY;
+  const fresh = hasData && ageMs < ttlMs;
+  const allowedStale = hasData && (maxStaleMs <= 0 || ageMs < maxStaleMs);
+
+  if (force || !allowedStale || !hasData) {
+    return cachedApiGet(key, fetcher, { ttlMs, force });
+  }
+  if (fresh) {
+    return { data: existing.data, cached: true, stale: false, refreshing: false };
+  }
+
+  if (!existing.promise) {
+    const promise = cachedApiGet(key, fetcher, { ttlMs, force: true })
+      .then((result) => {
+        if (onUpdate) onUpdate(result.data, result);
+        return result;
+      })
+      .catch((error) => {
+        if (onUpdate) onUpdate(existing.data, { data: existing.data, cached: true, stale: true, error });
+        return { data: existing.data, cached: true, stale: true, error };
+      });
+    cache.set(key, { ...existing, promise });
+  }
+
+  return {
+    data: existing.data,
+    cached: true,
+    stale: true,
+    refreshing: true,
+    promise: cache.get(key)?.promise,
+  };
 }
 
 export function resetApiCacheForTests() {

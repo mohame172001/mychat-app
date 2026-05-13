@@ -37,7 +37,7 @@ const AdminConsole = lazy(() => import('./pages/admin/AdminConsole'));
 const SpecificReplyDebug = lazy(() => import('./pages/admin/SpecificReplyDebug'));
 
 const PageLoading = () => (
-  <div className="min-h-screen w-full flex items-center justify-center text-slate-500">Loading...</div>
+  <div className="w-full p-6 text-sm text-slate-500">Loading...</div>
 );
 
 const ProtectedRoute = ({ children }) => {
