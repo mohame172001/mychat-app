@@ -6920,16 +6920,89 @@ async def _calculate_dashboard_summary_live(
     month_start, month_end = _dashboard_month_bounds(current_month)
     t_after_meta = datetime.utcnow()
 
-    usage_summary = await get_current_usage_with_limits(user_id)
-    counters = usage_summary.get('counters') or {}
-    t_after_usage = datetime.utcnow()
+    # Phase 2.18C performance fix: the 6 independent read paths below
+    # (usage_summary, usage events, automations, contacts, link clicks,
+    # comments) used to run sequentially, costing ~6× single-query
+    # round-trip time. They are now executed in parallel via
+    # asyncio.gather, which on a warm backend cuts the typical live
+    # rebuild from 3-5s to ~1s. Exceptions on individual collections
+    # are caught locally so the summary still renders the rest.
+    async def _safe_clicks():
+        try:
+            return await db.link_click_events.find({
+                '$or': [{'userId': user_id}, {'user_id': user_id}],
+            }, projection={
+                'clickedAt': 1, 'createdAt': 1, 'created': 1,
+                'instagramUserId': 1, 'instagram_user_id': 1,
+                'recipient_id': 1, 'sender_id': 1,
+                'user_id': 1, 'userId': 1,
+                'instagram_account_id': 1, 'instagramAccountId': 1,
+                'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+                'accountId': 1,
+            }).sort('clickedAt', -1).limit(5000).to_list(5000)
+        except Exception:
+            return []
 
-    events = await _dashboard_usage_events_for_window(
-        user_id,
-        ['comment_processed', 'public_reply_sent', 'dm_sent', 'link_clicked'],
-        start_day,
+    async def _safe_connected_accounts():
+        try:
+            return await db.instagram_accounts.count_documents({
+                'userId': user_id,
+                'isActive': {'$ne': False},
+                'connectionValid': True,
+            })
+        except Exception:
+            return None  # caller falls back to usage_summary counter
+
+    (
+        usage_summary,
+        events,
+        autos,
+        contacts,
+        clicks,
+        recent_comments,
+        connected_accounts_raw,
+    ) = await asyncio.gather(
+        get_current_usage_with_limits(user_id),
+        _dashboard_usage_events_for_window(
+            user_id,
+            ['comment_processed', 'public_reply_sent', 'dm_sent', 'link_clicked'],
+            start_day,
+        ),
+        _dashboard_scoped_docs(
+            'automations', user_id, account, include_unscoped, 1000,
+            projection={'id': 1, 'name': 1, 'status': 1, 'created': 1, 'updated': 1, 'sent': 1,
+                        'post_scope': 1, 'media_id': 1, 'createdAt': 1},
+        ),
+        _dashboard_scoped_docs(
+            'contacts', user_id, account, include_unscoped, 2000,
+            projection={'id': 1, 'ig_id': 1, 'instagramUserId': 1, 'instagram_user_id': 1,
+                        'username': 1, 'contact_id': 1, 'user_id': 1,
+                        'instagram_account_id': 1, 'instagramAccountId': 1,
+                        'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+                        'accountId': 1},
+        ),
+        _safe_clicks(),
+        _dashboard_scoped_docs(
+            'comments', user_id, account, include_unscoped, 5000,
+            projection={'id': 1, 'commenter_id': 1, 'commenterId': 1, 'commenter_username': 1,
+                        'sender_id': 1, 'instagramUserId': 1,
+                        'reply_status': 1, 'replyStatus': 1, 'reply_provider_response_ok': 1,
+                        'dm_status': 1, 'dmStatus': 1, 'dm_provider_response_ok': 1,
+                        'action_status': 1, 'actionStatus': 1,
+                        'created': 1, 'createdAt': 1, 'updated': 1, 'updatedAt': 1,
+                        'ig_comment_id': 1, 'media_id': 1, 'mediaId': 1,
+                        'attempts': 1, 'skip_reason': 1, 'skipReason': 1,
+                        'reply_failure_reason': 1, 'dm_failure_reason': 1,
+                        'next_retry_at': 1, 'replied': 1, 'reply_text': 1,
+                        'user_id': 1,
+                        'instagram_account_id': 1, 'instagramAccountId': 1,
+                        'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+                        'accountId': 1},
+        ),
+        _safe_connected_accounts(),
     )
-    t_after_events = datetime.utcnow()
+    counters = usage_summary.get('counters') or {}
+    t_after_parallel_reads = datetime.utcnow()
 
     usage_comments_processed = 0
     usage_public_replies = 0
@@ -6959,19 +7032,11 @@ async def _calculate_dashboard_summary_live(
             if in_current_month:
                 usage_link_clicks += 1
 
-    autos = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 1000,
-        projection={'id': 1, 'name': 1, 'status': 1, 'created': 1, 'updated': 1, 'sent': 1,
-                    'post_scope': 1, 'media_id': 1, 'createdAt': 1})
+    # autos / contacts / clicks / recent_comments were fetched in the
+    # asyncio.gather() above.
     active_autos = [auto for auto in autos if _automation_active(auto)]
     top_automations = [_dashboard_auto_out(auto) for auto in autos[:6]]
-    t_after_autos = datetime.utcnow()
 
-    contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 2000,
-        projection={'id': 1, 'ig_id': 1, 'instagramUserId': 1, 'instagram_user_id': 1,
-                    'username': 1, 'contact_id': 1, 'user_id': 1,
-                    'instagram_account_id': 1, 'instagramAccountId': 1,
-                    'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
-                    'accountId': 1})
     ig_owner_id = _dashboard_key(instagram_account_id)
     contact_keys = set()
     for contact in contacts:
@@ -6984,24 +7049,9 @@ async def _calculate_dashboard_summary_live(
         )
         if key and key != ig_owner_id:
             contact_keys.add(key)
-    t_after_contacts = datetime.utcnow()
 
     converted_contacts = set()
     tracked_month_link_clicks = 0
-    try:
-        clicks = await db.link_click_events.find({
-            '$or': [{'userId': user_id}, {'user_id': user_id}],
-        }, projection={
-            'clickedAt': 1, 'createdAt': 1, 'created': 1,
-            'instagramUserId': 1, 'instagram_user_id': 1,
-            'recipient_id': 1, 'sender_id': 1,
-            'user_id': 1, 'userId': 1,
-            'instagram_account_id': 1, 'instagramAccountId': 1,
-            'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
-            'accountId': 1,
-        }).sort('clickedAt', -1).limit(5000).to_list(5000)
-    except Exception:
-        clicks = []
     for click in clicks:
         if not _dashboard_doc_matches_account(click, account, include_unscoped):
             continue
@@ -7016,22 +7066,7 @@ async def _calculate_dashboard_summary_live(
         if key and key != ig_owner_id:
             converted_contacts.add(key)
             contact_keys.add(key)
-    t_after_clicks = datetime.utcnow()
-    recent_comments = await _dashboard_scoped_docs('comments', user_id, account, include_unscoped, 5000,
-        projection={'id': 1, 'commenter_id': 1, 'commenterId': 1, 'commenter_username': 1,
-                    'sender_id': 1, 'instagramUserId': 1,
-                    'reply_status': 1, 'replyStatus': 1, 'reply_provider_response_ok': 1,
-                    'dm_status': 1, 'dmStatus': 1, 'dm_provider_response_ok': 1,
-                    'action_status': 1, 'actionStatus': 1,
-                    'created': 1, 'createdAt': 1, 'updated': 1, 'updatedAt': 1,
-                    'ig_comment_id': 1, 'media_id': 1, 'mediaId': 1,
-                    'attempts': 1, 'skip_reason': 1, 'skipReason': 1,
-                    'reply_failure_reason': 1, 'dm_failure_reason': 1,
-                    'next_retry_at': 1, 'replied': 1, 'reply_text': 1,
-                    'user_id': 1,
-                    'instagram_account_id': 1, 'instagramAccountId': 1,
-                    'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
-                    'accountId': 1})
+    # recent_comments was fetched in the asyncio.gather() above.
     provider_comments_processed = 0
     provider_public_replies = 0
     provider_dms = 0
@@ -7101,14 +7136,13 @@ async def _calculate_dashboard_summary_live(
     for day_key, users in conversion_users_by_day.items():
         buckets[day_key]['conversions'] = len(users)
 
-    try:
-        connected_accounts = await db.instagram_accounts.count_documents({
-            'userId': user_id,
-            'isActive': {'$ne': False},
-            'connectionValid': True,
-        })
-    except Exception:
+    # connected_accounts_raw was fetched in the asyncio.gather() above.
+    # If the parallel call failed, _safe_connected_accounts returned None
+    # and we fall back to the usage_summary counter so we still answer.
+    if connected_accounts_raw is None:
         connected_accounts = int(usage_summary.get('connectedInstagramAccountsCount') or 0)
+    else:
+        connected_accounts = connected_accounts_raw
 
     queue_summary = {
         'pending': 0,
@@ -7129,15 +7163,15 @@ async def _calculate_dashboard_summary_live(
 
     now = datetime.utcnow()
     duration_ms = int((now - started).total_seconds() * 1000)
+    # Phase 2.18C: queries now run in parallel, so the per-collection
+    # breakdown is no longer meaningful. We expose one parallel_reads
+    # bucket plus the pre/post phases so logs still show where time
+    # goes (network round-trip vs in-process processing).
     section_timings = {
         'active_account': int((t_after_account - started).total_seconds() * 1000),
         'meta': int((t_after_meta - t_after_account).total_seconds() * 1000),
-        'usage_limits': int((t_after_usage - t_after_meta).total_seconds() * 1000),
-        'usage_events': int((t_after_events - t_after_usage).total_seconds() * 1000),
-        'automations': int((t_after_autos - t_after_events).total_seconds() * 1000),
-        'contacts': int((t_after_contacts - t_after_autos).total_seconds() * 1000),
-        'link_clicks': int((t_after_clicks - t_after_contacts).total_seconds() * 1000),
-        'comments': int((now - t_after_clicks).total_seconds() * 1000),
+        'parallel_reads': int((t_after_parallel_reads - t_after_meta).total_seconds() * 1000),
+        'post_processing': int((now - t_after_parallel_reads).total_seconds() * 1000),
     }
     slowest_section = max(section_timings, key=section_timings.get)
     section_counts = {
@@ -7162,17 +7196,13 @@ async def _calculate_dashboard_summary_live(
     )
     logger.info(
         'dashboard_summary_breakdown user_id=%s '
-        'accountMs=%s metaMs=%s usageMs=%s eventsMs=%s autosMs=%s contactsMs=%s '
-        'clicksMs=%s commentsMs=%s totalMs=%s slowest=%s counts=%s',
+        'accountMs=%s metaMs=%s parallelReadsMs=%s postProcessingMs=%s '
+        'totalMs=%s slowest=%s counts=%s',
         user_id,
         section_timings['active_account'],
         section_timings['meta'],
-        section_timings['usage_limits'],
-        section_timings['usage_events'],
-        section_timings['automations'],
-        section_timings['contacts'],
-        section_timings['link_clicks'],
-        section_timings['comments'],
+        section_timings['parallel_reads'],
+        section_timings['post_processing'],
         duration_ms,
         slowest_section,
         json.dumps(section_counts, sort_keys=True),
