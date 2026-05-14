@@ -8,6 +8,8 @@ const AUTOMATIONS_TTL_MS = 90 * 1000;
 const AUTOMATIONS_MAX_STALE_MS = 5 * 60 * 1000;
 const ACCOUNTS_TTL_MS = 180 * 1000;
 const ACCOUNTS_MAX_STALE_MS = 10 * 60 * 1000;
+const ADMIN_TTL_MS = 60 * 1000;
+const ADMIN_MAX_STALE_MS = 2 * 60 * 1000;
 
 let scheduledScope = '';
 let scheduledPromise = null;
@@ -46,7 +48,7 @@ export function scheduleCoreAppWarmup(user, options = {}) {
   const keys = getCoreWarmupCacheKeys(user);
   scheduledPromise = new Promise((resolve) => {
     runWhenIdle(async () => {
-      await Promise.allSettled([
+      const tasks = [
         cachedApiGetSWR(keys.dashboard, () => api.get('/dashboard/summary'), {
           ttlMs: DASHBOARD_TTL_MS,
           maxStaleMs: DASHBOARD_MAX_STALE_MS,
@@ -62,7 +64,26 @@ export function scheduleCoreAppWarmup(user, options = {}) {
           maxStaleMs: ACCOUNTS_MAX_STALE_MS,
           persist: true,
         }),
-      ]);
+      ];
+      // Admins also see Admin Overview by default; prefetch the
+      // top-level admin sections so the console renders instantly
+      // when they click into it. Per-section caches still revalidate
+      // in the background when the admin opens each tab.
+      if (isAdmin) {
+        tasks.push(
+          cachedApiGetSWR(
+            `admin:overview:${user.id}`,
+            () => api.get('/admin/overview'),
+            { ttlMs: ADMIN_TTL_MS, maxStaleMs: ADMIN_MAX_STALE_MS, persist: true },
+          ),
+          cachedApiGetSWR(
+            `admin:members:${user.id}`,
+            () => api.get('/admin/members'),
+            { ttlMs: ADMIN_TTL_MS, maxStaleMs: ADMIN_MAX_STALE_MS, persist: true },
+          ),
+        );
+      }
+      await Promise.allSettled(tasks);
       resolve();
     });
   });

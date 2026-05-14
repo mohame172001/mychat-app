@@ -51,6 +51,25 @@ const features = [
 const Landing = () => {
   const [menuOpen, setMenuOpen] = useState(false);
 
+  // Smooth-scroll anchor handler. Native <a href="#hash"> scrolls only
+  // when the URL fragment changes; if the user is already at /#how the
+  // second click is a no-op. We also offset by the 64 px fixed nav so
+  // the target section heading is not hidden behind the nav.
+  const scrollToSection = (id) => (event) => {
+    event?.preventDefault?.();
+    setMenuOpen(false);
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const el = document.getElementById(id);
+    if (!el) return;
+    const NAV_OFFSET = 72;
+    const top = el.getBoundingClientRect().top + window.pageYOffset - NAV_OFFSET;
+    window.scrollTo({ top, behavior: 'smooth' });
+    // Reflect the section in the URL without triggering router navigation.
+    if (window.history?.replaceState) {
+      window.history.replaceState(null, '', `#${id}`);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-white text-slate-900 overflow-x-hidden">
       <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-white/80 border-b border-slate-100">
@@ -62,8 +81,8 @@ const Landing = () => {
             <span className="text-xl font-bold font-display tracking-tight">mychat</span>
           </Link>
           <div className="hidden md:flex items-center gap-8">
-            <a href="#features" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Features</a>
-            <a href="#how" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">How it works</a>
+            <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Features</a>
+            <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">How it works</a>
             <Link to="/privacy" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Privacy</Link>
             <Link to="/terms" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Terms</Link>
           </div>
@@ -82,8 +101,8 @@ const Landing = () => {
         {menuOpen && (
           <div className="md:hidden border-t border-slate-100 bg-white">
             <div className="px-6 py-4 flex flex-col gap-4">
-              <a href="#features" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Features</a>
-              <a href="#how" onClick={() => setMenuOpen(false)} className="text-sm font-medium">How it works</a>
+              <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium">Features</a>
+              <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium">How it works</a>
               <Link to="/privacy" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Privacy</Link>
               <Link to="/terms" onClick={() => setMenuOpen(false)} className="text-sm font-medium">Terms</Link>
               <Link to="/login"><Button variant="outline" className="w-full">Log in</Button></Link>

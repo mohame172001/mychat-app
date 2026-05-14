@@ -4,6 +4,14 @@ const PERSISTABLE_PREFIXES = [
   'dashboard-summary:',
   'automations-summary:',
   'instagram-accounts:',
+  // Admin console snapshots — same user as the cache key, sanitized of
+  // tokens / passwords / credentials by FORBIDDEN_PERSIST_KEYS. Stored
+  // per-admin so non-admin users never get an admin snapshot.
+  'admin:overview:',
+  'admin:users:',
+  'admin:user-detail:',
+  'admin:members:',
+  'admin:metrics:',
 ];
 const FORBIDDEN_PERSIST_KEYS = new Set([
   'access_token',

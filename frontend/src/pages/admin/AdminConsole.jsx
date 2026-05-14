@@ -171,7 +171,7 @@ function UsersTab({ onSelect }) {
       const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get('/admin/users', { params }),
-        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -317,7 +317,7 @@ function UserDetailTab({ userId, onBack, me }) {
       const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get(`/admin/users/${encodeURIComponent(userId)}/detail`),
-        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setData },
       );
       setData(result.data);
       setPlanKey(result.data?.plan?.plan_key || 'free');
@@ -788,7 +788,7 @@ function AdminsTab({ me }) {
       const result = await cachedApiGetSWR(
         `admin:members:${user?.id || 'anon'}`,
         () => api.get('/admin/members'),
-        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -986,7 +986,7 @@ function ReconciliationTab() {
       const result = await cachedApiGetSWR(
         `admin:metrics:${user?.id || 'anon'}:reconciliation`,
         () => api.get('/admin/metrics/reconciliation'),
-        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setData },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setData },
       );
       setData(result.data);
     } catch (err) {
@@ -1091,7 +1091,7 @@ export default function AdminConsole() {
       const result = await cachedApiGetSWR(
         `admin:overview:${user?.id || 'anon'}`,
         () => api.get('/admin/overview'),
-        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, onUpdate: setOverview },
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setOverview },
       );
       setOverview(result.data);
     } catch (err) {

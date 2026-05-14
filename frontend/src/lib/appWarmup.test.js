@@ -19,6 +19,12 @@ describe('app boot warmup wiring', () => {
     expect((source.match(/persist: true/g) || []).length).toBeGreaterThanOrEqual(3);
   });
 
+  test('admin users also warm admin overview + admin members', () => {
+    expect(source).toContain('/admin/overview');
+    expect(source).toContain('/admin/members');
+    expect(source).toContain('if (isAdmin)');
+  });
+
   test('runs low-priority and dedupes repeated warmups by user account scope', () => {
     expect(source).toContain('requestIdleCallback');
     expect(source).toContain('setTimeout');
