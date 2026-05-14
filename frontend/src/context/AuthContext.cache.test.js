@@ -6,7 +6,9 @@ describe('auth cache isolation wiring', () => {
     const source = fs.readFileSync(path.join(__dirname, 'AuthContext.jsx'), 'utf8');
 
     expect(source).toContain("import { clearApiCache } from '../lib/apiCache';");
+    expect(source).toContain("import { scheduleCoreAppWarmup } from '../lib/appWarmup';");
     expect((source.match(/clearApiCache\(\);/g) || []).length).toBeGreaterThanOrEqual(5);
+    expect((source.match(/scheduleCoreAppWarmup\(/g) || []).length).toBeGreaterThanOrEqual(5);
   });
 
   test('401 interceptor clears user-scoped API cache before redirecting', () => {

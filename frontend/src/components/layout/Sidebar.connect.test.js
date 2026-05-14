@@ -15,6 +15,11 @@ test('account switch uses client navigation instead of full page reload', () => 
   const source = fs.readFileSync(path.join(__dirname, 'Sidebar.jsx'), 'utf8');
 
   expect(source).toContain('useNavigate');
+  expect(source).toContain('cachedApiGetSWR');
+  expect(source).toContain('instagram-accounts');
   expect(source).toContain("invalidateApiCache('dashboard-summary')");
+  expect(source).toContain("invalidateApiCache('automations-summary')");
+  expect(source).toContain("invalidateApiCache('comments:list')");
+  expect(source).toContain('scheduleCoreAppWarmup');
   expect(source).not.toContain('window.location.assign');
 });

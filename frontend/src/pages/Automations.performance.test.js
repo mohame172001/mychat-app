@@ -9,6 +9,8 @@ describe('Automations performance wiring', () => {
     expect(source).toContain('cachedApiGet');
     expect(source).toContain('automations-summary');
     expect(source).toContain('AUTOMATIONS_TTL_MS');
+    expect(source).toContain('persist: true');
+    expect(source).toContain('maxStaleMs: AUTOMATIONS_MAX_STALE_MS');
     expect(source).not.toContain("api.get('/automations')");
   });
 

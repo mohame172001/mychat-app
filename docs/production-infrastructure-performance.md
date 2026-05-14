@@ -56,6 +56,19 @@ Frontend safe perf log:
 
 This log intentionally contains route and timing metadata only.
 
+## Phase 2.18 Frontend Snapshot Layer
+
+The frontend now has a browser-persistent, opt-in snapshot layer for safe app data. It is designed to remove the refresh/new-tab penalty caused by memory-only cache:
+
+- dashboard summary: 60s fresh TTL, 5m max stale.
+- automations summary/list: 90s fresh TTL, 5m max stale.
+- comments first page/filter: 20s fresh TTL, 2m max stale.
+- Instagram accounts: 180s fresh TTL, 10m max stale.
+
+The cache persists only successful JSON responses for allowlisted user/account-scoped keys. It clears on logout and matching invalidations, and it does not persist tokens, passwords, reset tokens, secrets, raw provider payloads, 401/403 responses, 5xx responses, or HTML error pages.
+
+This improves perceived first-load UX after browser Refresh, but it does not replace the always-on backend requirement. If the backend container sleeps, background refresh and any uncached route still pay cold-start latency.
+
 ## Production Measurement Procedure
 
 After deploy:

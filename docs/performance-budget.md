@@ -7,12 +7,14 @@ These are operating targets for MyChat before Billing. They are not hard CI gate
 - Public page shell visible: under 1.5s on a normal connection.
 - Authenticated route shell visible: under 1.5s after auth bootstrap.
 - Cached route data visible: immediate or under 300ms.
+- Restored route data after browser refresh/new tab: immediate or under 300ms when a safe persistent snapshot is within max stale.
 - No major route should show a blank white page while API data loads.
 - No infinite spinner without an error or retry path.
 - Manual Refresh always bypasses cache.
 - Mutations invalidate only affected cache prefixes.
 - Navigation must not use `window.location.assign` for normal in-app route changes.
 - Failed, HTML, 401, 403, 404, or 500 responses must not be cached as data.
+- Auth tokens, passwords, reset tokens, provider payloads, Graph raw bodies, and secrets must not be persisted by the app data cache.
 
 ## API Targets
 
@@ -27,6 +29,7 @@ These are operating targets for MyChat before Billing. They are not hard CI gate
 ## API Count Targets
 
 - Dashboard: 1 primary summary call on mount; cached navigation should render immediately and refresh in background.
+- App boot: after authenticated restore/login/signup, prefetch core Dashboard, Automations, Comments first-page, and Instagram accounts data once per user/account scope using low-priority idle work.
 - Automations: 1 primary summary call; profile/media/detail calls only when needed.
 - Comments: 1 bounded list call per filter/page plus websocket connection.
 - Billing: current plan and plan catalog may load in parallel.

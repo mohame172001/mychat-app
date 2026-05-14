@@ -14,6 +14,8 @@ describe('Comments performance wiring', () => {
     expect(source).toContain('${activeAccountKey}');
     expect(source).not.toContain('${statusFilter}');
     expect(source).toContain('COMMENTS_MAX_STALE_MS');
+    expect(source).toContain('getCachedApiData');
+    expect(source).toContain('persist: pageToFetch === 1');
   });
 
   test('manual refresh invalidates the comments cache and forces refetch', () => {

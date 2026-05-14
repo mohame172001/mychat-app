@@ -5,7 +5,7 @@ import { Badge } from '../components/ui/badge';
 import { AtSign, RefreshCw, Send, Wifi, WifiOff, CheckCircle2, Filter, AlertTriangle, Clock, Repeat, ShieldX } from 'lucide-react';
 import api, { API_BASE } from '../lib/api';
 import { toast } from 'sonner';
-import { cachedApiGetSWR, invalidateApiCache } from '../lib/apiCache';
+import { cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
@@ -46,8 +46,13 @@ function statusBadge(c) {
 
 const Comments = () => {
   const { user } = useAuth();
-  const [comments, setComments] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const activeAccountKey = user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
+  const initialCommentsCacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:unreplied:1`;
+  const initialCommentsSnapshot = getCachedApiData(initialCommentsCacheKey, { maxStaleMs: COMMENTS_MAX_STALE_MS });
+  const [comments, setComments] = useState(() => (
+    Array.isArray(initialCommentsSnapshot) ? initialCommentsSnapshot : (initialCommentsSnapshot?.comments || [])
+  ));
+  const [loading, setLoading] = useState(!initialCommentsSnapshot);
   const [loadingMore, setLoadingMore] = useState(false);
   const [replyText, setReplyText] = useState({});
   const [sending, setSending] = useState({});
@@ -63,19 +68,26 @@ const Comments = () => {
   const wsGaveUp = useRef(false);
 
   const fetchComments = useCallback(async (pageToFetch, isReset, options = {}) => {
-    if (isReset) setLoading(true);
-    else setLoadingMore(true);
+    const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
+    const applyData = (data) => {
+      const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
+      const incomingHasMore = data?.has_more ?? false;
+      setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);
+      setHasMore(incomingHasMore);
+      setPage(pageToFetch);
+    };
+
+    const cached = getCachedApiData(cacheKey, { maxStaleMs: COMMENTS_MAX_STALE_MS });
+    if (isReset && cached && !options.force) {
+      applyData(cached);
+      setLoading(false);
+    } else if (isReset) {
+      setLoading(true);
+    } else {
+      setLoadingMore(true);
+    }
 
     try {
-      const activeAccountKey = user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
-      const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
-      const applyData = (data) => {
-        const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
-        const incomingHasMore = data?.has_more ?? false;
-        setComments(prev => isReset ? incomingComments : [...prev, ...incomingComments]);
-        setHasMore(incomingHasMore);
-        setPage(pageToFetch);
-      };
       const result = await cachedApiGetSWR(
         cacheKey,
         async () => {
@@ -88,6 +100,7 @@ const Comments = () => {
           ttlMs: COMMENTS_TTL_MS,
           maxStaleMs: COMMENTS_MAX_STALE_MS,
           force: options.force === true,
+          persist: pageToFetch === 1,
           onUpdate: applyData,
         },
       );
@@ -99,7 +112,7 @@ const Comments = () => {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [unrepliedOnly, user?.id, user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
+  }, [unrepliedOnly, user?.id, activeAccountKey]);
 
   const connectWs = useCallback(() => {
     if (wsGaveUp.current) return;

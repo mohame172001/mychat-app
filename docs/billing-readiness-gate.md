@@ -35,6 +35,7 @@ Billing also remains **BLOCKED** on final production performance proof:
 - Backend health measured warm at 180-183 ms after an initial 477 ms request from the workstation.
 - `GET /api/dashboard/summary` now emits safe timing headers and safe frontend perf logs so authenticated dashboard timing can be measured without exposing sensitive data.
 - `GET /api/dashboard/summary` now uses a `dashboard_summaries` read-through snapshot when available: `read_model`, `stale_read_model`, or `rebuilt`.
+- Phase 2.18 adds frontend persistent safe snapshots for dashboard, automations, comments first page/filter, and sanitized Instagram accounts, plus low-priority app boot prefetch after auth restore/login/signup. This fixes the prior memory-only cache limitation where browser Refresh or a new tab had to reload every page from scratch.
 - Railway CLI access was unavailable locally (`invalid_grant`), so App Sleeping / always-on status must be verified in the Railway dashboard by the operator.
 - Billing must not start until either:
   - authenticated dashboard warm p50 <= 500 ms and p95 <= 1200 ms with route usable render <= 2s, or

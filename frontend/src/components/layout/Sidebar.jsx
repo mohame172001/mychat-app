@@ -19,8 +19,9 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
 import { useIsAdmin } from '../../lib/useIsAdmin';
-import { invalidateApiCache } from '../../lib/apiCache';
+import { cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../../lib/apiCache';
 import { preloadRoute } from '../../lib/routePreloader';
+import { scheduleCoreAppWarmup } from '../../lib/appWarmup';
 
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
@@ -34,7 +35,10 @@ export const navItems = [
 const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
   const navigate = useNavigate();
-  const [instagramAccounts, setInstagramAccounts] = useState([]);
+  const accountsCacheKey = `instagram-accounts:${user?.id || 'anon'}`;
+  const [instagramAccounts, setInstagramAccounts] = useState(() => (
+    getCachedApiData(accountsCacheKey, { maxStaleMs: 10 * 60 * 1000 })?.accounts || []
+  ));
   const [switchingAccount, setSwitchingAccount] = useState(false);
   const { isAdmin } = useIsAdmin();
 
@@ -42,7 +46,19 @@ const Sidebar = () => {
     let alive = true;
     const loadAccounts = async () => {
       try {
-        const { data } = await api.get('/instagram/accounts');
+        const result = await cachedApiGetSWR(
+          accountsCacheKey,
+          () => api.get('/instagram/accounts'),
+          {
+            ttlMs: 180 * 1000,
+            maxStaleMs: 10 * 60 * 1000,
+            persist: true,
+            onUpdate: (data) => {
+              if (alive) setInstagramAccounts(data?.accounts || []);
+            },
+          }
+        );
+        const data = result.data;
         if (alive) setInstagramAccounts(data?.accounts || []);
       } catch {
         if (alive) setInstagramAccounts([]);
@@ -54,7 +70,7 @@ const Sidebar = () => {
     return () => {
       alive = false;
     };
-  }, [user?.instagramConnected, user?.instagramHandle]);
+  }, [accountsCacheKey, user?.instagramConnected, user?.instagramHandle]);
 
   const currentAccount = instagramAccounts.find(account => account.active || account.isCurrent) || instagramAccounts[0];
   const currentAccountName = currentAccount?.username
@@ -69,8 +85,12 @@ const Sidebar = () => {
     setSwitchingAccount(true);
     try {
       await api.post(`/instagram/accounts/${account.id}/activate`);
-      await refreshUser?.();
+      const updatedUser = await refreshUser?.();
+      invalidateApiCache('instagram-accounts');
       invalidateApiCache('dashboard-summary');
+      invalidateApiCache('automations-summary');
+      invalidateApiCache('comments:list');
+      scheduleCoreAppWarmup(updatedUser || user);
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
       navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {

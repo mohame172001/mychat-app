@@ -46,7 +46,18 @@ The live calculation remains as the rebuild/fallback source. It preserves legacy
 
 ## Frontend UX Contract
 
-The frontend shows cached/snapshot dashboard data immediately when it is within max stale and refreshes in the background. Product decision: do not show visible freshness labels such as "Updated X ago", "Last updated", or Arabic equivalents. If background refresh fails while cached data exists, show only:
+The frontend shows cached/snapshot dashboard data immediately when it is within max stale and refreshes in the background. Phase 2.18 extends this from memory-only cache to opt-in persistent safe browser snapshots for:
+
+- dashboard summary
+- automations summary/list
+- comments first page/filter
+- sanitized Instagram accounts list
+
+Persistent snapshots are user/account scoped and are cleared on logout, account switch, or matching cache invalidation. The cache layer does not persist auth tokens, passwords, reset tokens, provider payloads, HTML responses, 401/403 responses, or 5xx responses.
+
+After auth bootstrap restores `mychat_user`, the app warms core route chunks and data for Dashboard, Automations, Comments, and Instagram accounts using low-priority idle prefetch. This is what makes refresh/new-tab UX materially different from memory-only SWR.
+
+Product decision: do not show visible freshness labels such as "Updated X ago", "Last updated", or Arabic equivalents. If background refresh fails while cached data exists, show only:
 
 `Couldn't refresh. Showing the latest available data.`
 

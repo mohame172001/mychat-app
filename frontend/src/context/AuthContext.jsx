@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../lib/api';
 import analytics from '../lib/analytics';
 import { clearApiCache } from '../lib/apiCache';
+import { scheduleCoreAppWarmup } from '../lib/appWarmup';
 
 const AuthContext = createContext(null);
 
@@ -13,10 +14,14 @@ export const AuthProvider = ({ children }) => {
     const init = async () => {
       const token = localStorage.getItem('mychat_token');
       const stored = localStorage.getItem('mychat_user');
+      let restoredUser = null;
       if (token && stored) {
         try {
           const parsed = JSON.parse(stored);
+          restoredUser = parsed;
           setUser(parsed);
+          setLoading(false);
+          scheduleCoreAppWarmup(parsed);
           // Restore analytics identity for an already-authenticated session.
           analytics.identify({ id: parsed.id });
         } catch (err) {
@@ -29,12 +34,13 @@ export const AuthProvider = ({ children }) => {
           setUser(data);
           localStorage.setItem('mychat_user', JSON.stringify(data));
           analytics.identify({ id: data.id });
+          scheduleCoreAppWarmup(data);
         } catch (err) {
           // Non-fatal: token may be expired; api interceptor handles redirect.
           console.warn('[Auth] /auth/me refresh failed:', err?.response?.status);
         }
       }
-      setLoading(false);
+      if (!restoredUser) setLoading(false);
     };
     init();
   }, []);
@@ -45,6 +51,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    scheduleCoreAppWarmup(data.user);
     // Phase 2.5 funnel events. analytics no-ops when PostHog is disabled.
     analytics.identify({ id: data.user.id });
     analytics.capture('login_completed', {});
@@ -57,6 +64,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    scheduleCoreAppWarmup(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('signup_completed', {});
     return data.user;
@@ -74,6 +82,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    scheduleCoreAppWarmup(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('login_completed', { method: 'google' });
     return data.user;
@@ -92,6 +101,7 @@ export const AuthProvider = ({ children }) => {
       const { data } = await api.get('/auth/me');
       setUser(data);
       localStorage.setItem('mychat_user', JSON.stringify(data));
+      scheduleCoreAppWarmup(data);
       return data;
     } catch (err) {
       console.warn('[Auth] refreshUser failed:', err?.response?.status);

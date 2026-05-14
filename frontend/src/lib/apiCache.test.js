@@ -2,6 +2,7 @@ import {
   cachedApiGet,
   cachedApiGetSWR,
   clearApiCache,
+  clearApiMemoryCacheForTests,
   getCachedApiData,
   invalidateApiCache,
   resetApiCacheForTests,
@@ -10,6 +11,8 @@ import {
 describe('cachedApiGet', () => {
   beforeEach(() => {
     resetApiCacheForTests();
+    window.localStorage.clear();
+    jest.useRealTimers();
   });
 
   test('dedupes simultaneous identical requests', async () => {
@@ -182,5 +185,89 @@ describe('cachedApiGet', () => {
     expect(result.cached).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(2);
     jest.useRealTimers();
+  });
+
+  test('persistent safe snapshots survive an in-memory cache reset', async () => {
+    const fetcher = jest.fn(() => Promise.resolve({ data: { totalContacts: 4 } }));
+
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', fetcher, {
+      ttlMs: 1000,
+      maxStaleMs: 300000,
+      persist: true,
+    });
+    clearApiMemoryCacheForTests();
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1', { maxStaleMs: 300000 })).toEqual({ totalContacts: 4 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  test('expired persistent snapshots are not returned as usable data', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1000);
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({ data: { totalContacts: 4 } }), {
+      ttlMs: 1000,
+      maxStaleMs: 2000,
+      persist: true,
+    });
+    clearApiMemoryCacheForTests();
+    jest.setSystemTime(5000);
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1', { maxStaleMs: 2000 })).toBeUndefined();
+    jest.useRealTimers();
+  });
+
+  test('failed and html responses are never persisted', async () => {
+    await expect(cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+      data: { detail: 'server_error' },
+    }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
+
+    await expect(cachedApiGetSWR('automations-summary:u1:acc1', () => ({
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+      data: '<html />',
+    }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
+
+    clearApiMemoryCacheForTests();
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
+    expect(getCachedApiData('automations-summary:u1:acc1')).toBeUndefined();
+  });
+
+  test('logout-style clear removes persisted snapshots', async () => {
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({ data: { count: 1 } }), { persist: true });
+    await cachedApiGetSWR('comments:list:u1:acc1:unreplied:1', () => ({ data: { comments: [] } }), { persist: true });
+
+    clearApiCache();
+
+    clearApiMemoryCacheForTests();
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
+    expect(getCachedApiData('comments:list:u1:acc1:unreplied:1')).toBeUndefined();
+  });
+
+  test('account-scoped invalidation removes only matching persisted snapshots', async () => {
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({ data: { count: 1 } }), { persist: true });
+    await cachedApiGetSWR('dashboard-summary:u1:acc2', () => ({ data: { count: 2 } }), { persist: true });
+
+    invalidateApiCache('dashboard-summary:u1:acc1');
+    clearApiMemoryCacheForTests();
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
+    expect(getCachedApiData('dashboard-summary:u1:acc2')).toEqual({ count: 2 });
+  });
+
+  test('forbidden token-like fields are redacted before persistence', async () => {
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({
+      data: {
+        ok: true,
+        access_token: 'secret-token',
+        nested: { password: 'secret-password', count: 1 },
+      },
+    }), { persist: true });
+
+    clearApiMemoryCacheForTests();
+
+    expect(getCachedApiData('dashboard-summary:u1:acc1')).toEqual({ ok: true, nested: { count: 1 } });
   });
 });

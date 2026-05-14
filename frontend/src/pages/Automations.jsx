@@ -315,10 +315,10 @@ const Automations = () => {
     user?.id || 'anon',
     user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active',
   ].join(':');
-  const [list, setList] = useState(() => getCachedApiData(cacheKey)?.items || []);
+  const [list, setList] = useState(() => getCachedApiData(cacheKey, { maxStaleMs: AUTOMATIONS_MAX_STALE_MS })?.items || []);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
-  const [loading, setLoading] = useState(!getCachedApiData(cacheKey));
+  const [loading, setLoading] = useState(!getCachedApiData(cacheKey, { maxStaleMs: AUTOMATIONS_MAX_STALE_MS }));
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [instagramAccount, setInstagramAccount] = useState(null);
@@ -363,7 +363,7 @@ const Automations = () => {
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async ({ force = false } = {}) => {
-    const cached = getCachedApiData(cacheKey);
+    const cached = getCachedApiData(cacheKey, { maxStaleMs: AUTOMATIONS_MAX_STALE_MS });
     if (cached && !force) {
       setList(cached.items || []);
       setLoading(false);
@@ -380,6 +380,7 @@ const Automations = () => {
           ttlMs: AUTOMATIONS_TTL_MS,
           maxStaleMs: AUTOMATIONS_MAX_STALE_MS,
           force,
+          persist: true,
           onUpdate: (data, updateResult) => {
             if (data) setList(data?.items || []);
             setLoadError(updateResult?.error ? REFRESH_FAILED_WITH_CACHE : '');

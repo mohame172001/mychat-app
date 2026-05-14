@@ -200,3 +200,24 @@ The dashboard remains the primary performance-sensitive route. Phase 2.16 added 
 - A regression test verifies the dashboard timing headers are present and do not expose token fields.
 
 Current dashboard implementation still computes from bounded live collections (`usage_events`, `automations`, `contacts`, `link_click_events`, and `comments`) rather than a persisted dashboard read model. If production warm dashboard p95 is over 1200 ms, the next required change is a dashboard read model keyed by user, active Instagram account, and UTC month. If warm dashboard is within budget but first request after idle is slow, the required change is Railway always-on infrastructure.
+
+## Phase 2.18 Instant First-Load Addendum
+
+Generated: 2026-05-14
+
+Phase 2.18 addresses the user-visible gap that remained after memory-only SWR: browser Refresh and new tabs started with empty route state. The frontend now has an allowlisted persistent snapshot layer for safe app data and app-boot data prefetch after auth restore/login/signup.
+
+Implemented behavior:
+
+- `apiCache` can persist only allowlisted successful JSON responses under user/account-scoped keys.
+- Persisted data is limited to dashboard summary, automations summary/list, comments first page/filter, and sanitized Instagram accounts.
+- 401/403/5xx/HTML responses are never persisted.
+- token-like, password-like, raw provider, and Mongo-unsafe keys are stripped before persistence.
+- logout and account-switch invalidation clear matching persistent snapshots.
+- `AuthContext` renders from stored `mychat_user` immediately and starts low-priority warmup for Dashboard, Automations, Comments, and Instagram accounts.
+
+Deferred production proof:
+
+- authenticated browser timing still needs a live operator session.
+- Railway always-on status still needs dashboard/operator confirmation.
+- billing remains blocked until auth recovery email E2E and performance production proof are both closed.

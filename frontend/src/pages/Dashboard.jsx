@@ -31,7 +31,7 @@ const Dashboard = () => {
     user?.id || 'anon',
     user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active',
   ].join(':');
-  const [stats, setStats] = useState(() => getCachedApiData(cacheKey) || null);
+  const [stats, setStats] = useState(() => getCachedApiData(cacheKey, { maxStaleMs: DASHBOARD_MAX_STALE_MS }) || null);
   const [loading, setLoading] = useState(!stats);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -39,7 +39,7 @@ const Dashboard = () => {
 
   useEffect(() => {
     let alive = true;
-    const cached = getCachedApiData(cacheKey);
+    const cached = getCachedApiData(cacheKey, { maxStaleMs: DASHBOARD_MAX_STALE_MS });
     if (cached) {
       setStats(cached);
       setLoading(false);
@@ -56,6 +56,7 @@ const Dashboard = () => {
           {
             ttlMs: DASHBOARD_TTL_MS,
             maxStaleMs: DASHBOARD_MAX_STALE_MS,
+            persist: true,
             onUpdate: (data, updateResult) => {
               if (alive) {
                 if (data) setStats(data);
@@ -91,7 +92,7 @@ const Dashboard = () => {
       const result = await cachedApiGet(
         cacheKey,
         () => api.get('/dashboard/summary'),
-        { ttlMs: DASHBOARD_TTL_MS, force: true }
+        { ttlMs: DASHBOARD_TTL_MS, force: true, persist: true }
       );
       setStats(result.data);
     } catch (err) {
