@@ -4,6 +4,9 @@ const PERSISTABLE_PREFIXES = [
   'dashboard-summary:',
   'automations-summary:',
   'instagram-accounts:',
+  // Cached Instagram media list (post grid in the automation wizard).
+  // Public post metadata + Instagram CDN URLs only — no tokens.
+  'instagram-media:',
   // Admin console snapshots — same user as the cache key, sanitized of
   // tokens / passwords / credentials by FORBIDDEN_PERSIST_KEYS. Stored
   // per-admin so non-admin users never get an admin snapshot.

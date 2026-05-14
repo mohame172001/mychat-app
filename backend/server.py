@@ -11462,17 +11462,64 @@ async def instagram_media(user_id: str = Depends(get_current_active_user_id), li
         endpoints.append((f'https://graph.facebook.com/v21.0/{ig_id}/media', f'graph.facebook.com/v21.0/{ig_id}/media'))
 
     errors = {}
-    
+
+    # Phase 2.18E performance: the hot path for the wizard is /me/media
+    # alone — typical latency to Instagram Graph is 300-800ms per call,
+    # so we used to add a serial /me debug call (extra 300-800ms) before
+    # the actual media fetch. We now fire the /me debug call in
+    # parallel with the first media endpoint, so the wizard sees /me/media
+    # data as soon as it returns instead of waiting on a metadata probe.
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            try:
-                mer = await c.get('https://graph.instagram.com/me', params={'access_token': token, 'fields': 'user_id,id,username'})
-                if mer.status_code == 200:
-                    me_id_for_debug = str((mer.json() or {}).get('user_id') or (mer.json() or {}).get('id') or '') or None
-            except Exception:
-                pass
+            async def _fetch_me():
+                try:
+                    mer = await c.get(
+                        'https://graph.instagram.com/me',
+                        params={'access_token': token, 'fields': 'user_id,id,username'},
+                    )
+                    if mer.status_code == 200:
+                        body = mer.json() or {}
+                        return str(body.get('user_id') or body.get('id') or '') or None
+                except Exception:
+                    pass
+                return None
 
-            for url, label in endpoints:
+            async def _fetch_first_endpoint():
+                url, label = endpoints[0]
+                try:
+                    r = await c.get(url, params={'access_token': token, 'fields': fields, 'limit': lim})
+                    return label, r
+                except Exception as e:
+                    return label, e
+
+            me_id_for_debug, (first_label, first_result) = await asyncio.gather(
+                _fetch_me(), _fetch_first_endpoint(),
+            )
+
+            if not isinstance(first_result, Exception) and first_result.status_code == 200:
+                items = (first_result.json() or {}).get('data') or []
+                return {
+                    'ok': True,
+                    'accountId': account.get('id'),
+                    'endpointUsed': first_label,
+                    'media': items,
+                    'items': items,
+                    'count': len(items),
+                    'warning': None if items else f'No media returned from {first_label}',
+                    'errors': errors,
+                    'graphMeId': me_id_for_debug,
+                    'dbIgUserId': ig_id or None,
+                    'idMatch': (bool(me_id_for_debug) and me_id_for_debug == ig_id) if ig_id else None,
+                }
+
+            # First endpoint failed; record reason and fall through to the
+            # legacy serial fallback over the remaining endpoints.
+            if isinstance(first_result, Exception):
+                errors[first_label] = {'exception': str(first_result)[:200]}
+            else:
+                errors[first_label] = {'status': first_result.status_code, 'body': first_result.text[:500]}
+
+            for url, label in endpoints[1:]:
                 try:
                     r = await c.get(url, params={'access_token': token, 'fields': fields, 'limit': lim})
                     if r.status_code == 200:

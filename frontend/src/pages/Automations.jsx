@@ -571,34 +571,66 @@ const Automations = () => {
   }, [canProcessExistingOnSelectedPost, processExistingUnreplied]);
 
   const loadMediaForBuilder = async ({ preferredMediaId = '', pickFirst = true } = {}) => {
-    setMedia([]);
     setMediaError(null);
     setMediaWarning(null);
-    setMediaLoading(true);
-    try {
-      const { data } = await api.get('/instagram/media');
+    // Phase 2.18E: Instagram media list now uses persisted SWR cache so
+    // the post grid renders the LAST KNOWN posts the moment the wizard
+    // opens. A fresh fetch runs in the background (TTL 5min, maxStale
+    // 30min) and replaces the grid silently when the new payload
+    // arrives. This removes the multi-second "loading..." spinner the
+    // user used to see when picking a post to attach an automation to.
+    const cacheKey = `instagram-media:${user?.id || 'anon'}:${user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active'}`;
+    const cached = getCachedApiData(cacheKey, { maxStaleMs: 30 * 60 * 1000 });
+    const applyMediaPayload = (data) => {
+      if (!data) return;
       const items = data?.media || data?.items || [];
       if (data?.ok === false) {
-        setMedia([]);
         const errBody = data?.error?.body;
         setMediaError(typeof errBody === 'string' ? errBody : JSON.stringify(data?.error || data));
-      } else {
-        setMedia(items);
-        const preferred = preferredMediaId ? items.find(item => item.id === preferredMediaId) : null;
-        if (preferred) {
-          setSelectedMedia(preferred);
-        } else if (items.length > 0 && pickFirst) {
-          setSelectedMedia(items[0]);
-        }
-        if (items.length === 0) {
-          setMediaWarning(data?.warning || 'No Instagram media returned. Connect Instagram and publish a post first.');
-        } else if (data?.warning) {
-          setMediaWarning(data.warning);
-        }
+        setMedia([]);
+        return;
       }
-    } catch (e) {
-      setMediaError(e?.response?.data?.detail || e?.message || 'Failed to load posts. Connect Instagram first.');
+      setMedia(items);
+      const preferred = preferredMediaId ? items.find(item => item.id === preferredMediaId) : null;
+      if (preferred) {
+        setSelectedMedia(preferred);
+      } else if (items.length > 0 && pickFirst) {
+        setSelectedMedia((prev) => prev || items[0]);
+      }
+      if (items.length === 0) {
+        setMediaWarning(data?.warning || 'No Instagram media returned. Connect Instagram and publish a post first.');
+      } else if (data?.warning) {
+        setMediaWarning(data.warning);
+      } else {
+        setMediaWarning(null);
+      }
+      setMediaError(null);
+    };
+
+    if (cached) {
+      applyMediaPayload(cached);
+      setMediaLoading(false);
+    } else {
       setMedia([]);
+      setMediaLoading(true);
+    }
+    try {
+      const result = await cachedApiGetSWR(
+        cacheKey,
+        () => api.get('/instagram/media'),
+        {
+          ttlMs: 5 * 60 * 1000,
+          maxStaleMs: 30 * 60 * 1000,
+          persist: true,
+          onUpdate: (data) => applyMediaPayload(data),
+        }
+      );
+      applyMediaPayload(result.data);
+    } catch (e) {
+      if (!cached) {
+        setMediaError(e?.response?.data?.detail || e?.message || 'Failed to load posts. Connect Instagram first.');
+        setMedia([]);
+      }
     }
     setMediaLoading(false);
   };
