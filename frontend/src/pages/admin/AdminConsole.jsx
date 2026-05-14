@@ -289,7 +289,7 @@ function UsersTab({ onSelect }) {
 }
 
 function UserDetailTab({ userId, onBack, me }) {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [planKey, setPlanKey] = useState('');
@@ -343,6 +343,25 @@ function UserDetailTab({ userId, onBack, me }) {
       toast.success(`Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
       setReason('');
       invalidateAdminUserCaches(userId);
+      // Phase 2.18J: if the admin assigned the plan to themselves,
+      // their own Dashboard / Automations / Billing / usage caches
+      // now show the OLD plan limits. Wipe those snapshots and have
+      // refreshUser run /auth/bootstrap so the next visit to /app
+      // renders with the new plan limits immediately.
+      if (user?.id && userId === user.id) {
+        invalidateApiCache('dashboard-summary');
+        invalidateApiCache('automations-summary');
+        invalidateApiCache('instagram-accounts');
+        // Billing page reads /plan/current via billing:plan-current:*
+        // and /plans via billing:plans:* — both must drop so the next
+        // visit to /app/billing reflects the new plan card.
+        invalidateApiCache('billing:plan-current');
+        if (typeof refreshUser === 'function') {
+          // Fire-and-forget — onAssign returns without blocking on
+          // the bootstrap round-trip.
+          refreshUser();
+        }
+      }
       await load();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Plan assignment failed';
@@ -350,7 +369,7 @@ function UserDetailTab({ userId, onBack, me }) {
     } finally {
       setAssigning(false);
     }
-  }, [userId, planKey, reason, load]);
+  }, [userId, planKey, reason, load, user?.id, refreshUser]);
 
   const onCreateAllowance = useCallback(async () => {
     const metrics = {};

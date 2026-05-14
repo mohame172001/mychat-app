@@ -692,7 +692,13 @@ async def assign_user_plan(
     assigned_by: str,
     reason: Optional[str] = None,
 ) -> dict:
-    """Manually assign a plan to a user. Idempotent upsert."""
+    """Manually assign a plan to a user. Idempotent upsert.
+
+    Phase 2.18J: also clears the dashboard_summaries read-through
+    snapshot for the target user so the next /api/dashboard/summary
+    (and /auth/bootstrap) call rebuilds with the new plan limits
+    rather than serving cached numbers tied to the old plan.
+    """
     if not _plans.is_valid_plan_key(plan_key):
         raise HTTPException(400, f'Invalid plan_key: {plan_key}')
     if not user_id:
@@ -717,6 +723,14 @@ async def assign_user_plan(
         },
         upsert=True,
     )
+    # Invalidate every dashboard snapshot belonging to this user so the
+    # plan_key + limits in the next response reflect the new plan
+    # everywhere (Dashboard, Billing, /api/usage/current, the
+    # plan-limit guards on /instagram/auth-url and POST /automations).
+    try:
+        await invalidate_dashboard_summary(str(user_id))
+    except Exception:
+        pass
     return await get_user_plan(user_id)
 
 
@@ -8842,6 +8856,12 @@ async def admin_create_user_override(
     if override_type == _overrides.OVERRIDE_TYPE_TRIAL:
         for canonical in instagram_trial_account_ids:
             await _record_instagram_trial_claim(target_user_id, canonical, 'trial_grant')
+    # Phase 2.18J: drop the dashboard snapshot so the target user
+    # sees the new effective limits immediately on their next visit.
+    try:
+        await invalidate_dashboard_summary(target_user_id)
+    except Exception:
+        pass
     await _record_admin_action(
         actor,
         action='user_limit_override_created',
@@ -8881,6 +8901,12 @@ async def admin_revoke_user_override(
             'updated_at': now,
         }},
     )
+    # Phase 2.18J: drop the dashboard snapshot so the revoked override
+    # disappears from the target user's effective limits immediately.
+    try:
+        await invalidate_dashboard_summary(target_user_id)
+    except Exception:
+        pass
     await _record_admin_action(
         actor,
         action='user_limit_override_revoked',
