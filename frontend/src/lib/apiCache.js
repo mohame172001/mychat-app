@@ -141,6 +141,20 @@ export function getCachedApiData(key, options = {}) {
   return entry?.data;
 }
 
+/**
+ * Phase 2.18I: directly seed a cache entry from a payload we already
+ * have (for example the bootstrap response after login). The next
+ * cachedApiGetSWR call against this key sees the seeded data
+ * immediately and skips the network until TTL expires.
+ */
+export function seedApiCacheEntry(key, data, options = {}) {
+  if (!key || data === undefined || data === null) return;
+  const persist = Boolean(options.persist);
+  const updatedAt = Number(options.updatedAt) || now();
+  cache.set(key, { data, updatedAt, promise: null });
+  persistEntry(key, data, updatedAt, persist);
+}
+
 export function getApiCacheEntry(key) {
   const entry = getEntry(key);
   if (!entry) return null;

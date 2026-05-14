@@ -4029,6 +4029,216 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
     return _public_user(u)
 
 
+# Phase 2.18I: single round-trip session bootstrap. The frontend used
+# to need 4-5 sequential network round-trips after login (auth/me,
+# dashboard/summary, automations/summary, instagram/accounts, plus
+# admin overview for admins) before the dashboard could render real
+# numbers. This endpoint collapses all of them into one parallel call
+# so by the time the user sees /app, every important payload is
+# already in the response and the client seeds its SWR cache directly
+# — every page renders from a hot cache on first visit.
+@api.get('/auth/bootstrap')
+async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
+    started = datetime.utcnow()
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'User not found')
+
+    # Resolve the active Instagram account once and reuse it across all
+    # the data probes below so we don't pay for that lookup five times.
+    try:
+        account = await getActiveInstagramAccount(user_id)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        account = None
+
+    # admin? compute once.
+    try:
+        role, _bootstrap_owner = await _resolve_admin_role(u)
+        is_admin = _admin_roles.is_admin_role(role)
+    except Exception:
+        role = None
+        is_admin = False
+
+    # Build the parallel task list. The dashboard summary uses the
+    # read-through cache (snapshot table) so this stays cheap even
+    # under load.
+    async def _safe(coro):
+        try:
+            return await coro
+        except Exception as e:
+            return {'error': str(e)[:120]}
+
+    async def _safe_dashboard():
+        try:
+            data, _meta = await _get_dashboard_summary_readthrough(user_id, account)
+            return data
+        except Exception as e:
+            return {'error': str(e)[:120]}
+
+    async def _safe_automations():
+        try:
+            if account is None:
+                return {'items': [], 'count': 0, 'lastUpdatedAt': datetime.utcnow().isoformat()}
+            rows = await db.automations.find(
+                _account_scoped_query(user_id, account)
+            ).sort('updated', -1).limit(500).to_list(500)
+            missing = [
+                r for r in rows
+                if r.get('media_id')
+                and not ((r.get('media_preview') or {}).get('thumbnail_url'))
+                and not ((r.get('media_preview') or {}).get('media_url'))
+            ][:12]
+            if missing:
+                refreshed = await asyncio.gather(
+                    *(_backfill_automation_media_preview(r, account) for r in missing)
+                )
+                by_id = {r.get('id'): r for r in refreshed}
+                rows = [by_id.get(r.get('id'), r) for r in rows]
+            items = [_automation_summary_row(row) for row in rows]
+            return {'items': items, 'count': len(items),
+                    'lastUpdatedAt': datetime.utcnow().isoformat()}
+        except Exception as e:
+            return {'items': [], 'count': 0, 'error': str(e)[:120],
+                    'lastUpdatedAt': datetime.utcnow().isoformat()}
+
+    async def _safe_accounts():
+        try:
+            await _sync_user_instagram_account_doc(u)
+            active_id = (account or {}).get('id') or u.get('active_instagram_account_id') or ''
+            rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
+            missing = [r for r in rows
+                       if not (r.get('profilePictureUrl') or r.get('profile_picture_url'))]
+            if missing:
+                refreshed = await asyncio.gather(*(_backfill_account_profile_picture(r) for r in missing))
+                by_id = {r.get('id'): r for r in refreshed}
+                rows = [by_id.get(r.get('id'), r) for r in rows]
+            return {
+                'accounts': [_instagram_account_public_row(row, active_id) for row in rows],
+                'activeInstagramAccountId': active_id or None,
+                'count': len(rows),
+            }
+        except Exception as e:
+            return {'accounts': [], 'count': 0, 'error': str(e)[:120]}
+
+    async def _safe_admin_overview():
+        if not is_admin:
+            return None
+        try:
+            # Reuse the same code path as /api/admin/overview by calling
+            # the read paths in parallel via the existing helper.
+            now = datetime.utcnow()
+            today_start = datetime(now.year, now.month, now.day)
+            seven_days = today_start - timedelta(days=7)
+            thirty_days = today_start - timedelta(days=30)
+            month = _usage_month(now)
+
+            async def _safe_usage_totals():
+                totals = {field: 0 for field in USAGE_COUNTER_FIELDS}
+                try:
+                    cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(month))
+                    async for row in cursor:
+                        for field in USAGE_COUNTER_FIELDS:
+                            totals[field] += int(row.get(field) or 0)
+                except Exception:
+                    pass
+                return totals
+
+            async def _safe_plan_distribution():
+                dist = {key: 0 for key in _plans.PLAN_KEYS}
+                try:
+                    cursor = db.user_plans.find({})
+                    async for row in cursor:
+                        key = row.get('plan_key')
+                        if _plans.is_valid_plan_key(key):
+                            dist[key] += 1
+                except Exception:
+                    pass
+                return dist
+
+            (
+                total_users, active_users, suspended_users, deleted_users,
+                users_today, users_7d, users_30d,
+                total_ig, connected_ig, total_autos, active_autos,
+                usage_totals, plan_distribution,
+                plan_limited, retryable_failures, permanent_failures, queue_pending,
+            ) = await asyncio.gather(
+                db.users.count_documents({}),
+                db.users.count_documents({'status': {'$nin': ['suspended', 'deleted']}}),
+                db.users.count_documents({'status': 'suspended'}),
+                db.users.count_documents({'status': 'deleted'}),
+                db.users.count_documents({'created_at': {'$gte': today_start}}),
+                db.users.count_documents({'created_at': {'$gte': seven_days}}),
+                db.users.count_documents({'created_at': {'$gte': thirty_days}}),
+                db.instagram_accounts.count_documents({}),
+                db.instagram_accounts.count_documents({'connectionValid': True}),
+                db.automations.count_documents({}),
+                db.automations.count_documents({'status': 'active'}),
+                _safe_usage_totals(),
+                _safe_plan_distribution(),
+                db.comments.count_documents({'action_status': 'plan_limited'}),
+                db.comments.count_documents({'action_status': 'failed_retryable'}),
+                db.comments.count_documents({
+                    'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
+                }),
+                db.comments.count_documents({'queued': True}),
+            )
+            user_plan_rows = sum(plan_distribution.values())
+            plan_distribution['free'] += max(0, total_users - user_plan_rows)
+            return {
+                'total_users': total_users,
+                'active_users': active_users,
+                'suspended_users': suspended_users,
+                'deleted_users': deleted_users,
+                'users_created_today': users_today,
+                'users_created_7d': users_7d,
+                'users_created_30d': users_30d,
+                'total_instagram_accounts': total_ig,
+                'connected_instagram_accounts': connected_ig,
+                'total_automations': total_autos,
+                'active_automations': active_autos,
+                'event_month': month,
+                'current_month_usage_totals': usage_totals,
+                'plan_distribution': plan_distribution,
+                'plan_limited_counts': plan_limited,
+                'retryable_failures_count': retryable_failures,
+                'permanent_failures_count': permanent_failures,
+                'queue_pending_count': queue_pending,
+            }
+        except Exception as e:
+            return {'error': str(e)[:120]}
+
+    (
+        dashboard_summary,
+        automations_summary,
+        instagram_accounts_payload,
+        admin_overview_payload,
+    ) = await asyncio.gather(
+        _safe_dashboard(),
+        _safe_automations(),
+        _safe_accounts(),
+        _safe_admin_overview(),
+    )
+
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info(
+        'auth_bootstrap user_id=%s is_admin=%s durationMs=%s',
+        user_id, is_admin, duration_ms,
+    )
+
+    return {
+        'user': _public_user(u),
+        'isAdmin': is_admin,
+        'role': role,
+        'dashboard_summary': dashboard_summary,
+        'automations_summary': automations_summary,
+        'instagram_accounts': instagram_accounts_payload,
+        'admin_overview': admin_overview_payload,
+        'bootstrap_duration_ms': duration_ms,
+    }
+
+
 @api.post('/auth/resend-verification')
 async def resend_email_verification(body: dict = Body(...), request: Request = None):
     ip = _client_ip(request) if request is not None else 'unknown'

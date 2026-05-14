@@ -1,10 +1,82 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../lib/api';
 import analytics from '../lib/analytics';
-import { clearApiCache } from '../lib/apiCache';
+import { clearApiCache, seedApiCacheEntry } from '../lib/apiCache';
 import { scheduleCoreAppWarmup } from '../lib/appWarmup';
 
 const AuthContext = createContext(null);
+
+// Phase 2.18I: cache-key constants used by all consumers (Dashboard,
+// Automations, Sidebar, AdminConsole) and by the bootstrap-response
+// seeder below. Anything that wants to read a snapshot uses the same
+// scheme as the place that writes it.
+const DASHBOARD_TTL_MS = 60 * 1000;
+const DASHBOARD_MAX_STALE_MS = 6 * 60 * 60 * 1000;
+const AUTOMATIONS_TTL_MS = 90 * 1000;
+const AUTOMATIONS_MAX_STALE_MS = 6 * 60 * 60 * 1000;
+const ACCOUNTS_TTL_MS = 180 * 1000;
+const ACCOUNTS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
+const ADMIN_TTL_MS = 60 * 1000;
+const ADMIN_MAX_STALE_MS = 30 * 60 * 1000;
+
+function activeAccountKey(user) {
+  return user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
+}
+
+/**
+ * Seed the in-memory + persistent SWR cache from a single
+ * /auth/bootstrap response so all four core pages (Dashboard,
+ * Automations, Sidebar accounts, Admin overview) can render from a
+ * hot cache the moment the user navigates to them — no second
+ * round-trip after login or refresh.
+ */
+function seedFromBootstrap(bootstrap, user) {
+  if (!bootstrap || typeof bootstrap !== 'object' || !user?.id) return;
+  const accountKey = activeAccountKey(user);
+  if (bootstrap.dashboard_summary && !bootstrap.dashboard_summary.error) {
+    seedApiCacheEntry(
+      `dashboard-summary:${user.id}:${accountKey}`,
+      bootstrap.dashboard_summary,
+      { persist: true, ttlMs: DASHBOARD_TTL_MS, maxStaleMs: DASHBOARD_MAX_STALE_MS },
+    );
+  }
+  if (bootstrap.automations_summary && !bootstrap.automations_summary.error) {
+    seedApiCacheEntry(
+      `automations-summary:${user.id}:${accountKey}`,
+      bootstrap.automations_summary,
+      { persist: true, ttlMs: AUTOMATIONS_TTL_MS, maxStaleMs: AUTOMATIONS_MAX_STALE_MS },
+    );
+  }
+  if (bootstrap.instagram_accounts && !bootstrap.instagram_accounts.error) {
+    seedApiCacheEntry(
+      `instagram-accounts:${user.id}`,
+      bootstrap.instagram_accounts,
+      { persist: true, ttlMs: ACCOUNTS_TTL_MS, maxStaleMs: ACCOUNTS_MAX_STALE_MS },
+    );
+  }
+  if (bootstrap.isAdmin && bootstrap.admin_overview && !bootstrap.admin_overview.error) {
+    seedApiCacheEntry(
+      `admin:overview:${user.id}`,
+      bootstrap.admin_overview,
+      { persist: true, ttlMs: ADMIN_TTL_MS, maxStaleMs: ADMIN_MAX_STALE_MS },
+    );
+  }
+}
+
+async function fetchBootstrap(currentUser) {
+  try {
+    const { data } = await api.get('/auth/bootstrap');
+    if (data?.user) {
+      try { localStorage.setItem('mychat_user', JSON.stringify(data.user)); } catch (_) {}
+      try { analytics.identify({ id: data.user.id }); } catch (_) {}
+    }
+    seedFromBootstrap(data, data?.user || currentUser);
+    return data;
+  } catch (err) {
+    console.warn('[Auth] /auth/bootstrap failed:', err?.response?.status);
+    return null;
+  }
+}
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -21,24 +93,20 @@ export const AuthProvider = ({ children }) => {
           restoredUser = parsed;
           setUser(parsed);
           setLoading(false);
-          scheduleCoreAppWarmup(parsed);
-          // Restore analytics identity for an already-authenticated session.
           analytics.identify({ id: parsed.id });
+          // Kick off bootstrap immediately so /dashboard/summary,
+          // /automations/summary, /instagram/accounts (and /admin/overview
+          // when applicable) all arrive in ONE round-trip. The page can
+          // render the cached snapshot synchronously while the fresh
+          // bootstrap response replaces it the moment it lands.
+          scheduleCoreAppWarmup(parsed);
         } catch (err) {
           console.error('[Auth] Failed to parse stored user:', err);
           localStorage.removeItem('mychat_user');
           clearApiCache();
         }
-        try {
-          const { data } = await api.get('/auth/me');
-          setUser(data);
-          localStorage.setItem('mychat_user', JSON.stringify(data));
-          analytics.identify({ id: data.id });
-          scheduleCoreAppWarmup(data);
-        } catch (err) {
-          // Non-fatal: token may be expired; api interceptor handles redirect.
-          console.warn('[Auth] /auth/me refresh failed:', err?.response?.status);
-        }
+        const data = await fetchBootstrap(restoredUser);
+        if (data?.user) setUser(data.user);
       }
       if (!restoredUser) setLoading(false);
     };
@@ -51,8 +119,13 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    // Race the bootstrap in parallel with the React route transition
+    // so by the time the dashboard mounts, its snapshot is already
+    // in the cache. Don't await — the user sees /app immediately.
+    fetchBootstrap(data.user).then((b) => {
+      if (b?.user) setUser(b.user);
+    });
     scheduleCoreAppWarmup(data.user);
-    // Phase 2.5 funnel events. analytics no-ops when PostHog is disabled.
     analytics.identify({ id: data.user.id });
     analytics.capture('login_completed', {});
     return data.user;
@@ -64,6 +137,9 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    fetchBootstrap(data.user).then((b) => {
+      if (b?.user) setUser(b.user);
+    });
     scheduleCoreAppWarmup(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('signup_completed', {});
@@ -82,6 +158,9 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
     setUser(data.user);
+    fetchBootstrap(data.user).then((b) => {
+      if (b?.user) setUser(b.user);
+    });
     scheduleCoreAppWarmup(data.user);
     analytics.identify({ id: data.user.id });
     analytics.capture('login_completed', { method: 'google' });
@@ -97,15 +176,12 @@ export const AuthProvider = ({ children }) => {
   };
 
   const refreshUser = async () => {
-    try {
-      const { data } = await api.get('/auth/me');
-      setUser(data);
-      localStorage.setItem('mychat_user', JSON.stringify(data));
-      scheduleCoreAppWarmup(data);
-      return data;
-    } catch (err) {
-      console.warn('[Auth] refreshUser failed:', err?.response?.status);
+    const data = await fetchBootstrap(user);
+    if (data?.user) {
+      setUser(data.user);
+      return data.user;
     }
+    return null;
   };
 
   return (
