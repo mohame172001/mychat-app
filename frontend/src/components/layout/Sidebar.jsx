@@ -82,16 +82,52 @@ const Sidebar = () => {
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;
     setSwitchingAccount(true);
+    // Capture the previous active account so we can roll back the
+    // optimistic UI flip on failure.
+    const previousActive = instagramAccounts.find((a) => a.active || a.isCurrent) || null;
+    // Phase 2.18H UX: optimistically flip the active flag in local
+    // state the moment the user picks an account. The dropdown trigger
+    // (which renders @username + avatar from the same state) now
+    // updates INSTANTLY. The /activate POST + /auth/me refresh still
+    // run in the background and reconcile authoritative state — but
+    // the user no longer sees the previous account lingering until a
+    // manual refresh.
+    setInstagramAccounts((prev) => prev.map((a) => ({
+      ...a,
+      active: a.id === account.id,
+      isCurrent: a.id === account.id,
+    })));
     try {
-      await api.post(`/instagram/accounts/${account.id}/activate`);
-      const updatedUser = await refreshUser?.();
+      const { data } = await api.post(`/instagram/accounts/${account.id}/activate`);
+      // The activate endpoint already returns the authoritative new
+      // active account. Use it directly so we don't need to wait on a
+      // second /instagram/accounts round-trip.
+      if (data?.account) {
+        setInstagramAccounts((prev) => prev.map((a) => (
+          a.id === data.account.id
+            ? { ...a, ...data.account, active: true, isCurrent: true }
+            : { ...a, active: false, isCurrent: false }
+        )));
+      }
       invalidateApiCache('instagram-accounts');
       invalidateApiCache('dashboard-summary');
       invalidateApiCache('automations-summary');
-      scheduleCoreAppWarmup(updatedUser || user);
+      invalidateApiCache('instagram-media');
+      // Kick off the user refresh + core warmup in parallel — neither
+      // blocks the UI update; the optimistic state above is already
+      // visible to the user.
+      const refreshPromise = refreshUser?.();
+      refreshPromise?.then((u) => scheduleCoreAppWarmup(u || user));
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
       navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {
+      // Roll back the optimistic flip on failure so the dropdown
+      // matches the server's view again.
+      setInstagramAccounts((prev) => prev.map((a) => ({
+        ...a,
+        active: a.id === previousActive?.id,
+        isCurrent: a.id === previousActive?.id,
+      })));
       toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
     }
     setSwitchingAccount(false);

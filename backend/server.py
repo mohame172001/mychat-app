@@ -4586,6 +4586,57 @@ def _automation_summary_row(auto: dict) -> dict:
     }
 
 
+async def _backfill_automation_media_preview(auto: dict, account: dict) -> dict:
+    """Phase 2.18H: lazy-fetch missing media_preview.thumbnail_url for
+    automations bound to a specific media_id. Older automations
+    created before the wizard cached the preview show a blank
+    placeholder otherwise. Each fetch is one Instagram Graph call and
+    we run them in parallel via gather upstream."""
+    if not isinstance(auto, dict):
+        return auto
+    media_id = auto.get('media_id') or ''
+    if not media_id:
+        return auto
+    preview = auto.get('media_preview') or {}
+    if preview.get('thumbnail_url') or preview.get('media_url'):
+        return auto
+    token = (account or {}).get('accessToken') or ''
+    if not token:
+        return auto
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{media_id}',
+                params={
+                    'access_token': token,
+                    'fields': 'id,caption,media_type,media_url,thumbnail_url,permalink',
+                },
+            )
+            if r.status_code != 200:
+                return auto
+            body = r.json() or {}
+            thumbnail = body.get('thumbnail_url') or body.get('media_url') or ''
+            if not thumbnail:
+                return auto
+            new_preview = {
+                'caption': body.get('caption') or preview.get('caption') or '',
+                'thumbnail_url': thumbnail,
+                'media_url': body.get('media_url') or thumbnail,
+                'media_type': body.get('media_type') or preview.get('media_type') or '',
+                'permalink': body.get('permalink') or preview.get('permalink') or '',
+            }
+            await db.automations.update_one(
+                {'id': auto.get('id')},
+                {'$set': {'media_preview': new_preview, 'updated': datetime.utcnow()}},
+            )
+            return {**auto, 'media_preview': new_preview}
+    except Exception:
+        # Never fail the parent listing because a media preview backfill
+        # could not reach Instagram Graph.
+        pass
+    return auto
+
+
 @api.get('/automations/summary')
 async def list_automations_summary(user_id: str = Depends(get_current_active_user_id)):
     started = datetime.utcnow()
@@ -4596,6 +4647,22 @@ async def list_automations_summary(user_id: str = Depends(get_current_active_use
             return {'items': [], 'count': 0, 'lastUpdatedAt': datetime.utcnow().isoformat()}
         raise
     rows = await db.automations.find(_account_scoped_query(user_id, account)).sort('updated', -1).limit(500).to_list(500)
+    # Phase 2.18H: parallel-backfill missing media_preview thumbnails
+    # for automations that target a specific post but were created
+    # before the wizard cached the preview. Limit to 12 concurrent
+    # Graph calls so a workspace with hundreds of legacy automations
+    # does not stall the listing — anything beyond that keeps the
+    # placeholder until next listing.
+    missing = [
+        r for r in rows
+        if r.get('media_id')
+        and not ((r.get('media_preview') or {}).get('thumbnail_url'))
+        and not ((r.get('media_preview') or {}).get('media_url'))
+    ][:12]
+    if missing:
+        refreshed = await asyncio.gather(*(_backfill_automation_media_preview(r, account) for r in missing))
+        by_id = {r.get('id'): r for r in refreshed}
+        rows = [by_id.get(r.get('id'), r) for r in rows]
     items = [_automation_summary_row(row) for row in rows]
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
@@ -16252,6 +16319,57 @@ async def dm_resubscribe(user_id: str = Depends(get_current_active_user_id)):
     }
 
 
+async def _backfill_account_profile_picture(account: dict) -> dict:
+    """Phase 2.18H: lazy-fetch missing profile_picture_url from Instagram
+    Graph. Each connected Instagram account has its own access token —
+    the secondary account may have been linked without a profile-photo
+    refresh, leaving the avatar field null. We fetch on demand (one
+    Graph round-trip per account, in parallel via gather upstream) and
+    persist the result so subsequent calls hit the DB only."""
+    if not isinstance(account, dict):
+        return account
+    if account.get('profilePictureUrl') or account.get('profile_picture_url'):
+        return account
+    token = account.get('accessToken') or ''
+    ig_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    if not (token and ig_id):
+        return account
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{ig_id}',
+                params={
+                    'access_token': token,
+                    'fields': 'profile_picture_url,username,account_type',
+                },
+            )
+            if r.status_code != 200:
+                return account
+            body = r.json() or {}
+            pic = body.get('profile_picture_url') or None
+            if not pic:
+                return account
+            update_doc = {
+                'profilePictureUrl': pic,
+                'profile_picture_url': pic,
+                'updatedAt': datetime.utcnow(),
+            }
+            if body.get('username') and not account.get('username'):
+                update_doc['username'] = body['username']
+            if body.get('account_type') and not account.get('accountType'):
+                update_doc['accountType'] = body['account_type']
+            await db.instagram_accounts.update_one(
+                {'id': account.get('id')},
+                {'$set': update_doc},
+            )
+            account = {**account, **update_doc}
+    except Exception:
+        # Stay silent — failing to backfill the avatar must never fail
+        # the parent /instagram/accounts request.
+        pass
+    return account
+
+
 @api.get('/instagram/accounts')
 async def instagram_accounts(user_id: str = Depends(get_current_active_user_id)):
     user_doc = await db.users.find_one({'id': user_id}) or {}
@@ -16265,6 +16383,15 @@ async def instagram_accounts(user_id: str = Depends(get_current_active_user_id))
             raise
         active_account_id = user_doc.get('active_instagram_account_id') or ''
     rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
+    # Phase 2.18H: parallel-backfill missing profile pictures for every
+    # account that lacks one. Connected accounts without a saved avatar
+    # show a generic placeholder otherwise. Each fetch is independent
+    # so gather() runs them concurrently.
+    missing = [row for row in rows if not (row.get('profilePictureUrl') or row.get('profile_picture_url'))]
+    if missing:
+        refreshed = await asyncio.gather(*(_backfill_account_profile_picture(r) for r in missing))
+        by_id = {r.get('id'): r for r in refreshed}
+        rows = [by_id.get(r.get('id'), r) for r in rows]
     return {
         'accounts': [_instagram_account_public_row(row, active_account_id) for row in rows],
         'activeInstagramAccountId': active_account_id or None,
