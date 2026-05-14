@@ -33,6 +33,10 @@ const Settings = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
 
+  const hasKnownInstagramIdentity = Boolean(user?.instagramHandle || user?.activeInstagramAccountId || user?.activeInstagramIgUserId);
+  const instagramReconnectMode = (user?.instagramConnected || user?.instagramConnectionValid === false || hasKnownInstagramIdentity)
+    ? 'reconnect'
+    : 'connect';
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -119,7 +123,7 @@ const Settings = () => {
                     <div className="flex gap-2">
                       <Button onClick={async () => {
                         setIgConnecting(true);
-                        try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
+                        try { await startInstagramConnect({ mode: 'reconnect', returnTo: '/app/settings?tab=instagram' }); }
                         catch (e) { toast.error(instagramConnectExceptionMessage(e)); setIgConnecting(false); }
                       }} variant="outline" className="rounded-xl" disabled={igConnecting}>
                         {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
@@ -152,11 +156,11 @@ const Settings = () => {
                   <div className="mt-6 flex justify-end">
                     <Button onClick={async () => {
                       setIgConnecting(true);
-                      try { await startInstagramConnect({ mode: 'add_account', returnTo: '/app/settings?tab=instagram' }); }
+                      try { await startInstagramConnect({ mode: instagramReconnectMode, returnTo: '/app/settings?tab=instagram' }); }
                       catch (e) { toast.error(instagramConnectExceptionMessage(e, 'Failed - check IG_APP_ID/IG_APP_SECRET in .env')); setIgConnecting(false); }
                     }} className="w-full bg-slate-900 text-white rounded-xl sm:w-auto" disabled={igConnecting}>
                       {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}
-                      Connect Instagram
+                      {instagramReconnectMode === 'reconnect' ? 'Reconnect Instagram' : 'Connect Instagram'}
                     </Button>
                   </div>
 

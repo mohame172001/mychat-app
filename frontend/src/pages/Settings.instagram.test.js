@@ -1,4 +1,6 @@
 import { instagramErrorMessage } from '../lib/instagramErrors';
+const fs = require('fs');
+const path = require('path');
 
 test('Instagram duplicate account error is explicit and points to a recovery path', () => {
   const message = instagramErrorMessage('instagram_account_already_connected');
@@ -35,4 +37,13 @@ test('Unknown reason still produces a usable message instead of "Server Error"',
   const message = instagramErrorMessage('some_new_reason_we_did_not_anticipate');
   expect(message).toMatch(/instagram connection failed/i);
   expect(message).toMatch(/retry|try again|connect again/i);
+});
+
+test('Settings reconnects existing invalid Instagram identity instead of adding another account', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'Settings.jsx'), 'utf8');
+
+  expect(source).toContain("mode: 'reconnect'");
+  expect(source).toContain('instagramReconnectMode');
+  expect(source).toContain('Reconnect Instagram');
+  expect(source).not.toContain("mode: 'add_account'");
 });

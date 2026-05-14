@@ -85,8 +85,13 @@ const Sidebar = () => {
     ? `@${currentAccount.username}`
     : null;
   const currentAccountAvatar = currentAccount?.profilePictureUrl
-    || (currentAccount ? user?.instagramProfilePictureUrl : null)
-    || user?.avatar;
+    || (currentAccount ? user?.instagramProfilePictureUrl : null);
+  const connectMode = instagramAccounts.length > 0
+    ? 'add_account'
+    : ((user?.instagramConnectionValid === false || user?.instagramHandle) ? 'reconnect' : 'connect');
+  const connectLabel = instagramAccounts.length > 0
+    ? 'Connect another account'
+    : (connectMode === 'reconnect' ? 'Reconnect Instagram' : 'Connect Instagram');
 
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;
@@ -147,7 +152,7 @@ const Sidebar = () => {
     event?.stopPropagation?.();
     setSwitchingAccount(true);
     try {
-      await startInstagramConnect({ mode: 'add_account', returnTo: '/app' });
+      await startInstagramConnect({ mode: connectMode, returnTo: '/app' });
     } catch (e) {
       toast.error(e?.response?.data?.detail || e?.message || 'Failed to start Instagram connection');
       setSwitchingAccount(false);
@@ -193,11 +198,17 @@ const Sidebar = () => {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-left transition hover:bg-slate-100">
-              <img
-                src={currentAccountAvatar}
-                alt={currentAccountName || 'Instagram account'}
-                className="w-8 h-8 rounded-full object-cover"
-              />
+              {currentAccountAvatar ? (
+                <img
+                  src={currentAccountAvatar}
+                  alt={currentAccountName || 'Instagram account'}
+                  className="w-8 h-8 rounded-full object-cover"
+                />
+              ) : (
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-500">
+                  <Instagram className="h-4 w-4" />
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold truncate">
                   {currentAccountName || 'No Instagram account'}
@@ -242,7 +253,7 @@ const Sidebar = () => {
               disabled={switchingAccount}
               className="cursor-pointer"
             >
-              <Instagram className="h-4 w-4" /> Connect another account
+              <Instagram className="h-4 w-4" /> {connectLabel}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
