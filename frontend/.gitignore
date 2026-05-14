@@ -21,3 +21,8 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Playwright / E2E artifacts (traces, screenshots, reports)
+/test-results
+/playwright-report
+/playwright/.cache

@@ -28,6 +28,19 @@ Even with the security gate green, billing remains **BLOCKED** on product-functi
 
 Billing must not start until password reset email delivery, reset-link consumption, old-password rejection after reset, new-password login after reset, and token-reuse rejection all pass on the live host with the production email webhook.
 
+### Phase 2.18 blocker-evidence pass (added 2026-05-14)
+
+Follow-up to the Phase 2.18 review pass. Closes one operational dev task; collects evidence for both P1 blockers without claiming closure.
+
+- **CI=true frontend build**: previously failed on missing optional SDKs (`@sentry/react`, `posthog-js`). Now passes. `frontend/craco.config.js` registers an `webpack.IgnorePlugin` only for the deps that are actually absent from `node_modules` so installed deps still bundle as lazy chunks. Both `yarn build` and `CI=true yarn build` are green.
+- **E2E**: re-run with `yarn test:e2e --project=chromium --reporter=line` → 10 passed, 1 skipped (16.9s). The skip is `operator-auth-smoke`, deliberately gated on operator credentials.
+- **Backend production health timing** (unauth, no operator token): cold first call 481 ms, warm p50 394 ms, p95 405 ms from a transatlantic workstation. `X-Response-Time` server header is `0` (sub-millisecond backend processing). No observable cold-start within this probe window; this is consistent with — but does not prove — always-on.
+- **Production-safe timing script**: new `backend/scripts/measure_production_timings.py` reads `MYCHAT_BACKEND_URL` and (optional) `MYCHAT_AUTH_TOKEN` from env vars; redacts tokens; emits markdown + JSON tables; ready for operator authenticated runs.
+- **Reset email E2E**: production `POST /api/auth/forgot-password` probed with a non-existent address → generic 200 response confirmed (920 ms). Real end-to-end email receipt + reset link consumption STILL REQUIRES a real test mailbox and the operator-side checklist (see `docs/phase-2.18-blocker-closure.md`).
+- **Railway always-on**: repo config files (`backend/railway.json`, `frontend/railway.json`, Procfiles, `nixpacks.toml`) do not expose a sleep / always-on flag. This is a Railway dashboard setting; operator verification still required.
+
+Billing remains **BLOCKED**. Full report: `docs/phase-2.18-blocker-closure.md`.
+
 ### Phase 2.18 review pass (added 2026-05-14)
 
 A senior production-engineer codebase review was completed against the full backend + frontend surface. Outcome: **no code regressions found, no correctness fixes required**. Every critical surface (webhook HMAC verification, password reset token lifecycle, Sentry/observability scrubbing, frontend persistent-snapshot cache, auth context cleanup, reset-password page) was re-verified correct.
