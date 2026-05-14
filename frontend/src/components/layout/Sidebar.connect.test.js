@@ -28,6 +28,8 @@ test('account switch uses client navigation instead of full page reload', () => 
   expect(source).toContain("connectMode === 'reconnect'");
   expect(source).toContain('Reconnect Instagram');
   expect(source).toContain('Connect Instagram');
+  expect(source).toContain('setInstagramAccounts([])');
+  expect(source).toContain('invalidateApiCache(accountsCacheKey)');
   expect(source).toContain("invalidateApiCache('dashboard-summary')");
   expect(source).toContain("invalidateApiCache('automations-summary')");
   // Comments page was removed; no comments cache prefix to invalidate.

@@ -36,7 +36,9 @@ const Sidebar = () => {
   const navigate = useNavigate();
   const accountsCacheKey = `instagram-accounts:${user?.id || 'anon'}`;
   const [instagramAccounts, setInstagramAccounts] = useState(() => (
-    getCachedApiData(accountsCacheKey, { maxStaleMs: 10 * 60 * 1000 })?.accounts || []
+    user?.instagramConnected
+      ? (getCachedApiData(accountsCacheKey, { maxStaleMs: 10 * 60 * 1000 })?.accounts || [])
+      : []
   ));
   const [switchingAccount, setSwitchingAccount] = useState(false);
   const { isAdmin } = useIsAdmin();
@@ -63,6 +65,13 @@ const Sidebar = () => {
         if (alive) setInstagramAccounts([]);
       }
     };
+    if (!user?.instagramConnected) {
+      setInstagramAccounts([]);
+      invalidateApiCache(accountsCacheKey);
+      return () => {
+        alive = false;
+      };
+    }
     if (user?.instagramConnected) {
       loadAccounts();
     }
