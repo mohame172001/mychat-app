@@ -664,14 +664,115 @@ async def _record_comment_usage_once(comment_doc_id: str, marker_field: str, **u
 import plans as _plans  # noqa: E402
 
 
+def _user_plan_assignment_timestamp(row: Optional[dict]) -> Optional[datetime]:
+    if not row:
+        return None
+    raw = (
+        row.get('updated_at')
+        or row.get('updatedAt')
+        or row.get('created_at')
+        or row.get('createdAt')
+    )
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    return None
+
+
+def _select_user_plan_assignment(rows: List[dict]) -> Optional[dict]:
+    """Pick the effective manual plan assignment from possibly duplicate rows.
+
+    `user_plans` is indexed unique by user_id now, but old production data can
+    still contain duplicates from before that guarantee. Using `find_one` made
+    limits depend on arbitrary Mongo row order. The newest assignment wins; if
+    legacy rows lack timestamps, the latest returned row wins as a deterministic
+    fallback instead of silently over/under-granting by chance.
+    """
+    candidates = [
+        (idx, row)
+        for idx, row in enumerate(rows or [])
+        if _plans.is_valid_plan_key((row or {}).get('plan_key'))
+    ]
+    if not candidates:
+        return None
+
+    def _sort_key(item):
+        idx, row = item
+        ts = _user_plan_assignment_timestamp(row)
+        return (
+            1 if ts else 0,
+            ts.timestamp() if ts else float('-inf'),
+            idx,
+        )
+
+    return max(candidates, key=_sort_key)[1]
+
+
+async def _get_user_plan_assignment(user_id: str) -> Optional[dict]:
+    if not user_id:
+        return None
+    try:
+        rows = await db.user_plans.find({'user_id': str(user_id)}).to_list(50)
+    except Exception:
+        try:
+            row = await db.user_plans.find_one({'user_id': str(user_id)})
+        except Exception:
+            row = None
+        return row if _plans.is_valid_plan_key((row or {}).get('plan_key')) else None
+
+    selected = _select_user_plan_assignment(rows)
+    valid_count = sum(
+        1
+        for row in rows or []
+        if _plans.is_valid_plan_key((row or {}).get('plan_key'))
+    )
+    if selected and valid_count > 1:
+        logger.warning(
+            'duplicate_user_plan_rows_resolved user_id=%s row_count=%s selected_plan=%s',
+            user_id, valid_count, selected.get('plan_key'),
+        )
+    return selected
+
+
+async def _effective_user_plan_key_map() -> Dict[str, str]:
+    grouped: Dict[str, List[dict]] = {}
+    try:
+        cursor = db.user_plans.find({})
+        async for row in cursor:
+            uid = row.get('user_id')
+            if uid:
+                grouped.setdefault(str(uid), []).append(row)
+    except Exception:
+        return {}
+
+    effective: Dict[str, str] = {}
+    for uid, rows in grouped.items():
+        row = _select_user_plan_assignment(rows)
+        if row:
+            effective[uid] = row.get('plan_key') or _plans.DEFAULT_PLAN_KEY
+    return effective
+
+
+async def _effective_plan_distribution(total_users: Optional[int] = None) -> dict:
+    dist = {key: 0 for key in _plans.PLAN_KEYS}
+    effective = await _effective_user_plan_key_map()
+    for plan_key in effective.values():
+        if _plans.is_valid_plan_key(plan_key):
+            dist[plan_key] += 1
+    if total_users is not None:
+        dist[_plans.DEFAULT_PLAN_KEY] += max(0, int(total_users or 0) - len(effective))
+    return dist
+
+
 async def get_user_plan(user_id: str) -> dict:
     """Return the user's plan definition. Missing row -> free plan."""
     if not user_id:
         return _plans.get_plan_limits(_plans.DEFAULT_PLAN_KEY)
-    try:
-        row = await db.user_plans.find_one({'user_id': str(user_id)})
-    except Exception:
-        row = None
+    row = await _get_user_plan_assignment(str(user_id))
     plan_key = (row or {}).get('plan_key')
     if not _plans.is_valid_plan_key(plan_key):
         plan_key = _plans.DEFAULT_PLAN_KEY
@@ -4160,16 +4261,10 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
                 return totals
 
             async def _safe_plan_distribution():
-                dist = {key: 0 for key in _plans.PLAN_KEYS}
                 try:
-                    cursor = db.user_plans.find({})
-                    async for row in cursor:
-                        key = row.get('plan_key')
-                        if _plans.is_valid_plan_key(key):
-                            dist[key] += 1
+                    return await _effective_plan_distribution()
                 except Exception:
-                    pass
-                return dist
+                    return {key: 0 for key in _plans.PLAN_KEYS}
 
             (
                 total_users, active_users, suspended_users, deleted_users,
@@ -8102,16 +8197,10 @@ async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
         return totals
 
     async def _safe_plan_distribution():
-        dist = {key: 0 for key in _plans.PLAN_KEYS}
         try:
-            cursor = db.user_plans.find({})
-            async for row in cursor:
-                key = row.get('plan_key')
-                if _plans.is_valid_plan_key(key):
-                    dist[key] += 1
+            return await _effective_plan_distribution()
         except Exception:
-            pass
-        return dist
+            return {key: 0 for key in _plans.PLAN_KEYS}
 
     (
         total_users,
@@ -8153,7 +8242,6 @@ async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
         db.comments.count_documents({'queued': True}),
     )
 
-    # Users without a user_plans row are implicitly 'free'.
     user_plan_rows = sum(plan_distribution.values())
     plan_distribution['free'] += max(0, total_users - user_plan_rows)
 
@@ -8219,21 +8307,19 @@ async def admin_users_list(
         if not _plans.is_valid_plan_key(plan_key):
             raise HTTPException(400, f'Invalid plan_key: {plan_key}')
         plan_filter_user_ids = set()
+        effective_plan_by_user = await _effective_user_plan_key_map()
         if plan_key == _plans.DEFAULT_PLAN_KEY:
-            # 'free' = users with no row OR row.plan_key=free.
-            # Cheaper: exclude the non-free plans, count rest.
-            non_free = set()
-            cursor = db.user_plans.find({'plan_key': {'$ne': 'free'}})
-            async for row in cursor:
-                non_free.add(row.get('user_id'))
+            # 'free' = users with no effective plan row OR latest assignment is free.
             cursor2 = db.users.find({})
             async for row in cursor2:
-                if row.get('id') not in non_free:
+                uid = row.get('id')
+                if effective_plan_by_user.get(uid, _plans.DEFAULT_PLAN_KEY) == _plans.DEFAULT_PLAN_KEY:
                     plan_filter_user_ids.add(row.get('id'))
         else:
-            cursor = db.user_plans.find({'plan_key': plan_key})
-            async for row in cursor:
-                plan_filter_user_ids.add(row.get('user_id'))
+            plan_filter_user_ids = {
+                uid for uid, effective_plan in effective_plan_by_user.items()
+                if effective_plan == plan_key
+            }
         if plan_filter_user_ids is not None:
             query['id'] = {'$in': list(plan_filter_user_ids)}
 

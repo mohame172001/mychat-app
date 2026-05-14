@@ -59,6 +59,66 @@ def test_a_missing_user_plan_defaults_to_free(monkeypatch):
     assert plan['_assignment']['billing_enabled'] is False
 
 
+def test_a2_duplicate_user_plan_rows_latest_assignment_wins(monkeypatch):
+    fake_db = FakeDB(
+        user=_user(id='u1'),
+        user_plans=[
+            {
+                'id': 'old-free',
+                'user_id': 'u1',
+                'plan_key': 'free',
+                'updated_at': datetime(2026, 1, 1, 10, 0, 0),
+            },
+            {
+                'id': 'new-business',
+                'user_id': 'u1',
+                'plan_key': 'business',
+                'assigned_by': 'admin',
+                'assignment_reason': 'manual upgrade',
+                'updated_at': datetime(2026, 1, 2, 10, 0, 0),
+            },
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    plan = _run(server.get_user_plan('u1'))
+    effective = _run(server.compute_effective_limits('u1'))
+
+    assert plan['plan_key'] == 'business'
+    assert plan['_assignment']['assigned_by'] == 'admin'
+    assert effective['max_instagram_accounts'] == 20
+
+
+def test_a3_duplicate_user_plan_rows_latest_downgrade_wins(monkeypatch):
+    fake_db = FakeDB(
+        user=_user(id='u1'),
+        user_plans=[
+            {
+                'id': 'old-business',
+                'user_id': 'u1',
+                'plan_key': 'business',
+                'updated_at': datetime(2026, 1, 1, 10, 0, 0),
+            },
+            {
+                'id': 'new-free',
+                'user_id': 'u1',
+                'plan_key': 'free',
+                'assigned_by': 'admin',
+                'assignment_reason': 'manual downgrade',
+                'updated_at': datetime(2026, 1, 2, 10, 0, 0),
+            },
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    plan = _run(server.get_user_plan('u1'))
+    effective = _run(server.compute_effective_limits('u1'))
+
+    assert plan['plan_key'] == 'free'
+    assert plan['_assignment']['assignment_reason'] == 'manual downgrade'
+    assert effective['max_instagram_accounts'] == 1
+
+
 # ── B. GET /api/plans ───────────────────────────────────────────────────────
 
 def test_b_list_plans_returns_all_tiers(monkeypatch):
@@ -178,6 +238,64 @@ def test_g2_instagram_reconnect_not_blocked(monkeypatch):
     # Should not raise.
     res = _run(server.instagram_auth_url(mode='reconnect', returnTo='/app', user_id='u1'))
     assert res['mode'] == 'reconnect'
+
+
+def test_g3_instagram_add_account_uses_latest_business_plan(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA', connectionValid=True),
+        _user(id='u1', instagramConnected=True, instagram_connection_valid=True),
+        user_plans=[
+            {
+                'id': 'old-free',
+                'user_id': 'u1',
+                'plan_key': 'free',
+                'updated_at': datetime(2026, 1, 1, 10, 0, 0),
+            },
+            {
+                'id': 'new-business',
+                'user_id': 'u1',
+                'plan_key': 'business',
+                'updated_at': datetime(2026, 1, 2, 10, 0, 0),
+            },
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'IG_APP_ID', 'test-app-id')
+    monkeypatch.setattr(server, 'IG_APP_SECRET', 'test-app-secret')
+
+    res = _run(server.instagram_auth_url(mode='add_account', returnTo='/app', user_id='u1'))
+
+    assert res['mode'] == 'add_account'
+
+
+def test_g4_instagram_add_account_blocks_latest_free_plan(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA', connectionValid=True),
+        _user(id='u1', instagramConnected=True, instagram_connection_valid=True),
+        user_plans=[
+            {
+                'id': 'old-business',
+                'user_id': 'u1',
+                'plan_key': 'business',
+                'updated_at': datetime(2026, 1, 1, 10, 0, 0),
+            },
+            {
+                'id': 'new-free',
+                'user_id': 'u1',
+                'plan_key': 'free',
+                'updated_at': datetime(2026, 1, 2, 10, 0, 0),
+            },
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'IG_APP_ID', 'test-app-id')
+    monkeypatch.setattr(server, 'IG_APP_SECRET', 'test-app-secret')
+
+    with pytest.raises(server.HTTPException) as exc:
+        _run(server.instagram_auth_url(mode='add_account', returnTo='/app', user_id='u1'))
+
+    assert exc.value.status_code == 402
+    assert 'free' in str(exc.value.detail).lower()
 
 
 # ── H. automation activation cap ────────────────────────────────────────────
