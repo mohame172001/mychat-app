@@ -9059,6 +9059,149 @@ async def admin_force_disconnect_instagram_account(
     }
 
 
+class AdminRestoreIn(BaseModel):
+    row_id: Optional[str] = None
+    target_user_id: Optional[str] = None
+    instagram_account_id: Optional[str] = None
+    username: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@api.post('/admin/instagram/accounts/restore')
+async def admin_restore_instagram_account(
+    body: AdminRestoreIn = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18L admin restore: re-activate a disconnected
+    instagram_accounts row so the legitimate owner does not have to
+    re-run OAuth. Useful after an accidental wipe or after the
+    Phase 2.18K bulk disconnect dropped a row the user still wants.
+
+    Identify the row by row_id, target_user_id + instagram_account_id,
+    target_user_id + username, or just instagram_account_id /
+    username when the row is uniquely identifiable. The row must
+    still have a stored accessToken — we never invent credentials.
+
+    Requires admin.users.manage. Sets connectionValid=True,
+    isActive=True, refreshStatus='restored_by_admin' and clears
+    refreshLockedUntil so the regular refresh job picks it up.
+    """
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    query: dict = {}
+    if body.row_id:
+        query['id'] = body.row_id
+    else:
+        if body.target_user_id:
+            query['$or'] = [
+                {'userId': body.target_user_id},
+                {'user_id': body.target_user_id},
+            ]
+        if body.instagram_account_id:
+            canonical = _canonical_instagram_account_id(body.instagram_account_id) or body.instagram_account_id
+            query.setdefault('$and', []).append({
+                '$or': [{'instagramAccountId': canonical}, {'igUserId': canonical}],
+            })
+        if body.username:
+            clean_username = body.username.strip().lstrip('@').lower()
+            query.setdefault('$and', []).append({
+                'username': {'$regex': f'^{re.escape(clean_username)}$', '$options': 'i'},
+            })
+    if not query:
+        raise HTTPException(400, 'Provide row_id, or some combination of target_user_id / instagram_account_id / username.')
+    rows = await db.instagram_accounts.find(query).to_list(50)
+    if not rows:
+        raise HTTPException(404, 'No matching instagram_accounts row.')
+    if len(rows) > 1:
+        raise HTTPException(
+            409,
+            f'{len(rows)} rows matched — narrow the filter (use row_id) so we restore exactly one.',
+        )
+    row = rows[0]
+    if not (row.get('accessToken') or '').strip():
+        raise HTTPException(
+            400,
+            'This row has no stored access token. The legitimate owner must run OAuth again from the Settings page.',
+        )
+    target_uid = row.get('userId') or row.get('user_id')
+    if not target_uid:
+        raise HTTPException(500, 'Stored row is missing a user_id; cannot restore safely.')
+    # If another row is currently active+valid for the same IG account
+    # under a DIFFERENT user, that's the existing-owner case — block.
+    canonical = _canonical_instagram_account_id(row.get('instagramAccountId') or row.get('igUserId') or '')
+    if canonical:
+        conflict = await db.instagram_accounts.find_one({
+            'instagramAccountId': canonical,
+            'isActive': True,
+            'connectionValid': True,
+            'id': {'$ne': row.get('id')},
+        })
+        if conflict and (conflict.get('userId') or conflict.get('user_id')) != target_uid:
+            raise HTTPException(
+                409,
+                {
+                    'code': 'instagram_account_already_connected',
+                    'message': 'Another MyChat account is currently the active owner of this Instagram account. Force-disconnect that one first.',
+                },
+            )
+    now = datetime.utcnow()
+    await db.instagram_accounts.update_one(
+        {'id': row.get('id')},
+        {'$set': {
+            'isActive': True,
+            'connectionValid': True,
+            'refreshStatus': 'restored_by_admin',
+            'refreshLockedUntil': None,
+            'updatedAt': now,
+        }},
+    )
+    # Mirror back onto users.* so the existing legacy code paths
+    # (Sidebar, /api/instagram/profile, OAuth checks) see the user as
+    # connected.
+    await db.users.update_one(
+        {'id': target_uid},
+        {'$set': {
+            'instagramConnected': True,
+            'instagram_connection_valid': True,
+            'instagramConnectionValid': True,
+            'instagram_connection_blocker': None,
+            'instagramHandle': row.get('username') or '',
+            'ig_user_id': canonical or row.get('instagramAccountId') or '',
+            'meta_access_token': row.get('accessToken') or '',
+            'instagram_account_type': row.get('accountType'),
+            'tokenExpiresAt': row.get('tokenExpiresAt'),
+            'instagram_token_expires_at': row.get('tokenExpiresAt'),
+            'active_instagram_account_id': row.get('id'),
+        }},
+    )
+    try:
+        await invalidate_dashboard_summary(target_uid)
+    except Exception:
+        pass
+    await _record_admin_action(
+        actor,
+        action='instagram_account_restored',
+        target_user_id=target_uid,
+        metadata={
+            'row_id': row.get('id'),
+            'instagramAccountId_partial': _safe_partial_identifier(row.get('instagramAccountId') or ''),
+            'reason_length': len(str(body.reason or '')),
+        },
+    )
+    logger.info(
+        'instagram_account_restored_by_admin admin=%s row_id=%s target_user_id=%s',
+        (actor.get('email') or '').lower(),
+        row.get('id'),
+        target_uid,
+    )
+    return {
+        'ok': True,
+        'row_id': row.get('id'),
+        'target_user_id': target_uid,
+        'username': row.get('username'),
+        'instagramAccountId': row.get('instagramAccountId'),
+    }
+
+
 @api.get('/admin/users/{target_user_id}/effective-limits')
 async def admin_user_effective_limits(
     target_user_id: str,
