@@ -112,6 +112,23 @@ ENV_NAME = (
 ).strip().lower()
 IS_PRODUCTION = ENV_NAME in ('production', 'prod')
 
+# Phase 2.18G security: in production we never want to accept an unsigned
+# Instagram webhook. The HMAC enforce flag is on by default, but we also
+# require the secret to actually be configured so we can compute the
+# expected signature. Fail fast so a misconfigured production deploy
+# never silently downgrades to warn-only.
+if IS_PRODUCTION and not META_WEBHOOK_APP_SECRET:
+    raise RuntimeError(
+        'META_WEBHOOK_APP_SECRET (or META_APP_SECRET) is required in '
+        'production so the Instagram webhook HMAC signature can be '
+        'verified. Refusing to start without it.'
+    )
+if IS_PRODUCTION and not META_WEBHOOK_HMAC_ENFORCE:
+    raise RuntimeError(
+        'META_WEBHOOK_HMAC_ENFORCE=0 is not permitted in production. '
+        'Unsigned Instagram webhooks must never be accepted in prod.'
+    )
+
 # Comma-separated list of explicit allowed origins. In production we ALSO
 # always include FRONTEND_URL (and any RAILWAY_PUBLIC_DOMAIN values) so the
 # main frontend cannot be accidentally locked out by a bad env value.
@@ -3876,9 +3893,31 @@ async def meta_data_deletion_callback(request: Request):
 
 
 # ---------------- auth ----------------
+
+# Phase 2.18G security: centralize password policy in one place so signup,
+# password change, and password reset all enforce the same rules. The
+# previous code allowed a 1-character signup password because SignupIn
+# had no length check, and 6-character passwords on change/reset.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 256
+
+
+def _enforce_password_policy(candidate: object) -> str:
+    """Validate a new password. Raises HTTPException with a stable detail
+    string the frontend already translates. Returns the validated string."""
+    if not isinstance(candidate, str):
+        raise HTTPException(400, 'password_required')
+    if len(candidate) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(400, 'password_too_short')
+    if len(candidate) > PASSWORD_MAX_LENGTH:
+        raise HTTPException(400, 'password_too_long')
+    return candidate
+
+
 @api.post('/auth/signup', response_model=AuthOut)
 async def signup(data: SignupIn, request: Request):
     ip = _client_ip(request)
+    _enforce_password_policy(data.password)
     normalized_email = _normalize_email_value(data.email)
     if _rate_limited('signup', ip,
                      limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
@@ -3964,9 +4003,7 @@ async def change_password(
         raise HTTPException(400, 'Password login not configured for this account')
     if not verify_password(data.current_password, u['password_hash']):
         raise HTTPException(401, 'Current password is incorrect')
-    new_password = data.new_password if isinstance(data.new_password, str) else ''
-    if len(new_password) < 6:
-        raise HTTPException(400, 'password_too_short')
+    new_password = _enforce_password_policy(data.new_password)
     new_hashed = hash_password(new_password)
     result = await db.users.update_one(
         {'id': user_id},
@@ -4218,10 +4255,7 @@ async def auth_reset_password(data: ResetPasswordIn = Body(...)):
     token = data.token if isinstance(data.token, str) else ''
     if not token or len(token) > 256:
         raise HTTPException(400, 'invalid_password_reset_token')
-    new_password = data.new_password if isinstance(data.new_password, str) else ''
-    # Same minimum-length policy as the Settings password change form.
-    if len(new_password) < 6:
-        raise HTTPException(400, 'password_too_short')
+    new_password = _enforce_password_policy(data.new_password)
     token_hash = _hash_password_reset_token(token)
     user = await db.users.find_one({'password_reset_token_hash': token_hash})
     if not user:
@@ -16503,6 +16537,22 @@ async def response_timing_middleware(request, call_next):
                 'Strict-Transport-Security',
                 'max-age=31536000; includeSubDomains',
             )
+    # Phase 2.18G security: prevent caches (browser, intermediaries) from
+    # storing authenticated or admin responses, which could otherwise be
+    # served to a different user on a shared device. Public health,
+    # /auth/google/config, and /plans deliberately stay cacheable.
+    path_str = path if isinstance(path, str) else str(path or '')
+    if (
+        path_str.startswith('/api/auth/')
+        or path_str.startswith('/api/admin/')
+        or path_str.startswith('/api/dashboard/')
+        or path_str.startswith('/api/automations')
+        or path_str.startswith('/api/instagram/')
+        or path_str.startswith('/api/usage/')
+        or path_str.startswith('/api/plan/current')
+    ) and not path_str == '/api/auth/google/config':
+        headers['Cache-Control'] = 'no-store, private'
+        headers.setdefault('Pragma', 'no-cache')
     if duration_ms > 3000:
         logger.warning(
             'slow_request path=%s durationMs=%s',

@@ -454,6 +454,10 @@ def test_docs_disabled_when_production_env_set():
         'FRONTEND_URL': 'https://x',
         'IG_APP_ID': '1', 'IG_APP_SECRET': 's',
         'META_WEBHOOK_VERIFY_TOKEN': 'verify',
+        # Phase 2.18G fail-fast requires the webhook signing secret in
+        # production. Provide one so the module reloads cleanly while
+        # we're asserting on docs_url/redoc_url defaults.
+        'META_WEBHOOK_APP_SECRET': 'test-only-app-secret',
         'CRON_SECRET': 'c',
         'ADMIN_EMAILS': 'admin@example.com',
     }

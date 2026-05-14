@@ -25,9 +25,12 @@ describe('app boot warmup wiring', () => {
     expect(source).toContain('if (isAdmin)');
   });
 
-  test('runs low-priority and dedupes repeated warmups by user account scope', () => {
-    expect(source).toContain('requestIdleCallback');
-    expect(source).toContain('setTimeout');
+  test('fires prefetch immediately (no idle delay) and dedupes repeated warmups by scope', () => {
+    // Phase 2.18F: prefetch must not be wrapped in requestIdleCallback /
+    // setTimeout — that delayed the critical first /dashboard/summary
+    // call until after the Dashboard mounted.
+    expect(source).not.toContain('requestIdleCallback');
+    expect(source).not.toContain('runWhenIdle');
     expect(source).toContain('scheduledScope === scope');
     expect(source).toContain('activeInstagramAccountId');
     expect(source).toContain('activeInstagramIgUserId');
