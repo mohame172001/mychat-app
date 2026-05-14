@@ -72,12 +72,21 @@ const Sidebar = () => {
   }, [accountsCacheKey, user?.instagramConnected, user?.instagramHandle]);
 
   const currentAccount = instagramAccounts.find(account => account.active || account.isCurrent) || instagramAccounts[0];
+  // Phase 2.18M: do NOT fall back to user.instagramHandle when the
+  // authoritative instagram_accounts query returned nothing. The
+  // previous fallback was creating a phantom "@username" trigger
+  // label even after the user had been disconnected — the Settings
+  // page correctly said "Not connected" but this button still
+  // showed the old handle, which made the state look inconsistent
+  // and confused the user. We now only show an IG handle when a
+  // real account is in the list; otherwise the button reads
+  // "No Instagram account" and the dropdown shows the connect path.
   const currentAccountName = currentAccount?.username
     ? `@${currentAccount.username}`
-    : user?.instagramHandle
-      ? `@${String(user.instagramHandle).replace('@', '')}`
-      : user?.name;
-  const currentAccountAvatar = currentAccount?.profilePictureUrl || user?.instagramProfilePictureUrl || user?.avatar;
+    : null;
+  const currentAccountAvatar = currentAccount?.profilePictureUrl
+    || (currentAccount ? user?.instagramProfilePictureUrl : null)
+    || user?.avatar;
 
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;

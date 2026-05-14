@@ -11237,6 +11237,45 @@ async def instagram_auth_url(
     # 'reconnect' is always allowed (it replaces an existing connection,
     # not adding a new one).
     if oauth_mode == 'add_account':
+        # Phase 2.18M: auto-heal inconsistent state before counting.
+        # The user's screenshot showed Settings = "No account connected"
+        # but the plan-cap check still saying "free allows 1, upgrade".
+        # That happens when an old disconnect path left users.* at
+        # disconnected but legacy instagram_accounts rows still had
+        # connectionValid=True. We treat the users.* document as the
+        # authoritative "is this user connected to ANY IG account"
+        # signal — if it says no, we deactivate every still-valid row
+        # owned by this user before we count.
+        user_doc_for_cleanup = await db.users.find_one({'id': user_id}) or {}
+        users_say_connected = bool(
+            user_doc_for_cleanup.get('instagramConnected')
+            or user_doc_for_cleanup.get('instagram_connection_valid')
+        )
+        if not users_say_connected:
+            try:
+                cleanup = await db.instagram_accounts.update_many(
+                    {
+                        '$or': [{'userId': user_id}, {'user_id': user_id}],
+                        'connectionValid': True,
+                    },
+                    {'$set': {
+                        'connectionValid': False,
+                        'isActive': False,
+                        'isCurrent': False,
+                        'refreshStatus': 'auto_cleanup_users_disconnected',
+                        'refreshLockedUntil': None,
+                        'updatedAt': datetime.utcnow(),
+                    }},
+                )
+                if getattr(cleanup, 'modified_count', 0) > 0:
+                    logger.info(
+                        'instagram_plan_check_auto_cleanup user_id=%s rows_cleaned=%s',
+                        user_id, cleanup.modified_count,
+                    )
+                    await invalidate_dashboard_summary(user_id)
+            except Exception:
+                # Cleanup is best-effort — don't block the user.
+                pass
         plan = await get_user_plan(user_id)
         effective = await compute_effective_limits(user_id)
         snapshots = await _usage_snapshots_for_user(user_id)
