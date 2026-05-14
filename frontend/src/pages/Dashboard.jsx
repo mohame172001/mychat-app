@@ -13,19 +13,29 @@ import { useAuth } from '../context/AuthContext';
 const DASHBOARD_TTL_MS = 60 * 1000;
 const DASHBOARD_MAX_STALE_MS = 5 * 60 * 1000;
 const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
+const INSTAGRAM_CONNECT_REQUIRED = 'Connect or reconnect Instagram to load dashboard data.';
 
-const classifyDashboardError = (err) => {
+const classifyDashboardError = (err, user) => {
   if (!err) return 'Dashboard data could not be loaded.';
   if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return 'Dashboard request timed out. Please try again.';
   const status = err?.response?.status;
   if (status === 401 || status === 403) return 'Session expired. Please log in again.';
   if (status && status >= 500) return 'Dashboard server error. Please try again later.';
+  const detail = String(err?.response?.data?.detail || err?.message || '').toLowerCase();
+  const instagramConnectProblem = detail.includes('no instagram account')
+    || detail.includes('instagram account')
+    || detail.includes('instagram connection')
+    || user?.instagramConnected === false
+    || user?.instagramConnectionValid === false;
+  if (instagramConnectProblem) return INSTAGRAM_CONNECT_REQUIRED;
   if (!status && err.message?.includes?.('Network')) return 'Network error. Please check your connection.';
   return 'Dashboard data could not be loaded.';
 };
 
 const Dashboard = () => {
   const { user } = useAuth();
+  const userInstagramConnected = user?.instagramConnected;
+  const userInstagramConnectionValid = user?.instagramConnectionValid;
   const cacheKey = [
     'dashboard-summary',
     user?.id || 'anon',
@@ -74,7 +84,12 @@ const Dashboard = () => {
         }
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
-        if (alive) setError(classifyDashboardError(err));
+        if (alive) {
+          setError(classifyDashboardError(err, {
+            instagramConnected: userInstagramConnected,
+            instagramConnectionValid: userInstagramConnectionValid,
+          }));
+        }
       } finally {
         if (alive) setLoading(false);
       }
@@ -83,7 +98,7 @@ const Dashboard = () => {
     return () => {
       alive = false;
     };
-  }, [cacheKey]);
+  }, [cacheKey, userInstagramConnected, userInstagramConnectionValid]);
 
   const refreshDashboard = async () => {
     setRefreshing(true);
@@ -97,7 +112,10 @@ const Dashboard = () => {
       setStats(result.data);
     } catch (err) {
       console.error('[Dashboard] Refresh failed:', err);
-      setError(stats ? REFRESH_FAILED_WITH_CACHE : classifyDashboardError(err));
+      setError(stats ? REFRESH_FAILED_WITH_CACHE : classifyDashboardError(err, {
+        instagramConnected: userInstagramConnected,
+        instagramConnectionValid: userInstagramConnectionValid,
+      }));
     } finally {
       setRefreshing(false);
       setLoading(false);

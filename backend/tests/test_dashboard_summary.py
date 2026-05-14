@@ -149,6 +149,39 @@ def test_dashboard_summary_does_not_expose_tokens(monkeypatch):
     assert 'meta_access_token' not in payload
 
 
+def test_dashboard_summary_without_instagram_account_returns_empty_state(monkeypatch):
+    fake_db = FakeDB(
+        account=[],
+        user=_user(
+            id='u1',
+            ig_user_id=None,
+            meta_access_token=None,
+            active_instagram_account_id=None,
+            instagramConnected=False,
+            instagram_connection_valid=False,
+        ),
+        automations=[],
+        contacts=[],
+        usage_events=[],
+        link_click_events=[],
+        comments=[],
+        monthly_usage=[],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+
+    result = _run(server.dashboard_summary(user_id='u1', response=response))
+
+    assert result['instagram']['connected'] is False
+    assert result['instagram']['activeAccountId'] is None
+    assert result['instagram']['instagramAccountId'] is None
+    assert result['totalContacts'] == 0
+    assert result['activeAutomations'] == 0
+    assert result['messagesSent'] == 0
+    assert len(result['weeklyPerformance']) == 7
+    assert response.headers['X-Dashboard-Summary-Source'] in {'rebuilt', 'read_model'}
+
+
 def test_dashboard_summary_sets_safe_timing_headers(monkeypatch):
     fake_db = _summary_db()
     monkeypatch.setattr(server, 'db', fake_db)

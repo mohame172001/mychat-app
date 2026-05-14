@@ -26,6 +26,12 @@ describe('Dashboard performance wiring', () => {
     expect(source).toContain('dashboard-summary');
   });
 
+  test('shows a connection-specific error for Instagram account problems', () => {
+    expect(source).toContain('Connect or reconnect Instagram to load dashboard data.');
+    expect(source).toContain('instagramConnectionValid');
+    expect(source).toContain('no instagram account');
+  });
+
   test('uses silent background refresh without visible updated-time labels', () => {
     expect(source).toContain("Couldn't refresh. Showing the latest available data.");
     expect(source).not.toContain('Showing cached dashboard data. Refresh failed.');
