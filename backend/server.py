@@ -9946,6 +9946,68 @@ def _instagram_account_public_row(account: dict, active_account_id: str = '') ->
     }
 
 
+def _is_public_switchable_instagram_account(account: dict) -> bool:
+    if not isinstance(account, dict):
+        return False
+    instagram_account_id = account.get('instagramAccountId') or account.get('igUserId')
+    return bool(
+        account.get('id')
+        and instagram_account_id
+        and account.get('accessToken')
+        and account.get('connectionValid') is True
+        and account.get('isActive') is not False
+        and account.get('refreshStatus') not in {
+            'disconnected',
+            'auto_cleanup_users_disconnected',
+            'auto_cleanup_single_account_plan',
+            'force_disconnected_by_admin',
+            'replaced_by_reconnect',
+        }
+    )
+
+
+async def _cleanup_extra_instagram_accounts_for_single_account_plan(
+    user_id: str,
+    active_account_id: str,
+) -> int:
+    if not user_id or not active_account_id:
+        return 0
+    try:
+        effective = await compute_effective_limits(user_id)
+        max_accounts = effective.get('max_instagram_accounts')
+        if max_accounts is None or int(max_accounts) > 1:
+            return 0
+        result = await db.instagram_accounts.update_many(
+            {
+                '$or': [{'userId': user_id}, {'user_id': user_id}],
+                'id': {'$ne': active_account_id},
+                'connectionValid': True,
+            },
+            {'$set': {
+                'connectionValid': False,
+                'isActive': False,
+                'isCurrent': False,
+                'refreshStatus': 'auto_cleanup_single_account_plan',
+                'refreshLockedUntil': None,
+                'updatedAt': datetime.utcnow(),
+            }},
+        )
+        cleaned = int(getattr(result, 'modified_count', 0) or 0)
+        if cleaned:
+            logger.info(
+                'instagram_accounts_single_plan_cleanup user_id=%s active_account_id=%s rows_cleaned=%s',
+                user_id, active_account_id, cleaned,
+            )
+            await invalidate_dashboard_summary(user_id)
+        return cleaned
+    except Exception as exc:
+        logger.warning(
+            'instagram_accounts_single_plan_cleanup_failed user_id=%s exception=%s',
+            user_id, type(exc).__name__,
+        )
+        return 0
+
+
 def _instagram_context_from_account(account_doc: Optional[dict]) -> dict:
     account_doc = account_doc or {}
     instagram_account_id = str(account_doc.get('instagramAccountId') or account_doc.get('igUserId') or '')
@@ -11606,6 +11668,24 @@ async def instagram_callback(request: Request,
                     {'$set': {'ig_oauth_last_audit': _redact_secrets(audit)}},
                 )
                 await instagram_account_activate(connected_account_id, user_id=user_id)
+                if oauth_mode != 'add_account':
+                    cleanup = await db.instagram_accounts.update_many(
+                        {
+                            '$or': [{'userId': user_id}, {'user_id': user_id}],
+                            'id': {'$ne': connected_account_id},
+                            'connectionValid': True,
+                        },
+                        {'$set': {
+                            'connectionValid': False,
+                            'isActive': False,
+                            'isCurrent': False,
+                            'refreshStatus': 'replaced_by_reconnect',
+                            'refreshLockedUntil': None,
+                            'updatedAt': datetime.utcnow(),
+                        }},
+                    )
+                    if getattr(cleanup, 'modified_count', 0):
+                        await invalidate_dashboard_summary(user_id)
                 await _safe_record_usage_event(
                     user_id=user_id,
                     event_type='instagram_account_connected',
@@ -16969,7 +17049,11 @@ async def instagram_accounts(user_id: str = Depends(get_current_active_user_id))
         if e.status_code != 400:
             raise
         active_account_id = user_doc.get('active_instagram_account_id') or ''
-    rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
+    await _cleanup_extra_instagram_accounts_for_single_account_plan(user_id, active_account_id)
+    rows = await db.instagram_accounts.find({
+        '$or': [{'userId': user_id}, {'user_id': user_id}],
+    }).sort('updatedAt', -1).to_list(100)
+    rows = [row for row in rows if _is_public_switchable_instagram_account(row)]
     # Phase 2.18H: parallel-backfill missing profile pictures for every
     # account that lacks one. Connected accounts without a saved avatar
     # show a generic placeholder otherwise. Each fetch is independent

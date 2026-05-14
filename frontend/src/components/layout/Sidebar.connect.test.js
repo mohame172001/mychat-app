@@ -25,6 +25,9 @@ test('account switch uses client navigation instead of full page reload', () => 
   expect(source).toContain('useNavigate');
   expect(source).toContain('cachedApiGetSWR');
   expect(source).toContain('instagram-accounts');
+  expect(source).toContain('filterDisplayableInstagramAccounts');
+  expect(source).toContain('connectionValid === true');
+  expect(source).toContain('auto_cleanup_single_account_plan');
   expect(source).toContain("connectMode === 'reconnect'");
   expect(source).toContain('Reconnect Instagram');
   expect(source).toContain('Connect Instagram');

@@ -31,13 +31,34 @@ export const navItems = [
   { to: '/app/settings', icon: Settings, label: 'Settings' }
 ];
 
+const hiddenRefreshStates = new Set([
+  'disconnected',
+  'auto_cleanup_users_disconnected',
+  'auto_cleanup_single_account_plan',
+  'force_disconnected_by_admin',
+  'replaced_by_reconnect',
+]);
+
+export const isDisplayableInstagramAccount = (account) => Boolean(
+  account
+    && account.id
+    && account.connectionValid === true
+    && account.isActive !== false
+    && !hiddenRefreshStates.has(account.refreshStatus)
+    && (account.username || account.instagramAccountId || account.igUserId)
+);
+
+export const filterDisplayableInstagramAccounts = (payload) => (
+  (payload?.accounts || []).filter(isDisplayableInstagramAccount)
+);
+
 const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
   const navigate = useNavigate();
   const accountsCacheKey = `instagram-accounts:${user?.id || 'anon'}`;
   const [instagramAccounts, setInstagramAccounts] = useState(() => (
     user?.instagramConnected
-      ? (getCachedApiData(accountsCacheKey, { maxStaleMs: 10 * 60 * 1000 })?.accounts || [])
+      ? filterDisplayableInstagramAccounts(getCachedApiData(accountsCacheKey, { maxStaleMs: 10 * 60 * 1000 }))
       : []
   ));
   const [switchingAccount, setSwitchingAccount] = useState(false);
@@ -55,12 +76,12 @@ const Sidebar = () => {
             maxStaleMs: 10 * 60 * 1000,
             persist: true,
             onUpdate: (data) => {
-              if (alive) setInstagramAccounts(data?.accounts || []);
+              if (alive) setInstagramAccounts(filterDisplayableInstagramAccounts(data));
             },
           }
         );
         const data = result.data;
-        if (alive) setInstagramAccounts(data?.accounts || []);
+        if (alive) setInstagramAccounts(filterDisplayableInstagramAccounts(data));
       } catch {
         if (alive) setInstagramAccounts([]);
       }

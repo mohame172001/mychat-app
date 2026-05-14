@@ -469,6 +469,11 @@ def test_instagram_accounts_marks_server_side_active_and_hides_tokens(monkeypatc
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)
 
+    async def multi_account_limits(_user_id):
+        return {'max_instagram_accounts': 5}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', multi_account_limits)
+
     result = _run(server.instagram_accounts(user_id='u1'))
 
     assert result['activeInstagramAccountId'] == 'accA'
@@ -476,6 +481,60 @@ def test_instagram_accounts_marks_server_side_active_and_hides_tokens(monkeypatc
     assert [row['id'] for row in result['accounts'] if row['active']] == ['accA']
     assert 'token-a' not in str(result)
     assert 'accessToken' not in str(result)
+
+
+def test_instagram_accounts_hides_disconnected_and_tokenless_rows(monkeypatch):
+    fake_db = _multi_account_db()
+    fake_db.instagram_accounts.docs.append(_account(
+        id='accDisconnected',
+        userId='u1',
+        instagramAccountId='igOld',
+        username='old',
+        connectionValid=False,
+        isActive=False,
+        refreshStatus='disconnected',
+        accessToken='old-token',
+    ))
+    fake_db.instagram_accounts.docs.append(_account(
+        id='accNoToken',
+        userId='u1',
+        instagramAccountId='igNoToken',
+        username='no_token',
+        connectionValid=True,
+        isActive=True,
+        accessToken='',
+    ))
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def multi_account_limits(_user_id):
+        return {'max_instagram_accounts': 5}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', multi_account_limits)
+
+    result = _run(server.instagram_accounts(user_id='u1'))
+
+    assert [row['id'] for row in result['accounts']] == ['accA', 'accB']
+    assert result['count'] == 2
+    assert 'old-token' not in str(result)
+
+
+def test_instagram_accounts_auto_cleans_extra_rows_for_single_account_plan(monkeypatch):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def single_account_limits(_user_id):
+        return {'max_instagram_accounts': 1}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', single_account_limits)
+
+    result = _run(server.instagram_accounts(user_id='u1'))
+    account_b = _run(fake_db.instagram_accounts.find_one({'id': 'accB'}))
+
+    assert [row['id'] for row in result['accounts']] == ['accA']
+    assert result['count'] == 1
+    assert account_b['connectionValid'] is False
+    assert account_b['isActive'] is False
+    assert account_b['refreshStatus'] == 'auto_cleanup_single_account_plan'
 
 
 def test_instagram_account_activate_switches_active_account(monkeypatch):
@@ -538,6 +597,11 @@ def _oauth_success_responses(ig_id='igB', username='account_b', token='short-b',
 def test_instagram_callback_creates_second_account_and_sets_it_active(monkeypatch):
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)
+
+    async def multi_account_limits(_user_id):
+        return {'max_instagram_accounts': 5}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', multi_account_limits)
     fake_client = FakeAsyncClient(_oauth_success_responses())
     monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
     state = server._sign_instagram_oauth_state({
