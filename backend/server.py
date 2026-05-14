@@ -8917,6 +8917,148 @@ async def admin_revoke_user_override(
     return {'ok': True, 'override': _overrides.safe_override_summary(refreshed or row)}
 
 
+@api.get('/admin/instagram/accounts/by-handle')
+async def admin_lookup_instagram_account_by_handle(
+    username: str = Query('', description='Instagram username (without @)'),
+    instagram_account_id: str = Query('', description='Instagram numeric user id'),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18K: admin diagnostic — find every instagram_accounts row
+    for a given handle / IG account id, including rows still marked
+    connectionValid=True that may be blocking a reconnect. Returns
+    sanitized owner + row metadata. No access tokens. Requires
+    admin.users.view."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    needle_username = (username or '').strip().lstrip('@').lower()
+    needle_id = (instagram_account_id or '').strip()
+    if not (needle_username or needle_id):
+        raise HTTPException(400, 'Provide username= or instagram_account_id=')
+    query: dict = {'$or': []}
+    if needle_username:
+        # case-insensitive exact match on username
+        query['$or'].append({
+            'username': {'$regex': f'^{re.escape(needle_username)}$', '$options': 'i'},
+        })
+    if needle_id:
+        canonical = _canonical_instagram_account_id(needle_id) or needle_id
+        query['$or'].append({'instagramAccountId': canonical})
+        query['$or'].append({'igUserId': canonical})
+    rows = await db.instagram_accounts.find(query).sort('updatedAt', -1).to_list(50)
+    out = []
+    for row in rows:
+        owner_id = row.get('userId') or row.get('user_id') or ''
+        owner_email = None
+        owner_status = None
+        if owner_id:
+            owner = await db.users.find_one(
+                {'id': owner_id},
+                projection={'email': 1, 'status': 1},
+            )
+            if owner:
+                owner_email = (owner.get('email') or '').lower() or None
+                owner_status = owner.get('status') or 'active'
+        out.append({
+            'row_id': row.get('id'),
+            'instagramAccountId': row.get('instagramAccountId') or row.get('igUserId'),
+            'username': row.get('username'),
+            'owner_user_id': owner_id,
+            'owner_email': owner_email,
+            'owner_status': owner_status,
+            'connectionValid': bool(row.get('connectionValid')),
+            'isActive': bool(row.get('isActive')),
+            'isCurrent': bool(row.get('isCurrent')),
+            'refreshStatus': row.get('refreshStatus'),
+            'createdAt': _iso_or_none(row.get('createdAt')),
+            'updatedAt': _iso_or_none(row.get('updatedAt')),
+            'tokenExpiresAt': _iso_or_none(row.get('tokenExpiresAt')),
+        })
+    return {'count': len(out), 'rows': out}
+
+
+class AdminForceDisconnectIn(BaseModel):
+    row_id: Optional[str] = None
+    instagram_account_id: Optional[str] = None
+    username: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@api.post('/admin/instagram/accounts/force-disconnect')
+async def admin_force_disconnect_instagram_account(
+    body: AdminForceDisconnectIn = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18K: admin force-disconnect.
+
+    Lets an admin (admin.users.manage) clear an orphan / locked
+    instagram_accounts row so the legitimate owner can re-OAuth and
+    re-link without hitting the 'already connected to another MyChat
+    account' guard. Identify the row by row_id, by instagram_account_id,
+    or by username — at least one is required. Affected rows are set
+    to isActive=False / connectionValid=False / isCurrent=False, the
+    refresh lock is cleared, and the action is recorded in the admin
+    audit log.
+    """
+    actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
+    if not body.row_id and not body.instagram_account_id and not body.username:
+        raise HTTPException(400, 'Provide row_id, instagram_account_id, or username.')
+    query: dict = {}
+    if body.row_id:
+        query = {'id': body.row_id}
+    elif body.instagram_account_id:
+        canonical = _canonical_instagram_account_id(body.instagram_account_id) or body.instagram_account_id
+        query = {'$or': [{'instagramAccountId': canonical}, {'igUserId': canonical}]}
+    elif body.username:
+        clean_username = body.username.strip().lstrip('@').lower()
+        query = {'username': {'$regex': f'^{re.escape(clean_username)}$', '$options': 'i'}}
+    affected_rows = await db.instagram_accounts.find(query).to_list(100)
+    if not affected_rows:
+        raise HTTPException(404, 'No instagram_accounts row matched.')
+    affected_user_ids = sorted({
+        (r.get('userId') or r.get('user_id') or '') for r in affected_rows if (r.get('userId') or r.get('user_id'))
+    })
+    now = datetime.utcnow()
+    result = await db.instagram_accounts.update_many(
+        query,
+        {'$set': {
+            'isActive': False,
+            'isCurrent': False,
+            'connectionValid': False,
+            'refreshStatus': 'force_disconnected_by_admin',
+            'refreshLockedUntil': None,
+            'updatedAt': now,
+        }},
+    )
+    # Drop dashboard snapshots for every affected user so their plan
+    # connected-account count refreshes the moment they hit /app again.
+    for uid in affected_user_ids:
+        try:
+            await invalidate_dashboard_summary(uid)
+        except Exception:
+            pass
+    await _record_admin_action(
+        actor,
+        action='instagram_account_force_disconnected',
+        target_user_id=affected_user_ids[0] if affected_user_ids else None,
+        metadata={
+            'rows_modified': getattr(result, 'modified_count', 0),
+            'affected_user_count': len(affected_user_ids),
+            'identifier': 'row_id' if body.row_id else ('instagram_account_id' if body.instagram_account_id else 'username'),
+            'reason_length': len(str(body.reason or '')),
+        },
+    )
+    logger.info(
+        'instagram_account_force_disconnected_by_admin admin=%s rows=%s users=%s',
+        (actor.get('email') or '').lower(),
+        getattr(result, 'modified_count', 0),
+        len(affected_user_ids),
+    )
+    return {
+        'ok': True,
+        'rows_disconnected': getattr(result, 'modified_count', 0),
+        'affected_user_ids': affected_user_ids,
+    }
+
+
 @api.get('/admin/users/{target_user_id}/effective-limits')
 async def admin_user_effective_limits(
     target_user_id: str,
@@ -12305,6 +12447,18 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
 
 @api.post('/instagram/disconnect')
 async def instagram_disconnect(user_id: str = Depends(get_current_active_user_id)):
+    """Disconnect EVERY Instagram account row owned by this user.
+
+    Phase 2.18K: the previous implementation only disconnected the
+    single row matching users.ig_user_id, which left any other linked
+    or orphan row for the same user with connectionValid=True. That
+    row kept counting toward the plan's max_instagram_accounts cap and
+    silently blocked the user from reconnecting ('Plan free allows
+    1 Instagram account...'). Now we deactivate ALL of the user's
+    instagram_accounts rows in one update_many so the slate is truly
+    clean and the snapshot count drops to zero.
+    """
+    now = datetime.utcnow()
     u = await db.users.find_one({'id': user_id})
     await db.users.update_one(
         {'id': user_id},
@@ -12314,6 +12468,7 @@ async def instagram_disconnect(user_id: str = Depends(get_current_active_user_id
                 'instagram_connection_valid': False,
                 'instagram_connection_blocker': 'disconnected_by_user',
                 'instagramHandle': None,
+                'active_instagram_account_id': None,
             },
             '$unset': {
                 'meta_access_token': '',
@@ -12321,24 +12476,38 @@ async def instagram_disconnect(user_id: str = Depends(get_current_active_user_id
                 'instagram_account_type': '',
                 'instagram_graph_me_id': '',
                 'instagram_graph_me_user_id': '',
+                'instagram_profile_picture_url': '',
             },
         }
     )
-    if u and u.get('ig_user_id'):
-        await db.instagram_accounts.update_one(
-            {
-                'userId': user_id,
-                'instagramAccountId': str(u.get('ig_user_id') or ''),
-            },
-            {'$set': {
-                'isActive': False,
-                'connectionValid': False,
-                'refreshStatus': 'disconnected',
-                'refreshLockedUntil': None,
-                'updatedAt': datetime.utcnow(),
-            }},
-        )
-    return {'ok': True}
+    # Nuke EVERY instagram_accounts row owned by this user (both
+    # userId and user_id field variants) so no phantom row keeps
+    # counting toward the plan cap.
+    result = await db.instagram_accounts.update_many(
+        {'$or': [{'userId': user_id}, {'user_id': user_id}]},
+        {'$set': {
+            'isActive': False,
+            'isCurrent': False,
+            'connectionValid': False,
+            'refreshStatus': 'disconnected',
+            'refreshLockedUntil': None,
+            'updatedAt': now,
+        }},
+    )
+    # Drop the dashboard snapshot so the plan-limit guard re-reads
+    # the new (zero) connected count on the very next request.
+    try:
+        await invalidate_dashboard_summary(user_id)
+    except Exception:
+        pass
+    logger.info(
+        'instagram_disconnect_all user_id=%s rows_disconnected=%s',
+        user_id, result.modified_count if hasattr(result, 'modified_count') else 0,
+    )
+    return {
+        'ok': True,
+        'rows_disconnected': getattr(result, 'modified_count', 0),
+    }
 
 
 @api.get('/instagram/webhook')
