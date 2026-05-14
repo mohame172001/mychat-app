@@ -7749,63 +7749,88 @@ async def admin_me(user_id: str = Depends(get_current_active_user_id)):
 @api.get('/admin/overview')
 async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
     """Sanitized aggregate snapshot of the SaaS — totals + plan distribution
-    + this month's usage roll-up + failure / queue health counts."""
+    + this month's usage roll-up + failure / queue health counts.
+
+    Phase 2.18D: all read paths now run in parallel via asyncio.gather.
+    Previously this endpoint ran 13 count_documents + 2 cursor iterations
+    sequentially, paying one MongoDB round-trip per call. With ~20-50ms
+    latency per call to MongoDB Atlas that meant 0.5-1.5s before any byte
+    came back. The aggregate is now bounded by the slowest single read.
+    """
     started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_OVERVIEW_VIEW)
     now = datetime.utcnow()
     today_start = datetime(now.year, now.month, now.day)
     seven_days = today_start - timedelta(days=7)
     thirty_days = today_start - timedelta(days=30)
-
-    # User totals
-    total_users = await db.users.count_documents({})
-    active_users = await db.users.count_documents({'status': {'$nin': ['suspended', 'deleted']}})
-    suspended_users = await db.users.count_documents({'status': 'suspended'})
-    deleted_users = await db.users.count_documents({'status': 'deleted'})
-    users_today = await db.users.count_documents({'created_at': {'$gte': today_start}})
-    users_7d = await db.users.count_documents({'created_at': {'$gte': seven_days}})
-    users_30d = await db.users.count_documents({'created_at': {'$gte': thirty_days}})
-
-    # Instagram accounts
-    total_ig = await db.instagram_accounts.count_documents({})
-    connected_ig = await db.instagram_accounts.count_documents({'connectionValid': True})
-
-    # Automations
-    total_autos = await db.automations.count_documents({})
-    active_autos = await db.automations.count_documents({'status': 'active'})
-
-    # Current-month usage roll-up (sum across users)
     month = _usage_month(now)
-    usage_totals = {field: 0 for field in USAGE_COUNTER_FIELDS}
-    try:
-        cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(month))
-        async for row in cursor:
-            for field in USAGE_COUNTER_FIELDS:
-                usage_totals[field] += int(row.get(field) or 0)
-    except Exception:
-        pass
 
-    # Plan distribution
-    plan_distribution = {key: 0 for key in _plans.PLAN_KEYS}
-    try:
-        cursor = db.user_plans.find({})
-        async for row in cursor:
-            key = row.get('plan_key')
-            if _plans.is_valid_plan_key(key):
-                plan_distribution[key] += 1
-    except Exception:
-        pass
+    async def _safe_usage_totals():
+        totals = {field: 0 for field in USAGE_COUNTER_FIELDS}
+        try:
+            cursor = db.monthly_usage.find(_monthly_usage_user_scope_query(month))
+            async for row in cursor:
+                for field in USAGE_COUNTER_FIELDS:
+                    totals[field] += int(row.get(field) or 0)
+        except Exception:
+            pass
+        return totals
+
+    async def _safe_plan_distribution():
+        dist = {key: 0 for key in _plans.PLAN_KEYS}
+        try:
+            cursor = db.user_plans.find({})
+            async for row in cursor:
+                key = row.get('plan_key')
+                if _plans.is_valid_plan_key(key):
+                    dist[key] += 1
+        except Exception:
+            pass
+        return dist
+
+    (
+        total_users,
+        active_users,
+        suspended_users,
+        deleted_users,
+        users_today,
+        users_7d,
+        users_30d,
+        total_ig,
+        connected_ig,
+        total_autos,
+        active_autos,
+        usage_totals,
+        plan_distribution,
+        plan_limited,
+        retryable_failures,
+        permanent_failures,
+        queue_pending,
+    ) = await asyncio.gather(
+        db.users.count_documents({}),
+        db.users.count_documents({'status': {'$nin': ['suspended', 'deleted']}}),
+        db.users.count_documents({'status': 'suspended'}),
+        db.users.count_documents({'status': 'deleted'}),
+        db.users.count_documents({'created_at': {'$gte': today_start}}),
+        db.users.count_documents({'created_at': {'$gte': seven_days}}),
+        db.users.count_documents({'created_at': {'$gte': thirty_days}}),
+        db.instagram_accounts.count_documents({}),
+        db.instagram_accounts.count_documents({'connectionValid': True}),
+        db.automations.count_documents({}),
+        db.automations.count_documents({'status': 'active'}),
+        _safe_usage_totals(),
+        _safe_plan_distribution(),
+        db.comments.count_documents({'action_status': 'plan_limited'}),
+        db.comments.count_documents({'action_status': 'failed_retryable'}),
+        db.comments.count_documents({
+            'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
+        }),
+        db.comments.count_documents({'queued': True}),
+    )
+
     # Users without a user_plans row are implicitly 'free'.
     user_plan_rows = sum(plan_distribution.values())
     plan_distribution['free'] += max(0, total_users - user_plan_rows)
-
-    # Failure / plan_limited counts (cheap counts on indexed fields)
-    plan_limited = await db.comments.count_documents({'action_status': 'plan_limited'})
-    retryable_failures = await db.comments.count_documents({'action_status': 'failed_retryable'})
-    permanent_failures = await db.comments.count_documents({
-        'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
-    })
-    queue_pending = await db.comments.count_documents({'queued': True})
 
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info('admin_overview_calculated user_id=%s durationMs=%s', user_id, duration_ms)

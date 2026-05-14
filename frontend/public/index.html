@@ -10,6 +10,13 @@
         />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <!-- Phase 2.18D: open the TCP+TLS connection to the backend
+             during HTML parse so the very first /api/auth/me and
+             /api/dashboard/summary requests do not pay the full
+             handshake cost on top of the round-trip. dns-prefetch is
+             a fallback for browsers that ignore preconnect. -->
+        <link rel="preconnect" href="https://backend-production-a1a3.up.railway.app" crossorigin />
+        <link rel="dns-prefetch" href="https://backend-production-a1a3.up.railway.app" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
         <!--
         manifest.json provides metadata used when your web app is installed on a
