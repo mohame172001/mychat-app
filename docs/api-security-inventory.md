@@ -2,7 +2,7 @@
 
 Generated: 2026-05-13
 
-Total routes inventoried: 113
+Total routes inventoried: 115 API routes plus the tracked-link redirect route.
 
 No unauthenticated sensitive mutation route was identified in this inventory. Public routes are constrained by credentials, verification token/HMAC, signed request behavior, short code lookup, or generic responses.
 
@@ -12,6 +12,9 @@ No unauthenticated sensitive mutation route was identified in this inventory. Pu
 | POST | /api/auth/signup | no/public constrained | n/a | n/a or token/signature/short-code scoped | yes/bounded | yes | low | auth tests |
 | POST | /api/auth/login | no/public constrained | n/a | n/a or token/signature/short-code scoped | yes/bounded | yes | low | auth tests |
 | GET | /api/auth/me | yes | n/a | current user scoped | yes/bounded | yes/basic | low | auth tests |
+| POST | /api/auth/password | yes | n/a | current user scoped | yes/bounded | yes | low | password-change tests |
+| POST | /api/auth/forgot-password | no/public constrained | n/a | n/a; generic response prevents account enumeration | yes/bounded | yes | low | password-reset tests |
+| POST | /api/auth/reset-password | no/public constrained | n/a | hashed reset-token scoped | yes/bounded | yes | low | password-reset tests |
 | POST | /api/auth/resend-verification | no/public constrained | n/a | n/a or token/signature/short-code scoped | yes/bounded | yes | low | auth tests |
 | POST | /api/auth/verify-email | no/public constrained | n/a | n/a or token/signature/short-code scoped | yes/bounded | yes | low | auth tests |
 | GET | /api/auth/verify-email | no/public constrained | n/a | n/a or token/signature/short-code scoped | yes/bounded | yes/basic | low | auth tests |

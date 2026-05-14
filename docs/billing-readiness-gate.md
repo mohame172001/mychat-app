@@ -2,7 +2,7 @@
 
 Generated: 2026-05-13
 
-This gate intentionally does not add Paddle, Paymob, Stripe, checkout, subscriptions, or payment webhooks. It answers whether the security base is ready for a future billing implementation.
+This gate intentionally does not add Paddle, Paymob, Stripe, checkout, subscriptions, or payment webhooks. It separates the security base from the product launch gate. The security base is mostly complete, but Billing remains blocked while live auth recovery email delivery and production performance proof are still open.
 
 | Question | Expected | Result | Evidence | Notes |
 |---|---:|---:|---|---|
@@ -12,12 +12,12 @@ This gate intentionally does not add Paddle, Paymob, Stripe, checkout, subscript
 | Can same Instagram account reset limits through new user? | no | no | backend/tests/test_instagram_account_limit_abuse.py | Duplicate active ownership is blocked and usage subject follows IG account. |
 | Are admin overrides audited? | yes | yes | backend/tests/test_admin_advanced.py | Plan/allowance/member mutations write sanitized audit logs. |
 | Are raw payment payloads prohibited by policy? | yes | yes | this document; security matrix BILL checks | No provider integration exists yet; future billing must preserve scrubber policy. |
-| Is webhook idempotency pattern established? | yes | yes | backend/tests/test_webhook_idempotency.py; queue/state tests | Pattern can be reused for payment webhooks later. |
+| Is webhook idempotency pattern established? | yes | yes | backend/tests/test_webhook_queue.py; backend/tests/test_queue_jobs.py; usage reservation tests | Pattern can be reused for payment webhooks later. |
 | Are secrets/env scanning rules documented? | yes | yes | docs/production-security-checklist.md; docs/deployment-verification.md | No real secrets found in static scan. |
 | Are checkout buttons disabled until provider integration? | yes | yes | frontend/e2e/product-smoke.spec.js | Billing remains placeholder-only; no Stripe/Paddle/Paymob checkout. |
-| Is there any P0/P1/P2 blocker before Billing? | no | no | docs/security-verification-matrix.md | Only P3 operational follow-ups remain. |
+| Is there any P0/P1/P2 product blocker before Billing? | no | no | this gate; docs/auth-recovery-notes.md; docs/production-infrastructure-performance.md | Billing is blocked by P1 product/infrastructure gates: reset email E2E and production performance proof. |
 
-Conclusion: Billing can start from a security-readiness standpoint. Future billing work must add provider-specific webhook signature verification, idempotency keys, raw payload redaction, server-side plan mutation only, and reconciliation tests before accepting real payments.
+Conclusion: Billing cannot start yet. Future billing work must add provider-specific webhook signature verification, idempotency keys, raw payload redaction, server-side plan mutation only, and reconciliation tests before accepting real payments.
 
 ### Phase 2.14 product-functional gate (added)
 
@@ -34,6 +34,7 @@ Billing also remains **BLOCKED** on final production performance proof:
 
 - Backend health measured warm at 180-183 ms after an initial 477 ms request from the workstation.
 - `GET /api/dashboard/summary` now emits safe timing headers and safe frontend perf logs so authenticated dashboard timing can be measured without exposing sensitive data.
+- `GET /api/dashboard/summary` now uses a `dashboard_summaries` read-through snapshot when available: `read_model`, `stale_read_model`, or `rebuilt`.
 - Railway CLI access was unavailable locally (`invalid_grant`), so App Sleeping / always-on status must be verified in the Railway dashboard by the operator.
 - Billing must not start until either:
   - authenticated dashboard warm p50 <= 500 ms and p95 <= 1200 ms with route usable render <= 2s, or

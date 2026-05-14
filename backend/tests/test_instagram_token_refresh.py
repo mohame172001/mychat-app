@@ -145,8 +145,26 @@ class FakeCollection:
     async def find_one(self, query):
         return next((doc for doc in self.docs if _match(doc, query)), None)
 
-    def find(self, query=None, **projection_kw):
-        return FakeCursor([doc for doc in self.docs if _match(doc, query or {})])
+    def find(self, query=None, projection=None, **projection_kw):
+        projection = projection if projection is not None else projection_kw.get('projection')
+        rows = [doc for doc in self.docs if _match(doc, query or {})]
+        if isinstance(projection, dict) and projection:
+            include_keys = {key for key, value in projection.items() if value}
+            exclude_keys = {key for key, value in projection.items() if not value}
+            if include_keys:
+                projected = []
+                for doc in rows:
+                    item = {key: doc[key] for key in include_keys if key in doc}
+                    if '_id' in doc and projection.get('_id', 1):
+                        item['_id'] = doc['_id']
+                    projected.append(item)
+                rows = projected
+            elif exclude_keys:
+                rows = [
+                    {key: value for key, value in doc.items() if key not in exclude_keys}
+                    for doc in rows
+                ]
+        return FakeCursor(rows)
 
     async def update_one(self, query, update, upsert=False):
         doc = await self.find_one(query)
@@ -196,6 +214,14 @@ class FakeCollection:
     async def count_documents(self, query):
         return len([doc for doc in self.docs if _match(doc, query)])
 
+    async def delete_many(self, query):
+        before = len(self.docs)
+        self.docs = [doc for doc in self.docs if not _match(doc, query)]
+        return SimpleNamespace(deleted_count=before - len(self.docs))
+
+    async def create_index(self, *_args, **_kwargs):
+        return _kwargs.get('name') or 'fake_index'
+
     async def find_one_and_update(self, query, update, **_kwargs):
         doc = await self.find_one(query)
         if not doc:
@@ -228,6 +254,7 @@ class FakeDB:
         self.monthly_usage = FakeCollection(collections.get('monthly_usage', []))
         self.usage_reservations = FakeCollection(collections.get('usage_reservations', []))
         self.usage_reservation_buckets = FakeCollection(collections.get('usage_reservation_buckets', []))
+        self.dashboard_summaries = FakeCollection(collections.get('dashboard_summaries', []))
         self.user_plans = FakeCollection(collections.get('user_plans', []))
         self.admin_audit_logs = FakeCollection(collections.get('admin_audit_logs', []))
         self.admin_members = FakeCollection(collections.get('admin_members', []))

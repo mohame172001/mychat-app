@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
@@ -342,6 +343,26 @@ def test_reset_password_too_short_rejected(monkeypatch):
     saved = db.users.docs[0]
     assert 'password_reset_token_hash' in saved
     assert saved.get('password_reset_used_at') is None
+
+
+def test_settings_password_change_too_short_rejected(monkeypatch):
+    db = _setup(monkeypatch, users=[
+        _full_user(id='u1', email='settings@example.com', username='settings',
+                   normalized_email='settings@example.com',
+                   password_hash=hash_password('OldPass123!'),
+                   email_verified=True),
+    ])
+
+    with pytest.raises(HTTPException) as exc:
+        _run(server.change_password(
+            server.PasswordChangeIn(current_password='OldPass123!', new_password='abc'),
+            user_id='u1',
+        ))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == 'password_too_short'
+    assert verify_password('OldPass123!', db.users.docs[0]['password_hash'])
+    assert not verify_password('abc', db.users.docs[0]['password_hash'])
 
 
 def test_old_jwt_is_revoked_after_reset(monkeypatch):

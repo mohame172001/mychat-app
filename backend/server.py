@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, Response, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, Response, BackgroundTasks, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -93,11 +93,10 @@ if not META_VERIFY_TOKEN:
 # it; otherwise we fall back to META_APP_SECRET.
 META_WEBHOOK_APP_SECRET, META_WEBHOOK_APP_SECRET_SOURCE = _resolve_env(
     'META_WEBHOOK_APP_SECRET', 'META_APP_SECRET')
-# When enforce=True (META_WEBHOOK_HMAC_ENFORCE=1 env), webhooks with bad or
-# missing signatures are rejected with 403. Default is warn-only mode so
-# existing setups aren't disrupted until the operator confirms the correct
-# secret is configured.
-META_WEBHOOK_HMAC_ENFORCE = os.environ.get('META_WEBHOOK_HMAC_ENFORCE', '0') == '1'
+# When enforce=True, webhooks with bad or missing signatures are rejected with
+# 403. Production defaults to enforced verification; local/dev can explicitly
+# set META_WEBHOOK_HMAC_ENFORCE=0 when testing unsigned webhook payloads.
+META_WEBHOOK_HMAC_ENFORCE = os.environ.get('META_WEBHOOK_HMAC_ENFORCE', '1') != '0'
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 BACKEND_PUBLIC_URL = os.environ.get('BACKEND_PUBLIC_URL', 'http://localhost:8001')
 CRON_SECRET = os.environ.get('CRON_SECRET', '')
@@ -601,6 +600,17 @@ async def record_usage_event(
             _monthly_usage_instagram_query(str(instagram_account_id), event_month),
             account_update,
             upsert=True,
+        )
+    try:
+        await invalidate_dashboard_summary(str(user_id), instagram_account_id=instagram_account_id, month=event_month)
+    except NameError:
+        # During isolated tests/imports the dashboard cache helper may not be
+        # bound yet. Usage recording must remain the source of truth.
+        pass
+    except Exception as e:
+        logger.warning(
+            'dashboard_summary_invalidation_failed user_id=%s instagramAccountId=%s reason=%s',
+            user_id, instagram_account_id, str(e)[:120],
         )
     return event
 
@@ -3954,7 +3964,10 @@ async def change_password(
         raise HTTPException(400, 'Password login not configured for this account')
     if not verify_password(data.current_password, u['password_hash']):
         raise HTTPException(401, 'Current password is incorrect')
-    new_hashed = hash_password(data.new_password)
+    new_password = data.new_password if isinstance(data.new_password, str) else ''
+    if len(new_password) < 6:
+        raise HTTPException(400, 'password_too_short')
+    new_hashed = hash_password(new_password)
     result = await db.users.update_one(
         {'id': user_id},
         {'$set': {
@@ -4630,6 +4643,10 @@ async def create_automation(data: AutomationIn, user_id: str = Depends(get_curre
                 )
     a = Automation(user_id=user_id, **automation_data)
     await db.automations.insert_one(a.model_dump())
+    await invalidate_dashboard_summary(
+        user_id,
+        instagram_account_id=automation_data.get('instagramAccountId') or ctx.get('instagramAccountId'),
+    )
     await _safe_record_usage_event(
         user_id=user_id,
         event_type='automation_created',
@@ -4814,6 +4831,10 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
             automation_id=aid,
             metadata={'source': 'patch_automation'},
         )
+    await invalidate_dashboard_summary(
+        user_id,
+        instagram_account_id=existing.get('instagramAccountId') or (account or {}).get('instagramAccountId'),
+    )
     d = await db.automations.find_one({'id': aid, **scoped})
     return _strip_mongo(d)
 
@@ -4824,6 +4845,7 @@ async def delete_automation(aid: str, user_id: str = Depends(get_current_active_
     res = await db.automations.delete_one({'id': aid, **_account_scoped_query(user_id, account)})
     if res.deleted_count == 0:
         raise HTTPException(404, 'Not found')
+    await invalidate_dashboard_summary(user_id, instagram_account_id=account.get('instagramAccountId'))
     return {'ok': True}
 
 
@@ -4850,6 +4872,10 @@ async def duplicate_automation(aid: str, user_id: str = Depends(get_current_acti
     if _is_comment_automation_rule(copy):
         copy['activationStartedAt'] = now
     await db.automations.insert_one(copy)
+    await invalidate_dashboard_summary(
+        user_id,
+        instagram_account_id=copy.get('instagramAccountId') or account.get('instagramAccountId'),
+    )
     await _safe_record_usage_event(
         user_id=user_id,
         event_type='automation_created',
@@ -5126,6 +5152,7 @@ async def create_quick_comment_rule(
     }
     doc = _normalize_public_reply_for_persistence(doc)
     await db.automations.insert_one(doc)
+    await invalidate_dashboard_summary(user_id, instagram_account_id=doc.get('instagramAccountId'))
     await _safe_record_usage_event(
         user_id=user_id,
         event_type='automation_created',
@@ -5455,6 +5482,10 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
             'replySentAt': datetime.utcnow(),
         }}
     )
+    await invalidate_dashboard_summary(
+        user_id,
+        instagram_account_id=comment.get('instagramAccountId') or comment.get('igUserId') or account.get('instagramAccountId'),
+    )
     return {'ok': True, 'graph_reply_id': body.get('id')}
 
 
@@ -5702,6 +5733,10 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
             automation_id=comment.get('rule_id') or comment.get('ruleId'),
             comment_id=cid,
             metadata={'source': 'retry', 'ig_comment_id': ig_comment_id},
+        )
+        await invalidate_dashboard_summary(
+            user_id,
+            instagram_account_id=comment.get('instagramAccountId') or comment.get('igUserId') or account.get('instagramAccountId'),
         )
         logger.info(
             'comment_retry_reply_success comment_id=%s ig_comment_id=%s attempts=%s',
@@ -6643,6 +6678,203 @@ def _dashboard_auto_out(auto: dict) -> dict:
     }
 
 
+DASHBOARD_SUMMARY_FRESH_SECONDS = 60
+DASHBOARD_SUMMARY_MAX_STALE_SECONDS = 5 * 60
+DASHBOARD_SUMMARY_METRICS_VERSION = 1
+
+
+def _get_dashboard_summary_month(now: Optional[datetime] = None) -> str:
+    return _usage_month(now or datetime.utcnow())
+
+
+def _dashboard_summary_account_id(account: Optional[dict]) -> str:
+    return str(
+        (account or {}).get('instagramAccountId') or
+        (account or {}).get('igUserId') or
+        (account or {}).get('id') or
+        'none'
+    )
+
+
+def _make_dashboard_summary_cache_key(user_id: str, instagram_account_id: str, month: str) -> dict:
+    return {
+        'user_id': str(user_id),
+        'instagramAccountId': str(instagram_account_id or 'none'),
+        'month': str(month),
+    }
+
+
+async def _get_dashboard_summary_snapshot(user_id: str, instagram_account_id: str, month: str) -> Optional[dict]:
+    try:
+        return await db.dashboard_summaries.find_one(
+            _make_dashboard_summary_cache_key(user_id, instagram_account_id, month)
+        )
+    except Exception as exc:
+        logger.warning(
+            'dashboard_summary_snapshot_lookup_failed user_id=%s instagramAccountId=%s reason=%s',
+            user_id,
+            _token_prefix(instagram_account_id),
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _store_dashboard_summary_snapshot(
+    user_id: str,
+    instagram_account_id: str,
+    month: str,
+    summary: dict,
+    now: Optional[datetime] = None,
+) -> None:
+    now_dt = now or datetime.utcnow()
+    key = _make_dashboard_summary_cache_key(user_id, instagram_account_id, month)
+    doc = {
+        **key,
+        'summary': summary,
+        'metrics_version': DASHBOARD_SUMMARY_METRICS_VERSION,
+        'source': 'rebuilt',
+        'computed_at': now_dt,
+        'updated_at': now_dt,
+        'expires_at': now_dt + timedelta(seconds=DASHBOARD_SUMMARY_FRESH_SECONDS),
+        'max_stale_at': now_dt + timedelta(seconds=DASHBOARD_SUMMARY_MAX_STALE_SECONDS),
+    }
+    try:
+        await db.dashboard_summaries.update_one(
+            key,
+            {
+                '$set': doc,
+                '$setOnInsert': {'created_at': now_dt},
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            'dashboard_summary_snapshot_store_failed user_id=%s instagramAccountId=%s reason=%s',
+            user_id,
+            _token_prefix(instagram_account_id),
+            type(exc).__name__,
+        )
+
+
+async def invalidate_dashboard_summary(
+    user_id: str,
+    instagram_account_id: Optional[str] = None,
+    month: Optional[str] = None,
+) -> None:
+    query: Dict[str, Any] = {'user_id': str(user_id)}
+    if instagram_account_id:
+        query['instagramAccountId'] = str(instagram_account_id)
+    if month:
+        query['month'] = str(month)
+    try:
+        await db.dashboard_summaries.delete_many(query)
+    except Exception as exc:
+        logger.warning(
+            'dashboard_summary_invalidation_failed user_id=%s reason=%s',
+            user_id,
+            type(exc).__name__,
+        )
+
+
+def _dashboard_snapshot_dt(snapshot: dict, field: str) -> Optional[datetime]:
+    value = (snapshot or {}).get(field)
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00')).replace(tzinfo=None)
+        except Exception:
+            return None
+    return None
+
+
+def _dashboard_snapshot_usable(snapshot: Optional[dict], field: str, now_dt: datetime) -> bool:
+    marker = _dashboard_snapshot_dt(snapshot or {}, field)
+    return bool(marker and now_dt <= marker and isinstance((snapshot or {}).get('summary'), dict))
+
+
+async def _refresh_dashboard_summary_snapshot(user_id: str, account: Optional[dict], month: str) -> None:
+    instagram_account_id = _dashboard_summary_account_id(account)
+    try:
+        summary, _meta = await _calculate_dashboard_summary_live(
+            user_id,
+            account=account,
+            account_loaded=True,
+        )
+        await _store_dashboard_summary_snapshot(user_id, instagram_account_id, month, summary)
+        logger.info(
+            'dashboard_summary_background_refresh_success user_id=%s instagramAccountId=%s',
+            user_id,
+            _token_prefix(instagram_account_id),
+        )
+    except Exception as exc:
+        logger.warning(
+            'dashboard_summary_background_refresh_failed user_id=%s instagramAccountId=%s reason=%s',
+            user_id,
+            _token_prefix(instagram_account_id),
+            type(exc).__name__,
+        )
+
+
+async def _get_dashboard_summary_readthrough(
+    user_id: str,
+    account: Optional[dict],
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> tuple[dict, dict]:
+    started = datetime.utcnow()
+    now_dt = datetime.utcnow()
+    month = _get_dashboard_summary_month(now_dt)
+    instagram_account_id = _dashboard_summary_account_id(account)
+    snapshot = await _get_dashboard_summary_snapshot(user_id, instagram_account_id, month)
+
+    if _dashboard_snapshot_usable(snapshot, 'expires_at', now_dt):
+        duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+        return snapshot['summary'], {
+            'duration_ms': duration_ms,
+            'source': 'read_model',
+            'slowest': 'read_model',
+        }
+
+    if _dashboard_snapshot_usable(snapshot, 'max_stale_at', now_dt):
+        if background_tasks is not None:
+            background_tasks.add_task(_refresh_dashboard_summary_snapshot, user_id, account, month)
+        duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+        return snapshot['summary'], {
+            'duration_ms': duration_ms,
+            'source': 'stale_read_model',
+            'slowest': 'read_model',
+        }
+
+    try:
+        summary, live_meta = await _calculate_dashboard_summary_live(
+            user_id,
+            account=account,
+            account_loaded=True,
+        )
+        await _store_dashboard_summary_snapshot(user_id, instagram_account_id, month, summary, now_dt)
+        duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+        return summary, {
+            **live_meta,
+            'duration_ms': duration_ms,
+            'source': 'rebuilt',
+            'slowest': live_meta.get('slowest') or 'live',
+        }
+    except Exception:
+        if _dashboard_snapshot_usable(snapshot, 'max_stale_at', now_dt):
+            duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+            logger.warning(
+                'dashboard_summary_rebuild_failed_using_stale user_id=%s instagramAccountId=%s',
+                user_id,
+                _token_prefix(instagram_account_id),
+            )
+            return snapshot['summary'], {
+                'duration_ms': duration_ms,
+                'source': 'stale_fallback',
+                'slowest': 'read_model',
+            }
+        raise
+
+
 @api.get('/dashboard/metric-sources')
 async def dashboard_metric_sources(user_id: str = Depends(get_current_active_user_id)):
     """Return the dashboard metric contract.
@@ -6657,11 +6889,11 @@ async def dashboard_metric_sources(user_id: str = Depends(get_current_active_use
     }
 
 
-@api.get('/dashboard/summary')
-async def dashboard_summary(
-    user_id: str = Depends(get_current_active_user_id),
-    response: Response = None,
-):
+async def _calculate_dashboard_summary_live(
+    user_id: str,
+    account: Optional[dict] = None,
+    account_loaded: bool = False,
+) -> tuple[dict, dict]:
     """Compact dashboard payload for fast route transitions.
 
     The legacy /dashboard/stats endpoint intentionally remains available for
@@ -6671,12 +6903,13 @@ async def dashboard_summary(
     history aggregation.
     """
     started = datetime.utcnow()
-    try:
-        account = await getActiveInstagramAccount(user_id)
-    except HTTPException as e:
-        if e.status_code != 400:
-            raise
-        account = None
+    if not account_loaded:
+        try:
+            account = await getActiveInstagramAccount(user_id)
+        except HTTPException as e:
+            if e.status_code != 400:
+                raise
+            account = None
     t_after_account = datetime.utcnow()
 
     include_unscoped = await _dashboard_include_unscoped(user_id)
@@ -6735,7 +6968,10 @@ async def dashboard_summary(
 
     contacts = await _dashboard_scoped_docs('contacts', user_id, account, include_unscoped, 2000,
         projection={'id': 1, 'ig_id': 1, 'instagramUserId': 1, 'instagram_user_id': 1,
-                    'username': 1, 'contact_id': 1, 'user_id': 1})
+                    'username': 1, 'contact_id': 1, 'user_id': 1,
+                    'instagram_account_id': 1, 'instagramAccountId': 1,
+                    'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+                    'accountId': 1})
     ig_owner_id = _dashboard_key(instagram_account_id)
     contact_keys = set()
     for contact in contacts:
@@ -6760,6 +6996,9 @@ async def dashboard_summary(
             'instagramUserId': 1, 'instagram_user_id': 1,
             'recipient_id': 1, 'sender_id': 1,
             'user_id': 1, 'userId': 1,
+            'instagram_account_id': 1, 'instagramAccountId': 1,
+            'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+            'accountId': 1,
         }).sort('clickedAt', -1).limit(5000).to_list(5000)
     except Exception:
         clicks = []
@@ -6789,7 +7028,10 @@ async def dashboard_summary(
                     'attempts': 1, 'skip_reason': 1, 'skipReason': 1,
                     'reply_failure_reason': 1, 'dm_failure_reason': 1,
                     'next_retry_at': 1, 'replied': 1, 'reply_text': 1,
-                    'user_id': 1})
+                    'user_id': 1,
+                    'instagram_account_id': 1, 'instagramAccountId': 1,
+                    'instagramAccountDbId': 1, 'igUserId': 1, 'ig_user_id': 1,
+                    'accountId': 1})
     provider_comments_processed = 0
     provider_public_replies = 0
     provider_dms = 0
@@ -6905,11 +7147,6 @@ async def dashboard_summary(
         'link_clicks': len(clicks),
         'comments': len(recent_comments),
     }
-    if response is not None:
-        response.headers['X-Dashboard-Summary-Time'] = str(duration_ms)
-        response.headers['X-Dashboard-Summary-Slowest'] = slowest_section
-        response.headers['X-Dashboard-Summary-Source'] = 'live'
-
     logger.info(
         'dashboard_summary_calculated user_id=%s activeAccountId=%s instagramAccountId=%s '
         'messagesSent=%s publicRepliesSent=%s dmsSent=%s activeAutomations=%s totalContacts=%s durationMs=%s',
@@ -6942,7 +7179,7 @@ async def dashboard_summary(
     )
 
     weekly_performance = list(buckets.values())
-    return {
+    summary = {
         'totalContacts': total_contacts,
         'activeAutomations': len(active_autos),
         'messagesSent': month_messages_sent,
@@ -6971,6 +7208,37 @@ async def dashboard_summary(
         'conversion_rate': conversion_rate,
         'weekly_chart': weekly_performance,
     }
+    return summary, {
+        'duration_ms': duration_ms,
+        'source': 'live',
+        'slowest': slowest_section,
+        'section_timings': section_timings,
+        'section_counts': section_counts,
+    }
+
+
+@api.get('/dashboard/summary')
+async def dashboard_summary(
+    user_id: str = Depends(get_current_active_user_id),
+    response: Response = None,
+    background_tasks: BackgroundTasks = None,
+):
+    try:
+        account = await getActiveInstagramAccount(user_id)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        account = None
+    summary, meta = await _get_dashboard_summary_readthrough(
+        user_id,
+        account,
+        background_tasks=background_tasks,
+    )
+    if response is not None:
+        response.headers['X-Dashboard-Summary-Time'] = str(int(meta.get('duration_ms') or 0))
+        response.headers['X-Dashboard-Summary-Slowest'] = str(meta.get('slowest') or 'unknown')
+        response.headers['X-Dashboard-Summary-Source'] = str(meta.get('source') or 'unknown')
+    return summary
 
 
 @api.get('/dashboard/stats')
@@ -10702,9 +10970,12 @@ async def oauth_last_attempt(user_id: str = Depends(get_current_active_user_id))
 
 @api.delete('/admin/users/{email}')
 async def admin_delete_user(email: str, user_id: str = Depends(get_current_active_user_id)):
-    """Delete a user by email. Only allows self-deletion or deletion of test
-    accounts (those with @test.com or @example.com emails). Never deletes the
-    primary production user."""
+    """Legacy hard-delete helper for disposable test accounts only.
+
+    This endpoint keeps the historical route for compatibility, but it is
+    admin-gated and cannot be used by ordinary authenticated users.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_MANAGE)
     requester = await db.users.find_one({'id': user_id})
     if not requester:
         raise HTTPException(404, 'requester not found')
@@ -10714,10 +10985,9 @@ async def admin_delete_user(email: str, user_id: str = Depends(get_current_activ
     if not target:
         raise HTTPException(404, f'user {email} not found')
     target_email = (target.get('email') or '').lower()
-    is_self = target['id'] == user_id
     is_test = target_email.endswith('@test.com') or target_email.endswith('@example.com')
-    if not is_self and not is_test:
-        raise HTTPException(403, 'Cannot delete another production user')
+    if not is_test:
+        raise HTTPException(403, 'Hard delete is limited to disposable test accounts')
     target_id = target['id']
     # Clean up associated data
     await db.dm_rules.delete_many({'user_id': target_id})
@@ -15911,6 +16181,7 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
             'updated': now,
         }},
     )
+    await invalidate_dashboard_summary(user_id)
     refreshed = await db.instagram_accounts.find_one({'id': account_id}) or account
     return {'ok': True, 'account': _instagram_account_public_row(refreshed, account_id)}
 
@@ -16308,6 +16579,23 @@ async def _startup():
             [('limit_subject_type', 1), ('limit_subject_id', 1), ('month', 1), ('metric', 1)],
             unique=True,
             name='usage_reservation_buckets_subject_month_metric_unique',
+        )
+        await db.dashboard_summaries.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('month', 1)],
+            unique=True,
+            name='dashboard_summaries_user_account_month_unique',
+        )
+        await db.dashboard_summaries.create_index(
+            [('user_id', 1), ('month', 1)],
+            name='dashboard_summaries_user_month',
+        )
+        await db.dashboard_summaries.create_index(
+            [('instagramAccountId', 1), ('month', 1)],
+            name='dashboard_summaries_account_month',
+        )
+        await db.dashboard_summaries.create_index(
+            [('expires_at', 1)],
+            name='dashboard_summaries_expires_at',
         )
         try:
             await db.monthly_usage.drop_index('monthly_usage_user_month_unique')

@@ -27,9 +27,11 @@ const DEFAULT_FOLLOW_VERIFICATION_FAILED = 'مش قادر أتأكد من الم
 const DEFAULT_FOLLOW_RETRY_BUTTON = DEFAULT_FOLLOW_BUTTON;
 const DEFAULT_FOLLOW_COOLDOWN = 'بحاول أتأكد من المتابعة 😊 جرّب تضغط الزر مرة تانية خلال ثواني.';
 const DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3;
-const AUTOMATIONS_TTL_MS = 45000;
+const AUTOMATIONS_TTL_MS = 90 * 1000;
+const AUTOMATIONS_MAX_STALE_MS = 5 * 60 * 1000;
 const AUTOMATION_DETAIL_TTL_MS = 60000;
 const INSTAGRAM_PROFILE_TTL_MS = 120000;
+const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
 
 const TextArea = ({ className = '', ...props }) => (
   <textarea
@@ -376,17 +378,17 @@ const Automations = () => {
         () => api.get('/automations/summary', { timeout: 8000 }),
         {
           ttlMs: AUTOMATIONS_TTL_MS,
-          maxStaleMs: 5 * 60 * 1000,
+          maxStaleMs: AUTOMATIONS_MAX_STALE_MS,
           force,
           onUpdate: (data, updateResult) => {
-            setList(data?.items || []);
-            setLoadError(updateResult?.error ? 'Showing cached automations. Refresh failed.' : '');
+            if (data) setList(data?.items || []);
+            setLoadError(updateResult?.error ? REFRESH_FAILED_WITH_CACHE : '');
           },
         }
       );
       setList(result.data?.items || []);
-      if (result.error) setLoadError('Showing cached automations. Refresh failed.');
-      else if (result.stale) setLoadError('Refreshing automations...');
+      if (result.error) setLoadError(REFRESH_FAILED_WITH_CACHE);
+      else setLoadError('');
     } catch (err) {
       setLoadError('Failed to load automations.');
       toast.error('Failed to load automations');
@@ -648,6 +650,7 @@ const Automations = () => {
     try {
       await api.patch(`/automations/${a.id}`, { status: newStatus });
       invalidateApiCache('automations-summary');
+      invalidateApiCache('dashboard-summary');
       invalidateApiCache(`automation-detail:${a.id}`);
     } catch {
       toast.error('Failed to update');
@@ -660,6 +663,7 @@ const Automations = () => {
     try {
       await api.delete(`/automations/${id}`);
       invalidateApiCache('automations-summary');
+      invalidateApiCache('dashboard-summary');
       invalidateApiCache(`automation-detail:${id}`);
       toast.success('Deleted');
     } catch {
@@ -819,6 +823,7 @@ const Automations = () => {
         await api.post('/automations/quick-comment-rule', body);
       }
       invalidateApiCache('automations-summary');
+      invalidateApiCache('dashboard-summary');
       if (editingAutomation?.id) invalidateApiCache(`automation-detail:${editingAutomation.id}`);
       await refresh({ force: true });
       toast.success(editingAutomation ? 'Automation updated. Stats preserved.' : 'Automation is live');

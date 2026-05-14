@@ -75,6 +75,14 @@ Phase 2.14F delivery contract update:
 
 Provider template requirement: the reset template must render one of `reset_url`, `resetUrl`, `url`, or `link` as the clickable reset link.
 
+Production deliverability requirement before Billing:
+
+- Use an official product sender such as `noreply@<product-domain>` or `support@<product-domain>`, not a personal Gmail sender.
+- Verify the sending domain/provider identity.
+- Configure SPF, DKIM, and DMARC for the sender domain.
+- Confirm provider delivery logs show accepted/delivered status for the temporary production test account.
+- Check spam/promotions only as a diagnostic step; Inbox delivery or documented provider-delivered status plus consumed reset link is required for closure.
+
 ## Google-only accounts
 
 Users created via Google Sign-In have `password_hash = None`. The forgot-password path short-circuits with the generic response and never issues a token. If those users want a password later, the intended UX is: log in via Google → Settings → "Set a password" (out of scope for Phase 2.14).

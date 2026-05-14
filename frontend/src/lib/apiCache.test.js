@@ -100,6 +100,20 @@ describe('cachedApiGet', () => {
     expect(getCachedApiData('forbidden:u1')).toBeUndefined();
   });
 
+  test('does not preserve cached data after a 401 refresh failure', async () => {
+    const authError = new Error('unauthorized');
+    authError.response = { status: 401 };
+    const fetcher = jest
+      .fn()
+      .mockResolvedValueOnce({ data: { count: 1 } })
+      .mockRejectedValueOnce(authError);
+
+    await cachedApiGet('auth-sensitive:u1', fetcher, { ttlMs: 1 });
+    await expect(cachedApiGet('auth-sensitive:u1', fetcher, { ttlMs: 1, force: true })).rejects.toBe(authError);
+
+    expect(getCachedApiData('auth-sensitive:u1')).toBeUndefined();
+  });
+
   test('SWR returns stale cached data immediately and refreshes in background', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(1000);
@@ -146,6 +160,27 @@ describe('cachedApiGet', () => {
     expect(b.data).toEqual({ count: 1 });
     expect(fetcher).toHaveBeenCalledTimes(2);
     await a.promise;
+    jest.useRealTimers();
+  });
+
+  test('SWR expired cache forces foreground refresh instead of returning stale data', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1000);
+    const fetcher = jest
+      .fn()
+      .mockResolvedValueOnce({ data: { count: 1 } })
+      .mockResolvedValueOnce({ data: { count: 2 } });
+
+    await cachedApiGetSWR('dashboard-summary:u1:acc1', fetcher, { ttlMs: 1000, maxStaleMs: 2000 });
+    jest.setSystemTime(5000);
+    const result = await cachedApiGetSWR('dashboard-summary:u1:acc1', fetcher, {
+      ttlMs: 1000,
+      maxStaleMs: 2000,
+    });
+
+    expect(result.data).toEqual({ count: 2 });
+    expect(result.cached).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(2);
     jest.useRealTimers();
   });
 });

@@ -239,6 +239,33 @@ def test_scrubber_drops_google_auth_body_entirely():
     assert 'SECRET_PAYLOAD' not in repr(out)
 
 
+def test_scrubber_drops_password_auth_bodies_entirely():
+    for path in (
+        '/api/auth/login',
+        '/api/auth/signup',
+        '/api/auth/password',
+        '/api/auth/forgot-password',
+        '/api/auth/reset-password',
+    ):
+        out = observability.redact_sentry_event({
+            'request': {
+                'url': f'https://api.example.com{path}',
+                'data': {
+                    'password': 'PlainPassword123!',
+                    'current_password': 'OldPassword123!',
+                    'new_password': 'NewPassword123!',
+                    'token': 'raw-reset-token',
+                },
+                'headers': {},
+            },
+        })
+        assert out['request']['data'] == '[redacted]'
+        assert 'PlainPassword123!' not in repr(out)
+        assert 'OldPassword123!' not in repr(out)
+        assert 'NewPassword123!' not in repr(out)
+        assert 'raw-reset-token' not in repr(out)
+
+
 def test_scrubber_redacts_credential_id_token_in_extra():
     """Forbidden Google fields outside webhook routes still get key-redacted."""
     out = observability.redact_sentry_event({
@@ -258,6 +285,31 @@ def test_scrubber_redacts_credential_id_token_in_extra():
     assert extra['safe'] == 'keep_me'
     assert 'JWT-PAYLOAD-SECRET' not in repr(out)
     assert 'rt-secret' not in repr(out)
+
+
+def test_scrubber_redacts_password_keys_in_extra():
+    out = observability.redact_sentry_event({
+        'extra': {
+            'password': 'PlainPassword123!',
+            'current_password': 'OldPassword123!',
+            'new_password': 'NewPassword123!',
+            'password_hash': '$2b$secret',
+            'password_reset_token_hash': 'hash-secret',
+            'safe': 'keep_me',
+        },
+    })
+    extra = out['extra']
+    for forbidden in (
+        'password',
+        'current_password',
+        'new_password',
+        'password_hash',
+        'password_reset_token_hash',
+    ):
+        assert extra[forbidden] == '[redacted]'
+    assert extra['safe'] == 'keep_me'
+    assert 'PlainPassword123!' not in repr(out)
+    assert '$2b$secret' not in repr(out)
 
 
 def test_server_redact_secrets_covers_google_credentials_and_refresh_tokens():

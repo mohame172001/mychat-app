@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import sys
 
-from fastapi import Response
+from fastapi import BackgroundTasks, Response
 
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
@@ -157,7 +157,7 @@ def test_dashboard_summary_sets_safe_timing_headers(monkeypatch):
     result = _run(server.dashboard_summary(user_id='u1', response=response))
 
     assert result['instagram']['instagramAccountId'] == 'igA'
-    assert response.headers['X-Dashboard-Summary-Source'] == 'live'
+    assert response.headers['X-Dashboard-Summary-Source'] in {'rebuilt', 'read_model', 'stale_read_model'}
     assert response.headers['X-Dashboard-Summary-Time'].isdigit()
     assert response.headers['X-Dashboard-Summary-Slowest'] in {
         'active_account',
@@ -168,11 +168,144 @@ def test_dashboard_summary_sets_safe_timing_headers(monkeypatch):
         'contacts',
         'link_clicks',
         'comments',
+        'read_model',
     }
     header_payload = str(dict(response.headers))
     assert 'old-token' not in header_payload
     assert 'accessToken' not in header_payload
     assert 'meta_access_token' not in header_payload
+
+
+def test_dashboard_summary_missing_snapshot_rebuilds_and_stores(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+
+    result = _run(server.dashboard_summary(user_id='u1', response=response))
+
+    assert response.headers['X-Dashboard-Summary-Source'] == 'rebuilt'
+    assert result['activeAutomations'] == 1
+    assert len(fake_db.dashboard_summaries.docs) == 1
+    snapshot = fake_db.dashboard_summaries.docs[0]
+    assert snapshot['user_id'] == 'u1'
+    assert snapshot['instagramAccountId'] == 'igA'
+    assert snapshot['summary']['activeAutomations'] == 1
+    assert snapshot['expires_at'] > datetime.utcnow()
+    assert snapshot['max_stale_at'] > snapshot['expires_at']
+
+
+def test_dashboard_summary_fresh_snapshot_returns_read_model(monkeypatch):
+    fake_db = _summary_db()
+    month = datetime.utcnow().strftime('%Y-%m')
+    now = datetime.utcnow()
+    fake_db.dashboard_summaries.docs.append({
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'month': month,
+        'summary': {'activeAutomations': 123, 'instagram': {'instagramAccountId': 'igA'}},
+        'expires_at': now + timedelta(seconds=30),
+        'max_stale_at': now + timedelta(minutes=5),
+    })
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+
+    result = _run(server.dashboard_summary(user_id='u1', response=response))
+
+    assert result['activeAutomations'] == 123
+    assert response.headers['X-Dashboard-Summary-Source'] == 'read_model'
+    assert response.headers['X-Dashboard-Summary-Slowest'] == 'read_model'
+
+
+def test_dashboard_summary_stale_snapshot_returns_immediately_and_schedules_refresh(monkeypatch):
+    fake_db = _summary_db()
+    month = datetime.utcnow().strftime('%Y-%m')
+    now = datetime.utcnow()
+    fake_db.dashboard_summaries.docs.append({
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'month': month,
+        'summary': {'activeAutomations': 55, 'instagram': {'instagramAccountId': 'igA'}},
+        'expires_at': now - timedelta(seconds=1),
+        'max_stale_at': now + timedelta(minutes=5),
+    })
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+    background_tasks = BackgroundTasks()
+
+    result = _run(server.dashboard_summary(
+        user_id='u1',
+        response=response,
+        background_tasks=background_tasks,
+    ))
+
+    assert result['activeAutomations'] == 55
+    assert response.headers['X-Dashboard-Summary-Source'] == 'stale_read_model'
+    assert len(background_tasks.tasks) == 1
+
+
+def test_dashboard_summary_expired_snapshot_rebuilds(monkeypatch):
+    fake_db = _summary_db()
+    month = datetime.utcnow().strftime('%Y-%m')
+    now = datetime.utcnow()
+    fake_db.dashboard_summaries.docs.append({
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'month': month,
+        'summary': {'activeAutomations': 55, 'instagram': {'instagramAccountId': 'igA'}},
+        'expires_at': now - timedelta(minutes=10),
+        'max_stale_at': now - timedelta(minutes=5),
+    })
+    monkeypatch.setattr(server, 'db', fake_db)
+    response = Response()
+
+    result = _run(server.dashboard_summary(user_id='u1', response=response))
+
+    assert result['activeAutomations'] == 1
+    assert response.headers['X-Dashboard-Summary-Source'] == 'rebuilt'
+    assert fake_db.dashboard_summaries.docs[0]['summary']['activeAutomations'] == 1
+
+
+def test_dashboard_summary_stale_fallback_on_rebuild_failure(monkeypatch):
+    fake_db = _summary_db()
+    month = datetime.utcnow().strftime('%Y-%m')
+    now = datetime.utcnow()
+    fake_db.dashboard_summaries.docs.append({
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'month': month,
+        'summary': {'activeAutomations': 44, 'instagram': {'instagramAccountId': 'igA'}},
+        'expires_at': now - timedelta(seconds=1),
+        'max_stale_at': now + timedelta(minutes=5),
+    })
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError('boom')
+
+    monkeypatch.setattr(server, '_calculate_dashboard_summary_live', boom)
+    result, meta = _run(server._get_dashboard_summary_readthrough('u1', _account(
+        id='accA', userId='u1', instagramAccountId='igA'
+    )))
+
+    assert result['activeAutomations'] == 44
+    assert meta['source'] == 'stale_read_model'
+
+
+def test_invalidate_dashboard_summary_deletes_only_matching_scope(monkeypatch):
+    fake_db = _summary_db()
+    fake_db.dashboard_summaries.docs.extend([
+        {'user_id': 'u1', 'instagramAccountId': 'igA', 'month': '2026-05', 'summary': {}},
+        {'user_id': 'u1', 'instagramAccountId': 'igB', 'month': '2026-05', 'summary': {}},
+        {'user_id': 'u2', 'instagramAccountId': 'igA', 'month': '2026-05', 'summary': {}},
+    ])
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    _run(server.invalidate_dashboard_summary('u1', instagram_account_id='igA', month='2026-05'))
+
+    assert fake_db.dashboard_summaries.docs == [
+        {'user_id': 'u1', 'instagramAccountId': 'igB', 'month': '2026-05', 'summary': {}},
+        {'user_id': 'u2', 'instagramAccountId': 'igA', 'month': '2026-05', 'summary': {}},
+    ]
 
 
 def test_dashboard_summary_prefers_provider_proof_for_active_account(monkeypatch):

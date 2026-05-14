@@ -58,6 +58,13 @@ _FORBIDDEN_BODY_KEYS = frozenset(s.lower() for s in (
     'authorization',
     'token',
     'jwt',
+    'password',
+    'current_password',
+    'new_password',
+    'confirm_password',
+    'password_hash',
+    'password_reset_token_hash',
+    'password_reset_token',
     'code',
     'state',
     'raw',
@@ -98,6 +105,11 @@ _REDACT_BODY_PATH_PREFIXES = (
     # Phase 2.7: the body of POST /api/auth/google contains a Google ID
     # token. Drop it whole rather than rely on key-based redaction.
     '/api/auth/google',
+    '/api/auth/login',
+    '/api/auth/signup',
+    '/api/auth/password',
+    '/api/auth/forgot-password',
+    '/api/auth/reset-password',
 )
 
 

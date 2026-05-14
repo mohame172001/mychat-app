@@ -12,7 +12,8 @@ describe('Comments performance wiring', () => {
     expect(source).toContain('COMMENTS_TTL_MS');
     expect(source).toContain("${user?.id || 'anon'}");
     expect(source).toContain('${activeAccountKey}');
-    expect(source).toContain('${statusFilter}');
+    expect(source).not.toContain('${statusFilter}');
+    expect(source).toContain('COMMENTS_MAX_STALE_MS');
   });
 
   test('manual refresh invalidates the comments cache and forces refetch', () => {
@@ -23,11 +24,18 @@ describe('Comments performance wiring', () => {
   test('retry reply refreshes comments without keeping stale retry status', () => {
     expect(source).toContain('/retry-reply');
     expect(source).toContain("invalidateApiCache('comments:list')");
+    expect(source).toContain("invalidateApiCache('dashboard-summary')");
   });
 
   test('unwraps cachedApiGetSWR result before reading comments payload', () => {
     expect(source).toContain('const result = await cachedApiGetSWR');
     expect(source).toContain('applyData(result.data)');
     expect(source).toContain('data?.comments || []');
+  });
+
+  test('does not add visible cache freshness timestamp copy', () => {
+    expect(source).not.toMatch(/updated .* ago/i);
+    expect(source).not.toMatch(/last updated/i);
+    expect(source).not.toContain('تم التحديث منذ');
   });
 });

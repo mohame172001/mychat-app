@@ -10,7 +10,19 @@ import api from '../lib/api';
 import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 
-const DASHBOARD_TTL_MS = 45000;
+const DASHBOARD_TTL_MS = 60 * 1000;
+const DASHBOARD_MAX_STALE_MS = 5 * 60 * 1000;
+const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
+
+const classifyDashboardError = (err) => {
+  if (!err) return 'Dashboard data could not be loaded.';
+  if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return 'Dashboard request timed out. Please try again.';
+  const status = err?.response?.status;
+  if (status === 401 || status === 403) return 'Session expired. Please log in again.';
+  if (status && status >= 500) return 'Dashboard server error. Please try again later.';
+  if (!status && err.message?.includes?.('Network')) return 'Network error. Please check your connection.';
+  return 'Dashboard data could not be loaded.';
+};
 
 const Dashboard = () => {
   const { user } = useAuth();
@@ -36,16 +48,6 @@ const Dashboard = () => {
       setLoading(true);
     }
 
-    const classifyError = (err) => {
-      if (!err) return 'Dashboard data could not be loaded.';
-      if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return 'Dashboard request timed out. Please try again.';
-      const status = err?.response?.status;
-      if (status === 401 || status === 403) return 'Session expired. Please log in again.';
-      if (status && status >= 500) return 'Dashboard server error. Please try again later.';
-      if (!status && err.message?.includes?.('Network')) return 'Network error. Please check your connection.';
-      return 'Dashboard data could not be loaded.';
-    };
-
     const load = async () => {
       try {
         const result = await cachedApiGetSWR(
@@ -53,11 +55,11 @@ const Dashboard = () => {
           () => api.get('/dashboard/summary'),
           {
             ttlMs: DASHBOARD_TTL_MS,
-            maxStaleMs: 5 * 60 * 1000,
+            maxStaleMs: DASHBOARD_MAX_STALE_MS,
             onUpdate: (data, updateResult) => {
               if (alive) {
-                setStats(data);
-                setError(updateResult?.error ? 'Showing cached dashboard data. Refresh failed.' : '');
+                if (data) setStats(data);
+                setError(updateResult?.error ? REFRESH_FAILED_WITH_CACHE : '');
               }
             },
           }
@@ -65,15 +67,13 @@ const Dashboard = () => {
         if (!alive) return;
         setStats(result.data);
         if (result.error) {
-          setError('Showing cached dashboard data. Refresh failed.');
-        } else if (result.stale) {
-          setError('Refreshing dashboard data...');
+          setError(REFRESH_FAILED_WITH_CACHE);
         } else {
           setError('');
         }
       } catch (err) {
         console.error('[Dashboard] Failed to load data:', err);
-        if (alive) setError(classifyError(err));
+        if (alive) setError(classifyDashboardError(err));
       } finally {
         if (alive) setLoading(false);
       }
@@ -96,7 +96,7 @@ const Dashboard = () => {
       setStats(result.data);
     } catch (err) {
       console.error('[Dashboard] Refresh failed:', err);
-      setError(classifyError(err));
+      setError(stats ? REFRESH_FAILED_WITH_CACHE : classifyDashboardError(err));
     } finally {
       setRefreshing(false);
       setLoading(false);

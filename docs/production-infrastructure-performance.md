@@ -36,11 +36,11 @@ This shows the backend can respond quickly once warm. It does not prove App Slee
 
 ## Dashboard Measurement Contract
 
-`GET /api/dashboard/summary` now exposes safe timing diagnostics:
+`GET /api/dashboard/summary` now exposes safe timing diagnostics and read-through snapshot source:
 
 - `X-Dashboard-Summary-Time`: total dashboard summary duration in milliseconds.
 - `X-Dashboard-Summary-Slowest`: slowest measured backend section name.
-- `X-Dashboard-Summary-Source`: currently `live`.
+- `X-Dashboard-Summary-Source`: `rebuilt`, `read_model`, `stale_read_model`, `stale_fallback`, or `live_fallback`.
 
 Safe backend log event:
 
@@ -65,7 +65,7 @@ After deploy:
 3. Capture the first dashboard console perf line.
 4. Refresh or navigate away/back and capture two warm dashboard perf lines.
 5. Record `client`, `backend`, `dashboard`, `source`, and `slowest`.
-6. If dashboard warm p95 is over 1200 ms, implement the dashboard read model before Billing.
+6. Confirm the second/warm dashboard request uses `read_model` or stays within the documented backend budget.
 7. If dashboard warm is within budget but first request after idle is slow, disable App Sleeping / move backend to always-on.
 
 ## Decision Rule

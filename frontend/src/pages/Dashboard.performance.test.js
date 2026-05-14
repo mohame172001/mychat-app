@@ -23,4 +23,12 @@ describe('Dashboard performance wiring', () => {
     expect(source).toContain('activeInstagramIgUserId');
     expect(source).toContain('dashboard-summary');
   });
+
+  test('uses silent background refresh without visible updated-time labels', () => {
+    expect(source).toContain("Couldn't refresh. Showing the latest available data.");
+    expect(source).not.toContain('Showing cached dashboard data. Refresh failed.');
+    expect(source).not.toMatch(/updated .* ago/i);
+    expect(source).not.toMatch(/last updated/i);
+    expect(source).not.toContain('تم التحديث منذ');
+  });
 });

@@ -33,17 +33,24 @@ The endpoint returns safe timing headers:
 
 ## Current Data Source
 
-Source is `live`: the response is computed from bounded raw collections. This preserves correctness and legacy account fallback behavior, but repeated warm requests may still be expensive for large tenants.
+Source is now a read-through dashboard snapshot:
 
-## Read Model Trigger
+- `rebuilt`: no usable snapshot existed, so the backend computed the live summary once and stored it.
+- `read_model`: a fresh `dashboard_summaries` snapshot was returned.
+- `stale_read_model`: an acceptable stale snapshot was returned immediately and a background refresh was scheduled.
+- `stale_fallback` / `live_fallback`: reserved fallback states if rebuild fails and a safe snapshot/live path remains available.
 
-Implement a persisted `dashboard_summaries` read model if production warm measurements show:
+The snapshot collection is `dashboard_summaries`. Fresh TTL is 60 seconds and max stale is 5 minutes. The stored `summary` preserves the existing dashboard response shape so the frontend does not need a separate contract.
 
-- p50 above 500 ms, or
-- p95 above 1200 ms, or
-- slowest section repeatedly dominated by bounded scans of comments, contacts, link clicks, or usage events.
+The live calculation remains as the rebuild/fallback source. It preserves legacy account fallback behavior and bounded collection reads.
 
-The read model must preserve exact visible numbers and keep live calculation as a fallback until equivalence tests pass.
+## Frontend UX Contract
+
+The frontend shows cached/snapshot dashboard data immediately when it is within max stale and refreshes in the background. Product decision: do not show visible freshness labels such as "Updated X ago", "Last updated", or Arabic equivalents. If background refresh fails while cached data exists, show only:
+
+`Couldn't refresh. Showing the latest available data.`
+
+Manual Refresh still bypasses cache.
 
 ## Infrastructure Trigger
 

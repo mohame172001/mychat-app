@@ -14,6 +14,11 @@ function isCacheableResponse(response) {
   return status >= 200 && status < 300 && isJsonResponse(response);
 }
 
+function isAuthError(error) {
+  const status = Number(error?.response?.status || error?.status || 0);
+  return status === 401 || status === 403;
+}
+
 export function getCachedApiData(key) {
   const entry = cache.get(key);
   return entry?.data;
@@ -45,6 +50,7 @@ export function clearApiCache() {
 export async function cachedApiGet(key, fetcher, options = {}) {
   const ttlMs = Number(options.ttlMs ?? 30000);
   const force = Boolean(options.force);
+  const allowStaleOnError = options.allowStaleOnError !== false;
   const existing = cache.get(key);
   const fresh = existing?.data && now() - existing.updatedAt < ttlMs;
 
@@ -69,7 +75,11 @@ export async function cachedApiGet(key, fetcher, options = {}) {
       return { data, cached: false, stale: false };
     })
     .catch((error) => {
-      if (existing?.data) {
+      if (isAuthError(error)) {
+        cache.delete(key);
+        throw error;
+      }
+      if (allowStaleOnError && existing?.data) {
         cache.set(key, { data: existing.data, updatedAt: existing.updatedAt, promise: null });
         return { data: existing.data, cached: true, stale: true, error };
       }
@@ -97,19 +107,24 @@ export async function cachedApiGetSWR(key, fetcher, options = {}) {
   const allowedStale = hasData && (maxStaleMs <= 0 || ageMs < maxStaleMs);
 
   if (force || !allowedStale || !hasData) {
-    return cachedApiGet(key, fetcher, { ttlMs, force });
+    return cachedApiGet(key, fetcher, { ttlMs, force, allowStaleOnError: allowedStale });
   }
   if (fresh) {
     return { data: existing.data, cached: true, stale: false, refreshing: false };
   }
 
   if (!existing.promise) {
-    const promise = cachedApiGet(key, fetcher, { ttlMs, force: true })
+    const promise = cachedApiGet(key, fetcher, { ttlMs, force: true, allowStaleOnError: true })
       .then((result) => {
         if (onUpdate) onUpdate(result.data, result);
         return result;
       })
       .catch((error) => {
+        if (isAuthError(error)) {
+          cache.delete(key);
+          if (onUpdate) onUpdate(undefined, { data: undefined, cached: false, stale: false, error });
+          return { data: undefined, cached: false, stale: false, error };
+        }
         if (onUpdate) onUpdate(existing.data, { data: existing.data, cached: true, stale: true, error });
         return { data: existing.data, cached: true, stale: true, error };
       });

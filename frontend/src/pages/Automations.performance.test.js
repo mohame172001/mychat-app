@@ -20,6 +20,7 @@ describe('Automations performance wiring', () => {
 
   test('mutations invalidate only automation caches and refresh intentionally', () => {
     expect(source).toContain("invalidateApiCache('automations-summary')");
+    expect(source).toContain("invalidateApiCache('dashboard-summary')");
     expect(source).toContain('invalidateApiCache(`automation-detail:${a.id}`)');
     expect(source).toContain('refresh({ force: true })');
   });
@@ -27,6 +28,10 @@ describe('Automations performance wiring', () => {
   test('page has localized skeleton and manual refresh state', () => {
     expect(source).toContain('automations-skeleton');
     expect(source).toContain('automations-refresh');
-    expect(source).toContain('Showing cached automations. Refresh failed.');
+    expect(source).toContain("Couldn't refresh. Showing the latest available data.");
+    expect(source).not.toContain('Showing cached automations. Refresh failed.');
+    expect(source).not.toMatch(/updated .* ago/i);
+    expect(source).not.toMatch(/last updated/i);
+    expect(source).not.toContain('تم التحديث منذ');
   });
 });

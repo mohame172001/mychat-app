@@ -9,7 +9,8 @@ import { cachedApiGetSWR, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 
 const WS_URL = API_BASE.replace(/^http/, 'ws').replace('/api', '');
-const COMMENTS_TTL_MS = 15000;
+const COMMENTS_TTL_MS = 20 * 1000;
+const COMMENTS_MAX_STALE_MS = 2 * 60 * 1000;
 
 // Pure logic moved to lib/commentStatus.js so tests can import it
 // without pulling axios / sonner / browser-only deps.
@@ -67,7 +68,7 @@ const Comments = () => {
 
     try {
       const activeAccountKey = user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';
-      const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${statusFilter}:${pageToFetch}`;
+      const cacheKey = `comments:list:${user?.id || 'anon'}:${activeAccountKey}:${unrepliedOnly ? 'unreplied' : 'all'}:${pageToFetch}`;
       const applyData = (data) => {
         const incomingComments = Array.isArray(data) ? data : (data?.comments || []);
         const incomingHasMore = data?.has_more ?? false;
@@ -85,7 +86,7 @@ const Comments = () => {
         },
         {
           ttlMs: COMMENTS_TTL_MS,
-          maxStaleMs: 2 * 60 * 1000,
+          maxStaleMs: COMMENTS_MAX_STALE_MS,
           force: options.force === true,
           onUpdate: applyData,
         },
@@ -98,7 +99,7 @@ const Comments = () => {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [unrepliedOnly, statusFilter, user?.id, user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
+  }, [unrepliedOnly, user?.id, user?.activeInstagramAccountId, user?.activeInstagramIgUserId]);
 
   const connectWs = useCallback(() => {
     if (wsGaveUp.current) return;
@@ -169,6 +170,8 @@ const Comments = () => {
     setSending(prev => ({ ...prev, [comment.id]: true }));
     try {
       await api.post(`/comments/${comment.id}/reply`, { text });
+      invalidateApiCache('dashboard-summary');
+      invalidateApiCache('comments:list');
       toast.success('Reply sent to Instagram');
       setReplyText(prev => ({ ...prev, [comment.id]: '' }));
       setComments(prev => prev.map(c => c.id === comment.id
@@ -208,6 +211,7 @@ const Comments = () => {
         toast.error(`Retry failed (${reason})`);
       }
       invalidateApiCache('comments:list');
+      invalidateApiCache('dashboard-summary');
       await fetchComments(1, true, { force: true });
     } catch (err) {
       console.error('[Comments] retry-reply failed', err);
