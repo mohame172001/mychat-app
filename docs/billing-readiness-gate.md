@@ -28,6 +28,21 @@ Even with the security gate green, billing remains **BLOCKED** on product-functi
 
 Billing must not start until password reset email delivery, reset-link consumption, old-password rejection after reset, new-password login after reset, and token-reuse rejection all pass on the live host with the production email webhook.
 
+### Phase 2.18 review pass (added 2026-05-14)
+
+A senior production-engineer codebase review was completed against the full backend + frontend surface. Outcome: **no code regressions found, no correctness fixes required**. Every critical surface (webhook HMAC verification, password reset token lifecycle, Sentry/observability scrubbing, frontend persistent-snapshot cache, auth context cleanup, reset-password page) was re-verified correct.
+
+Test re-runs:
+- Backend: 458/458 passed (was 458 in 2.17)
+- Frontend unit: 189/189 passed across 27 suites (was 180 in 2.17 — coverage grew by 9 tests)
+- Frontend default build: green (Railway production build still passes)
+
+The two P1 blockers remain **infrastructure / operator-only**, not code:
+1. Reset email E2E (requires real email provider + manual production consume flow)
+2. Production performance proof + Railway App Sleeping verification (requires Railway dashboard check by operator)
+
+Billing remains **BLOCKED** until both are closed with redacted evidence. Full report: `docs/phase-2.18-codebase-review.md`.
+
 ### Phase 2.16 performance gate (added)
 
 Billing also remains **BLOCKED** on final production performance proof:
