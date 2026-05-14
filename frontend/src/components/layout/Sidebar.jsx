@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Link, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Zap, Settings,
-  MessageCircle, HelpCircle, LogOut, AtSign, Inbox, ChevronDown, Check, Instagram,
+  MessageCircle, HelpCircle, LogOut, Inbox, ChevronDown, Check, Instagram,
   CreditCard, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -26,7 +26,6 @@ import { scheduleCoreAppWarmup } from '../../lib/appWarmup';
 export const navItems = [
   { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/app/automations', icon: Zap, label: 'Automations' },
-  { to: '/app/comments', icon: AtSign, label: 'Comments' },
   { to: '/app/dm-automation', icon: Inbox, label: 'DM Automation' },
   { to: '/app/billing', icon: CreditCard, label: 'Billing' },
   { to: '/app/settings', icon: Settings, label: 'Settings' }
@@ -89,7 +88,6 @@ const Sidebar = () => {
       invalidateApiCache('instagram-accounts');
       invalidateApiCache('dashboard-summary');
       invalidateApiCache('automations-summary');
-      invalidateApiCache('comments:list');
       scheduleCoreAppWarmup(updatedUser || user);
       toast.success(`Switched to @${account.username || account.instagramAccountId}`);
       navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);

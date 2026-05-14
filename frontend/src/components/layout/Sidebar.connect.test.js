@@ -19,7 +19,8 @@ test('account switch uses client navigation instead of full page reload', () => 
   expect(source).toContain('instagram-accounts');
   expect(source).toContain("invalidateApiCache('dashboard-summary')");
   expect(source).toContain("invalidateApiCache('automations-summary')");
-  expect(source).toContain("invalidateApiCache('comments:list')");
+  // Comments page was removed; no comments cache prefix to invalidate.
+  expect(source).not.toContain("invalidateApiCache('comments");
   expect(source).toContain('scheduleCoreAppWarmup');
   expect(source).not.toContain('window.location.assign');
 });

@@ -14,7 +14,6 @@ const signupFn = () => import('./pages/Signup');
 const dashboardFn = () => import('./pages/Dashboard');
 const automationsFn = () => import('./pages/Automations');
 const flowBuilderFn = () => import('./pages/FlowBuilder');
-const commentsFn = () => import('./pages/Comments');
 const settingsFn = () => import('./pages/Settings');
 const dmAutomationFn = () => import('./pages/DmAutomation');
 const privacyFn = () => import('./pages/PrivacyPolicy');
@@ -33,7 +32,6 @@ const Signup = lazy(signupFn);
 const Dashboard = lazy(dashboardFn);
 const Automations = lazy(automationsFn);
 const FlowBuilder = lazy(flowBuilderFn);
-const Comments = lazy(commentsFn);
 const Settings = lazy(settingsFn);
 const DmAutomation = lazy(dmAutomationFn);
 const PrivacyPolicy = lazy(privacyFn);
@@ -49,7 +47,6 @@ const ResetPassword = lazy(resetPasswordFn);
 registerRoute('Dashboard', dashboardFn);
 registerRoute('Automations', automationsFn);
 registerRoute('FlowBuilder', flowBuilderFn);
-registerRoute('Comments', commentsFn);
 registerRoute('DmAutomation', dmAutomationFn);
 registerRoute('Settings', settingsFn);
 registerRoute('Billing', billingFn);
@@ -100,7 +97,6 @@ function App() {
                 <Route index element={<Dashboard />} />
                 <Route path="automations" element={<Automations />} />
                 <Route path="automations/:id" element={<FlowBuilder />} />
-                <Route path="comments" element={<Comments />} />
                 <Route path="dm-automation" element={<DmAutomation />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="billing" element={<Billing />} />

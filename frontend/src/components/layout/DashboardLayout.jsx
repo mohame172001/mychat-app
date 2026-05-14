@@ -9,7 +9,7 @@ import { preloadRoutes } from '../../lib/routePreloader';
 import { Button } from '../ui/button';
 import { BUILD_SHA } from '../../buildInfo.generated';
 
-const commonRoutes = ['Automations', 'Comments', 'Billing', 'Settings'];
+const commonRoutes = ['Automations', 'Billing', 'Settings'];
 
 const DashboardLayout = () => {
   const { logout } = useAuth();

@@ -28,7 +28,6 @@ test.describe('authenticated product smoke with mocked API', () => {
 
     const navRoutes = [
       { name: 'Automations', heading: /automations/i },
-      { name: 'Comments', heading: /comments/i },
       { name: 'Billing', heading: /billing/i },
       { name: 'Settings', heading: /settings/i },
       { name: 'Dashboard', heading: /good morning/i },
@@ -57,31 +56,6 @@ test.describe('authenticated product smoke with mocked API', () => {
     await page.getByRole('button', { name: /edit/i }).first().click();
     await expect(page.getByRole('heading', { name: /edit automation/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /save changes/i })).toBeVisible();
-    await expectAppIsUsable(page);
-  });
-
-  test('comments filters, refresh, and retry-reply control render', async ({ page }) => {
-    await page.goto('/app/comments');
-
-    await expect(page.getByRole('heading', { name: /^comments$/i })).toBeVisible();
-    for (const label of [
-      'All',
-      'Pending / queued',
-      'Retryable failed',
-      'Permanent failed',
-      'Partial (DM failed)',
-      'Plan limited',
-      'Success',
-      'Skipped',
-    ]) {
-      await expect(page.getByRole('button', { name: label })).toBeVisible();
-    }
-
-    await page.getByRole('button', { name: /refresh/i }).click();
-    await expect(page.getByText('Sample retryable comment')).toBeVisible();
-    const retryButton = page.getByRole('button', { name: /retry reply/i }).first();
-    await expect(retryButton).toBeVisible();
-    await retryButton.click();
     await expectAppIsUsable(page);
   });
 

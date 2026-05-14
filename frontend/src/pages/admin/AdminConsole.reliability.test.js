@@ -4,7 +4,7 @@ const path = require('path');
 const source = fs.readFileSync(path.join(__dirname, 'AdminConsole.jsx'), 'utf8');
 
 const FRONTEND_AUDIT_CHECKLIST = [
-  'Login', 'Signup', 'Dashboard', 'Automations', 'Comments', 'Billing',
+  'Login', 'Signup', 'Dashboard', 'Automations', 'Billing',
   'Settings', 'System Health', 'Admin Overview', 'Admin Users',
   'Admin User Detail', 'Admin Admins', 'Admin Metrics',
 ];

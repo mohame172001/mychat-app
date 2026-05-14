@@ -237,13 +237,13 @@ describe('cachedApiGet', () => {
 
   test('logout-style clear removes persisted snapshots', async () => {
     await cachedApiGetSWR('dashboard-summary:u1:acc1', () => ({ data: { count: 1 } }), { persist: true });
-    await cachedApiGetSWR('comments:list:u1:acc1:unreplied:1', () => ({ data: { comments: [] } }), { persist: true });
+    await cachedApiGetSWR('instagram-accounts:u1', () => ({ data: { accounts: [] } }), { persist: true });
 
     clearApiCache();
 
     clearApiMemoryCacheForTests();
     expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
-    expect(getCachedApiData('comments:list:u1:acc1:unreplied:1')).toBeUndefined();
+    expect(getCachedApiData('instagram-accounts:u1')).toBeUndefined();
   });
 
   test('account-scoped invalidation removes only matching persisted snapshots', async () => {

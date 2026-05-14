@@ -54,7 +54,6 @@ test.describe('operator authenticated smoke', () => {
     const routes = [
       { name: 'dashboard', path: '/app', check: () => expect(page.getByTestId('dashboard-page')).toBeVisible() },
       { name: 'automations', path: '/app/automations', check: () => expect(page.getByRole('heading', { name: /^automations$/i })).toBeVisible() },
-      { name: 'comments', path: '/app/comments', check: () => expect(page.getByRole('heading', { name: /^comments$/i })).toBeVisible() },
       { name: 'settings', path: '/app/settings', check: () => expect(page.getByRole('heading', { name: /settings/i })).toBeVisible() },
       { name: 'billing', path: '/app/billing', check: () => expect(page.getByTestId('billing-page')).toBeVisible() },
     ];

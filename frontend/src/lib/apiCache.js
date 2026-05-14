@@ -3,7 +3,6 @@ const STORAGE_PREFIX = 'mychat_api_snapshot:';
 const PERSISTABLE_PREFIXES = [
   'dashboard-summary:',
   'automations-summary:',
-  'comments:list:',
   'instagram-accounts:',
 ];
 const FORBIDDEN_PERSIST_KEYS = new Set([
