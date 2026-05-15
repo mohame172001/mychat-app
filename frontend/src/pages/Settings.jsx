@@ -170,10 +170,28 @@ const Settings = () => {
           )}
 
           {tab === 'notifications' && (
-            <Card className="p-6 rounded-2xl border-slate-100">
-              <h3 className="font-display font-bold text-lg">Notifications</h3>
-              <p className="text-sm text-slate-500">Choose how you want to be notified.</p>
-              <div className="mt-6 space-y-4">
+            <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-notifications">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-display font-bold text-lg">Notifications</h3>
+                  <p className="text-sm text-slate-500">Choose how you want to be notified.</p>
+                </div>
+                <Badge className="bg-amber-50 text-amber-700 border-amber-100 rounded-full">
+                  Coming soon
+                </Badge>
+              </div>
+              {/* Phase 2.18S: the toggles below are placeholder UI —
+                  there is no /api/notifications/preferences endpoint
+                  yet. Disabling them and adding the explicit banner
+                  is more honest than letting users flip switches that
+                  silently revert on refresh. */}
+              <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-700">
+                Notification preferences will be saved once we ship the
+                preferences endpoint. For now you receive critical
+                account emails (password reset, plan changes) by
+                default — nothing else is sent.
+              </div>
+              <div className="mt-6 space-y-4 opacity-60 pointer-events-none">
                 {[
                   { id: 'email', label: 'Email notifications', desc: 'Get email alerts for new messages and activity.' },
                   { id: 'push', label: 'Push notifications', desc: 'Receive browser push notifications in real-time.' },
@@ -184,7 +202,7 @@ const Settings = () => {
                       <div className="font-semibold text-sm">{n.label}</div>
                       <div className="text-xs text-slate-500 mt-0.5">{n.desc}</div>
                     </div>
-                    <Switch checked={notif[n.id]} onCheckedChange={(v) => setNotif({ ...notif, [n.id]: v })} />
+                    <Switch checked={false} disabled aria-disabled="true" />
                   </div>
                 ))}
               </div>

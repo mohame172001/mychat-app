@@ -287,8 +287,18 @@ const Sidebar = () => {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button variant="ghost" className="w-full justify-start text-slate-600" size="sm">
-          <HelpCircle className="w-4 h-4 mr-2" /> Help & Support
+        <Button
+          asChild
+          variant="ghost"
+          className="w-full justify-start text-slate-600"
+          size="sm"
+        >
+          <a
+            href="mailto:mm.mohame172000@gmail.com?subject=MyChat%20support%20request"
+            rel="noopener noreferrer"
+          >
+            <HelpCircle className="w-4 h-4 mr-2" /> Help & Support
+          </a>
         </Button>
         <Button onClick={logout} variant="ghost" className="w-full justify-start text-slate-600" size="sm">
           <LogOut className="w-4 h-4 mr-2" /> Log out

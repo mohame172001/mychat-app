@@ -227,9 +227,12 @@ function UsersTab({ onSelect }) {
               <th className="text-left px-3 py-2">Plan</th>
               <th className="text-right px-3 py-2">IG</th>
               <th className="text-right px-3 py-2">Active rules</th>
-              <th className="text-right px-3 py-2">Comments</th>
-              <th className="text-right px-3 py-2">Replies</th>
-              <th className="text-right px-3 py-2">DMs</th>
+              {/* Phase 2.18S: column titles now spell out the
+                  current-month scoping so a fresh month showing 0
+                  across the board does not look like a bug. */}
+              <th className="text-right px-3 py-2" title="Comments processed this calendar month">Comments (mo)</th>
+              <th className="text-right px-3 py-2" title="Public replies sent this calendar month">Replies (mo)</th>
+              <th className="text-right px-3 py-2" title="DMs sent this calendar month">DMs (mo)</th>
               <th className="text-left px-3 py-2">Status</th>
               <th className="text-left px-3 py-2">Created</th>
               <th className="text-right px-3 py-2"></th>
