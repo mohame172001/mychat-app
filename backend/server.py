@@ -8624,6 +8624,13 @@ async def admin_disable_automation(
             'updatedAt': now,
         }},
     )
+    # Phase 2.18O: the dashboard summary's activeAutomations count and
+    # topAutomations list both embed status. Purge the snapshot so the
+    # paused state shows on the next /dashboard/summary call.
+    try:
+        await invalidate_dashboard_summary(automation.get('user_id'))
+    except Exception:
+        pass
     await _record_admin_action(
         admin_user,
         action='automation_disable',
@@ -9470,6 +9477,15 @@ async def _admin_user_status_change(
     if status in session_revoke_statuses:
         update_op['$inc'] = {'session_version': 1}
     await db.users.update_one({'id': target_user_id}, update_op)
+    # Phase 2.18O cache hygiene: every user-state change must purge
+    # the dashboard snapshot for the affected user so the new status
+    # (suspended / active / deleted), the paused automations, and the
+    # disconnected Instagram accounts are visible on the very next
+    # request.
+    try:
+        await invalidate_dashboard_summary(target_user_id)
+    except Exception:
+        pass
     await _record_admin_action(
         actor, action=action_name, target_user_id=target_user_id,
         metadata={'reason_length': len(reason or ''), 'new_status': status},
