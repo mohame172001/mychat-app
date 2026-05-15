@@ -4213,19 +4213,27 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
             return {'error': str(e)[:120]}
 
     async def _safe_automations():
+        # Phase 2.18Q: use the same _dashboard_scoped_docs semantics
+        # the dashboard's automations counter uses so bootstrap, the
+        # /automations/summary endpoint, and the dashboard agree on
+        # which rows exist.
         try:
-            if account is None:
-                return {'items': [], 'count': 0, 'lastUpdatedAt': datetime.utcnow().isoformat()}
-            rows = await db.automations.find(
-                _account_scoped_query(user_id, account)
-            ).sort('updated', -1).limit(500).to_list(500)
+            include_unscoped = await _dashboard_include_unscoped(user_id)
+            rows = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 500)
+            rows.sort(
+                key=lambda r: (
+                    r.get('updated') or r.get('updatedAt')
+                    or r.get('created') or r.get('createdAt') or datetime.min
+                ),
+                reverse=True,
+            )
             missing = [
                 r for r in rows
                 if r.get('media_id')
                 and not ((r.get('media_preview') or {}).get('thumbnail_url'))
                 and not ((r.get('media_preview') or {}).get('media_url'))
             ][:12]
-            if missing:
+            if missing and account is not None:
                 refreshed = await asyncio.gather(
                     *(_backfill_automation_media_preview(r, account) for r in missing)
                 )
@@ -4303,7 +4311,17 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
                 db.instagram_accounts.count_documents({}),
                 db.instagram_accounts.count_documents({'connectionValid': True}),
                 db.automations.count_documents({}),
-                db.automations.count_documents({'status': 'active'}),
+                # Phase 2.18Q: align with _automation_active() — legacy rows
+        # may have status missing and use enabled=true / isActive=true
+        # instead, which the dashboard's per-user counter already
+        # honors. Count them as active here too, otherwise the admin
+        # overview undercounts and disagrees with the dashboard.
+        db.automations.count_documents({'$or': [
+            {'status': 'active'},
+            {'status': {'$exists': False}, 'enabled': True},
+            {'status': None, 'enabled': True},
+            {'status': '', 'enabled': True},
+        ]}),
                 _safe_usage_totals(),
                 _safe_plan_distribution(),
                 db.comments.count_documents({'action_status': 'plan_limited'}),
@@ -4979,13 +4997,32 @@ async def _backfill_automation_media_preview(auto: dict, account: dict) -> dict:
 @api.get('/automations/summary')
 async def list_automations_summary(user_id: str = Depends(get_current_active_user_id)):
     started = datetime.utcnow()
+    # Phase 2.18Q: align scoping with /dashboard/summary so the
+    # 'Active Automations' counter on the dashboard never disagrees
+    # with the row count on /app/automations. The previous behaviour
+    # was: dashboard used _dashboard_scoped_docs (account-scoped +
+    # unscoped legacy rows when the workspace has <=1 IG account)
+    # while this endpoint used _account_scoped_query only. An
+    # automation with post_scope='any' that was saved without an IG
+    # account id (legacy data or a workspace that disconnected) was
+    # therefore visible on the dashboard count but missing from the
+    # actual list — the inconsistency the live tester pass hit.
     try:
         account = await getActiveInstagramAccount(user_id)
     except HTTPException as e:
-        if e.status_code == 400:
-            return {'items': [], 'count': 0, 'lastUpdatedAt': datetime.utcnow().isoformat()}
-        raise
-    rows = await db.automations.find(_account_scoped_query(user_id, account)).sort('updated', -1).limit(500).to_list(500)
+        if e.status_code != 400:
+            raise
+        account = None
+    include_unscoped = await _dashboard_include_unscoped(user_id)
+    rows = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 500)
+    # Stable ordering: newest updated first.
+    rows.sort(
+        key=lambda r: (
+            r.get('updated') or r.get('updatedAt')
+            or r.get('created') or r.get('createdAt') or datetime.min
+        ),
+        reverse=True,
+    )
     # Phase 2.18H: parallel-backfill missing media_preview thumbnails
     # for automations that target a specific post but were created
     # before the wizard cached the preview. Limit to 12 concurrent
@@ -8251,7 +8288,17 @@ async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
         db.instagram_accounts.count_documents({}),
         db.instagram_accounts.count_documents({'connectionValid': True}),
         db.automations.count_documents({}),
-        db.automations.count_documents({'status': 'active'}),
+        # Phase 2.18Q: align with _automation_active() — legacy rows
+        # may have status missing and use enabled=true / isActive=true
+        # instead, which the dashboard's per-user counter already
+        # honors. Count them as active here too, otherwise the admin
+        # overview undercounts and disagrees with the dashboard.
+        db.automations.count_documents({'$or': [
+            {'status': 'active'},
+            {'status': {'$exists': False}, 'enabled': True},
+            {'status': None, 'enabled': True},
+            {'status': '', 'enabled': True},
+        ]}),
         _safe_usage_totals(),
         _safe_plan_distribution(),
         db.comments.count_documents({'action_status': 'plan_limited'}),
