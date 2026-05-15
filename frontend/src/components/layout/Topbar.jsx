@@ -39,7 +39,7 @@ const Topbar = () => {
     <header className="hidden md:flex h-16 bg-white border-b border-slate-200 px-6 items-center justify-between topbar-shadow shrink-0">
       <div className="relative max-w-md w-full min-w-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-        <Input placeholder="Search contacts, automations..." className="pl-9 h-10 rounded-xl bg-slate-50 border-slate-100" />
+        <Input placeholder="Search automations..." className="pl-9 h-10 rounded-xl bg-slate-50 border-slate-100" />
       </div>
       <div className="flex items-center gap-2">
         <Badge

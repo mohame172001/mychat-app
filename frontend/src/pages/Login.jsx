@@ -90,7 +90,7 @@ const Login = () => {
         <div className="absolute inset-0 flex items-center justify-center p-12">
           <div className="text-white max-w-md">
             <h2 className="font-display text-4xl font-extrabold leading-tight">Automate the conversations that grow your business.</h2>
-            <p className="mt-4 text-white/90 text-lg">Use mychat with your own Instagram account, contacts, comments, and messages.</p>
+            <p className="mt-4 text-white/90 text-lg">Connect your Instagram, build comment-to-DM rules, and watch real conversations turn into action.</p>
           </div>
         </div>
       </div>

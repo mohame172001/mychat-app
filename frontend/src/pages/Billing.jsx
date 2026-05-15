@@ -111,7 +111,7 @@ function PlanCard({ plan, current }) {
         <div>
           <h3 className="text-lg font-semibold text-slate-800">{plan.display_name}</h3>
           <div className="text-xs text-slate-500">
-            ${plan.monthly_price_placeholder ?? 0}<span className="ml-1">/ month placeholder</span>
+            ${plan.monthly_price_placeholder ?? 0}<span className="ml-1">/ month</span>
           </div>
         </div>
         {highlighted && (

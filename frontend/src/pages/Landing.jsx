@@ -24,8 +24,8 @@ const features = [
   },
   {
     icon: 'Users',
-    title: 'Real Contacts',
-    description: 'Work with contacts created from your own connected Instagram activity.',
+    title: 'Audience-Aware Replies',
+    description: 'Every reply runs against your own connected Instagram account — no shared inbox, no shared data.',
     color: 'from-purple-500 to-pink-400',
   },
   {
@@ -144,7 +144,7 @@ const Landing = () => {
               </div>
               <div className="grid md:grid-cols-[240px_1fr] min-h-[400px]">
                 <div className="bg-slate-50 border-r border-slate-100 p-3 sm:p-4 space-y-1">
-                  {['Dashboard', 'Automations', 'Contacts', 'DM Automation', 'Broadcasting'].map((item, i) => (
+                  {['Dashboard', 'Automations', 'DM Automation', 'Billing', 'Settings'].map((item, i) => (
                     <div key={item} className={`px-3 py-2 rounded-lg text-sm font-medium ${i === 1 ? 'bg-blue-50 text-blue-700' : 'text-slate-600'}`}>{item}</div>
                   ))}
                 </div>
@@ -212,7 +212,7 @@ const Landing = () => {
             {[
               { step: '01', title: 'Connect Instagram', desc: 'Link a Business or Creator account through the app settings.' },
               { step: '02', title: 'Create a rule', desc: 'Choose a post, keyword, public reply, and DM message.' },
-              { step: '03', title: 'Review activity', desc: 'See real contacts, comments, messages, and broadcast records as they are created.' },
+              { step: '03', title: 'Review activity', desc: 'See real comment replies, DM sends, and link clicks as they happen on your account.' },
             ].map((s) => (
               <div key={s.step} className="rounded-2xl bg-white border border-slate-100 p-8">
                 <div className="text-6xl font-display font-extrabold text-slate-100">{s.step}</div>

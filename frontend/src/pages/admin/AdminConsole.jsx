@@ -265,6 +265,18 @@ function UsersTab({ onSelect }) {
                 </tr>
               );
             })}
+            {loading && (!data?.items || data.items.length === 0) && (
+              // Phase 2.18P: /admin/users is a heavy join (~5s on cold
+              // backend). Without a skeleton the table looks empty +
+              // broken until the request resolves.
+              [0, 1, 2, 3, 4].map((i) => (
+                <tr key={`skeleton-${i}`} data-testid="admin-users-skeleton">
+                  <td className="px-3 py-3" colSpan={10}>
+                    <div className="h-4 w-full animate-pulse rounded bg-slate-100" />
+                  </td>
+                </tr>
+              ))
+            )}
             {(!loading && (!data?.items || data.items.length === 0)) && (
               <tr><td className="px-3 py-6 text-center text-slate-500" colSpan={10}>No users.</td></tr>
             )}
