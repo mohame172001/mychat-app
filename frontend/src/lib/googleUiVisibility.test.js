@@ -15,8 +15,11 @@ describe('Google Sign-In production visibility wiring', () => {
     const source = src('components', 'auth', 'GoogleSignInButton.jsx');
 
     expect(source).toContain('Continue with Google');
-    expect(source).toContain('Google sign-in is not configured');
-    expect(source).toContain('Google sign-in config could not be loaded.');
+    // Phase 2.18R: end-user copy now reads cleanly. We test that the
+    // CTA is still present and that the diagnostic data-attribute is
+    // kept in the DOM for operator debugging — but the raw
+    // google_config_* string is no longer rendered visibly to users.
+    expect(source).toMatch(/Google sign-in is unavailable|Google sign-in is not configured/);
     expect(source).toContain('google-config-diagnostics');
     expect(source).toContain('google_config_request_attempted');
     expect(source).toContain('data-google-configured="false"');

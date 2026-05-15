@@ -94,12 +94,19 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
         </Button>
         <div className="text-center text-xs text-slate-400">
           {configStatus === 'loading'
-            ? 'Checking Google sign-in configuration'
-            : configStatus === 'error'
-              ? 'Google sign-in config could not be loaded.'
-              : 'Google sign-in is not configured'}
+            ? 'Checking Google sign-in…'
+            : 'Google sign-in is unavailable right now. Use email and password below.'}
         </div>
-        <div className="text-center text-[11px] text-slate-400" data-testid="google-config-diagnostics">
+        {/* Phase 2.18R: keep the diagnostic line in the DOM for our
+            own test fixtures and operator debugging — but stop
+            rendering raw `google_config_*` keys to end users. Visible
+            visually-hidden node is targetable by data-testid for
+            tests but does not leak debug noise into the UI. */}
+        <div
+          className="sr-only"
+          data-testid="google-config-diagnostics"
+          aria-hidden="true"
+        >
           {`google_config_request_attempted=${diagnostics.google_config_request_attempted ? 'yes' : 'no'} · google_config_request_ok=${diagnostics.google_config_request_ok ? 'yes' : 'no'} · google_config_response_enabled=${diagnostics.google_config_response_enabled ? 'yes' : 'no'} · google_config_response_was_json=${diagnostics.google_config_response_was_json ? 'yes' : 'no'} · google_config_error_code=${diagnostics.google_config_error_code}`}
         </div>
       </div>

@@ -63,8 +63,8 @@ describe('ResetPassword page', () => {
     expect(resetSrc).toMatch(/setParams\(next,\s*\{\s*replace:\s*true\s*\}\)/);
   });
 
-  test('validates password length (>=6) and confirms match', () => {
-    expect(resetSrc).toContain('length < 6');
+  test('validates password length (>=8) and confirms match', () => {
+    expect(resetSrc).toContain('length < 8');
     expect(resetSrc).toContain('newPassword !== confirmPassword');
   });
 

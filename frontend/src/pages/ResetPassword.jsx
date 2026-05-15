@@ -47,8 +47,8 @@ const ResetPassword = () => {
       toast.error('Please fill both password fields');
       return;
     }
-    if (newPassword.length < 6) {
-      toast.error('Password must be at least 6 characters');
+    if (newPassword.length < 8) {
+      toast.error('Password must be at least 8 characters');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -70,7 +70,7 @@ const ResetPassword = () => {
     } catch (err) {
       const detail = err?.response?.data?.detail;
       let msg = 'Reset failed. Request a fresh link.';
-      if (detail === 'password_too_short') msg = 'Password must be at least 6 characters';
+      if (detail === 'password_too_short') msg = 'Password must be at least 8 characters';
       else if (detail === 'password_reset_token_expired') msg = 'Reset link expired. Request a new one.';
       else if (detail === 'password_reset_token_used') msg = 'This reset link was already used.';
       else if (detail === 'invalid_password_reset_token') msg = 'Reset link is invalid. Request a new one.';
@@ -116,7 +116,7 @@ const ResetPassword = () => {
                 <PasswordInput
                   id="new-password"
                   autoComplete="new-password"
-                  placeholder="At least 6 characters"
+                  placeholder="At least 8 characters"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   inputClassName="h-12 rounded-xl"
