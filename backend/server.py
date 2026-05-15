@@ -513,9 +513,29 @@ def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
 async def _usage_snapshots_for_user(user_id: str) -> dict:
     snapshots = {}
     try:
+        # Phase 2.18N: align the plan-cap snapshot with what the
+        # account-switcher actually shows. The previous count of
+        # connectionValid=True rows still included rows that
+        # _is_public_switchable_instagram_account hides (rows missing
+        # an access token, or rows marked auto_cleanup_*, replaced_by_
+        # reconnect, force_disconnected_by_admin, disconnected). That
+        # left users in the inconsistent state from the screenshot:
+        # the switcher shows "No account connected" but the plan
+        # guard still says "free allows 1 account; upgrade". Counting
+        # only the rows that are actually visible to the user as
+        # connected fixes both screens at once.
         snapshots['instagram_accounts_connected_snapshot'] = await db.instagram_accounts.count_documents({
             '$or': [{'userId': user_id}, {'user_id': user_id}],
             'connectionValid': True,
+            'isActive': {'$ne': False},
+            'accessToken': {'$exists': True, '$nin': [None, '']},
+            'refreshStatus': {'$nin': [
+                'disconnected',
+                'auto_cleanup_users_disconnected',
+                'auto_cleanup_single_account_plan',
+                'force_disconnected_by_admin',
+                'replaced_by_reconnect',
+            ]},
         })
     except Exception:
         pass
