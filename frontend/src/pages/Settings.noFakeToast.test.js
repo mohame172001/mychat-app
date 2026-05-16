@@ -4,11 +4,24 @@ const path = require('path');
 const settings = fs.readFileSync(path.join(__dirname, 'Settings.jsx'), 'utf8');
 
 describe('Phase 2.15 — Settings page must not show fake-success toasts', () => {
-  test('Profile tab must NOT show a "Profile updated" toast without a backend call', () => {
-    // The original bug: a Save button that called toast.success with no
-    // API call attached. Phase 2.15 cleanup removed that button entirely
-    // and made the Profile fields read-only until an edit endpoint exists.
-    expect(settings).not.toMatch(/toast\.success\(['"]Profile updated['"]\)/);
+  test('Profile tab toast.success is gated by a real backend call', () => {
+    // Phase 2.18U: Profile editing is now a real feature backed by
+    // PATCH /auth/me. The 'Profile updated' toast is allowed, but only
+    // if it sits AFTER an awaited api.patch('/auth/me', ...) call so
+    // we never show a fake-success again.
+    const lines = settings.split('\n');
+    const toastLines = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => /toast\.success\(['"]Profile updated['"]\)/.test(line));
+    if (toastLines.length === 0) {
+      // No toast = trivially safe (the old read-only state).
+      expect(true).toBe(true);
+      return;
+    }
+    toastLines.forEach(({ line, idx }) => {
+      const window = lines.slice(Math.max(0, idx - 20), idx + 1).join('\n');
+      expect(window).toMatch(/await\s+api\.(patch|put|post)\(['"]\/auth\/me['"]/);
+    });
   });
 
   test('every toast.success in Settings is reachable only after an awaited API call or an external refresh callback', () => {

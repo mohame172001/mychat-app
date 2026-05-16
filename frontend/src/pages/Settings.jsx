@@ -32,6 +32,58 @@ const Settings = () => {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
+  // Phase 2.18U: Profile-editable state. We hold a draft of name +
+  // username locally so the user can type without round-tripping
+  // every keystroke, then submit on Save.
+  const [profileDraft, setProfileDraft] = useState({ name: '', username: '' });
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      setProfileDraft({
+        name: user.name || '',
+        username: user.username || '',
+      });
+    }
+    // We intentionally watch only the two fields we care about; pulling
+    // in `user` would re-init the draft on unrelated refreshUser() calls
+    // and overwrite an in-progress edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.name, user?.username]);
+
+  const profileDirty = Boolean(
+    user
+    && (profileDraft.name.trim() !== (user.name || '').trim()
+        || profileDraft.username.trim() !== (user.username || '').trim())
+  );
+
+  const saveProfile = async () => {
+    if (!profileDirty) return;
+    setSavingProfile(true);
+    try {
+      const payload = {};
+      const nextName = profileDraft.name.trim();
+      const nextUsername = profileDraft.username.trim();
+      if (nextName !== (user?.name || '').trim()) payload.name = nextName;
+      if (nextUsername !== (user?.username || '').trim()) payload.username = nextUsername;
+      await api.patch('/auth/me', payload);
+      toast.success('Profile updated');
+      if (typeof refreshUser === 'function') {
+        await refreshUser();
+      }
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      const map = {
+        username_already_taken: 'That username is already taken — pick another.',
+        username_invalid_characters: 'Username can only contain letters, numbers, underscores, dots, and hyphens.',
+        username_length_out_of_range: 'Username must be 3 to 32 characters.',
+        name_length_out_of_range: 'Name must be 1 to 80 characters.',
+      };
+      toast.error(map[detail] || (typeof detail === 'string' ? detail : 'Profile update failed'));
+    } finally {
+      setSavingProfile(false);
+    }
+  };
 
   const hasKnownInstagramIdentity = Boolean(user?.instagramHandle || user?.activeInstagramAccountId || user?.activeInstagramIgUserId);
   const instagramReconnectMode = (user?.instagramConnected || user?.instagramConnectionValid === false || hasKnownInstagramIdentity)
@@ -76,21 +128,74 @@ const Settings = () => {
 
         <div>
           {tab === 'profile' && (
-            <Card className="p-6 rounded-2xl border-slate-100">
+            <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-profile">
               <h3 className="font-display font-bold text-lg">Profile</h3>
-              <p className="text-sm text-slate-500">Your account profile (read-only for now).</p>
+              <p className="text-sm text-slate-500">Your account profile. Name and username are editable.</p>
               <div className="mt-6 flex items-center gap-4">
                 <img src={user?.avatar} alt="avatar" className="w-16 h-16 rounded-full object-cover" />
               </div>
               <div className="mt-6 grid sm:grid-cols-2 gap-4">
-                <div className="space-y-2"><Label>Full name</Label><Input value={user?.name || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
-                <div className="space-y-2"><Label>Username</Label><Input value={user?.username || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
-                <div className="space-y-2 sm:col-span-2"><Label>Email</Label><Input value={user?.email || ''} readOnly className="h-11 rounded-xl bg-slate-50" /></div>
+                <div className="space-y-2">
+                  <Label htmlFor="profile-name">Full name</Label>
+                  <Input
+                    id="profile-name"
+                    value={profileDraft.name}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, name: e.target.value }))}
+                    maxLength={80}
+                    placeholder="Your full name"
+                    className="h-11 rounded-xl"
+                    disabled={savingProfile}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="profile-username">Username</Label>
+                  <Input
+                    id="profile-username"
+                    value={profileDraft.username}
+                    onChange={(e) => setProfileDraft((p) => ({ ...p, username: e.target.value }))}
+                    maxLength={32}
+                    placeholder="username"
+                    className="h-11 rounded-xl"
+                    disabled={savingProfile}
+                  />
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="profile-email">Email</Label>
+                  <Input
+                    id="profile-email"
+                    value={user?.email || ''}
+                    readOnly
+                    className="h-11 rounded-xl bg-slate-50"
+                  />
+                  <p className="text-xs text-slate-500">
+                    Email changes require a verification flow that is not enabled yet.
+                    Contact support if you need it changed.
+                  </p>
+                </div>
               </div>
-              <p className="mt-4 text-xs text-slate-500">
-                Editing profile fields will be available in a future update. Use the
-                Security tab to change your password.
-              </p>
+              <div className="mt-6 flex items-center justify-end gap-3">
+                {profileDirty && !savingProfile && (
+                  <button
+                    type="button"
+                    onClick={() => setProfileDraft({
+                      name: user?.name || '',
+                      username: user?.username || '',
+                    })}
+                    className="text-sm text-slate-500 hover:text-slate-700"
+                    data-testid="profile-cancel"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <Button
+                  onClick={saveProfile}
+                  disabled={!profileDirty || savingProfile}
+                  className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white"
+                  data-testid="profile-save"
+                >
+                  {savingProfile ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>) : 'Save changes'}
+                </Button>
+              </div>
             </Card>
           )}
 

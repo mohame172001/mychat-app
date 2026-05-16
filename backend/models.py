@@ -33,6 +33,13 @@ class SignupIn(BaseModel):
     password: str
 
 
+class ProfileUpdateIn(BaseModel):
+    """Phase 2.18U: editable profile fields. Email changes require a
+    separate verification flow and are intentionally NOT supported here."""
+    name: Optional[str] = None
+    username: Optional[str] = None
+
+
 class LoginIn(BaseModel):
     username: str
     password: str

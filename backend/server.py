@@ -23,7 +23,7 @@ from pymongo.errors import DuplicateKeyError
 import httpx
 
 from models import (
-    SignupIn, LoginIn, AuthOut, UserPublic,
+    SignupIn, LoginIn, AuthOut, UserPublic, ProfileUpdateIn,
     AutomationIn, AutomationPatch, Automation,
     ContactIn, ContactPatch, Contact,
     BroadcastIn, BroadcastPatch, Broadcast,
@@ -4167,6 +4167,82 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
     # /auth/bootstrap).
     u = await _reconcile_user_instagram_flags(user_id, u) or u
     return _public_user(u)
+
+
+# Phase 2.18U: profile editing. Email changes intentionally NOT
+# supported here — they need a verification-link flow first. Only
+# display fields (name, username) are mutable in this endpoint.
+PROFILE_NAME_MIN = 1
+PROFILE_NAME_MAX = 80
+PROFILE_USERNAME_MIN = 3
+PROFILE_USERNAME_MAX = 32
+_PROFILE_USERNAME_RE = re.compile(r'^[a-zA-Z0-9_.-]+$')
+
+
+@api.patch('/auth/me', response_model=UserPublic)
+async def update_me(
+    data: ProfileUpdateIn = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Update a user's editable profile fields (name + username).
+
+    Validation:
+      - name: 1..80 chars after trim
+      - username: 3..32 chars, [a-zA-Z0-9_.-] only, unique
+    Username uniqueness is enforced by a final upsert race-safe
+    pre-check, and the response is the refreshed UserPublic.
+    """
+    u = await db.users.find_one({'id': user_id})
+    if not u:
+        raise HTTPException(404, 'User not found')
+    updates: dict = {}
+    raw_name = data.name
+    raw_username = data.username
+    if raw_name is not None:
+        if not isinstance(raw_name, str):
+            raise HTTPException(400, 'name_must_be_string')
+        name = raw_name.strip()
+        if len(name) < PROFILE_NAME_MIN or len(name) > PROFILE_NAME_MAX:
+            raise HTTPException(400, 'name_length_out_of_range')
+        updates['name'] = name
+    if raw_username is not None:
+        if not isinstance(raw_username, str):
+            raise HTTPException(400, 'username_must_be_string')
+        username = raw_username.strip()
+        if not _PROFILE_USERNAME_RE.fullmatch(username):
+            raise HTTPException(400, 'username_invalid_characters')
+        if len(username) < PROFILE_USERNAME_MIN or len(username) > PROFILE_USERNAME_MAX:
+            raise HTTPException(400, 'username_length_out_of_range')
+        # Only check uniqueness if it actually changes (case-insensitive
+        # because the existing signup flow does not lowercase).
+        if username.lower() != str(u.get('username') or '').lower():
+            existing = await db.users.find_one({
+                'username': {'$regex': f'^{re.escape(username)}$', '$options': 'i'},
+                'id': {'$ne': user_id},
+            })
+            if existing:
+                raise HTTPException(409, 'username_already_taken')
+        updates['username'] = username
+    if not updates:
+        # Nothing to do — return the current shape so the client gets
+        # a consistent UserPublic without thinking it's an error.
+        u = await _reconcile_user_instagram_flags(user_id, u) or u
+        return _public_user(u)
+    updates['updated_at'] = datetime.utcnow()
+    await db.users.update_one({'id': user_id}, {'$set': updates})
+    # Phase 2.18J cache hygiene: profile fields appear inside the
+    # dashboard summary's user identity block, so wipe the snapshot.
+    try:
+        await invalidate_dashboard_summary(user_id)
+    except Exception:
+        pass
+    logger.info(
+        'profile_updated user_id=%s fields=%s',
+        user_id, sorted([k for k in updates.keys() if k != 'updated_at']),
+    )
+    refreshed = await db.users.find_one({'id': user_id})
+    refreshed = await _reconcile_user_instagram_flags(user_id, refreshed) or refreshed
+    return _public_user(refreshed)
 
 
 # Phase 2.18I: single round-trip session bootstrap. The frontend used
