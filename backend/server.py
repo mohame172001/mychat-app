@@ -8244,6 +8244,40 @@ async def current_usage(user_id: str = Depends(get_current_active_user_id)):
     }
 
 
+@api.post('/admin/observability/test-error')
+async def admin_observability_test_error(
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18Y: admin-only Sentry verification.
+
+    Raises a uniquely-tagged exception so the admin can confirm in
+    the Sentry dashboard that the backend SDK is initialized and the
+    event scrubber is active. The exception text contains NO user
+    data, NO tokens, and NO request context — just a static marker.
+
+    NOTE: keep this endpoint until the admin confirms a test event
+    landed in Sentry, then it can be removed in a follow-up commit.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_OVERVIEW_VIEW)
+    try:
+        import observability as _observability  # noqa: WPS433
+        status_before = _observability.observability_status()
+    except Exception:
+        status_before = {'sentry_initialized': False, 'sentry_init_error': 'observability_import_failed'}
+    if not status_before.get('sentry_initialized'):
+        # Surface the diagnostic instead of raising the test error —
+        # otherwise the admin gets a 500 with no Sentry event, which
+        # is confusing. The status tells them exactly what to fix.
+        raise HTTPException(
+            503,
+            f'sentry_not_initialized configured={status_before.get("sentry_configured")} '
+            f'error={status_before.get("sentry_init_error") or "unknown"}',
+        )
+    marker = f'mychat-sentry-verification-{datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")}'
+    logger.warning('admin_triggered_sentry_test_event marker=%s', marker)
+    raise RuntimeError(f'mychat sentry verification event (safe to ignore) marker={marker}')
+
+
 @api.get('/observability/status')
 async def observability_status_endpoint(user_id: str = Depends(get_current_active_user_id)):
     """Phase 2.5: sanitized observability config for SystemHealth/admin.
