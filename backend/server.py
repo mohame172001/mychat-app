@@ -8259,23 +8259,48 @@ async def admin_observability_test_error(
     landed in Sentry, then it can be removed in a follow-up commit.
     """
     await _require_admin_permission(user_id, _admin_roles.PERM_OVERVIEW_VIEW)
+    # Force a fresh init() in case this worker missed the startup hook
+    # (e.g. uvicorn workers spawned after the initial boot). init_sentry
+    # is idempotent — a second call on an already-initialized worker is
+    # a cheap no-op that just returns True.
+    init_ok = False
+    init_error = None
     try:
         import observability as _observability  # noqa: WPS433
-        status_before = _observability.observability_status()
-    except Exception:
-        status_before = {'sentry_initialized': False, 'sentry_init_error': 'observability_import_failed'}
-    if not status_before.get('sentry_initialized'):
-        # Surface the diagnostic instead of raising the test error —
-        # otherwise the admin gets a 500 with no Sentry event, which
-        # is confusing. The status tells them exactly what to fix.
+        init_ok = bool(_observability.init_sentry())
+        status_now = _observability.observability_status()
+        init_error = status_now.get('sentry_init_error')
+    except Exception as exc:
+        init_error = f'observability_module_error: {type(exc).__name__}: {str(exc)[:100]}'
+    # Capture the exception directly so even if the LoggingIntegration
+    # is mis-wired, we still get a verified event in the Sentry project.
+    marker = f'mychat-sentry-verification-{datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")}'
+    logger.warning(
+        'admin_triggered_sentry_test_event marker=%s init_ok=%s init_error=%s',
+        marker, init_ok, (init_error or 'none'),
+    )
+    sent_event_id = None
+    try:
+        import sentry_sdk  # type: ignore
+        sent_event_id = sentry_sdk.capture_message(
+            f'mychat sentry verification message marker={marker}',
+            level='warning',
+        )
+    except Exception as exc:
+        logger.warning('sentry_capture_message_failed reason=%s', type(exc).__name__)
+    if not init_ok:
+        # Caller asked for a verification event but the worker says it
+        # could not init. Return a diagnostic so we don't silently
+        # raise an exception that goes nowhere.
         raise HTTPException(
             503,
-            f'sentry_not_initialized configured={status_before.get("sentry_configured")} '
-            f'error={status_before.get("sentry_init_error") or "unknown"}',
+            f'sentry_not_initialized init_error={init_error or "unknown"} '
+            f'capture_message_event_id={sent_event_id}',
         )
-    marker = f'mychat-sentry-verification-{datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")}'
-    logger.warning('admin_triggered_sentry_test_event marker=%s', marker)
-    raise RuntimeError(f'mychat sentry verification event (safe to ignore) marker={marker}')
+    raise RuntimeError(
+        f'mychat sentry verification event (safe to ignore) marker={marker} '
+        f'capture_message_event_id={sent_event_id}'
+    )
 
 
 @api.get('/observability/status')
