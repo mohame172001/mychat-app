@@ -5554,6 +5554,11 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
     res = await db.automations.update_one({'id': aid, **scoped}, {'$set': update})
     if res.matched_count == 0:
         raise HTTPException(404, 'Not found')
+    # Phase 2.18Y perf: when status_reenabled, record_usage_event already
+    # invalidates the dashboard summary internally, so the explicit
+    # invalidate below is only needed for non-status edits. Run both in
+    # parallel rather than serially to shave round-trips off Save.
+    invalidate_account_id = existing.get('instagramAccountId') or (account or {}).get('instagramAccountId')
     if status_reenabled:
         await _safe_record_usage_event(
             user_id=user_id,
@@ -5562,10 +5567,8 @@ async def patch_automation(aid: str, data: AutomationPatch, user_id: str = Depen
             automation_id=aid,
             metadata={'source': 'patch_automation'},
         )
-    await invalidate_dashboard_summary(
-        user_id,
-        instagram_account_id=existing.get('instagramAccountId') or (account or {}).get('instagramAccountId'),
-    )
+    else:
+        await invalidate_dashboard_summary(user_id, instagram_account_id=invalidate_account_id)
     d = await db.automations.find_one({'id': aid, **scoped})
     return _strip_mongo(d)
 
@@ -5883,20 +5886,28 @@ async def create_quick_comment_rule(
     }
     doc = _normalize_public_reply_for_persistence(doc)
     await db.automations.insert_one(doc)
-    await invalidate_dashboard_summary(user_id, instagram_account_id=doc.get('instagramAccountId'))
-    await _safe_record_usage_event(
-        user_id=user_id,
-        event_type='automation_created',
-        instagram_account_id=doc.get('instagramAccountId'),
-        automation_id=doc.get('id'),
-        metadata={'status': doc.get('status'), 'source': 'quick_comment_rule'},
-    )
-    await _safe_record_usage_event(
-        user_id=user_id,
-        event_type='automation_activated',
-        instagram_account_id=doc.get('instagramAccountId'),
-        automation_id=doc.get('id'),
-        metadata={'source': 'quick_comment_rule'},
+    # Phase 2.18Y perf: previously this handler awaited four serial
+    # writes after the insert (dashboard-summary invalidation, then two
+    # usage events that each re-invalidate the dashboard summary). That
+    # added 200-600ms of Mongo round-trips to every Go Live click. The
+    # explicit invalidate is now redundant because record_usage_event()
+    # already invalidates internally, and the two telemetry writes are
+    # mutually independent, so we fan them out in parallel.
+    await asyncio.gather(
+        _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_created',
+            instagram_account_id=doc.get('instagramAccountId'),
+            automation_id=doc.get('id'),
+            metadata={'status': doc.get('status'), 'source': 'quick_comment_rule'},
+        ),
+        _safe_record_usage_event(
+            user_id=user_id,
+            event_type='automation_activated',
+            instagram_account_id=doc.get('instagramAccountId'),
+            automation_id=doc.get('id'),
+            metadata={'source': 'quick_comment_rule'},
+        ),
     )
     return _strip_mongo({**doc})
 
@@ -13115,9 +13126,48 @@ async def _fetch_latest_media_id(access_token: str, ig_user_id: str) -> Optional
         return None
 
 
+# Phase 2.18Y perf: in-process TTL cache for recent media ids per IG
+# account. The same set is read twice in quick succession when a user
+# opens the automation wizard, picks a post, and hits Go Live — the
+# wizard fetches /instagram/media (returns up to 25 items) and then the
+# save handler validates the picked media id by re-fetching the recent
+# ids via _fetch_recent_media_ids. Caching the second call for 120s
+# eliminates a 300-800ms Instagram Graph round-trip from every Go Live
+# (and from every PATCH /automations/{id} that touches media_id).
+_RECENT_MEDIA_CACHE: dict = {}
+_RECENT_MEDIA_CACHE_TTL_SEC = 120
+
+
+def _recent_media_cache_get(ig_user_id: str) -> Optional[list]:
+    entry = _RECENT_MEDIA_CACHE.get(ig_user_id)
+    if not entry:
+        return None
+    ts, ids = entry
+    if (datetime.utcnow() - ts).total_seconds() > _RECENT_MEDIA_CACHE_TTL_SEC:
+        _RECENT_MEDIA_CACHE.pop(ig_user_id, None)
+        return None
+    return ids
+
+
+def _recent_media_cache_set(ig_user_id: str, ids: list) -> None:
+    if not ig_user_id:
+        return
+    _RECENT_MEDIA_CACHE[ig_user_id] = (datetime.utcnow(), list(ids))
+    # Cheap memory cap — drop oldest if the dict grows beyond a sane size.
+    if len(_RECENT_MEDIA_CACHE) > 2048:
+        try:
+            oldest = min(_RECENT_MEDIA_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _RECENT_MEDIA_CACHE.pop(oldest, None)
+        except Exception:
+            pass
+
+
 async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int = 10) -> list:
     if not access_token or not ig_user_id:
         return []
+    cached = _recent_media_cache_get(ig_user_id)
+    if cached is not None:
+        return cached
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(
@@ -13130,11 +13180,13 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
             )
             if r.status_code != 200:
                 return []
-            return [
+            ids = [
                 str(item.get('id'))
                 for item in ((r.json() or {}).get('data') or [])
                 if item.get('id')
             ]
+            _recent_media_cache_set(ig_user_id, ids)
+            return ids
     except Exception:
         return []
 
