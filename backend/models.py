@@ -40,6 +40,15 @@ class ProfileUpdateIn(BaseModel):
     username: Optional[str] = None
 
 
+class NotificationPreferencesIn(BaseModel):
+    """Phase 2.18V: opt-in transactional / digest notifications. Critical
+    account emails (password reset, plan change, security alerts) are
+    NEVER opt-out — they bypass this preference set."""
+    email: Optional[bool] = None
+    push: Optional[bool] = None
+    weekly: Optional[bool] = None
+
+
 class LoginIn(BaseModel):
     username: str
     password: str

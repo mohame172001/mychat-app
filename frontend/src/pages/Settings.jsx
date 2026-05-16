@@ -26,7 +26,48 @@ const Settings = () => {
   const { user, refreshUser } = useAuth();
   const location = useLocation();
   const [tab, setTab] = useState('profile');
-  const [notif, setNotif] = useState({ email: true, push: true, weekly: false });
+  const [notif, setNotif] = useState({ email: true, push: false, weekly: false });
+  const [notifLoading, setNotifLoading] = useState(true);
+  const [notifSaving, setNotifSaving] = useState(false);
+
+  // Phase 2.18V: load saved preferences on first mount.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { data } = await api.get('/notifications/preferences');
+        if (alive && data?.preferences) {
+          setNotif({
+            email: Boolean(data.preferences.email),
+            push: Boolean(data.preferences.push),
+            weekly: Boolean(data.preferences.weekly),
+          });
+        }
+      } catch {
+        /* fall through to defaults */
+      } finally {
+        if (alive) setNotifLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const updateNotificationPref = async (key, value) => {
+    // Optimistic flip — the user sees the toggle move instantly.
+    const previous = notif[key];
+    setNotif((n) => ({ ...n, [key]: value }));
+    setNotifSaving(true);
+    try {
+      await api.patch('/notifications/preferences', { [key]: value });
+    } catch (err) {
+      // Roll back on failure.
+      setNotif((n) => ({ ...n, [key]: previous }));
+      const detail = err?.response?.data?.detail;
+      toast.error(typeof detail === 'string' ? detail : 'Could not save preference');
+    } finally {
+      setNotifSaving(false);
+    }
+  };
   const [igConnecting, setIgConnecting] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -276,27 +317,18 @@ const Settings = () => {
 
           {tab === 'notifications' && (
             <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-notifications">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="font-display font-bold text-lg">Notifications</h3>
-                  <p className="text-sm text-slate-500">Choose how you want to be notified.</p>
-                </div>
-                <Badge className="bg-amber-50 text-amber-700 border-amber-100 rounded-full">
-                  Coming soon
-                </Badge>
-              </div>
-              {/* Phase 2.18S: the toggles below are placeholder UI —
-                  there is no /api/notifications/preferences endpoint
-                  yet. Disabling them and adding the explicit banner
-                  is more honest than letting users flip switches that
-                  silently revert on refresh. */}
-              <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-700">
-                Notification preferences will be saved once we ship the
-                preferences endpoint. For now you receive critical
-                account emails (password reset, plan changes) by
-                default — nothing else is sent.
-              </div>
-              <div className="mt-6 space-y-4 opacity-60 pointer-events-none">
+              <h3 className="font-display font-bold text-lg">Notifications</h3>
+              <p className="text-sm text-slate-500">Choose how you want to be notified.</p>
+              {/* Phase 2.18V: preferences are now persisted via
+                  GET/PATCH /api/notifications/preferences. Critical
+                  account mail (password reset, plan change, account
+                  suspended) bypasses these toggles by design. */}
+              <p className="mt-2 text-xs text-slate-500">
+                Critical account emails (password reset, plan change,
+                security alerts) are always sent regardless of these
+                preferences.
+              </p>
+              <div className="mt-6 space-y-4">
                 {[
                   { id: 'email', label: 'Email notifications', desc: 'Get email alerts for new messages and activity.' },
                   { id: 'push', label: 'Push notifications', desc: 'Receive browser push notifications in real-time.' },
@@ -307,7 +339,13 @@ const Settings = () => {
                       <div className="font-semibold text-sm">{n.label}</div>
                       <div className="text-xs text-slate-500 mt-0.5">{n.desc}</div>
                     </div>
-                    <Switch checked={false} disabled aria-disabled="true" />
+                    <Switch
+                      checked={Boolean(notif[n.id])}
+                      disabled={notifLoading || notifSaving}
+                      onCheckedChange={(v) => updateNotificationPref(n.id, v)}
+                      data-testid={`notif-toggle-${n.id}`}
+                      aria-label={`${n.label} toggle`}
+                    />
                   </div>
                 ))}
               </div>

@@ -24,6 +24,7 @@ import httpx
 
 from models import (
     SignupIn, LoginIn, AuthOut, UserPublic, ProfileUpdateIn,
+    NotificationPreferencesIn,
     AutomationIn, AutomationPatch, Automation,
     ContactIn, ContactPatch, Contact,
     BroadcastIn, BroadcastPatch, Broadcast,
@@ -4243,6 +4244,80 @@ async def update_me(
     refreshed = await db.users.find_one({'id': user_id})
     refreshed = await _reconcile_user_instagram_flags(user_id, refreshed) or refreshed
     return _public_user(refreshed)
+
+
+# Phase 2.18V: notification preferences. Critical security mail
+# (password reset, plan change, account suspended) is OUT OF scope
+# here — those bypass user preferences. This endpoint only governs
+# the opt-in/transactional surface.
+_NOTIFICATION_DEFAULTS = {
+    'email': True,    # Activity digest / new automation events
+    'push': False,    # Browser push, off by default
+    'weekly': False,  # Weekly summary, off by default
+}
+
+
+def _notification_preferences_payload(row: Optional[dict]) -> dict:
+    row = row or {}
+    return {
+        key: bool(row.get(key, default))
+        for key, default in _NOTIFICATION_DEFAULTS.items()
+    }
+
+
+@api.get('/notifications/preferences')
+async def get_notification_preferences(
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Return the caller's notification preferences. Returns the
+    documented defaults if the user has never saved any."""
+    row = await db.user_notification_preferences.find_one({'user_id': user_id})
+    return {
+        'preferences': _notification_preferences_payload(row),
+        'defaults': dict(_NOTIFICATION_DEFAULTS),
+    }
+
+
+@api.patch('/notifications/preferences')
+async def update_notification_preferences(
+    data: NotificationPreferencesIn = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Patch — only the keys the caller sends are written. Unknown
+    keys are ignored. Idempotent."""
+    raw = data.model_dump(exclude_none=True) if hasattr(data, 'model_dump') else data.dict(exclude_none=True)
+    accepted: dict = {}
+    for key in _NOTIFICATION_DEFAULTS.keys():
+        if key in raw:
+            accepted[key] = bool(raw[key])
+    if not accepted:
+        # Nothing to update — return current view.
+        row = await db.user_notification_preferences.find_one({'user_id': user_id})
+        return {
+            'preferences': _notification_preferences_payload(row),
+            'defaults': dict(_NOTIFICATION_DEFAULTS),
+        }
+    now = datetime.utcnow()
+    await db.user_notification_preferences.update_one(
+        {'user_id': user_id},
+        {
+            '$set': {**accepted, 'user_id': user_id, 'updated_at': now},
+            '$setOnInsert': {
+                'id': secrets.token_urlsafe(12),
+                'created_at': now,
+            },
+        },
+        upsert=True,
+    )
+    logger.info(
+        'notification_preferences_updated user_id=%s keys=%s',
+        user_id, sorted(accepted.keys()),
+    )
+    row = await db.user_notification_preferences.find_one({'user_id': user_id})
+    return {
+        'preferences': _notification_preferences_payload(row),
+        'defaults': dict(_NOTIFICATION_DEFAULTS),
+    }
 
 
 # Phase 2.18I: single round-trip session bootstrap. The frontend used
