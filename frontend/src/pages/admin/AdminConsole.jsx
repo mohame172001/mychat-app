@@ -5,6 +5,7 @@ import { Badge } from '../../components/ui/badge';
 import {
   ShieldAlert, Users, Activity, RefreshCw, Search, ArrowLeft,
   CheckCircle2, AlertTriangle, Lock, UserCog, BarChart3,
+  ScrollText,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { cachedApiGetSWR, invalidateApiCache } from '../../lib/apiCache';
@@ -1098,6 +1099,119 @@ function ReconciliationTab() {
 }
 
 
+// Phase 2.18W: admin audit-log viewer. Backend endpoint
+// /api/admin/audit-log already exists and returns sanitized entries
+// (admin email, action, target user id, metadata, timestamp). This
+// component just renders them in reverse-chronological order so the
+// owner can see every privileged mutation at a glance.
+function AuditLogTab() {
+  const { user } = useAuth();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await cachedApiGetSWR(
+        `admin:audit-log:${user?.id || 'anon'}`,
+        () => api.get('/admin/audit-log', { params: { limit: 100 } }),
+        { ttlMs: ADMIN_CACHE_TTL_MS, maxStaleMs: 2 * 60 * 1000, persist: true, onUpdate: setData },
+      );
+      setData(result.data);
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to load audit log';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to load audit log');
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const items = safeList(data?.items);
+
+  return (
+    <div data-testid="admin-audit-log">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700">
+          Admin audit log
+          {data?.count !== undefined && (
+            <span className="ml-2 text-slate-400 font-mono">({data.count})</span>
+          )}
+        </h3>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            invalidateApiCache('admin:audit-log');
+            load();
+          }}
+          disabled={loading}
+        >
+          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </Button>
+      </div>
+      {loading && items.length === 0 ? (
+        <AdminSkeleton rows={6} />
+      ) : items.length === 0 ? (
+        <div className="rounded-2xl border border-slate-100 bg-white p-6 text-center text-sm text-slate-500">
+          No admin actions recorded yet.
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-100 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+              <tr>
+                <th className="text-left px-3 py-2">When</th>
+                <th className="text-left px-3 py-2">Admin</th>
+                <th className="text-left px-3 py-2">Action</th>
+                <th className="text-left px-3 py-2">Target user</th>
+                <th className="text-left px-3 py-2">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((entry) => {
+                const meta = entry.metadata || {};
+                const metaKeys = Object.keys(meta);
+                return (
+                  <tr key={entry.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2 text-xs text-slate-500 font-mono whitespace-nowrap">
+                      {formatTimestamp(entry.created_at)}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {entry.admin_email || '—'}
+                    </td>
+                    <td className="px-3 py-2">
+                      <Badge className="bg-slate-100 text-slate-700 border-0">
+                        {entry.action || 'unknown'}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs text-slate-600">
+                      {entry.target_user_id || '—'}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-600">
+                      {metaKeys.length === 0
+                        ? '—'
+                        : (
+                          <span className="font-mono break-all">
+                            {metaKeys.slice(0, 3).map(k => `${k}=${JSON.stringify(meta[k])}`).join(' · ')}
+                            {metaKeys.length > 3 ? ` · +${metaKeys.length - 3} more` : ''}
+                          </span>
+                        )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const [me, setMe] = useState(null);   // null = loading
@@ -1167,6 +1281,7 @@ export default function AdminConsole() {
   const canViewUsers = hasPermission(me, PERM_USERS_VIEW);
   const canViewMembers = hasPermission(me, PERM_MEMBERS_VIEW);
   const canViewMetrics = hasPermission(me, 'admin.audit.view');
+  const canViewAudit = hasPermission(me, 'admin.audit.view');
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto" data-testid="admin-console">
@@ -1226,6 +1341,16 @@ export default function AdminConsole() {
             <BarChart3 className="w-4 h-4 mr-2" /> Metrics
           </Button>
         )}
+        {canViewAudit && (
+          <Button
+            variant={tab === 'audit' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('audit'); setSelectedUserId(null); }}
+            data-testid="admin-tab-audit"
+          >
+            <ScrollText className="w-4 h-4 mr-2" /> Audit log
+          </Button>
+        )}
         <div className="ml-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -1254,6 +1379,7 @@ export default function AdminConsole() {
       )}
       {tab === 'admins' && canViewMembers && <AdminsTab me={me} />}
       {tab === 'metrics' && canViewMetrics && <ReconciliationTab />}
+      {tab === 'audit' && canViewAudit && <AuditLogTab />}
     </div>
   );
 }

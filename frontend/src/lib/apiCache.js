@@ -15,6 +15,7 @@ const PERSISTABLE_PREFIXES = [
   'admin:user-detail:',
   'admin:members:',
   'admin:metrics:',
+  'admin:audit-log:',
 ];
 const FORBIDDEN_PERSIST_KEYS = new Set([
   'access_token',
