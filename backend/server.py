@@ -4356,6 +4356,20 @@ async def _reconcile_user_instagram_flags(user_id: str, u: Optional[dict] = None
         u = await db.users.find_one({'id': user_id})
     if not u:
         return None
+    legacy_connected = bool(
+        u.get('instagramConnected')
+        or u.get('instagram_connection_valid')
+        or u.get('instagramConnectionValid')
+    )
+    # Phase 2.18Y perf fix: drift is only possible when the legacy flag
+    # claims connected. The vast majority of authenticated reads hit
+    # users with legacy_connected=False (just-signed-up users, users who
+    # never linked IG, users already reconciled). For those, skip the
+    # count_documents query entirely — it was adding a round-trip to
+    # every /auth/me, /auth/bootstrap and /instagram/accounts call and
+    # showed up as the cause of the post-2.18T slowdown.
+    if not legacy_connected:
+        return u
     try:
         valid_count = await db.instagram_accounts.count_documents({
             '$or': [{'userId': user_id}, {'user_id': user_id}],
@@ -4364,12 +4378,7 @@ async def _reconcile_user_instagram_flags(user_id: str, u: Optional[dict] = None
         })
     except Exception:
         return u
-    legacy_connected = bool(
-        u.get('instagramConnected')
-        or u.get('instagram_connection_valid')
-        or u.get('instagramConnectionValid')
-    )
-    drift_to_disconnected = legacy_connected and valid_count == 0
+    drift_to_disconnected = valid_count == 0
     if not drift_to_disconnected:
         return u
     # The user document still claims connected, but there is no live
@@ -7101,7 +7110,16 @@ async def _dashboard_scoped_docs(collection_name: str, user_id: str, account: Op
             'instagram_account_id': {'$exists': False},
             'accountId': {'$exists': False},
         })
-    if not account and not include_unscoped:
+    # Phase 2.18Y: when the caller has no active Instagram account
+    # (account is None) we MUST also surface rows that were created
+    # against a previous IG account id. Otherwise automations the user
+    # built while connected to an old account vanish from the dashboard
+    # the moment that account is disconnected — exactly the missing-
+    # automation regression reported by live testers. include_unscoped
+    # only covers the no-id case; adding the broad user_id fallback
+    # restores the historical rows without breaking the per-account
+    # scoping for users who DO have an active account.
+    if not account:
         await add_many({'user_id': user_id})
     return docs
 
