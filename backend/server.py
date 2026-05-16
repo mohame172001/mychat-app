@@ -4161,6 +4161,11 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
+    # Phase 2.18T: reconcile stale legacy Instagram flags before
+    # returning so Topbar / Sidebar always see a consistent state
+    # even when the user goes through /auth/me directly (bypassing
+    # /auth/bootstrap).
+    u = await _reconcile_user_instagram_flags(user_id, u) or u
     return _public_user(u)
 
 
@@ -4172,12 +4177,101 @@ async def me(user_id: str = Depends(get_current_active_user_id)):
 # so by the time the user sees /app, every important payload is
 # already in the response and the client seeds its SWR cache directly
 # — every page renders from a hot cache on first visit.
+async def _reconcile_user_instagram_flags(user_id: str, u: Optional[dict] = None) -> Optional[dict]:
+    """Phase 2.18T: keep users.instagramConnected/instagramHandle in sync
+    with the authoritative instagram_accounts collection.
+
+    Live tester pass found a case where:
+      - users.instagramConnected = True (legacy)
+      - 0 instagram_accounts rows with connectionValid=True for this user
+    Result: Topbar shows 'Connected' badge while Admin Users shows
+    IG=0 and Settings shows 'No account connected'. The fields drift
+    because older code paths set users.instagramConnected without
+    also writing to instagram_accounts, and historical disconnects
+    cleared the latter without clearing the former.
+
+    This helper is the one-shot reconciler. Cheap to run on every
+    authenticated read:
+      - 1 count_documents
+      - 0 or 1 update_one (only when actually drifted)
+    It is idempotent — a clean user-doc is left untouched.
+
+    Returns the (possibly updated) users document so callers can avoid
+    a second find_one round-trip.
+    """
+    if not user_id:
+        return u
+    if u is None:
+        u = await db.users.find_one({'id': user_id})
+    if not u:
+        return None
+    try:
+        valid_count = await db.instagram_accounts.count_documents({
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
+            'connectionValid': True,
+            'isActive': {'$ne': False},
+        })
+    except Exception:
+        return u
+    legacy_connected = bool(
+        u.get('instagramConnected')
+        or u.get('instagram_connection_valid')
+        or u.get('instagramConnectionValid')
+    )
+    drift_to_disconnected = legacy_connected and valid_count == 0
+    if not drift_to_disconnected:
+        return u
+    # The user document still claims connected, but there is no live
+    # IG row backing it. Authoritative source is instagram_accounts —
+    # clear the stale legacy flags so Topbar / Sidebar / Admin agree.
+    now = datetime.utcnow()
+    await db.users.update_one(
+        {'id': user_id},
+        {
+            '$set': {
+                'instagramConnected': False,
+                'instagram_connection_valid': False,
+                'instagramConnectionValid': False,
+                'instagram_connection_blocker': 'reconciled_no_live_account',
+                'instagramHandle': None,
+                'active_instagram_account_id': None,
+                'updated_at': now,
+            },
+            '$unset': {
+                'meta_access_token': '',
+                'ig_user_id': '',
+                'instagram_account_type': '',
+                'instagram_graph_me_id': '',
+                'instagram_graph_me_user_id': '',
+                'instagram_profile_picture_url': '',
+            },
+        },
+    )
+    try:
+        await invalidate_dashboard_summary(user_id)
+    except Exception:
+        pass
+    logger.info(
+        'instagram_flags_reconciled_user_doc user_id=%s valid_count=%s',
+        user_id, valid_count,
+    )
+    # Re-read so the caller sees the corrected state without another
+    # round-trip later.
+    refreshed = await db.users.find_one({'id': user_id})
+    return refreshed or u
+
+
 @api.get('/auth/bootstrap')
 async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
     started = datetime.utcnow()
     u = await db.users.find_one({'id': user_id})
     if not u:
         raise HTTPException(404, 'User not found')
+    # Phase 2.18T: reconcile stale users.instagramConnected flags
+    # against the authoritative instagram_accounts table BEFORE
+    # building the bootstrap payload so the Topbar / Sidebar /
+    # dashboard counters all see the same state.
+    u = await _reconcile_user_instagram_flags(user_id, u) or u
 
     # Resolve the active Instagram account once and reuse it across all
     # the data probes below so we don't pay for that lookup five times.
@@ -17209,6 +17303,9 @@ async def _backfill_account_profile_picture(account: dict) -> dict:
 @api.get('/instagram/accounts')
 async def instagram_accounts(user_id: str = Depends(get_current_active_user_id)):
     user_doc = await db.users.find_one({'id': user_id}) or {}
+    # Phase 2.18T: reconcile users.* legacy flags FIRST so the rest of
+    # this endpoint operates on a consistent view of the world.
+    user_doc = await _reconcile_user_instagram_flags(user_id, user_doc) or user_doc
     if user_doc:
         await _sync_user_instagram_account_doc(user_doc)
     try:
