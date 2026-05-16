@@ -11,7 +11,13 @@ import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache
 import { useAuth } from '../context/AuthContext';
 
 const DASHBOARD_TTL_MS = 60 * 1000;
-const DASHBOARD_MAX_STALE_MS = 5 * 60 * 1000;
+// Phase 2.18Y cold-start fix: keep persisted dashboard data eligible
+// for stale-while-revalidate render up to 24h. When a user opens the
+// site for the first time of the day, the previous 5-min window forced
+// a full loading state and made the app feel heavy. With 24h SWR, the
+// UI paints from localStorage immediately and a fresh /dashboard/summary
+// call refreshes the numbers in the background.
+const DASHBOARD_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
 const INSTAGRAM_CONNECT_REQUIRED = 'Connect or reconnect Instagram to load dashboard data.';
 

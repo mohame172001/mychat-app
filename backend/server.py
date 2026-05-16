@@ -17716,6 +17716,17 @@ async def tracked_link_redirect(short_code: str, request: Request):
     return RedirectResponse(original_url, status_code=302)
 
 
+# Phase 2.18Y cold-start: lightweight warmup endpoint with no DB hop.
+# The frontend hits this as soon as index.html loads so the Railway
+# container is awake by the time the first authenticated call (auth/me
+# or auth/bootstrap) arrives. Keeping it on /api/health means it goes
+# through the same routing/CORS path as real traffic without paying
+# the Mongo round-trip that /auth/me would.
+@api.get('/health')
+async def api_health() -> dict:
+    return {'ok': True, 'service': 'mychat-backend'}
+
+
 app.include_router(api)
 
 

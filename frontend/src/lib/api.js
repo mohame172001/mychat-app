@@ -6,6 +6,20 @@ export const API_BASE = `${BACKEND_URL}/api`;
 
 const api = axios.create({ baseURL: API_BASE, timeout: 20000 });
 
+// Phase 2.18Y cold-start: fire a no-DB warmup ping at module-load time
+// so the Railway container is already awake by the time the first
+// authenticated call (auth/me, auth/bootstrap, dashboard/summary)
+// arrives. Worst case it costs one round-trip; best case (cold
+// container) it parallelizes the cold-start spin-up with React boot
+// instead of stacking them serially behind /auth/me. Errors are
+// intentionally swallowed — this is a best-effort hint.
+if (typeof window !== 'undefined' && BACKEND_URL) {
+  try {
+    fetch(`${API_BASE}/health`, { method: 'GET', cache: 'no-store', credentials: 'omit' })
+      .catch(() => {});
+  } catch (_) { /* ignore */ }
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('mychat_token');
   if (token) config.headers.Authorization = `Bearer ${token}`;

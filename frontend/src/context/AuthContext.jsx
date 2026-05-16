@@ -10,14 +10,21 @@ const AuthContext = createContext(null);
 // Automations, Sidebar, AdminConsole) and by the bootstrap-response
 // seeder below. Anything that wants to read a snapshot uses the same
 // scheme as the place that writes it.
+// Phase 2.18Y cold-start fix: extend maxStaleMs windows so the
+// localStorage snapshot is still eligible for stale-while-revalidate
+// render after a full day away. The TTL controls when a background
+// refresh fires; the maxStaleMs controls when we give up on the
+// snapshot entirely and force a blocking loading state. Keeping these
+// generous means the user always sees their last-known data instantly,
+// and the refresh updates in the background.
 const DASHBOARD_TTL_MS = 60 * 1000;
-const DASHBOARD_MAX_STALE_MS = 6 * 60 * 60 * 1000;
+const DASHBOARD_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const AUTOMATIONS_TTL_MS = 90 * 1000;
-const AUTOMATIONS_MAX_STALE_MS = 6 * 60 * 60 * 1000;
+const AUTOMATIONS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const ACCOUNTS_TTL_MS = 180 * 1000;
 const ACCOUNTS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const ADMIN_TTL_MS = 60 * 1000;
-const ADMIN_MAX_STALE_MS = 30 * 60 * 1000;
+const ADMIN_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 
 function activeAccountKey(user) {
   return user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active';

@@ -28,7 +28,11 @@ const DEFAULT_FOLLOW_RETRY_BUTTON = DEFAULT_FOLLOW_BUTTON;
 const DEFAULT_FOLLOW_COOLDOWN = 'بحاول أتأكد من المتابعة 😊 جرّب تضغط الزر مرة تانية خلال ثواني.';
 const DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS = 3;
 const AUTOMATIONS_TTL_MS = 90 * 1000;
-const AUTOMATIONS_MAX_STALE_MS = 5 * 60 * 1000;
+// Phase 2.18Y cold-start fix: render persisted automations data via SWR
+// up to 24h after the last fetch. Previous 5-min window forced a full
+// loading state every morning; with this, the list paints instantly
+// from localStorage while the background refresh updates it.
+const AUTOMATIONS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const AUTOMATION_DETAIL_TTL_MS = 60000;
 const INSTAGRAM_PROFILE_TTL_MS = 120000;
 const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
