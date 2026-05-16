@@ -7881,9 +7881,18 @@ async def _calculate_dashboard_summary_live(
         )
         if user_key:
             conversion_users_by_day[day_key].add(user_key)
-    if any(provider_weekly_messages.values()):
-        for day_key, count in provider_weekly_messages.items():
-            buckets[day_key]['messages'] = count
+    # Phase 2.18Y dashboard chart accuracy fix: previously the provider
+    # (comment-table) counts OVERWROTE the usage_events counts per day,
+    # so on any day where both sources had data the chart silently
+    # discarded the larger of the two. That made the bars on the
+    # Weekly Performance chart visibly disagree with the "Messages
+    # Sent" stat card. Take the per-day max instead — matches the
+    # max(provider, usage) reconciliation we already apply to the
+    # monthly aggregates above so chart and card always tell the same
+    # story.
+    for day_key, provider_count in provider_weekly_messages.items():
+        existing = int(buckets[day_key].get('messages') or 0)
+        buckets[day_key]['messages'] = max(existing, int(provider_count))
     for day_key, users in conversion_users_by_day.items():
         buckets[day_key]['conversions'] = len(users)
 
