@@ -18018,6 +18018,37 @@ async def _startup():
             sparse=True,
             name='users_email_verification_token_hash',
         )
+        # Phase 2.18X: missing-but-critical indexes surfaced by the
+        # 2000-user readiness audit.
+        #
+        # users.id is the surrogate key used by *every* find_one in
+        # the auth path. MongoDB does NOT auto-index it (only _id is
+        # auto-indexed, and we use a custom id field). Without this
+        # index, the user lookup becomes a collection scan at scale.
+        await db.users.create_index(
+            [('id', 1)], unique=True, name='users_id_unique',
+        )
+        # users.username uniqueness check fires on signup + on PATCH
+        # /auth/me. Indexing it both removes the scan and enforces
+        # the uniqueness at the DB layer.
+        await db.users.create_index(
+            [('username', 1)], unique=True, sparse=True,
+            name='users_username_unique',
+        )
+        # Phase 2.14 password reset token hash lookup — identical
+        # access pattern to email_verification_token_hash so it gets
+        # the same shape of index.
+        await db.users.create_index(
+            [('password_reset_token_hash', 1)],
+            sparse=True,
+            name='users_password_reset_token_hash',
+        )
+        # Phase 2.18V notification preferences — one row per user,
+        # always looked up by user_id.
+        await db.user_notification_preferences.create_index(
+            [('user_id', 1)], unique=True,
+            name='user_notification_preferences_user_unique',
+        )
         # Phase 2.8: user_limit_overrides indexes.
         await db.user_limit_overrides.create_index(
             [('user_id', 1), ('status', 1)],
