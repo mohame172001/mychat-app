@@ -4508,15 +4508,41 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
 
     async def _safe_accounts():
         try:
-            await _sync_user_instagram_account_doc(u)
+            # Phase 2.18Y perf: skip the redundant sync (getActive ran it
+            # already) and fire avatar backfill as a background task so
+            # /auth/bootstrap returns even when Instagram Graph is slow.
             active_id = (account or {}).get('id') or u.get('active_instagram_account_id') or ''
             rows = await db.instagram_accounts.find({'userId': user_id}).sort('updatedAt', -1).to_list(100)
-            missing = [r for r in rows
-                       if not (r.get('profilePictureUrl') or r.get('profile_picture_url'))]
-            if missing:
-                refreshed = await asyncio.gather(*(_backfill_account_profile_picture(r) for r in missing))
-                by_id = {r.get('id'): r for r in refreshed}
-                rows = [by_id.get(r.get('id'), r) for r in rows]
+            now_dt = datetime.utcnow()
+            backfill_min_interval_sec = 3600
+            pending_backfill = []
+            for r in rows:
+                if r.get('profilePictureUrl') or r.get('profile_picture_url'):
+                    continue
+                last_attempt = r.get('avatar_backfill_attempted_at')
+                if isinstance(last_attempt, datetime) and (now_dt - last_attempt).total_seconds() < backfill_min_interval_sec:
+                    continue
+                if not (r.get('accessToken') and (r.get('instagramAccountId') or r.get('igUserId'))):
+                    continue
+                pending_backfill.append(r)
+            if pending_backfill:
+                try:
+                    await db.instagram_accounts.update_many(
+                        {'id': {'$in': [r.get('id') for r in pending_backfill if r.get('id')]}},
+                        {'$set': {'avatar_backfill_attempted_at': now_dt}},
+                    )
+                except Exception:
+                    pass
+
+                async def _bg(rows_to_backfill):
+                    try:
+                        await asyncio.gather(
+                            *(_backfill_account_profile_picture(r) for r in rows_to_backfill),
+                            return_exceptions=True,
+                        )
+                    except Exception:
+                        pass
+                create_tracked_task(_bg(pending_backfill), 'bootstrap_avatar_backfill')
             return {
                 'accounts': [_instagram_account_public_row(row, active_id) for row in rows],
                 'activeInstagramAccountId': active_id or None,
