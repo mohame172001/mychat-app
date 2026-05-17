@@ -4137,8 +4137,25 @@ async def signup(data: SignupIn, request: Request):
         raise HTTPException(400, 'Username already taken')
     if await _find_user_by_email(normalized_email):
         raise HTTPException(400, 'Email already registered')
-    if PASSWORD_EMAIL_VERIFICATION_REQUIRED and not _email_verification_delivery_configured():
-        raise HTTPException(503, 'email_verification_not_configured')
+    # Phase 2.18Z: graceful degradation when email delivery isn't
+    # configured yet. Previously signup hard-failed with 503 even if
+    # the operator just hadn't wired SMTP/webhook env vars yet, which
+    # bricked new-user onboarding. Now:
+    #   - If verification IS required AND deliverable → enforce as before
+    #     (issue token, return 403 email_verification_required).
+    #   - If verification IS required but NOT deliverable → still create
+    #     the account, mark it `email_verified=false` + an explicit
+    #     `email_verification_deferred` reason so the operator can
+    #     trigger verification later from admin tooling.
+    #   - If verification is NOT required → unchanged.
+    delivery_configured = _email_verification_delivery_configured()
+    enforce_verification = PASSWORD_EMAIL_VERIFICATION_REQUIRED and delivery_configured
+    deferred_verification = PASSWORD_EMAIL_VERIFICATION_REQUIRED and not delivery_configured
+    if deferred_verification:
+        logger.warning(
+            'signup_email_verification_deferred email_hash=%s reason=email_delivery_not_configured',
+            (email_hash or '')[:12],
+        )
     import uuid
     user_id = str(uuid.uuid4())
     user_doc = {
@@ -4149,19 +4166,37 @@ async def signup(data: SignupIn, request: Request):
         'avatar': f'https://i.pravatar.cc/150?u={data.username}',
         'instagramConnected': False, 'instagramHandle': None,
         'session_version': 0,
-        'email_verified': not PASSWORD_EMAIL_VERIFICATION_REQUIRED,
-        'email_verification_required': bool(PASSWORD_EMAIL_VERIFICATION_REQUIRED),
+        'email_verified': not enforce_verification,
+        # Only mark verification "required" when we can actually deliver
+        # the email. Otherwise the account starts as unverified-but-
+        # allowed and can be hardened later once SMTP is wired.
+        'email_verification_required': bool(enforce_verification),
+        'email_verification_deferred': bool(deferred_verification),
         'auth_provider': 'password',
         'linked_providers': ['password'],
         'created': datetime.utcnow(),
     }
     await db.users.insert_one(user_doc)
     await _seed_user(user_id)
-    if PASSWORD_EMAIL_VERIFICATION_REQUIRED:
+    if enforce_verification:
         issued = await _issue_email_verification(user_doc, reason='signup')
         if not issued.get('sent'):
-            raise HTTPException(503, 'email_verification_not_configured')
-        raise HTTPException(403, 'email_verification_required')
+            # Delivery vanished between the check above and here.
+            # Convert to the deferred case so the user isn't stranded.
+            logger.warning(
+                'signup_email_verification_delivery_failed_after_create user_id=%s',
+                user_id,
+            )
+            await db.users.update_one(
+                {'id': user_id},
+                {'$set': {
+                    'email_verified': True,
+                    'email_verification_required': False,
+                    'email_verification_deferred': True,
+                }},
+            )
+        else:
+            raise HTTPException(403, 'email_verification_required')
     return AuthOut(token=create_token(user_id, session_version=0), user=_public_user(user_doc))
 
 
