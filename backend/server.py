@@ -8716,9 +8716,24 @@ async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
         db.users.count_documents({'status': {'$nin': ['suspended', 'deleted']}}),
         db.users.count_documents({'status': 'suspended'}),
         db.users.count_documents({'status': 'deleted'}),
-        db.users.count_documents({'created_at': {'$gte': today_start}}),
-        db.users.count_documents({'created_at': {'$gte': seven_days}}),
-        db.users.count_documents({'created_at': {'$gte': thirty_days}}),
+        # Phase 2.18Y: match either the new `created_at` field or any
+        # of the legacy variants (`created`, `createdAt`) so older
+        # signup rows still get counted in the recency buckets.
+        db.users.count_documents({'$or': [
+            {'created_at': {'$gte': today_start}},
+            {'createdAt': {'$gte': today_start}},
+            {'created': {'$gte': today_start}},
+        ]}),
+        db.users.count_documents({'$or': [
+            {'created_at': {'$gte': seven_days}},
+            {'createdAt': {'$gte': seven_days}},
+            {'created': {'$gte': seven_days}},
+        ]}),
+        db.users.count_documents({'$or': [
+            {'created_at': {'$gte': thirty_days}},
+            {'createdAt': {'$gte': thirty_days}},
+            {'created': {'$gte': thirty_days}},
+        ]}),
         db.instagram_accounts.count_documents({}),
         db.instagram_accounts.count_documents({'connectionValid': True}),
         db.automations.count_documents({}),
@@ -8854,16 +8869,29 @@ async def admin_users_list(
             exceeded[limit_key] = bool(
                 limit_value is not None and used >= int(limit_value)
             )
+        # Phase 2.18Y: fall back across the three legacy "user created"
+        # field names so old signup rows that only stamped `created` or
+        # `createdAt` don't show "—" in the admin users table.
+        created_at_value = (
+            u.get('created_at')
+            or u.get('createdAt')
+            or u.get('created')
+        )
+        last_seen_value = (
+            u.get('last_seen_at')
+            or u.get('lastSeenAt')
+            or u.get('last_login_at')
+        )
         items.append({
             'user_id': uid,
             'email': u.get('email'),
             'created_at': (
-                u.get('created_at').isoformat()
-                if isinstance(u.get('created_at'), datetime) else u.get('created_at')
+                created_at_value.isoformat()
+                if isinstance(created_at_value, datetime) else created_at_value
             ),
             'last_seen_at': (
-                u.get('last_seen_at').isoformat()
-                if isinstance(u.get('last_seen_at'), datetime) else u.get('last_seen_at')
+                last_seen_value.isoformat()
+                if isinstance(last_seen_value, datetime) else last_seen_value
             ),
             'plan_key': plan['plan_key'],
             'billing_status': plan['_assignment'].get('billing_status') or 'manual',
