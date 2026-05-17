@@ -6,6 +6,7 @@ import {
   ArrowRight, BarChart3, Bot, ChevronRight, Instagram, Menu,
   MessageCircle, Sparkles, Target, Users, X, Zap,
 } from 'lucide-react';
+import { buildSupportMailtoHref, handleContactClick } from '../lib/contactSupport';
 
 const iconMap = { MessageCircle, Zap, Users, BarChart3, Bot, Target };
 
@@ -251,7 +252,13 @@ const Landing = () => {
             <Link to="/privacy" className="hover:text-slate-900">Privacy</Link>
             <Link to="/terms" className="hover:text-slate-900">Terms</Link>
             <Link to="/data-deletion" className="hover:text-slate-900">Data Deletion</Link>
-            <a href="mailto:mm.mohame172000@gmail.com" className="hover:text-slate-900">Contact</a>
+            <a
+              href={buildSupportMailtoHref()}
+              onClick={handleContactClick}
+              className="hover:text-slate-900"
+            >
+              Contact
+            </a>
           </div>
         </div>
       </footer>

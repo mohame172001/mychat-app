@@ -8,6 +8,7 @@ import { useIsAdmin } from '../../lib/useIsAdmin';
 import { preloadRoutes } from '../../lib/routePreloader';
 import { Button } from '../ui/button';
 import { BUILD_SHA } from '../../buildInfo.generated';
+import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
 
 const commonRoutes = ['Automations', 'Billing', 'Settings'];
 
@@ -63,7 +64,13 @@ const DashboardLayout = () => {
           <div className="flex gap-4 md:gap-5">
             <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">Privacy</Link>
             <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noreferrer">Terms</Link>
-            <a href="mailto:mm.mohame172000@gmail.com" className="hover:text-slate-900">Contact</a>
+            <a
+              href={buildSupportMailtoHref()}
+              onClick={handleContactClick}
+              className="hover:text-slate-900"
+            >
+              Contact
+            </a>
           </div>
         </footer>
       </div>

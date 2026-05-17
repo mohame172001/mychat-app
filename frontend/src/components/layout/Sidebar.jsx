@@ -19,6 +19,7 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
 import { useIsAdmin } from '../../lib/useIsAdmin';
+import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
 import { cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../../lib/apiCache';
 import { preloadRoute } from '../../lib/routePreloader';
 import { scheduleCoreAppWarmup } from '../../lib/appWarmup';
@@ -294,7 +295,8 @@ const Sidebar = () => {
           size="sm"
         >
           <a
-            href="mailto:mm.mohame172000@gmail.com?subject=MyChat%20support%20request"
+            href={buildSupportMailtoHref()}
+            onClick={handleContactClick}
             rel="noopener noreferrer"
           >
             <HelpCircle className="w-4 h-4 mr-2" /> Help & Support
