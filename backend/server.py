@@ -18650,6 +18650,102 @@ async def api_health() -> dict:
     return {'ok': True, 'service': 'mychat-backend'}
 
 
+@api.get('/status')
+async def public_status() -> dict:
+    """Phase 2.18Z: public service-status snapshot for the /status page.
+
+    Intentionally lightweight: only the data that's safe to expose
+    without auth (degraded/operational labels per subsystem). No user
+    counts, no usage numbers, no tokens. The frontend renders this as
+    a status-page-style dashboard so prospective customers + existing
+    users can see whether the service is healthy at a glance.
+    """
+    now = datetime.utcnow()
+    components: list = []
+
+    # API itself — if this handler ran, the API is reachable.
+    components.append({
+        'key': 'api',
+        'name': 'API',
+        'status': 'operational',
+        'detail': 'Responding to requests',
+    })
+
+    # Mongo — quick admin command, ~100ms.
+    try:
+        await db.command('ping')
+        components.append({
+            'key': 'database',
+            'name': 'Database',
+            'status': 'operational',
+            'detail': 'MongoDB primary reachable',
+        })
+    except Exception:
+        components.append({
+            'key': 'database',
+            'name': 'Database',
+            'status': 'major_outage',
+            'detail': 'MongoDB unreachable',
+        })
+
+    # Instagram webhook intake — heuristic: did Meta deliver an event
+    # in the past 24h? If yes, ingress is healthy.
+    try:
+        last_received = WEBHOOK_LAST_RECEIVED_AT
+        if last_received and (now - last_received).total_seconds() < 24 * 3600:
+            components.append({
+                'key': 'webhook_intake',
+                'name': 'Instagram webhook ingress',
+                'status': 'operational',
+                'detail': f'Last event {int((now - last_received).total_seconds() // 60)} min ago',
+            })
+        else:
+            components.append({
+                'key': 'webhook_intake',
+                'name': 'Instagram webhook ingress',
+                'status': 'partial_outage' if last_received else 'unknown',
+                'detail': 'No event received in the past 24h' if last_received else 'Awaiting first delivery',
+            })
+    except Exception:
+        components.append({
+            'key': 'webhook_intake', 'name': 'Instagram webhook ingress',
+            'status': 'unknown', 'detail': 'Status unavailable',
+        })
+
+    # Webhook processor — if last_processed is within 24h OR queue is empty,
+    # processor is doing its job.
+    try:
+        last_processed = WEBHOOK_LAST_PROCESSED_AT
+        dlq_pending = await db.webhook_processing_failures.count_documents({'status': 'pending_retry'})
+        if last_processed and (now - last_processed).total_seconds() < 24 * 3600:
+            components.append({
+                'key': 'webhook_processor',
+                'name': 'Webhook processor',
+                'status': 'operational' if dlq_pending == 0 else 'partial_outage',
+                'detail': f'Last process {int((now - last_processed).total_seconds() // 60)} min ago; {dlq_pending} pending retry',
+            })
+        else:
+            components.append({
+                'key': 'webhook_processor', 'name': 'Webhook processor',
+                'status': 'unknown', 'detail': 'No recent activity',
+            })
+    except Exception:
+        components.append({
+            'key': 'webhook_processor', 'name': 'Webhook processor',
+            'status': 'unknown', 'detail': 'Status unavailable',
+        })
+
+    # Roll up the overall status.
+    levels = {'operational': 0, 'unknown': 1, 'partial_outage': 2, 'major_outage': 3}
+    worst = max((levels.get(c['status'], 1) for c in components), default=0)
+    overall = ['operational', 'unknown', 'partial_outage', 'major_outage'][worst]
+    return {
+        'overall_status': overall,
+        'checked_at': now.isoformat(),
+        'components': components,
+    }
+
+
 app.include_router(api)
 
 

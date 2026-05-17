@@ -19,6 +19,7 @@ const dmAutomationFn = () => import('./pages/DmAutomation');
 const privacyFn = () => import('./pages/PrivacyPolicy');
 const termsFn = () => import('./pages/Terms');
 const dataDeletionFn = () => import('./pages/DataDeletion');
+const statusPageFn = () => import('./pages/StatusPage');
 const billingFn = () => import('./pages/Billing');
 const adminFn = () => import('./pages/admin/AdminConsole');
 const specificReplyDebugFn = () => import('./pages/admin/SpecificReplyDebug');
@@ -37,6 +38,7 @@ const DmAutomation = lazy(dmAutomationFn);
 const PrivacyPolicy = lazy(privacyFn);
 const Terms = lazy(termsFn);
 const DataDeletion = lazy(dataDeletionFn);
+const StatusPage = lazy(statusPageFn);
 const Billing = lazy(billingFn);
 const AdminConsole = lazy(adminFn);
 const SpecificReplyDebug = lazy(specificReplyDebugFn);
@@ -93,6 +95,7 @@ function App() {
               <Route path="/privacy" element={<PrivacyPolicy />} />
               <Route path="/terms" element={<Terms />} />
               <Route path="/data-deletion" element={<DataDeletion />} />
+              <Route path="/status" element={<StatusPage />} />
               <Route path="/app" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
                 <Route index element={<Dashboard />} />
                 <Route path="automations" element={<Automations />} />
