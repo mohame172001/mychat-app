@@ -11132,6 +11132,23 @@ async def _sync_user_instagram_account_doc(
     token = access_token if access_token is not None else (user_doc.get('meta_access_token') or '')
     if not (user_id and instagram_account_id and token):
         return None
+    # Phase 2.18Y perf: skip the expensive owner-check + upsert chain
+    # when the legacy users.* values already match a recently-written
+    # instagram_accounts row. This function used to run 5-6 DB ops on
+    # every authenticated read; for steady-state users none of those
+    # writes change anything because their token + account id are
+    # unchanged. Now we short-circuit when the stored row matches the
+    # caller's legacy values and was written in the past 15 minutes.
+    if access_token is None and refresh_status is None and last_refreshed_at is None and token_expires_at is None and token_source is None:
+        try:
+            cached_doc_id = _instagram_account_doc_id(user_id, instagram_account_id)
+            stored_fresh = await db.instagram_accounts.find_one({'id': cached_doc_id})
+            if stored_fresh and stored_fresh.get('accessToken') == token:
+                last_updated = stored_fresh.get('updatedAt')
+                if isinstance(last_updated, datetime) and (datetime.utcnow() - last_updated).total_seconds() < 900:
+                    return stored_fresh
+        except Exception:
+            pass
     await _ensure_instagram_account_connect_allowed(user_id, instagram_account_id)
     now = datetime.utcnow()
     deterministic_account_id = _instagram_account_doc_id(user_id, instagram_account_id)
@@ -17606,8 +17623,11 @@ async def instagram_accounts(user_id: str = Depends(get_current_active_user_id))
     # Phase 2.18T: reconcile users.* legacy flags FIRST so the rest of
     # this endpoint operates on a consistent view of the world.
     user_doc = await _reconcile_user_instagram_flags(user_id, user_doc) or user_doc
-    if user_doc:
-        await _sync_user_instagram_account_doc(user_doc)
+    # Phase 2.18Y perf: drop the redundant explicit
+    # _sync_user_instagram_account_doc call — getActiveInstagramAccount
+    # already runs the same sync internally, so calling it here meant
+    # paying 5-6 extra DB ops every single time. The per-call short-
+    # circuit added to _sync makes the inner call cheap too.
     try:
         active_account = await getActiveInstagramAccount(user_id)
         active_account_id = active_account.get('id') or ''
