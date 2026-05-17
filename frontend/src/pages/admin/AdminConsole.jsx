@@ -122,6 +122,31 @@ function StatCard({ label, value, hint }) {
 }
 
 function OverviewTab({ data, onRefresh, loading }) {
+  const [reclassifying, setReclassifying] = useState(false);
+
+  const runReclassifier = async () => {
+    setReclassifying(true);
+    try {
+      const { data: res } = await api.post('/admin/comments/reclassify-collab-failures?limit=300');
+      const s = res.summary || {};
+      const moved = (s.reclassified_as_collab_skip || 0)
+        + (s.reclassified_as_unauthorized_skip || 0)
+        + (s.reclassified_as_gone_skip || 0);
+      toast.success(
+        moved > 0
+          ? `Reclassifier moved ${moved} row(s) out of the failure bucket`
+          : `Reclassifier scanned ${s.scanned || 0} row(s) — nothing to move`,
+        { duration: 6000 },
+      );
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Reclassifier failed';
+      toast.error(typeof msg === 'string' ? msg : 'Reclassifier failed');
+    } finally {
+      setReclassifying(false);
+    }
+  };
+
   if (!data) return null;
   const totals = data.current_month_usage_totals || {};
   return (
@@ -139,6 +164,23 @@ function OverviewTab({ data, onRefresh, loading }) {
         <StatCard label="Permanent failures" value={data.permanent_failure_counts || 0} />
         <StatCard label="Queue pending" value={(data.queue_health || {}).pending || 0} />
         <StatCard label="New users today" value={data.users_created_today || 0} />
+      </div>
+
+      {/* Operator tools — sweep collab/unauthorized comments out of the
+          failure bucket on demand. The background loop also does this
+          every 15 min, but the button is here for instant feedback. */}
+      <div className="mb-6 flex items-center justify-between bg-white rounded-2xl border border-slate-100 px-5 py-4 gap-4 flex-wrap">
+        <div className="text-sm">
+          <div className="font-semibold text-slate-700">Reclassify collab failures</div>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Scans recent permanent/partial failures for comments on posts
+            you don't own and moves them out of the failure count.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={runReclassifier} disabled={reclassifying}>
+          <RefreshCw className={`w-4 h-4 mr-2 ${reclassifying ? 'animate-spin' : ''}`} />
+          Run now
+        </Button>
       </div>
 
       <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-6" data-testid="plan-distribution">
