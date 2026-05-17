@@ -5327,13 +5327,21 @@ async def list_automations_summary(user_id: str = Depends(get_current_active_use
     # account id (legacy data or a workspace that disconnected) was
     # therefore visible on the dashboard count but missing from the
     # actual list — the inconsistency the live tester pass hit.
-    try:
-        account = await getActiveInstagramAccount(user_id)
-    except HTTPException as e:
-        if e.status_code != 400:
-            raise
-        account = None
-    include_unscoped = await _dashboard_include_unscoped(user_id)
+    # Phase 2.18Y perf: getActiveInstagramAccount + _dashboard_include_unscoped
+    # touch independent paths (the active account doc vs an instagram_accounts
+    # count). Run them in parallel rather than serially so the listing
+    # latency drops by the round-trip of the cheaper query.
+    async def _safe_get_active():
+        try:
+            return await getActiveInstagramAccount(user_id)
+        except HTTPException as e:
+            if e.status_code != 400:
+                raise
+            return None
+    account, include_unscoped = await asyncio.gather(
+        _safe_get_active(),
+        _dashboard_include_unscoped(user_id),
+    )
     rows = await _dashboard_scoped_docs('automations', user_id, account, include_unscoped, 500)
     # Stable ordering: newest updated first.
     rows.sort(
