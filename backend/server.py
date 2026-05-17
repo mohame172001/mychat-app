@@ -4487,18 +4487,45 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
                 ),
                 reverse=True,
             )
-            missing = [
-                r for r in rows
-                if r.get('media_id')
-                and not ((r.get('media_preview') or {}).get('thumbnail_url'))
-                and not ((r.get('media_preview') or {}).get('media_url'))
-            ][:12]
+            # Phase 2.18Y perf: same non-blocking backfill as
+            # /automations/summary uses — skip if attempted in the
+            # past hour, otherwise fire create_tracked_task so the
+            # bootstrap response never waits on Graph.
+            now_dt = datetime.utcnow()
+            missing = []
+            for r in rows:
+                if not r.get('media_id'):
+                    continue
+                preview = r.get('media_preview') or {}
+                if preview.get('thumbnail_url') or preview.get('media_url'):
+                    continue
+                last_attempt = preview.get('backfill_attempted_at')
+                if isinstance(last_attempt, datetime) and (now_dt - last_attempt).total_seconds() < 3600:
+                    continue
+                missing.append(r)
+                if len(missing) >= 12:
+                    break
             if missing and account is not None:
-                refreshed = await asyncio.gather(
-                    *(_backfill_automation_media_preview(r, account) for r in missing)
+                try:
+                    await db.automations.update_many(
+                        {'id': {'$in': [r.get('id') for r in missing if r.get('id')]}},
+                        {'$set': {'media_preview.backfill_attempted_at': now_dt}},
+                    )
+                except Exception:
+                    pass
+
+                async def _bg_media_backfill_bootstrap(autos_to_fix, acc):
+                    try:
+                        await asyncio.gather(
+                            *(_backfill_automation_media_preview(a, acc) for a in autos_to_fix),
+                            return_exceptions=True,
+                        )
+                    except Exception:
+                        pass
+                create_tracked_task(
+                    _bg_media_backfill_bootstrap(missing, account),
+                    'bootstrap_media_preview_backfill',
                 )
-                by_id = {r.get('id'): r for r in refreshed}
-                rows = [by_id.get(r.get('id'), r) for r in rows]
             items = [_automation_summary_row(row) for row in rows]
             return {'items': items, 'count': len(items),
                     'lastUpdatedAt': datetime.utcnow().isoformat()}
@@ -5309,22 +5336,44 @@ async def list_automations_summary(user_id: str = Depends(get_current_active_use
         ),
         reverse=True,
     )
-    # Phase 2.18H: parallel-backfill missing media_preview thumbnails
-    # for automations that target a specific post but were created
-    # before the wizard cached the preview. Limit to 12 concurrent
-    # Graph calls so a workspace with hundreds of legacy automations
-    # does not stall the listing — anything beyond that keeps the
-    # placeholder until next listing.
-    missing = [
-        r for r in rows
-        if r.get('media_id')
-        and not ((r.get('media_preview') or {}).get('thumbnail_url'))
-        and not ((r.get('media_preview') or {}).get('media_url'))
-    ][:12]
-    if missing:
-        refreshed = await asyncio.gather(*(_backfill_automation_media_preview(r, account) for r in missing))
-        by_id = {r.get('id'): r for r in refreshed}
-        rows = [by_id.get(r.get('id'), r) for r in rows]
+    # Phase 2.18Y perf: same non-blocking pattern as /instagram/accounts
+    # — gate retries on a 1-hour-per-row backoff and fire the actual
+    # Graph fetches via create_tracked_task so the listing returns
+    # immediately. Otherwise a stale token meant every list call paid
+    # the 8s Graph timeout per missing thumbnail.
+    now_dt = datetime.utcnow()
+    media_backfill_min_interval_sec = 3600
+    missing = []
+    for r in rows:
+        if not r.get('media_id'):
+            continue
+        preview = r.get('media_preview') or {}
+        if preview.get('thumbnail_url') or preview.get('media_url'):
+            continue
+        last_attempt = preview.get('backfill_attempted_at')
+        if isinstance(last_attempt, datetime) and (now_dt - last_attempt).total_seconds() < media_backfill_min_interval_sec:
+            continue
+        missing.append(r)
+        if len(missing) >= 12:
+            break
+    if missing and account is not None:
+        try:
+            await db.automations.update_many(
+                {'id': {'$in': [r.get('id') for r in missing if r.get('id')]}},
+                {'$set': {'media_preview.backfill_attempted_at': now_dt}},
+            )
+        except Exception:
+            pass
+
+        async def _bg_media_backfill(autos_to_fix, acc):
+            try:
+                await asyncio.gather(
+                    *(_backfill_automation_media_preview(a, acc) for a in autos_to_fix),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+        create_tracked_task(_bg_media_backfill(missing, account), 'media_preview_backfill')
     items = [_automation_summary_row(row) for row in rows]
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
