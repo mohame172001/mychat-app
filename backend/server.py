@@ -8279,28 +8279,39 @@ async def admin_observability_test_error(
         'admin_triggered_sentry_test_event marker=%s init_ok=%s init_error=%s',
         marker, init_ok, (init_error or 'none'),
     )
-    sent_event_id = None
+    message_event_id = None
+    exception_event_id = None
     try:
         import sentry_sdk  # type: ignore
-        sent_event_id = sentry_sdk.capture_message(
+        message_event_id = sentry_sdk.capture_message(
             f'mychat sentry verification message marker={marker}',
             level='warning',
         )
+        # Also capture an exception so we get an "Issue" tile in the
+        # Sentry UI, not just a "Message" event. This is the same code
+        # path real production errors take.
+        try:
+            raise RuntimeError(
+                f'mychat sentry verification exception (safe to ignore) marker={marker}'
+            )
+        except RuntimeError as test_exc:
+            exception_event_id = sentry_sdk.capture_exception(test_exc)
     except Exception as exc:
-        logger.warning('sentry_capture_message_failed reason=%s', type(exc).__name__)
-    if not init_ok:
-        # Caller asked for a verification event but the worker says it
-        # could not init. Return a diagnostic so we don't silently
-        # raise an exception that goes nowhere.
-        raise HTTPException(
-            503,
-            f'sentry_not_initialized init_error={init_error or "unknown"} '
-            f'capture_message_event_id={sent_event_id}',
-        )
-    raise RuntimeError(
-        f'mychat sentry verification event (safe to ignore) marker={marker} '
-        f'capture_message_event_id={sent_event_id}'
-    )
+        logger.warning('sentry_capture_failed reason=%s', type(exc).__name__)
+    # Return a clean 200 JSON response so the browser CORS check passes
+    # and the admin can read the event ids back. Previously we raised an
+    # exception to trigger Sentry — but exception responses bypass the
+    # CORSMiddleware, so the browser blocked the result with
+    # "Failed to fetch" even though the server-side capture had already
+    # succeeded.
+    return {
+        'ok': init_ok and bool(message_event_id),
+        'marker': marker,
+        'init_ok': init_ok,
+        'init_error': init_error,
+        'message_event_id': message_event_id,
+        'exception_event_id': exception_event_id,
+    }
 
 
 @api.get('/observability/status')
