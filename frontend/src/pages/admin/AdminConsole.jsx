@@ -5,7 +5,7 @@ import { Badge } from '../../components/ui/badge';
 import {
   ShieldAlert, Users, Activity, RefreshCw, Search, ArrowLeft,
   CheckCircle2, AlertTriangle, Lock, UserCog, BarChart3,
-  ScrollText,
+  ScrollText, Inbox, RotateCcw,
 } from 'lucide-react';
 import api from '../../lib/api';
 import { cachedApiGetSWR, invalidateApiCache } from '../../lib/apiCache';
@@ -22,6 +22,7 @@ import {
   ROLE_DISPLAY, hasPermission, canManageRole, roleOptionsAssignableBy,
   PERM_OVERVIEW_VIEW, PERM_USERS_VIEW, PERM_USERS_MANAGE, PERM_PLANS_ASSIGN,
   PERM_AUTOMATIONS_DISABLE, PERM_MEMBERS_VIEW, PERM_MEMBERS_MANAGE,
+  PERM_FAILURES_VIEW,
 } from '../../lib/adminPermissions';
 
 const ADMIN_CACHE_TTL_MS = 30000;
@@ -1223,6 +1224,149 @@ function AuditLogTab() {
 }
 
 
+function WebhookDlqTab() {
+  const [items, setItems] = useState([]);
+  const [counts, setCounts] = useState({ pending_retry: 0, permanently_failed: 0, replayed: 0 });
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [retrying, setRetrying] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const url = '/admin/webhook-dlq' + (filter ? `?status=${encodeURIComponent(filter)}` : '');
+      const { data } = await api.get(url);
+      setItems(data.items || []);
+      setCounts(data.counts || {});
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to load webhook DLQ';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to load webhook DLQ');
+    } finally {
+      setLoading(false);
+    }
+  }, [filter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const replayOne = async (id) => {
+    setRetrying((prev) => ({ ...prev, [id]: true }));
+    try {
+      await api.post(`/admin/webhook-dlq/${encodeURIComponent(id)}/retry`);
+      toast.success('Replayed successfully');
+      await load();
+    } catch (err) {
+      const detail = err?.response?.data?.detail || 'Replay failed';
+      toast.error(typeof detail === 'string' ? detail : 'Replay failed');
+    } finally {
+      setRetrying((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const statusStyle = (s) => {
+    if (s === 'replayed') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+    if (s === 'permanently_failed') return 'bg-rose-50 text-rose-700 border-rose-200';
+    return 'bg-amber-50 text-amber-700 border-amber-200';
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {[
+          { key: 'pending_retry', label: 'Pending retry', value: counts.pending_retry, tone: 'amber' },
+          { key: 'permanently_failed', label: 'Permanently failed', value: counts.permanently_failed, tone: 'rose' },
+          { key: 'replayed', label: 'Replayed', value: counts.replayed, tone: 'emerald' },
+        ].map((tile) => (
+          <button
+            key={tile.key}
+            type="button"
+            onClick={() => setFilter(filter === tile.key ? '' : tile.key)}
+            className={`rounded-2xl border p-4 text-left transition ${
+              filter === tile.key ? 'ring-2 ring-slate-900' : 'hover:shadow-sm'
+            } ${
+              tile.tone === 'amber' ? 'border-amber-200 bg-amber-50' :
+              tile.tone === 'rose' ? 'border-rose-200 bg-rose-50' :
+              'border-emerald-200 bg-emerald-50'
+            }`}
+          >
+            <div className={`text-2xl font-extrabold font-display ${
+              tile.tone === 'amber' ? 'text-amber-700' :
+              tile.tone === 'rose' ? 'text-rose-700' :
+              'text-emerald-700'
+            }`}>{tile.value ?? 0}</div>
+            <div className="text-xs font-medium mt-1 text-slate-700">{tile.label}</div>
+          </button>
+        ))}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-100 p-5">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 className="text-sm font-semibold text-slate-700">
+            Webhook DLQ {filter && <span className="text-slate-500 font-normal">— filtered: {filter}</span>}
+          </h3>
+          <div className="flex items-center gap-2">
+            {filter && (
+              <Button variant="outline" size="sm" onClick={() => setFilter('')}>Clear filter</Button>
+            )}
+            <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+              <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
+            </Button>
+          </div>
+        </div>
+        {!loading && items.length === 0 && (
+          <div className="text-sm text-slate-500 py-6 text-center">
+            No DLQ entries{filter ? ` with status ${filter}` : ''}. Webhook processing is healthy. 🎉
+          </div>
+        )}
+        <ul className="space-y-3">
+          {items.map((entry) => (
+            <li key={entry.id} className="border border-slate-100 rounded-xl p-4">
+              <div className="flex items-start justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Badge className={`rounded-full border ${statusStyle(entry.status)}`}>{entry.status}</Badge>
+                  <span className="text-xs text-slate-600 font-mono">attempts={entry.attempts}</span>
+                  {entry.payload_object && (
+                    <span className="text-xs text-slate-500 font-mono">object={entry.payload_object}</span>
+                  )}
+                  {entry.payload_entry_count > 0 && (
+                    <span className="text-xs text-slate-500 font-mono">entries={entry.payload_entry_count}</span>
+                  )}
+                </div>
+                {entry.status !== 'replayed' && (
+                  <Button
+                    variant="outline" size="sm"
+                    onClick={() => replayOne(entry.id)}
+                    disabled={retrying[entry.id]}
+                  >
+                    <RotateCcw className={`w-4 h-4 mr-2 ${retrying[entry.id] ? 'animate-spin' : ''}`} />
+                    Replay now
+                  </Button>
+                )}
+              </div>
+              {entry.exception_type && (
+                <div className="mt-2 text-xs text-rose-700">
+                  <span className="font-semibold">{entry.exception_type}</span>
+                  {entry.exception_message && <>: {entry.exception_message}</>}
+                </div>
+              )}
+              <div className="mt-2 text-[11px] text-slate-400 font-mono">
+                first_failed={entry.first_failed_at?.slice(0, 19)}
+                {entry.last_failed_at && entry.last_failed_at !== entry.first_failed_at && (
+                  <> · last_failed={entry.last_failed_at.slice(0, 19)}</>
+                )}
+                {entry.next_attempt_at && entry.status === 'pending_retry' && (
+                  <> · next_attempt={entry.next_attempt_at.slice(0, 19)}</>
+                )}
+                {entry.replayed_at && <> · replayed={entry.replayed_at.slice(0, 19)}</>}
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const [me, setMe] = useState(null);   // null = loading
@@ -1293,6 +1437,7 @@ export default function AdminConsole() {
   const canViewMembers = hasPermission(me, PERM_MEMBERS_VIEW);
   const canViewMetrics = hasPermission(me, 'admin.audit.view');
   const canViewAudit = hasPermission(me, 'admin.audit.view');
+  const canViewDlq = hasPermission(me, PERM_FAILURES_VIEW);
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto" data-testid="admin-console">
@@ -1362,6 +1507,16 @@ export default function AdminConsole() {
             <ScrollText className="w-4 h-4 mr-2" /> Audit log
           </Button>
         )}
+        {canViewDlq && (
+          <Button
+            variant={tab === 'webhook-dlq' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('webhook-dlq'); setSelectedUserId(null); }}
+            data-testid="admin-tab-webhook-dlq"
+          >
+            <Inbox className="w-4 h-4 mr-2" /> Webhook DLQ
+          </Button>
+        )}
         <div className="ml-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -1391,6 +1546,11 @@ export default function AdminConsole() {
       {tab === 'admins' && canViewMembers && <AdminsTab me={me} />}
       {tab === 'metrics' && canViewMetrics && <ReconciliationTab />}
       {tab === 'audit' && canViewAudit && <AuditLogTab />}
+      {tab === 'webhook-dlq' && canViewDlq && (
+        <AdminSectionErrorBoundary name="webhook-dlq" resetKey="webhook-dlq">
+          <WebhookDlqTab />
+        </AdminSectionErrorBoundary>
+      )}
     </div>
   );
 }
