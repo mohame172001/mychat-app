@@ -13606,17 +13606,55 @@ async def instagram_webhook(request: Request):
     return {'ok': True}
 
 
+async def _persist_webhook_dlq_entry(payload: dict, exc: BaseException) -> None:
+    """Phase 2.18Y reliability: store a failed webhook payload to a DLQ
+    so the retry worker can replay it. The full payload is persisted
+    (it never contains tokens — Meta's signed payload is metadata only,
+    no access tokens or DMs in the body) plus error metadata for
+    operator triage.
+    """
+    try:
+        entry = {
+            'id': secrets.token_urlsafe(12),
+            '_id': secrets.token_urlsafe(12),
+            'payload': payload if isinstance(payload, dict) else {'_raw': str(payload)[:8000]},
+            'exception_type': type(exc).__name__,
+            'exception_message': str(exc)[:500],
+            'attempts': 0,
+            'next_attempt_at': datetime.utcnow() + timedelta(seconds=30),
+            'first_failed_at': datetime.utcnow(),
+            'last_failed_at': datetime.utcnow(),
+            'status': 'pending_retry',
+            'created_at': datetime.utcnow(),
+        }
+        await db.webhook_processing_failures.insert_one(entry)
+        logger.warning(
+            'webhook_dlq_entry_created id=%s exception_type=%s',
+            entry['id'], entry['exception_type'],
+        )
+    except Exception as persist_exc:
+        # If even the DLQ write fails (Mongo down), don't compound the
+        # original error. The exception was already logged via
+        # logger.exception above.
+        logger.warning('webhook_dlq_write_failed reason=%s', type(persist_exc).__name__)
+
+
 async def _supervised_process_webhook(payload: dict):
     """Wrap _process_webhook so a fire-and-forget task can never silently
     swallow exceptions. Stamps WEBHOOK_LAST_PROCESSED_AT for the health
-    endpoint and logs webhook_processor_failed on error."""
+    endpoint and persists failures to the DLQ collection so the retry
+    worker can replay them later."""
     global WEBHOOK_LAST_PROCESSED_AT
     try:
         logger.info('webhook_processor_started')
         await _process_webhook(payload)
         WEBHOOK_LAST_PROCESSED_AT = datetime.utcnow()
-    except Exception:
+    except Exception as exc:
         logger.exception('webhook_processor_failed')
+        # Phase 2.18Y: persist to DLQ for the retry worker. Reading the
+        # original exception above doesn't consume it — we still
+        # capture it for the audit trail.
+        await _persist_webhook_dlq_entry(payload, exc)
 
 
 def _webhook_log_safe_summary(doc: dict) -> dict:
@@ -13636,6 +13674,96 @@ def _webhook_log_safe_summary(doc: dict) -> dict:
         'signature_reason': doc.get('signature_reason'),
         'enforce_mode': doc.get('enforce_mode'),
     }
+
+
+@api.get('/admin/webhook-dlq')
+async def admin_webhook_dlq_list(
+    status: Optional[str] = None,
+    limit: int = 50,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18Y: admin DLQ viewer. Returns sanitized rows from
+    webhook_processing_failures so the operator can see what failed and
+    decide whether to manually replay it.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_FAILURES_VIEW)
+    query: dict = {}
+    if status:
+        if status not in ('pending_retry', 'permanently_failed', 'replayed'):
+            raise HTTPException(400, 'invalid status filter')
+        query['status'] = status
+    limit = max(1, min(int(limit or 50), 200))
+    rows = await db.webhook_processing_failures.find(query).sort(
+        'first_failed_at', -1,
+    ).limit(limit).to_list(limit)
+    counts = {
+        'pending_retry': await db.webhook_processing_failures.count_documents({'status': 'pending_retry'}),
+        'permanently_failed': await db.webhook_processing_failures.count_documents({'status': 'permanently_failed'}),
+        'replayed': await db.webhook_processing_failures.count_documents({'status': 'replayed'}),
+    }
+
+    def _summarize(row: dict) -> dict:
+        payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
+        return {
+            'id': row.get('id'),
+            'status': row.get('status'),
+            'attempts': int(row.get('attempts') or 0),
+            'exception_type': row.get('exception_type') or row.get('last_exception_type'),
+            'exception_message': (row.get('last_exception_message') or row.get('exception_message') or '')[:200],
+            'first_failed_at': row.get('first_failed_at').isoformat()
+                if isinstance(row.get('first_failed_at'), datetime) else row.get('first_failed_at'),
+            'last_failed_at': row.get('last_failed_at').isoformat()
+                if isinstance(row.get('last_failed_at'), datetime) else row.get('last_failed_at'),
+            'next_attempt_at': row.get('next_attempt_at').isoformat()
+                if isinstance(row.get('next_attempt_at'), datetime) else row.get('next_attempt_at'),
+            'replayed_at': row.get('replayed_at').isoformat()
+                if isinstance(row.get('replayed_at'), datetime) else row.get('replayed_at'),
+            'payload_object': payload.get('object'),
+            'payload_entry_count': len(payload.get('entry') or []) if isinstance(payload.get('entry'), list) else 0,
+        }
+
+    return {
+        'items': [_summarize(r) for r in rows],
+        'counts': counts,
+    }
+
+
+@api.post('/admin/webhook-dlq/{entry_id}/retry')
+async def admin_webhook_dlq_retry(
+    entry_id: str,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Force-replay a DLQ entry now, regardless of its current backoff."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_FAILURES_VIEW)
+    row = await db.webhook_processing_failures.find_one({'id': entry_id})
+    if not row:
+        raise HTTPException(404, 'dlq entry not found')
+    try:
+        await _process_webhook(row.get('payload') or {})
+        await db.webhook_processing_failures.update_one(
+            {'id': entry_id},
+            {'$set': {
+                'status': 'replayed',
+                'attempts': int(row.get('attempts') or 0) + 1,
+                'replayed_at': datetime.utcnow(),
+            }},
+        )
+        logger.info('webhook_dlq_manual_replay_success id=%s admin_user_id=%s',
+                    entry_id, user_id)
+        return {'ok': True, 'status': 'replayed'}
+    except Exception as exc:
+        await db.webhook_processing_failures.update_one(
+            {'id': entry_id},
+            {'$set': {
+                'attempts': int(row.get('attempts') or 0) + 1,
+                'last_failed_at': datetime.utcnow(),
+                'last_exception_type': type(exc).__name__,
+                'last_exception_message': str(exc)[:500],
+            }},
+        )
+        logger.warning('webhook_dlq_manual_replay_failed id=%s admin_user_id=%s exc=%s',
+                       entry_id, user_id, type(exc).__name__)
+        raise HTTPException(500, f'replay_failed: {type(exc).__name__}')
 
 
 @api.get('/instagram/webhook-log')
@@ -16022,6 +16150,99 @@ async def _repair_legacy_reply_success_without_provider_proof(limit: int = 500) 
     return summary
 
 
+WEBHOOK_DLQ_MAX_ATTEMPTS = _env_int_clamped('WEBHOOK_DLQ_MAX_ATTEMPTS', 5, 1, 20)
+WEBHOOK_DLQ_BATCH_SIZE = _env_int_clamped('WEBHOOK_DLQ_BATCH_SIZE', 10, 1, 100)
+
+
+async def _webhook_dlq_tick() -> dict:
+    """Phase 2.18Y reliability: retry webhook payloads that
+    _supervised_process_webhook failed on. Each DLQ row carries an
+    'attempts' counter, an exponential 'next_attempt_at', and a status
+    field that the admin tab can query. Permanently-failed rows stay in
+    Mongo for forensics but are no longer retried."""
+    now = datetime.utcnow()
+    summary = {'checked': 0, 'replayed_success': 0, 'replayed_failed': 0,
+               'permanently_failed': 0}
+    try:
+        due = await db.webhook_processing_failures.find({
+            'status': 'pending_retry',
+            'attempts': {'$lt': WEBHOOK_DLQ_MAX_ATTEMPTS},
+            'next_attempt_at': {'$lte': now},
+        }).sort('next_attempt_at', 1).limit(WEBHOOK_DLQ_BATCH_SIZE).to_list(WEBHOOK_DLQ_BATCH_SIZE)
+    except Exception:
+        logger.exception('webhook_dlq_query_failed')
+        return summary
+    for entry in due:
+        if IS_SHUTTING_DOWN:
+            break
+        summary['checked'] += 1
+        attempt = int(entry.get('attempts') or 0) + 1
+        try:
+            await _process_webhook(entry.get('payload') or {})
+            await db.webhook_processing_failures.update_one(
+                {'id': entry.get('id')},
+                {'$set': {
+                    'status': 'replayed',
+                    'attempts': attempt,
+                    'replayed_at': datetime.utcnow(),
+                    'last_failed_at': entry.get('last_failed_at'),
+                }},
+            )
+            summary['replayed_success'] += 1
+            logger.info('webhook_dlq_replay_success id=%s attempts=%s',
+                        entry.get('id'), attempt)
+        except Exception as exc:
+            backoff_seconds = min(3600, 30 * (2 ** attempt))
+            permanently_failed = attempt >= WEBHOOK_DLQ_MAX_ATTEMPTS
+            new_status = 'permanently_failed' if permanently_failed else 'pending_retry'
+            try:
+                await db.webhook_processing_failures.update_one(
+                    {'id': entry.get('id')},
+                    {'$set': {
+                        'status': new_status,
+                        'attempts': attempt,
+                        'next_attempt_at': datetime.utcnow() + timedelta(seconds=backoff_seconds),
+                        'last_failed_at': datetime.utcnow(),
+                        'last_exception_type': type(exc).__name__,
+                        'last_exception_message': str(exc)[:500],
+                    }},
+                )
+            except Exception:
+                logger.exception('webhook_dlq_update_failed id=%s', entry.get('id'))
+            if permanently_failed:
+                summary['permanently_failed'] += 1
+                logger.warning(
+                    'webhook_dlq_permanently_failed id=%s attempts=%s last_exc=%s',
+                    entry.get('id'), attempt, type(exc).__name__,
+                )
+            else:
+                summary['replayed_failed'] += 1
+                logger.warning(
+                    'webhook_dlq_replay_failed id=%s attempts=%s next_attempt_in_sec=%s',
+                    entry.get('id'), attempt, backoff_seconds,
+                )
+    return summary
+
+
+async def _webhook_dlq_loop():
+    interval = _env_int_clamped('WEBHOOK_DLQ_INTERVAL_SECONDS', 60, 10, 3600)
+    logger.info('webhook_dlq_loop_started interval=%s max_attempts=%s',
+                interval, WEBHOOK_DLQ_MAX_ATTEMPTS)
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
+        try:
+            await _webhook_dlq_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('webhook_dlq_tick_failed')
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=interval)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(interval)
+
+
 async def _automation_queue_loop():
     logger.info('automation_queue_started interval=%s batch_size=%s max_attempts=%s',
                 AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE,
@@ -18270,6 +18491,15 @@ async def _startup():
             unique=True,
             name='usage_reservation_buckets_subject_month_metric_unique',
         )
+        # Phase 2.18Y reliability: webhook DLQ retry worker index.
+        await db.webhook_processing_failures.create_index(
+            [('status', 1), ('next_attempt_at', 1)],
+            name='webhook_dlq_status_next_attempt',
+        )
+        await db.webhook_processing_failures.create_index(
+            [('first_failed_at', -1)],
+            name='webhook_dlq_first_failed_at',
+        )
         await db.dashboard_summaries.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('month', 1)],
             unique=True,
@@ -18524,6 +18754,7 @@ async def _startup():
     logger.info('automation_queue_registering interval=%s batch_size=%s',
                 AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE)
     _register_bg_task('automation_queue', _automation_queue_loop)
+    _register_bg_task('webhook_dlq', _webhook_dlq_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
     # Watchdog last so it can supervise the others.
     _register_bg_task('watchdog', _watchdog_loop)
