@@ -12,6 +12,7 @@ import { cachedApiGetSWR, invalidateApiCache } from '../../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../../lib/analytics';
 import { fetchAdminMe } from '../../lib/useIsAdmin';
+import { describeDmFailureReason, dmFailureToneClasses } from '../../lib/dmFailureReasons';
 import { useAuth } from '../../context/AuthContext';
 import {
   PLAN_KEYS, PLAN_DISPLAY,
@@ -781,24 +782,33 @@ function UserDetailTab({ userId, onBack, me }) {
             {recentFailures.length === 0 && (
               <div className="text-sm text-slate-500">No recent failures.</div>
             )}
-            <ul className="space-y-2 text-sm font-mono">
-              {recentFailures.map(f => (
-                <li key={f.comment_id} className="border-b border-slate-100 pb-2 last:border-0">
-                  <div>
-                    <span className="text-slate-700">{f.action_status}</span>
-                    {' · '}
-                    <span className="text-xs text-slate-500">
-                      reply={f.reply_status || '—'} · dm={f.dm_status || '—'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    ig_comment={f.ig_comment_id} · media={f.media_id} · attempts={f.attempts}
-                    {(f.dm_failure_reason || f.reply_failure_reason) && (
-                      <> · reason={f.dm_failure_reason || f.reply_failure_reason}</>
+            <ul className="space-y-3 text-sm">
+              {recentFailures.map(f => {
+                const reason = f.dm_failure_reason || f.reply_failure_reason;
+                const described = reason ? describeDmFailureReason(reason) : null;
+                return (
+                  <li key={f.comment_id} className="border-b border-slate-100 pb-3 last:border-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-slate-700 font-mono text-xs">{f.action_status}</span>
+                      {described && (
+                        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${dmFailureToneClasses(described.tone)}`}>
+                          {described.label}
+                        </span>
+                      )}
+                      <span className="text-xs text-slate-500 font-mono">
+                        reply={f.reply_status || '—'} · dm={f.dm_status || '—'}
+                      </span>
+                    </div>
+                    {described && (
+                      <p className="mt-1 text-xs text-slate-500 leading-relaxed">{described.detail}</p>
                     )}
-                  </div>
-                </li>
-              ))}
+                    <div className="mt-1 text-[11px] text-slate-400 font-mono">
+                      ig_comment={f.ig_comment_id} · media={f.media_id} · attempts={f.attempts}
+                      {reason && <> · raw_reason={reason}</>}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         </>
