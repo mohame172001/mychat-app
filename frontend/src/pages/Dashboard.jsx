@@ -273,6 +273,52 @@ const Dashboard = () => {
         </Card>
       </div>
 
+      {/* Delivery health — surfaces silent DM failures so the user
+          doesn't only see "183 messages sent" without context. */}
+      {stats?.queueSummary && (
+        (stats.queueSummary.permanentFailures > 0 || stats.queueSummary.partialSuccess > 0 || stats.queueSummary.retryable > 0) && (
+          <div className="mt-6">
+            <Card className="p-6 rounded-2xl border-slate-100">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <h3 className="font-display font-bold text-lg">Delivery health</h3>
+                  <p className="text-sm text-slate-500">How your Instagram comments + DMs were delivered this month.</p>
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {stats.queueSummary.retryable > 0 && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                    <div className="text-2xl font-extrabold font-display text-amber-700">{stats.queueSummary.retryable}</div>
+                    <div className="text-sm font-medium text-amber-800">Retrying</div>
+                    <p className="text-xs text-amber-700/80 mt-1">Temporary errors — the system will keep trying.</p>
+                  </div>
+                )}
+                {stats.queueSummary.partialSuccess > 0 && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="text-2xl font-extrabold font-display text-blue-700">{stats.queueSummary.partialSuccess}</div>
+                    <div className="text-sm font-medium text-blue-800">Reply sent, DM blocked</div>
+                    <p className="text-xs text-blue-700/80 mt-1">
+                      The public reply landed, but Instagram blocked the follow-up DM —
+                      usually because the user hasn't messaged you in the past 24h.
+                    </p>
+                  </div>
+                )}
+                {stats.queueSummary.permanentFailures > 0 && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+                    <div className="text-2xl font-extrabold font-display text-rose-700">{stats.queueSummary.permanentFailures}</div>
+                    <div className="text-sm font-medium text-rose-800">Permanently failed</div>
+                    <p className="text-xs text-rose-700/80 mt-1">
+                      Instagram declined these — most often the recipient blocked promotional
+                      messages or the messaging window expired. No retry is possible.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </Card>
+          </div>
+        )
+      )}
+
       <div className="mt-6">
         <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
