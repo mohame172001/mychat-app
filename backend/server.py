@@ -1718,11 +1718,42 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                 return _detailed_send_result(True, r.status_code, body=body)
             safe_error = _safe_provider_error_payload(r.text[:500])
             classified = classify_instagram_send_error(safe_error, r.status_code)
-            logger.error('send_ig_message_failed status=%s reason=%s retryable=%s',
-                         r.status_code, classified['failure_reason'], classified['retryable'])
+            # Phase 2.18Y: when classification falls through to
+            # unknown_graph_error, surface a sanitized snippet of the
+            # actual Meta error message so we can extend the classifier
+            # next time it fires. The snippet is taken from the same
+            # _safe_provider_error_payload that already redacted tokens
+            # and stack traces, so it's safe to log.
+            error_snippet = ''
+            try:
+                error_snippet = str(
+                    safe_error.get('message')
+                    or safe_error.get('error_user_msg')
+                    or safe_error.get('error_user_title')
+                    or ''
+                )[:180]
+            except Exception:
+                error_snippet = ''
+            provider_code = safe_error.get('code')
+            provider_subcode = safe_error.get('error_subcode') or safe_error.get('subcode')
+            if classified['failure_reason'] == 'unknown_graph_error':
+                logger.error(
+                    'send_ig_message_failed status=%s reason=%s retryable=%s '
+                    'graph_code=%s graph_subcode=%s message_snippet=%r',
+                    r.status_code, classified['failure_reason'], classified['retryable'],
+                    provider_code, provider_subcode, error_snippet,
+                )
+            else:
+                logger.error(
+                    'send_ig_message_failed status=%s reason=%s retryable=%s',
+                    r.status_code, classified['failure_reason'], classified['retryable'],
+                )
             _LAST_DM_FAILURE.set({
                 'failure_reason': classified.get('failure_reason') or 'unknown_graph_error',
                 'status_code': r.status_code,
+                'graph_code': provider_code,
+                'graph_subcode': provider_subcode,
+                'message_snippet': error_snippet,
             })
             return _detailed_send_result(False, r.status_code, error=safe_error)
     except Exception as e:
