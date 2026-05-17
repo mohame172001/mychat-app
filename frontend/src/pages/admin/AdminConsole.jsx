@@ -11,6 +11,7 @@ import api from '../../lib/api';
 import { cachedApiGetSWR, invalidateApiCache } from '../../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../../lib/analytics';
+import { fetchAdminMe } from '../../lib/useIsAdmin';
 import { useAuth } from '../../context/AuthContext';
 import {
   PLAN_KEYS, PLAN_DISPLAY,
@@ -1220,17 +1221,17 @@ export default function AdminConsole() {
   const [tab, setTab] = useState('overview');
   const [selectedUserId, setSelectedUserId] = useState(null);
 
-  // Probe admin gate.
+  // Probe admin gate. Uses the shared fetchAdminMe cache so Sidebar +
+  // DashboardLayout + this page all see one /admin/me call instead of
+  // three concurrent ones.
   useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get('/admin/me');
-        setMe(data);
-        if (data?.is_admin) analytics.capture('admin_console_viewed', {});
-      } catch (_) {
-        setMe({ is_admin: false });
-      }
-    })();
+    let alive = true;
+    fetchAdminMe().then((data) => {
+      if (!alive) return;
+      setMe(data || { is_admin: false });
+      if (data?.is_admin) analytics.capture('admin_console_viewed', {});
+    });
+    return () => { alive = false; };
   }, []);
 
   const loadOverview = useCallback(async () => {
