@@ -17620,15 +17620,49 @@ async def instagram_accounts(user_id: str = Depends(get_current_active_user_id))
         '$or': [{'userId': user_id}, {'user_id': user_id}],
     }).sort('updatedAt', -1).to_list(100)
     rows = [row for row in rows if _is_public_switchable_instagram_account(row)]
-    # Phase 2.18H: parallel-backfill missing profile pictures for every
-    # account that lacks one. Connected accounts without a saved avatar
-    # show a generic placeholder otherwise. Each fetch is independent
-    # so gather() runs them concurrently.
-    missing = [row for row in rows if not (row.get('profilePictureUrl') or row.get('profile_picture_url'))]
-    if missing:
-        refreshed = await asyncio.gather(*(_backfill_account_profile_picture(r) for r in missing))
-        by_id = {r.get('id'): r for r in refreshed}
-        rows = [by_id.get(r.get('id'), r) for r in rows]
+    # Phase 2.18Y perf: avatar backfill used to await an Instagram
+    # Graph call per missing-avatar account (timeout 8s each), which
+    # made /instagram/accounts spike to 4-8 seconds whenever an account
+    # had a stale token or a transient network blip — and every retry
+    # paid the same price because nothing remembered the last failure.
+    # Now we honour an in-doc backoff (recent attempts are skipped) AND
+    # fire the remaining backfills in the background via create_tracked_task
+    # so the response returns immediately. The avatar lands on the next
+    # /instagram/accounts call once Graph responds.
+    now_dt = datetime.utcnow()
+    backfill_min_interval_sec = 3600  # one Graph attempt per account per hour
+    pending_backfill = []
+    for row in rows:
+        if row.get('profilePictureUrl') or row.get('profile_picture_url'):
+            continue
+        last_attempt = row.get('avatar_backfill_attempted_at')
+        if isinstance(last_attempt, datetime):
+            if (now_dt - last_attempt).total_seconds() < backfill_min_interval_sec:
+                continue
+        if not (row.get('accessToken') and (row.get('instagramAccountId') or row.get('igUserId'))):
+            continue
+        pending_backfill.append(row)
+    if pending_backfill:
+        # Mark attempt time NOW so concurrent requests don't all queue
+        # their own backfill task for the same account.
+        try:
+            await db.instagram_accounts.update_many(
+                {'id': {'$in': [r.get('id') for r in pending_backfill if r.get('id')]}},
+                {'$set': {'avatar_backfill_attempted_at': now_dt}},
+            )
+        except Exception:
+            pass
+
+        async def _background_backfill(account_rows):
+            try:
+                await asyncio.gather(
+                    *(_backfill_account_profile_picture(r) for r in account_rows),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+
+        create_tracked_task(_background_backfill(pending_backfill), 'avatar_backfill')
     return {
         'accounts': [_instagram_account_public_row(row, active_account_id) for row in rows],
         'activeInstagramAccountId': active_account_id or None,
