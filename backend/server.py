@@ -13635,10 +13635,16 @@ async def _check_media_ownership(access_token: str, ig_user_id: str, media_id: s
     collaborator (the post was published by someone else).
 
     Returns one of:
-      'owned'   — the connected IG user is the original poster
-      'collab'  — Meta says the media exists but the owner.id differs
-      'gone'    — the media is no longer accessible (deleted, private)
-      'unknown' — couldn't determine (network / unexpected error)
+      'owned'        — the connected IG user is the original poster
+      'collab'       — Meta says the media exists but the owner.id differs
+      'gone'         — the media is no longer accessible (deleted/private)
+      'unauthorized' — Meta refuses to expose this media to the caller's
+                       token. From the business's point of view this is
+                       indistinguishable from a collab post — they
+                       cannot reply or DM either way, so we treat it as
+                       a not-actionable post for the purposes of failure
+                       counts.
+      'unknown'      — transient/network error; should not reclassify
 
     Used by the comment-failure reclassifier so we don't surface
     'permanently failed' counts for comments on posts the user
@@ -13654,15 +13660,38 @@ async def _check_media_ownership(access_token: str, ig_user_id: str, media_id: s
             )
             if r.status_code == 404:
                 return 'gone'
-            if r.status_code != 200:
-                return 'unknown'
-            body = r.json() or {}
-            owner_id = str(((body.get('owner') or {}).get('id')) or '')
-            if not owner_id:
-                # When the connected user IS the owner Graph sometimes
-                # omits the owner field entirely (it implies "you").
-                return 'owned'
-            return 'owned' if owner_id == str(ig_user_id) else 'collab'
+            if r.status_code == 200:
+                body = r.json() or {}
+                owner_id = str(((body.get('owner') or {}).get('id')) or '')
+                if not owner_id:
+                    # When the connected user IS the owner Graph
+                    # sometimes omits the owner field entirely (it
+                    # implies "you").
+                    return 'owned'
+                return 'owned' if owner_id == str(ig_user_id) else 'collab'
+            # Non-200, non-404. If Meta returned a permission-style
+            # error, treat the media as inaccessible to this business
+            # — functionally equivalent to a collab post.
+            if r.status_code in (400, 403):
+                try:
+                    err = (r.json() or {}).get('error') or {}
+                except Exception:
+                    err = {}
+                msg = str(err.get('message') or '').lower()
+                code = err.get('code')
+                # Code 100/200/803 + the typical "Unsupported get request"
+                # / "Object with ID does not exist" / "Permission" copy
+                # all mean "this post is not addressable by your token".
+                if (
+                    code in (100, 200, 803)
+                    or 'permission' in msg
+                    or 'unsupported get request' in msg
+                    or 'does not exist' in msg
+                    or 'cannot be loaded' in msg
+                    or 'not authorized' in msg
+                ):
+                    return 'unauthorized'
+            return 'unknown'
     except Exception:
         return 'unknown'
 
@@ -13701,8 +13730,11 @@ async def admin_reclassify_collab_failures(
     }).limit(limit)
     rows = await cursor.to_list(limit)
     summary = {
-        'scanned': 0, 'owned': 0, 'collab': 0, 'gone': 0, 'unknown': 0,
+        'scanned': 0,
+        'owned': 0, 'collab': 0, 'gone': 0, 'unauthorized': 0, 'unknown': 0,
         'reclassified_as_collab_skip': 0,
+        'reclassified_as_unauthorized_skip': 0,
+        'reclassified_as_gone_skip': 0,
     }
     # Dedup media ids — many comments live on the same post.
     media_ids = sorted({str(r.get('media_id') or r.get('mediaId') or '') for r in rows} - {''})
@@ -13721,6 +13753,16 @@ async def admin_reclassify_collab_failures(
             update_doc['action_status'] = 'skipped_not_post_owner'
             update_doc['skip_reason'] = 'collab_post_not_owned_by_business'
             summary['reclassified_as_collab_skip'] += 1
+        elif kind == 'unauthorized':
+            # Token has no access to this post — functionally
+            # equivalent to a collab post for failure-counting.
+            update_doc['action_status'] = 'skipped_not_post_owner'
+            update_doc['skip_reason'] = 'post_unauthorized_for_business_token'
+            summary['reclassified_as_unauthorized_skip'] += 1
+        elif kind == 'gone':
+            update_doc['action_status'] = 'skipped_post_unavailable'
+            update_doc['skip_reason'] = 'post_deleted_or_inaccessible'
+            summary['reclassified_as_gone_skip'] += 1
         try:
             await db.comments.update_one({'id': r.get('id')}, {'$set': update_doc})
         except Exception:
