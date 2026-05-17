@@ -8464,6 +8464,12 @@ async def admin_assign_user_plan(
     reason = (body or {}).get('reason') or 'manual_admin_assignment'
     if not _plans.is_valid_plan_key(plan_key):
         raise HTTPException(400, f'plan_key must be one of: {", ".join(_plans.PLAN_KEYS)}')
+    # Phase 2.18Y: validate the target user actually exists before
+    # writing a user_plans row. Without this, a typoed user id silently
+    # created a stray plan assignment row that would never reconcile.
+    target_user = await db.users.find_one({'id': target_user_id}, {'id': 1})
+    if not target_user:
+        raise HTTPException(404, 'User not found')
     plan = await assign_user_plan(target_user_id, plan_key, assigned_by=user_id, reason=reason)
     logger.info(
         'admin_plan_assigned target_user_id=%s plan_key=%s assigned_by=%s',
