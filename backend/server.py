@@ -8874,14 +8874,24 @@ async def admin_users_list(
     rows = await cursor.to_list(page_size)
 
     month = _usage_month(datetime.utcnow())
-    items = []
-    for u in rows:
+    # Phase 2.18Y perf fix: this loop used to await 4 DB queries per
+    # user sequentially (plan + monthly_usage + 2× count_documents for
+    # snapshots). For 25 rows that meant ~100 round-trips and ~5s of
+    # latency. Fan-out the enrichment per-user in parallel via
+    # asyncio.gather — the slowest user determines the wall time.
+    async def _enrich_one(u):
         uid = u.get('id') or ''
-        plan = await get_user_plan(uid)
-        usage = await db.monthly_usage.find_one(
-            _monthly_usage_user_query(uid, month)
-        ) or {}
-        snapshots = await _usage_snapshots_for_user(uid)
+        plan, usage_doc, snapshots = await asyncio.gather(
+            get_user_plan(uid),
+            db.monthly_usage.find_one(_monthly_usage_user_query(uid, month)),
+            _usage_snapshots_for_user(uid),
+        )
+        return u, plan, (usage_doc or {}), (snapshots or {})
+
+    enriched = await asyncio.gather(*[_enrich_one(u) for u in rows])
+    items = []
+    for u, plan, usage, snapshots in enriched:
+        uid = u.get('id') or ''
         counters = {f: int(usage.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
         exceeded = {}
         for limit_key, counter_field in _plans.LIMIT_TO_COUNTER_FIELD.items():
