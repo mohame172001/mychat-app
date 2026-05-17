@@ -263,6 +263,28 @@ function UsersTab({ onSelect }) {
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={async () => {
+            try {
+              const res = await api.get('/admin/users.csv', { responseType: 'blob' });
+              const url = URL.createObjectURL(res.data);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `mychat_users_${new Date().toISOString().slice(0,10)}.csv`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+              toast.success('CSV downloaded');
+            } catch (err) {
+              toast.error('CSV export failed');
+            }
+          }}
+        >
+          Export CSV
+        </Button>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">

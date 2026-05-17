@@ -8782,6 +8782,68 @@ async def admin_overview(user_id: str = Depends(get_current_active_user_id)):
     }
 
 
+@api.get('/admin/users.csv')
+async def admin_users_csv(
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2.18Z: download all users as CSV for ad-hoc analysis.
+    Sanitized — no tokens, no password hashes, no Mongo _id."""
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    import io, csv
+    month = _usage_month(datetime.utcnow())
+    cursor = db.users.find({}).sort([('created_at', -1)])
+    rows = await cursor.to_list(2000)
+    user_ids = [u.get('id') for u in rows if u.get('id')]
+    # Reuse the same bulk-fetch pattern as /admin/users.
+    plans_list = await asyncio.gather(*[get_user_plan(uid) for uid in user_ids])
+    plan_by_user = dict(zip(user_ids, plans_list))
+    usage_by_user: dict = {}
+    try:
+        async for row in db.monthly_usage.find({
+            'limit_subject_type': 'user',
+            'limit_subject_id': {'$in': user_ids},
+            'event_month': month,
+        }):
+            usage_by_user[str(row.get('limit_subject_id') or '')] = row
+    except Exception:
+        pass
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        'user_id', 'email', 'username', 'plan_key', 'status',
+        'created_at', 'last_seen_at',
+        'comments_processed_this_month', 'public_replies_this_month',
+        'dms_sent_this_month', 'links_clicked_this_month',
+    ])
+    for u in rows:
+        uid = u.get('id') or ''
+        plan = plan_by_user.get(uid) or {}
+        usage = usage_by_user.get(uid, {})
+        created_at_value = u.get('created_at') or u.get('createdAt') or u.get('created')
+        last_seen_value = u.get('last_seen_at') or u.get('lastSeenAt') or u.get('last_login_at')
+        writer.writerow([
+            uid,
+            u.get('email') or '',
+            u.get('username') or '',
+            plan.get('plan_key') or 'free',
+            u.get('status') or 'active',
+            created_at_value.isoformat() if isinstance(created_at_value, datetime) else (created_at_value or ''),
+            last_seen_value.isoformat() if isinstance(last_seen_value, datetime) else (last_seen_value or ''),
+            int(usage.get('comments_processed') or 0),
+            int(usage.get('public_replies_sent') or 0),
+            int(usage.get('dms_sent') or 0),
+            int(usage.get('links_clicked') or 0),
+        ])
+    csv_bytes = buf.getvalue().encode('utf-8-sig')
+    filename = f'mychat_users_{datetime.utcnow().strftime("%Y%m%d_%H%M")}.csv'
+    return Response(
+        content=csv_bytes,
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
 @api.get('/admin/users')
 async def admin_users_list(
     page: int = 1,
