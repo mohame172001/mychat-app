@@ -8874,23 +8874,69 @@ async def admin_users_list(
     rows = await cursor.to_list(page_size)
 
     month = _usage_month(datetime.utcnow())
-    # Phase 2.18Y perf fix: this loop used to await 4 DB queries per
-    # user sequentially (plan + monthly_usage + 2× count_documents for
-    # snapshots). For 25 rows that meant ~100 round-trips and ~5s of
-    # latency. Fan-out the enrichment per-user in parallel via
-    # asyncio.gather — the slowest user determines the wall time.
-    async def _enrich_one(u):
-        uid = u.get('id') or ''
-        plan, usage_doc, snapshots = await asyncio.gather(
-            get_user_plan(uid),
-            db.monthly_usage.find_one(_monthly_usage_user_query(uid, month)),
-            _usage_snapshots_for_user(uid),
-        )
-        return u, plan, (usage_doc or {}), (snapshots or {})
+    # Phase 2.18Y perf fix v2: previous version parallelized per-user
+    # but each user still issued 4 separate Mongo round-trips that
+    # then contend for the connection pool. Now we batch-fetch ALL
+    # the data needed for every user in just THREE bulk queries
+    # (monthly_usage, instagram_accounts counts, automations counts)
+    # then merge in memory. With 25 rows the wall time drops to the
+    # single slowest bulk query (~150ms) instead of 25× round-trips.
+    user_ids = [u.get('id') for u in rows if u.get('id')]
+    usage_by_user: dict = {}
+    ig_count_by_user: dict = {}
+    auto_count_by_user: dict = {}
+    try:
+        # Bulk monthly usage for this batch + this month.
+        usage_query = {
+            'limit_subject_type': 'user',
+            'limit_subject_id': {'$in': user_ids},
+            'event_month': month,
+        }
+        async for row in db.monthly_usage.find(usage_query):
+            usage_by_user[str(row.get('limit_subject_id') or row.get('user_id') or '')] = row
+        # Bulk IG-accounts count per user via aggregation. One round-trip.
+        ig_pipeline = [
+            {'$match': {
+                '$or': [{'userId': {'$in': user_ids}}, {'user_id': {'$in': user_ids}}],
+                'connectionValid': True,
+                'isActive': {'$ne': False},
+                'accessToken': {'$exists': True, '$nin': [None, '']},
+                'refreshStatus': {'$nin': [
+                    'disconnected',
+                    'auto_cleanup_users_disconnected',
+                    'auto_cleanup_single_account_plan',
+                    'force_disconnected_by_admin',
+                    'replaced_by_reconnect',
+                ]},
+            }},
+            {'$group': {'_id': {'$ifNull': ['$userId', '$user_id']}, 'n': {'$sum': 1}}},
+        ]
+        async for row in db.instagram_accounts.aggregate(ig_pipeline):
+            ig_count_by_user[str(row.get('_id') or '')] = int(row.get('n') or 0)
+        # Bulk active automations count per user. One round-trip.
+        auto_pipeline = [
+            {'$match': {'user_id': {'$in': user_ids}, 'status': 'active'}},
+            {'$group': {'_id': '$user_id', 'n': {'$sum': 1}}},
+        ]
+        async for row in db.automations.aggregate(auto_pipeline):
+            auto_count_by_user[str(row.get('_id') or '')] = int(row.get('n') or 0)
+    except Exception as exc:
+        logger.warning('admin_users_bulk_enrich_failed reason=%s', type(exc).__name__)
 
-    enriched = await asyncio.gather(*[_enrich_one(u) for u in rows])
+    # Plans are still per-user (get_user_plan resolves overrides) but
+    # at least run them in parallel.
+    plans_list = await asyncio.gather(*[get_user_plan(uid) for uid in user_ids])
+    plan_by_user = dict(zip(user_ids, plans_list))
+
     items = []
-    for u, plan, usage, snapshots in enriched:
+    for u in rows:
+        uid = u.get('id') or ''
+        plan = plan_by_user.get(uid) or await get_user_plan(uid)
+        usage = usage_by_user.get(uid, {})
+        snapshots = {
+            'instagram_accounts_connected_snapshot': ig_count_by_user.get(uid, 0),
+            'active_automations_snapshot': auto_count_by_user.get(uid, 0),
+        }
         uid = u.get('id') or ''
         counters = {f: int(usage.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
         exceeded = {}
