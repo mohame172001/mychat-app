@@ -918,11 +918,17 @@ async def get_current_usage_with_limits(user_id: str, month: Optional[str] = Non
     separately via 'base_limits' so the UI can show 'X added by your
     free trial' etc.
     """
-    plan = await get_user_plan(user_id)
-    counters = await _user_monthly_counters(user_id, month)
-    snapshots = await _usage_snapshots_for_user(str(user_id))
+    # Phase 2.18Y perf: previously these four independent reads ran
+    # serially, costing one Mongo round-trip each (~150ms × 4 = 600ms
+    # baseline for an idle worker). Run them in parallel — bounded
+    # by the slowest single call.
+    plan, counters, snapshots, overrides = await asyncio.gather(
+        get_user_plan(user_id),
+        _user_monthly_counters(user_id, month),
+        _usage_snapshots_for_user(str(user_id)),
+        get_active_user_limit_overrides(user_id),
+    )
     base_limits = {key: plan.get(key) for key in _plans.LIMIT_COUNTER_KEYS}
-    overrides = await get_active_user_limit_overrides(user_id)
     effective = _overrides.compute_effective(
         {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS},
         overrides,
