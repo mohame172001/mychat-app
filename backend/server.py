@@ -8885,47 +8885,66 @@ async def admin_users_list(
     usage_by_user: dict = {}
     ig_count_by_user: dict = {}
     auto_count_by_user: dict = {}
-    try:
-        # Bulk monthly usage for this batch + this month.
-        usage_query = {
-            'limit_subject_type': 'user',
-            'limit_subject_id': {'$in': user_ids},
-            'event_month': month,
-        }
-        async for row in db.monthly_usage.find(usage_query):
-            usage_by_user[str(row.get('limit_subject_id') or row.get('user_id') or '')] = row
-        # Bulk IG-accounts count per user via aggregation. One round-trip.
-        ig_pipeline = [
-            {'$match': {
-                '$or': [{'userId': {'$in': user_ids}}, {'user_id': {'$in': user_ids}}],
-                'connectionValid': True,
-                'isActive': {'$ne': False},
-                'accessToken': {'$exists': True, '$nin': [None, '']},
-                'refreshStatus': {'$nin': [
-                    'disconnected',
-                    'auto_cleanup_users_disconnected',
-                    'auto_cleanup_single_account_plan',
-                    'force_disconnected_by_admin',
-                    'replaced_by_reconnect',
-                ]},
-            }},
-            {'$group': {'_id': {'$ifNull': ['$userId', '$user_id']}, 'n': {'$sum': 1}}},
-        ]
-        async for row in db.instagram_accounts.aggregate(ig_pipeline):
-            ig_count_by_user[str(row.get('_id') or '')] = int(row.get('n') or 0)
-        # Bulk active automations count per user. One round-trip.
-        auto_pipeline = [
-            {'$match': {'user_id': {'$in': user_ids}, 'status': 'active'}},
-            {'$group': {'_id': '$user_id', 'n': {'$sum': 1}}},
-        ]
-        async for row in db.automations.aggregate(auto_pipeline):
-            auto_count_by_user[str(row.get('_id') or '')] = int(row.get('n') or 0)
-    except Exception as exc:
-        logger.warning('admin_users_bulk_enrich_failed reason=%s', type(exc).__name__)
+    async def _fetch_usage():
+        out: dict = {}
+        try:
+            async for row in db.monthly_usage.find({
+                'limit_subject_type': 'user',
+                'limit_subject_id': {'$in': user_ids},
+                'event_month': month,
+            }):
+                out[str(row.get('limit_subject_id') or row.get('user_id') or '')] = row
+        except Exception:
+            pass
+        return out
 
-    # Plans are still per-user (get_user_plan resolves overrides) but
-    # at least run them in parallel.
-    plans_list = await asyncio.gather(*[get_user_plan(uid) for uid in user_ids])
+    async def _fetch_ig_counts():
+        out: dict = {}
+        try:
+            async for row in db.instagram_accounts.aggregate([
+                {'$match': {
+                    '$or': [{'userId': {'$in': user_ids}}, {'user_id': {'$in': user_ids}}],
+                    'connectionValid': True,
+                    'isActive': {'$ne': False},
+                    'accessToken': {'$exists': True, '$nin': [None, '']},
+                    'refreshStatus': {'$nin': [
+                        'disconnected',
+                        'auto_cleanup_users_disconnected',
+                        'auto_cleanup_single_account_plan',
+                        'force_disconnected_by_admin',
+                        'replaced_by_reconnect',
+                    ]},
+                }},
+                {'$group': {'_id': {'$ifNull': ['$userId', '$user_id']}, 'n': {'$sum': 1}}},
+            ]):
+                out[str(row.get('_id') or '')] = int(row.get('n') or 0)
+        except Exception:
+            pass
+        return out
+
+    async def _fetch_auto_counts():
+        out: dict = {}
+        try:
+            async for row in db.automations.aggregate([
+                {'$match': {'user_id': {'$in': user_ids}, 'status': 'active'}},
+                {'$group': {'_id': '$user_id', 'n': {'$sum': 1}}},
+            ]):
+                out[str(row.get('_id') or '')] = int(row.get('n') or 0)
+        except Exception:
+            pass
+        return out
+
+    # Phase 2.18Y perf v3: fan out the three bulk reads AND the
+    # per-user plan resolution in one single asyncio.gather wave.
+    # Everything that touches Mongo for this request runs in
+    # parallel — wall time is now bound by the slowest individual
+    # call rather than by their sum.
+    usage_by_user, ig_count_by_user, auto_count_by_user, plans_list = await asyncio.gather(
+        _fetch_usage(),
+        _fetch_ig_counts(),
+        _fetch_auto_counts(),
+        asyncio.gather(*[get_user_plan(uid) for uid in user_ids]),
+    )
     plan_by_user = dict(zip(user_ids, plans_list))
 
     items = []
