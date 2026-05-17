@@ -13725,8 +13725,13 @@ async def admin_reclassify_collab_failures(
     cursor = db.comments.find({
         'user_id': user_id,
         'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted', 'partial_success']},
-        # only check rows that don't already have an ownership tag
-        'media_ownership_check': {'$exists': False},
+        # Re-scan rows we haven't checked yet OR rows we previously
+        # tagged 'unknown' (transient Graph error). A row that already
+        # resolved to owned/collab/gone/unauthorized stays untouched.
+        '$or': [
+            {'media_ownership_check': {'$exists': False}},
+            {'media_ownership_check': 'unknown'},
+        ],
     }).limit(limit)
     rows = await cursor.to_list(limit)
     summary = {
