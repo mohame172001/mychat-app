@@ -1540,7 +1540,24 @@ def classify_instagram_send_error(error: Any, status_code: Optional[int] = None)
 
     reason = 'unknown_graph_error'
     retryable = False
-    if status_code in (429,) or code in (4, 17, 32, 613) or 'rate limit' in message or 'too many' in message:
+    # Phase 2.18Y: explicit Meta subcodes for the messaging-policy
+    # rejections that show up as code=1 with a generic "unknown error"
+    # message. Meta deliberately obscures these reasons in the public
+    # message field; the subcode is the only stable identifier.
+    # Reference: https://developers.facebook.com/docs/messenger-platform/error-codes
+    #   1545033 = recipient not eligible / 24-hour window expired
+    #   1545041 = messaging policy violation
+    #   2018028 = no matching user / cannot message
+    #   2018278 = recipient cannot receive messages
+    _MESSAGING_WINDOW_SUBCODES = {1545033, 1545041, 2018028, 2018278}
+    try:
+        sub_int = int(subcode) if subcode is not None else None
+    except (TypeError, ValueError):
+        sub_int = None
+    if sub_int in _MESSAGING_WINDOW_SUBCODES:
+        reason = 'messaging_window_expired'
+        retryable = False
+    elif status_code in (429,) or code in (4, 17, 32, 613) or 'rate limit' in message or 'too many' in message:
         reason = 'rate_limited'
         retryable = True
     elif status_code and status_code >= 500:
@@ -1736,17 +1753,32 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                 error_snippet = ''
             provider_code = safe_error.get('code')
             provider_subcode = safe_error.get('error_subcode') or safe_error.get('subcode')
+            # Phase 2.18Y: business-expected rejections (recipient can't
+            # receive, window expired, blocked you) are NOT bugs — log
+            # them at warning level so they stay in app logs but don't
+            # page on-call via Sentry. Only the truly unknown patterns
+            # bubble up as errors.
+            _EXPECTED_REASONS = {
+                'messaging_window_expired',
+                'recipient_unavailable',
+                'messaging_not_allowed',
+                'user_blocked_messages',
+                'rate_limited',
+            }
+            log_fn = logger.warning if classified['failure_reason'] in _EXPECTED_REASONS else logger.error
             if classified['failure_reason'] == 'unknown_graph_error':
-                logger.error(
+                log_fn(
                     'send_ig_message_failed status=%s reason=%s retryable=%s '
                     'graph_code=%s graph_subcode=%s message_snippet=%r',
                     r.status_code, classified['failure_reason'], classified['retryable'],
                     provider_code, provider_subcode, error_snippet,
                 )
             else:
-                logger.error(
-                    'send_ig_message_failed status=%s reason=%s retryable=%s',
+                log_fn(
+                    'send_ig_message_failed status=%s reason=%s retryable=%s '
+                    'graph_code=%s graph_subcode=%s',
                     r.status_code, classified['failure_reason'], classified['retryable'],
+                    provider_code, provider_subcode,
                 )
             _LAST_DM_FAILURE.set({
                 'failure_reason': classified.get('failure_reason') or 'unknown_graph_error',
