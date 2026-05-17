@@ -9098,32 +9098,66 @@ async def admin_user_detail(
     if not user:
         raise HTTPException(404, 'User not found')
 
-    plan = await get_user_plan(target_user_id)
-    usage_now = await get_current_usage_with_limits(target_user_id)
+    # Phase 2.18Y: previously these four reads ran serially even though
+    # they touch independent collections (user_plans, monthly_usage,
+    # ...). Fan them out so the slowest single read sets the latency
+    # rather than their sum.
     last_month_dt = datetime.utcnow().replace(day=1) - timedelta(days=1)
     last_month_key = _usage_month(last_month_dt)
-    last_month = await db.monthly_usage.find_one(
-        _monthly_usage_user_query(target_user_id, last_month_key)
-    ) or {}
+    plan, usage_now, last_month, all_accounts = await asyncio.gather(
+        get_user_plan(target_user_id),
+        get_current_usage_with_limits(target_user_id),
+        db.monthly_usage.find_one(_monthly_usage_user_query(target_user_id, last_month_key)),
+        db.instagram_accounts.find(
+            {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]}
+        ).to_list(50),
+    )
+    last_month = last_month or {}
     last_month_counters = {f: int(last_month.get(f) or 0) for f in USAGE_COUNTER_FIELDS}
+
+    # Phase 2.18Y: bulk-fetch instagram_account_trial_claims for ALL
+    # accounts in one query rather than one per account.
+    canonical_ids = [
+        _canonical_instagram_account_id(
+            (acc.get('instagramAccountId') or acc.get('igUserId'))
+        )
+        for acc in all_accounts
+    ]
+    canonical_ids = [c for c in canonical_ids if c]
+    trial_claims_by_ig: dict = {}
+    account_usage_by_ig: dict = {}
+    if canonical_ids:
+        async def _bulk_trial_claims():
+            out: dict = {}
+            async for row in db.instagram_account_trial_claims.find(
+                {'instagram_account_id': {'$in': canonical_ids}},
+            ):
+                out[str(row.get('instagram_account_id') or '')] = row
+            return out
+
+        async def _bulk_account_usage():
+            return await asyncio.gather(
+                *(_instagram_monthly_counters(c) for c in canonical_ids)
+            )
+        trial_claims_by_ig, account_usage_list = await asyncio.gather(
+            _bulk_trial_claims(),
+            _bulk_account_usage(),
+        )
+        for c, usage in zip(canonical_ids, account_usage_list):
+            account_usage_by_ig[c] = usage
 
     # Instagram accounts (no tokens)
     accounts = []
-    cursor = db.instagram_accounts.find(
-        {'$or': [{'userId': target_user_id}, {'user_id': target_user_id}]}
-    )
-    async for acc in cursor:
+    for acc in all_accounts:
         canonical_ig_id = _canonical_instagram_account_id(
             acc.get('instagramAccountId') or acc.get('igUserId')
         )
-        account_usage = await _instagram_monthly_counters(canonical_ig_id) if canonical_ig_id else {
-            field: 0 for field in USAGE_COUNTER_FIELDS
-        }
-        trial_claim = None
-        if canonical_ig_id:
-            trial_claim = await db.instagram_account_trial_claims.find_one({
-                'instagram_account_id': canonical_ig_id,
-            })
+        account_usage = (
+            account_usage_by_ig.get(canonical_ig_id, {})
+            if canonical_ig_id
+            else {field: 0 for field in USAGE_COUNTER_FIELDS}
+        )
+        trial_claim = trial_claims_by_ig.get(canonical_ig_id) if canonical_ig_id else None
         ownership_status = acc.get('ownershipStatus') or (
             'active_owner' if acc.get('connectionValid') and acc.get('isActive') is not False
             else 'disconnected'
