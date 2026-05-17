@@ -16612,6 +16612,146 @@ async def _webhook_dlq_tick() -> dict:
     return summary
 
 
+COLLAB_RECLASSIFIER_BATCH_PER_USER = _env_int_clamped(
+    'COLLAB_RECLASSIFIER_BATCH_PER_USER', 50, 1, 500,
+)
+COLLAB_RECLASSIFIER_USER_TIME_BUDGET_SEC = _env_int_clamped(
+    'COLLAB_RECLASSIFIER_USER_TIME_BUDGET_SEC', 20, 5, 300,
+)
+
+
+async def _collab_reclassifier_tick() -> dict:
+    """Phase 2.18Z auto-reclassifier: scan failed comments across ALL
+    connected users and mark ones on not-owned/inaccessible media as
+    skipped_* so they stop being counted as failures on the dashboard.
+
+    This is the periodic version of the admin-triggered
+    /admin/comments/reclassify-collab-failures endpoint. Each user
+    gets a small per-tick batch + a time budget so a single account
+    with thousands of failures can't starve the rest.
+    """
+    summary = {
+        'users_scanned': 0,
+        'rows_scanned': 0,
+        'reclassified_collab': 0,
+        'reclassified_unauthorized': 0,
+        'reclassified_gone': 0,
+        'unknown_remaining': 0,
+    }
+    # Only look at users with at least one un-tagged or 'unknown' failed
+    # comment. The aggregation gives us a single round-trip to identify
+    # candidates instead of scanning the whole users table.
+    try:
+        candidates = await db.comments.aggregate([
+            {'$match': {
+                'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted', 'partial_success']},
+                '$or': [
+                    {'media_ownership_check': {'$exists': False}},
+                    {'media_ownership_check': 'unknown'},
+                ],
+            }},
+            {'$group': {'_id': '$user_id', 'n': {'$sum': 1}}},
+            {'$limit': 50},
+        ]).to_list(50)
+    except Exception:
+        return summary
+
+    for cand in candidates:
+        if IS_SHUTTING_DOWN:
+            break
+        uid = cand.get('_id')
+        if not uid:
+            continue
+        summary['users_scanned'] += 1
+        try:
+            user = await db.users.find_one({'id': uid})
+        except Exception:
+            user = None
+        ig_user_id = (user or {}).get('ig_user_id') or ''
+        access_token = (user or {}).get('meta_access_token') or ''
+        if not (ig_user_id and access_token):
+            # User has no live IG connection — can't check ownership.
+            # Skip; their rows stay flagged and will retry next tick if
+            # the connection comes back.
+            continue
+        rows = await db.comments.find({
+            'user_id': uid,
+            'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted', 'partial_success']},
+            '$or': [
+                {'media_ownership_check': {'$exists': False}},
+                {'media_ownership_check': 'unknown'},
+            ],
+        }).limit(COLLAB_RECLASSIFIER_BATCH_PER_USER).to_list(COLLAB_RECLASSIFIER_BATCH_PER_USER)
+
+        media_ids = sorted({str(r.get('media_id') or r.get('mediaId') or '') for r in rows} - {''})
+        ownership_by_media: dict = {}
+        budget_started = datetime.utcnow()
+        for mid in media_ids:
+            if (datetime.utcnow() - budget_started).total_seconds() > COLLAB_RECLASSIFIER_USER_TIME_BUDGET_SEC:
+                break
+            ownership_by_media[mid] = await _check_media_ownership(access_token, ig_user_id, mid)
+
+        now = datetime.utcnow()
+        for r in rows:
+            mid = str(r.get('media_id') or r.get('mediaId') or '')
+            kind = ownership_by_media.get(mid)
+            if kind is None:
+                continue
+            summary['rows_scanned'] += 1
+            update_doc = {'media_ownership_check': kind, 'media_ownership_checked_at': now}
+            if kind == 'collab':
+                update_doc['action_status'] = 'skipped_not_post_owner'
+                update_doc['skip_reason'] = 'collab_post_not_owned_by_business'
+                summary['reclassified_collab'] += 1
+            elif kind == 'unauthorized':
+                update_doc['action_status'] = 'skipped_not_post_owner'
+                update_doc['skip_reason'] = 'post_unauthorized_for_business_token'
+                summary['reclassified_unauthorized'] += 1
+            elif kind == 'gone':
+                update_doc['action_status'] = 'skipped_post_unavailable'
+                update_doc['skip_reason'] = 'post_deleted_or_inaccessible'
+                summary['reclassified_gone'] += 1
+            elif kind == 'unknown':
+                summary['unknown_remaining'] += 1
+            try:
+                await db.comments.update_one({'id': r.get('id')}, {'$set': update_doc})
+            except Exception:
+                pass
+
+        # Invalidate dashboard snapshot if anything moved.
+        if any(ownership_by_media.get(m) in ('collab', 'unauthorized', 'gone') for m in media_ids):
+            try:
+                await invalidate_dashboard_summary(uid)
+            except Exception:
+                pass
+    return summary
+
+
+async def _collab_reclassifier_loop():
+    interval = _env_int_clamped('COLLAB_RECLASSIFIER_INTERVAL_SECONDS', 900, 60, 3600)
+    logger.info('collab_reclassifier_loop_started interval=%s', interval)
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
+        try:
+            summary = await _collab_reclassifier_tick()
+            if summary.get('rows_scanned'):
+                logger.info(
+                    'collab_reclassifier_tick users=%s rows=%s collab=%s unauthorized=%s gone=%s unknown_left=%s',
+                    summary['users_scanned'], summary['rows_scanned'],
+                    summary['reclassified_collab'], summary['reclassified_unauthorized'],
+                    summary['reclassified_gone'], summary['unknown_remaining'],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('collab_reclassifier_tick_failed')
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=interval)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(interval)
+
+
 async def _webhook_dlq_loop():
     interval = _env_int_clamped('WEBHOOK_DLQ_INTERVAL_SECONDS', 60, 10, 3600)
     logger.info('webhook_dlq_loop_started interval=%s max_attempts=%s',
@@ -19143,6 +19283,7 @@ async def _startup():
                 AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE)
     _register_bg_task('automation_queue', _automation_queue_loop)
     _register_bg_task('webhook_dlq', _webhook_dlq_loop)
+    _register_bg_task('collab_reclassifier', _collab_reclassifier_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
     # Watchdog last so it can supervise the others.
     _register_bg_task('watchdog', _watchdog_loop)
