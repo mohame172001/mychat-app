@@ -4669,17 +4669,24 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
         except Exception as e:
             return {'error': str(e)[:120]}
 
+    # Phase 2.18Y perf: dropped _safe_admin_overview() from the bootstrap
+    # gather. It ran 17 count_documents queries in parallel — fine for
+    # the admin overview page, but it was capping the bootstrap latency
+    # for every admin user even on pages that never read it. The
+    # appWarmup prefetcher already fires /admin/overview right after the
+    # bootstrap response lands, and the admin console SWR-loads it
+    # again on tab open, so removing it from bootstrap costs nothing
+    # and shaves ~500-1000ms off the admin's first paint.
     (
         dashboard_summary,
         automations_summary,
         instagram_accounts_payload,
-        admin_overview_payload,
     ) = await asyncio.gather(
         _safe_dashboard(),
         _safe_automations(),
         _safe_accounts(),
-        _safe_admin_overview(),
     )
+    admin_overview_payload = None
 
     duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
     logger.info(
