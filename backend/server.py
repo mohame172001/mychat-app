@@ -13629,6 +13629,114 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
         return []
 
 
+async def _check_media_ownership(access_token: str, ig_user_id: str, media_id: str) -> str:
+    """Phase 2.18Z: determine whether a media id is owned by the
+    connected IG user, or whether the connected user is only a
+    collaborator (the post was published by someone else).
+
+    Returns one of:
+      'owned'   — the connected IG user is the original poster
+      'collab'  — Meta says the media exists but the owner.id differs
+      'gone'    — the media is no longer accessible (deleted, private)
+      'unknown' — couldn't determine (network / unexpected error)
+
+    Used by the comment-failure reclassifier so we don't surface
+    'permanently failed' counts for comments on posts the user
+    doesn't actually own.
+    """
+    if not (access_token and ig_user_id and media_id):
+        return 'unknown'
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{media_id}',
+                params={'access_token': access_token, 'fields': 'id,owner'},
+            )
+            if r.status_code == 404:
+                return 'gone'
+            if r.status_code != 200:
+                return 'unknown'
+            body = r.json() or {}
+            owner_id = str(((body.get('owner') or {}).get('id')) or '')
+            if not owner_id:
+                # When the connected user IS the owner Graph sometimes
+                # omits the owner field entirely (it implies "you").
+                return 'owned'
+            return 'owned' if owner_id == str(ig_user_id) else 'collab'
+    except Exception:
+        return 'unknown'
+
+
+@api.post('/admin/comments/reclassify-collab-failures')
+async def admin_reclassify_collab_failures(
+    user_id: str = Depends(get_current_active_user_id),
+    limit: int = 100,
+):
+    """One-off admin sweep: scan recent permanently-failed comments,
+    check media ownership via Graph, and reclassify ones on collab
+    posts (where the connected user isn't the original poster) so
+    they stop being counted as failures.
+
+    Returns a summary so the admin can see exactly how many were
+    reclassified. Idempotent — running again only touches rows that
+    are still in failed_permanent state.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_FAILURES_VIEW)
+    limit = max(1, min(int(limit or 100), 500))
+
+    # Pull recent failed comments for this admin's own account first;
+    # the operator can iterate over their own data without touching
+    # other users' rows.
+    user = await db.users.find_one({'id': user_id})
+    ig_user_id = (user or {}).get('ig_user_id') or ''
+    access_token = (user or {}).get('meta_access_token') or ''
+    if not (ig_user_id and access_token):
+        raise HTTPException(400, 'admin has no Instagram account connected')
+
+    cursor = db.comments.find({
+        'user_id': user_id,
+        'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted', 'partial_success']},
+        # only check rows that don't already have an ownership tag
+        'media_ownership_check': {'$exists': False},
+    }).limit(limit)
+    rows = await cursor.to_list(limit)
+    summary = {
+        'scanned': 0, 'owned': 0, 'collab': 0, 'gone': 0, 'unknown': 0,
+        'reclassified_as_collab_skip': 0,
+    }
+    # Dedup media ids — many comments live on the same post.
+    media_ids = sorted({str(r.get('media_id') or r.get('mediaId') or '') for r in rows} - {''})
+    ownership_by_media: dict = {}
+    for mid in media_ids:
+        ownership_by_media[mid] = await _check_media_ownership(access_token, ig_user_id, mid)
+
+    now = datetime.utcnow()
+    for r in rows:
+        summary['scanned'] += 1
+        mid = str(r.get('media_id') or r.get('mediaId') or '')
+        kind = ownership_by_media.get(mid, 'unknown')
+        summary[kind] = summary.get(kind, 0) + 1
+        update_doc = {'media_ownership_check': kind, 'media_ownership_checked_at': now}
+        if kind == 'collab':
+            update_doc['action_status'] = 'skipped_not_post_owner'
+            update_doc['skip_reason'] = 'collab_post_not_owned_by_business'
+            summary['reclassified_as_collab_skip'] += 1
+        try:
+            await db.comments.update_one({'id': r.get('id')}, {'$set': update_doc})
+        except Exception:
+            pass
+    # Drop the dashboard snapshot so the new counts reflect on next read.
+    try:
+        await invalidate_dashboard_summary(user_id)
+    except Exception:
+        pass
+    return {
+        'ok': True,
+        'summary': summary,
+        'media_ids_checked': len(media_ids),
+    }
+
+
 @api.post('/instagram/disconnect')
 async def instagram_disconnect(user_id: str = Depends(get_current_active_user_id)):
     """Disconnect EVERY Instagram account row owned by this user.
