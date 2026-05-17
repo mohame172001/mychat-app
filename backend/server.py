@@ -16594,7 +16594,11 @@ async def _collab_reclassifier_tick() -> dict:
 
 
 async def _collab_reclassifier_loop():
-    interval = _env_int_clamped('COLLAB_RECLASSIFIER_INTERVAL_SECONDS', 900, 60, 3600)
+    # Phase 2.18Z: dropped the default from 15min → 3min so a fresh
+    # collab/unauthorized failure clears off the dashboard quickly
+    # without an operator intervention. Env-tunable for ops to widen
+    # if Instagram Graph rate-limits become a concern at scale.
+    interval = _env_int_clamped('COLLAB_RECLASSIFIER_INTERVAL_SECONDS', 180, 60, 3600)
     logger.info('collab_reclassifier_loop_started interval=%s', interval)
     while not SHUTDOWN_EVENT.is_set():
         if IS_SHUTTING_DOWN:

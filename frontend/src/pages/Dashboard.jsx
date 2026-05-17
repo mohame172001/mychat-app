@@ -145,6 +145,15 @@ const Dashboard = () => {
   ];
   const topAutomations = stats?.topAutomations || [];
 
+  // Phase 2.18Z: first-run empty state — when a user has signed up
+  // but hasn't connected Instagram OR has zero automations, the
+  // dashboard otherwise shows '0' cards + an empty chart with no
+  // sense of what to do next. The onboarding card below points them
+  // to the two concrete actions that unlock everything else.
+  const igConnected = Boolean(user?.instagramConnected);
+  const totalAutomations = Number(stats?.activeAutomations ?? stats?.active_automations ?? 0);
+  const isFirstRun = !loading && (!igConnected || totalAutomations === 0);
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto" data-testid="dashboard-page">
       <div className="flex items-end justify-between flex-wrap gap-4">
@@ -175,6 +184,56 @@ const Dashboard = () => {
         <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           {error}
         </div>
+      )}
+
+      {isFirstRun && (
+        <Card className="mt-6 p-6 rounded-2xl border-blue-100 bg-gradient-to-br from-blue-50 to-cyan-50">
+          <div className="flex items-start justify-between flex-wrap gap-4">
+            <div>
+              <h3 className="font-display font-bold text-lg text-slate-900">
+                {igConnected ? 'You\'re set — create your first automation' : 'Welcome to MyChat 👋'}
+              </h3>
+              <p className="text-sm text-slate-600 mt-1 max-w-2xl">
+                {igConnected
+                  ? 'Now build a comment automation: when someone comments on your post, MyChat will reply publicly and send them a DM.'
+                  : 'To start automating Instagram comments + DMs, connect your business account first. It takes 30 seconds.'}
+              </p>
+              <ol className="mt-4 space-y-2 text-sm text-slate-700">
+                <li className="flex items-center gap-2">
+                  <span className={`flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold ${igConnected ? 'bg-emerald-500 text-white' : 'bg-blue-500 text-white'}`}>
+                    {igConnected ? '✓' : '1'}
+                  </span>
+                  Connect your Instagram business account
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className={`flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold ${totalAutomations > 0 ? 'bg-emerald-500 text-white' : 'bg-slate-300 text-slate-700'}`}>
+                    {totalAutomations > 0 ? '✓' : '2'}
+                  </span>
+                  Create a comment automation rule
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold bg-slate-300 text-slate-700">3</span>
+                  Comments roll in — MyChat replies + DMs them automatically
+                </li>
+              </ol>
+            </div>
+            <div className="flex flex-col gap-2 shrink-0">
+              {!igConnected ? (
+                <Link to="/app/settings">
+                  <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
+                    Connect Instagram
+                  </Button>
+                </Link>
+              ) : (
+                <Link to="/app/automations">
+                  <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
+                    <Plus className="w-4 h-4 mr-1.5" /> Create automation
+                  </Button>
+                </Link>
+              )}
+            </div>
+          </div>
+        </Card>
       )}
 
       <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
