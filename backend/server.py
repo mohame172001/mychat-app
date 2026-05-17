@@ -4740,7 +4740,19 @@ async def auth_bootstrap(user_id: str = Depends(get_current_active_user_id)):
                 db.comments.count_documents({
                     'action_status': {'$in': ['failed_permanent', 'failed_retry_exhausted']},
                 }),
-                db.comments.count_documents({'queued': True}),
+                # Phase 2.18Z: 'pending' was just count_documents on
+                # queued=True, but that flag is sticky — comments that
+                # have since resolved (success / failed_permanent /
+                # skipped_*) still carried queued=True from when they
+                # entered the retry queue. The number was misleading.
+                # Now we count actually-pending rows: queued=True AND
+                # action_status in the genuinely-incomplete buckets.
+                db.comments.count_documents({
+                    'queued': True,
+                    'action_status': {'$in': [
+                        'pending', 'processing', 'failed_retryable', 'retryable',
+                    ]},
+                }),
             )
             user_plan_rows = sum(plan_distribution.values())
             plan_distribution['free'] += max(0, total_users - user_plan_rows)
