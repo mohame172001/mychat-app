@@ -57,7 +57,6 @@ const Landing = () => {
           <div className="hidden md:flex items-center gap-8">
             <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('landing.nav.features')}</a>
             <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('landing.nav.how')}</a>
-            <Link to="/status" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('landing.nav.status')}</Link>
             <Link to="/privacy" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('common.privacy')}</Link>
           </div>
           <div className="hidden md:flex items-center gap-3">
@@ -78,7 +77,6 @@ const Landing = () => {
             <div className="px-6 py-4 flex flex-col gap-4">
               <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium">{t('landing.nav.features')}</a>
               <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium">{t('landing.nav.how')}</a>
-              <Link to="/status" onClick={() => setMenuOpen(false)} className="text-sm font-medium">{t('landing.nav.status')}</Link>
               <Link to="/privacy" onClick={() => setMenuOpen(false)} className="text-sm font-medium">{t('common.privacy')}</Link>
               <div className="flex items-center justify-between pt-2 border-t border-slate-100">
                 <span className="text-xs text-slate-500">{lang === "ar" ? "اللغة" : "Language"}</span>
@@ -109,11 +107,6 @@ const Landing = () => {
               <Link to="/signup">
                 <Button size="lg" className="bg-slate-900 hover:bg-slate-800 text-white rounded-full px-8 h-14 text-base">
                   {t('landing.hero.cta')} <ArrowRight className="ms-2 w-4 h-4" />
-                </Button>
-              </Link>
-              <Link to="/status">
-                <Button size="lg" variant="outline" className="rounded-full px-6 h-14 text-base">
-                  {t('landing.hero.secondaryCta')}
                 </Button>
               </Link>
             </div>
@@ -225,7 +218,6 @@ const Landing = () => {
             <span className="text-sm text-slate-500 ms-2">{t('common.copyright')}</span>
           </div>
           <div className="flex gap-6 text-sm text-slate-500 items-center flex-wrap">
-            <Link to="/status" className="hover:text-slate-900">{t('landing.nav.status')}</Link>
             <Link to="/privacy" className="hover:text-slate-900">{t('common.privacy')}</Link>
             <Link to="/terms" className="hover:text-slate-900">{t('common.terms')}</Link>
             <Link to="/data-deletion" className="hover:text-slate-900">{t('common.dataDeletion')}</Link>

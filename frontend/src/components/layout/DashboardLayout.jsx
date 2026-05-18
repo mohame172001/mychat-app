@@ -62,11 +62,12 @@ const DashboardLayout = () => {
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
           <span className="flex items-center gap-2" data-testid="build-marker">
-            © 2026 mychat · {ar ? 'الإصدار:' : 'Build:'} <span className="font-mono text-[10px] text-slate-400">{BUILD_SHA}</span>
+            © 2026 mychat
+            <span className="hidden font-mono text-[10px] text-slate-300" data-build-sha={BUILD_SHA} />
           </span>
           <div className="flex gap-4 md:gap-5">
-            <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">{ar ? 'الخصوصية' : 'Privacy'}</Link>
-            <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noreferrer">{ar ? 'الشروط' : 'Terms'}</Link>
+            <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noopener noreferrer">{ar ? 'الخصوصية' : 'Privacy'}</Link>
+            <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noopener noreferrer">{ar ? 'الشروط' : 'Terms'}</Link>
             <a
               href={buildSupportMailtoHref()}
               onClick={handleContactClick}

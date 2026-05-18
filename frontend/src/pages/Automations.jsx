@@ -20,6 +20,24 @@ import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
 import { extractAutomationPublicReplies } from '../lib/automationReplies';
 
 const exampleWords = ['Price', 'Link', 'Shop'];
+
+// Translate well-known auto-generated automation names (the backend
+// saves them in English, e.g. "Any post - any comment"). For
+// user-typed names we leave them untouched.
+function translateAutomationName(name) {
+  if (!name) return name;
+  let out = name;
+  out = out.replace(/Any post/gi, 'أي منشور');
+  out = out.replace(/Selected post/gi, 'المنشور المختار');
+  out = out.replace(/Next post/gi, 'المنشور التالي');
+  out = out.replace(/Latest post/gi, 'أحدث منشور');
+  out = out.replace(/any comment/gi, 'أي تعليق');
+  out = out.replace(/specific keyword/gi, 'كلمة محدّدة');
+  out = out.replace(/\bkeyword\b/gi, 'كلمة');
+  out = out.replace(/Reply only/gi, 'ردّ فقط');
+  out = out.replace(/Reply \+ DM/gi, 'ردّ + رسالة');
+  return out;
+}
 const DEFAULT_FOLLOW_MESSAGE = 'فرحان إنك مهتم 😊\nتابع الحساب الأول، وبعدها اضغط على الزر عشان أبعتلك الرابط.';
 const DEFAULT_FOLLOW_BUTTON = 'تمت المتابعة';
 const DEFAULT_FOLLOW_KEYWORDS = 'Following, I followed, تمت المتابعة, تابعت';
@@ -1418,7 +1436,7 @@ const Automations = () => {
                   {thumb ? <img src={thumb} alt="" className="h-full w-full object-cover" /> : <Zap className="h-6 w-6 text-white" />}
                 </div>
                 <div className="min-w-[200px] flex-1">
-                  <div className="font-semibold">{a.name}</div>
+                  <div className="font-semibold">{ar ? translateAutomationName(a.name) : a.name}</div>
                   <div className="mt-0.5 text-xs text-slate-500">
                     {scopeLabel} - {modeLabel} - {keywordLabel}
                   </div>

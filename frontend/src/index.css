@@ -52,3 +52,14 @@ code { font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', mon
   * { @apply border-border; }
   body { @apply bg-background text-foreground; }
 }
+
+/* RTL flip for shadcn Switch thumb. Radix Switch puts data-state on
+   both the Root and the Thumb; we target the inner Thumb (which has
+   role=none and is wrapped by the Root button) so the checked-state
+   translate slides in the mirrored direction under right-to-left. */
+html[dir="rtl"] button[role="switch"][data-state="checked"] > span[data-state="checked"] {
+  transform: translateX(-1.25rem) !important;
+}
+html[dir="rtl"] button[role="switch"] > span[data-state="unchecked"] {
+  transform: translateX(0) !important;
+}
