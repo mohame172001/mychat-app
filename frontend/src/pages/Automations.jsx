@@ -15,6 +15,7 @@ import api from '../lib/api';
 import { cachedApiGet, cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
+import { useTranslation } from '../lib/i18n';
 import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
 import { extractAutomationPublicReplies } from '../lib/automationReplies';
 
@@ -308,6 +309,7 @@ const AutomationPhonePreview = ({
 
 const Automations = () => {
   const { user } = useAuth();
+  const { t } = useTranslation();
   const [routeSearchParams, setRouteSearchParams] = useSearchParams();
   const cacheKey = [
     'automations-summary',
@@ -1291,8 +1293,8 @@ const Automations = () => {
     <div className="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-3xl font-extrabold tracking-tight">Automations</h1>
-          <p className="mt-1 text-slate-600">Build Instagram comment automations for new comments only.</p>
+          <h1 className="font-display text-3xl font-extrabold tracking-tight">{t('automations.pageTitle')}</h1>
+          <p className="mt-1 text-slate-600">{t('automations.pageSubtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -1303,10 +1305,10 @@ const Automations = () => {
             data-testid="automations-refresh"
           >
             {refreshing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-            Refresh
+            {t('common.refresh')}
           </Button>
           <Button onClick={openBuilder} className="rounded-lg bg-slate-900 text-white hover:bg-slate-800">
-            <Plus className="mr-1.5 h-4 w-4" /> Create Automation
+            <Plus className="mr-1.5 h-4 w-4" /> {t('common.createAutomation')}
           </Button>
         </div>
       </div>
@@ -1321,7 +1323,7 @@ const Automations = () => {
         <div className="relative min-w-[240px] max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <Input
-            placeholder="Search automations..."
+            placeholder={t('automations.searchPlaceholder')}
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="h-10 rounded-lg bg-white pl-9"
@@ -1332,11 +1334,11 @@ const Automations = () => {
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`rounded-md px-4 py-1.5 text-sm font-medium capitalize transition-colors ${
+              className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
                 filter === f ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              {f}
+              {t(`automations.tabs.${f}`)}
             </button>
           ))}
         </div>

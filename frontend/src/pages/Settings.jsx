@@ -13,17 +13,19 @@ import { toast } from 'sonner';
 import api from '../lib/api';
 import { startInstagramConnect } from '../lib/instagramConnect';
 import { instagramErrorMessage, instagramConnectExceptionMessage } from '../lib/instagramErrors';
+import { useTranslation } from '../lib/i18n';
 
 const tabs = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'instagram', label: 'Instagram', icon: Instagram },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'billing', label: 'Billing', icon: CreditCard },
-  { id: 'security', label: 'Security', icon: Shield }
+  { id: 'profile', i18nKey: 'settings.tabs.profile', icon: User },
+  { id: 'instagram', i18nKey: 'settings.tabs.instagram', icon: Instagram },
+  { id: 'notifications', i18nKey: 'settings.tabs.notifications', icon: Bell },
+  { id: 'billing', i18nKey: 'settings.tabs.billing', icon: CreditCard },
+  { id: 'security', i18nKey: 'settings.tabs.security', icon: Shield }
 ];
 
 const Settings = () => {
   const { user, refreshUser } = useAuth();
+  const { t, lang } = useTranslation();
   const location = useLocation();
   const [tab, setTab] = useState('profile');
   const [notif, setNotif] = useState({ email: true, push: false, weekly: false });
@@ -152,16 +154,16 @@ const Settings = () => {
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
-      <h1 className="font-display text-3xl font-extrabold tracking-tight">Settings</h1>
-      <p className="mt-1 text-slate-600">Manage your account, Instagram connection and preferences.</p>
+      <h1 className="font-display text-3xl font-extrabold tracking-tight">{t('settings.title')}</h1>
+      <p className="mt-1 text-slate-600">{t('settings.subtitle')}</p>
 
       <div className="mt-8 grid md:grid-cols-[240px_1fr] gap-6">
         <aside className="mobile-nav-scroll -mx-1 flex gap-2 overflow-x-auto px-1 pb-1 md:mx-0 md:block md:space-y-1 md:overflow-visible md:px-0 md:pb-0">
-          {tabs.map(t => {
-            const Icon = t.icon;
+          {tabs.map(tabItem => {
+            const Icon = tabItem.icon;
             return (
-              <button key={t.id} onClick={() => setTab(t.id)} className={`shrink-0 md:w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${tab === t.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100 md:bg-transparent'}`}>
-                <Icon className="w-4 h-4" /> {t.label}
+              <button key={tabItem.id} onClick={() => setTab(tabItem.id)} className={`shrink-0 md:w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${tab === tabItem.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100 md:bg-transparent'}`}>
+                <Icon className="w-4 h-4" /> {t(tabItem.i18nKey)}
               </button>
             );
           })}
@@ -170,38 +172,36 @@ const Settings = () => {
         <div>
           {tab === 'profile' && (
             <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-profile">
-              <h3 className="font-display font-bold text-lg">Profile</h3>
-              <p className="text-sm text-slate-500">Your account profile. Name and username are editable.</p>
+              <h3 className="font-display font-bold text-lg">{t('settings.profile.heading')}</h3>
+              <p className="text-sm text-slate-500">{t('settings.profile.description')}</p>
               <div className="mt-6 flex items-center gap-4">
                 <img src={user?.avatar} alt="avatar" className="w-16 h-16 rounded-full object-cover" />
               </div>
               <div className="mt-6 grid sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="profile-name">Full name</Label>
+                  <Label htmlFor="profile-name">{t('settings.profile.fullName')}</Label>
                   <Input
                     id="profile-name"
                     value={profileDraft.name}
                     onChange={(e) => setProfileDraft((p) => ({ ...p, name: e.target.value }))}
                     maxLength={80}
-                    placeholder="Your full name"
                     className="h-11 rounded-xl"
                     disabled={savingProfile}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="profile-username">Username</Label>
+                  <Label htmlFor="profile-username">{t('settings.profile.username')}</Label>
                   <Input
                     id="profile-username"
                     value={profileDraft.username}
                     onChange={(e) => setProfileDraft((p) => ({ ...p, username: e.target.value }))}
                     maxLength={32}
-                    placeholder="username"
                     className="h-11 rounded-xl"
                     disabled={savingProfile}
                   />
                 </div>
                 <div className="space-y-2 sm:col-span-2">
-                  <Label htmlFor="profile-email">Email</Label>
+                  <Label htmlFor="profile-email">{t('settings.profile.email')}</Label>
                   <Input
                     id="profile-email"
                     value={user?.email || ''}
@@ -209,8 +209,7 @@ const Settings = () => {
                     className="h-11 rounded-xl bg-slate-50"
                   />
                   <p className="text-xs text-slate-500">
-                    Email changes require a verification flow that is not enabled yet.
-                    Contact support if you need it changed.
+                    {t('settings.profile.emailHint')}
                   </p>
                 </div>
               </div>
@@ -225,7 +224,7 @@ const Settings = () => {
                     className="text-sm text-slate-500 hover:text-slate-700"
                     data-testid="profile-cancel"
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
                 <Button
@@ -234,7 +233,7 @@ const Settings = () => {
                   className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white"
                   data-testid="profile-save"
                 >
-                  {savingProfile ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>) : 'Save changes'}
+                  {savingProfile ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> {t('common.loading')}</>) : t('common.saveChanges')}
                 </Button>
               </div>
             </Card>
@@ -317,22 +316,32 @@ const Settings = () => {
 
           {tab === 'notifications' && (
             <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-notifications">
-              <h3 className="font-display font-bold text-lg">Notifications</h3>
-              <p className="text-sm text-slate-500">Choose how you want to be notified.</p>
-              {/* Phase 2.18V: preferences are now persisted via
-                  GET/PATCH /api/notifications/preferences. Critical
-                  account mail (password reset, plan change, account
-                  suspended) bypasses these toggles by design. */}
+              <h3 className="font-display font-bold text-lg">{t('settings.notifications.heading')}</h3>
+              <p className="text-sm text-slate-500">
+                {lang === 'ar' ? 'حدّد طريقة استلام الإشعارات.' : 'Choose how you want to be notified.'}
+              </p>
               <p className="mt-2 text-xs text-slate-500">
-                Critical account emails (password reset, plan change,
-                security alerts) are always sent regardless of these
-                preferences.
+                {lang === 'ar'
+                  ? 'رسائل الحساب الجوهرية (إعادة تعيين كلمة المرور، تغيير الخطة، تنبيهات الأمان) تُرسَل دائماً بصرف النظر عن هذه التفضيلات.'
+                  : 'Critical account emails (password reset, plan change, security alerts) are always sent regardless of these preferences.'}
               </p>
               <div className="mt-6 space-y-4">
                 {[
-                  { id: 'email', label: 'Email notifications', desc: 'Get email alerts for new messages and activity.' },
-                  { id: 'push', label: 'Push notifications', desc: 'Receive browser push notifications in real-time.' },
-                  { id: 'weekly', label: 'Weekly summary', desc: 'A weekly digest of your automation performance.' }
+                  {
+                    id: 'email',
+                    label: t('settings.notifications.email'),
+                    desc: lang === 'ar' ? 'استلم تنبيهات بالبريد للرسائل والنشاط الجديد.' : 'Get email alerts for new messages and activity.',
+                  },
+                  {
+                    id: 'push',
+                    label: t('settings.notifications.push'),
+                    desc: lang === 'ar' ? 'استلم إشعارات فورية في المتصفح لحظة وقوع الحدث.' : 'Receive browser push notifications in real-time.',
+                  },
+                  {
+                    id: 'weekly',
+                    label: t('settings.notifications.weekly'),
+                    desc: lang === 'ar' ? 'موجز أسبوعي لأداء أتمتاتك.' : 'A weekly digest of your automation performance.',
+                  },
                 ].map(n => (
                   <div key={n.id} className="flex items-center justify-between p-4 rounded-xl border border-slate-100">
                     <div>
@@ -354,29 +363,28 @@ const Settings = () => {
 
           {tab === 'billing' && (
             <Card className="p-6 rounded-2xl border-slate-100" data-testid="settings-billing-summary">
-              <h3 className="font-display font-bold text-lg">Billing</h3>
+              <h3 className="font-display font-bold text-lg">{t('billing.title')}</h3>
               <p className="mt-2 text-sm text-slate-500">
-                Billing is not enabled yet. Plan upgrades with payment will be
-                available later — during beta, contact support to change your plan.
+                {t('billing.contactSupport')}
               </p>
               <div className="mt-4 p-5 rounded-2xl bg-slate-50 border border-slate-100">
                 <div className="flex items-center justify-between">
                   <div>
                     <div className="text-xs uppercase tracking-wide font-semibold text-slate-500">
-                      Status
+                      {lang === 'ar' ? 'الحالة' : 'Status'}
                     </div>
                     <div className="mt-1 font-display text-base font-semibold text-slate-800">
-                      Beta — billing disabled
+                      {lang === 'ar' ? 'مرحلة تجريبية — الفوترة معطّلة' : 'Beta — billing disabled'}
                     </div>
                   </div>
                   <Badge className="bg-amber-100 text-amber-800 border-0 rounded-full">
-                    No payment required
+                    {lang === 'ar' ? 'لا يلزم الدفع' : 'No payment required'}
                   </Badge>
                 </div>
               </div>
               <div className="mt-6">
                 <Button asChild className="bg-slate-900 text-white rounded-xl">
-                  <Link to="/app/billing">View usage &amp; plans</Link>
+                  <Link to="/app/billing">{lang === 'ar' ? 'عرض الاستهلاك والخطط' : 'View usage & plans'}</Link>
                 </Button>
               </div>
             </Card>
@@ -384,20 +392,20 @@ const Settings = () => {
 
           {tab === 'security' && (
             <Card className="p-6 rounded-2xl border-slate-100">
-              <h3 className="font-display font-bold text-lg">Security</h3>
+              <h3 className="font-display font-bold text-lg">{t('settings.security.heading')}</h3>
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!currentPassword || !newPassword || !confirmPassword) {
-                    toast.error('Please fill in all password fields');
+                    toast.error(lang === 'ar' ? 'يرجى تعبئة جميع حقول كلمة المرور' : 'Please fill in all password fields');
                     return;
                   }
                   if (newPassword.length < 8) {
-                    toast.error('New password must be at least 8 characters');
+                    toast.error(lang === 'ar' ? 'يجب ألا تقلّ كلمة المرور الجديدة عن ٨ أحرف' : 'New password must be at least 8 characters');
                     return;
                   }
                   if (newPassword !== confirmPassword) {
-                    toast.error('New passwords do not match');
+                    toast.error(t('auth.reset.mismatch'));
                     return;
                   }
                   setChangingPassword(true);
@@ -406,13 +414,13 @@ const Settings = () => {
                       current_password: currentPassword,
                       new_password: newPassword,
                     });
-                    toast.success('Password changed successfully. Use the new password next time you sign in.');
+                    toast.success(t('settings.security.updated'));
                     setCurrentPassword('');
                     setNewPassword('');
                     setConfirmPassword('');
                   } catch (err) {
-                    const detail = err?.response?.data?.detail || 'Failed to change password';
-                    toast.error(typeof detail === 'string' ? detail : 'Failed to change password');
+                    const detail = err?.response?.data?.detail || (lang === 'ar' ? 'تعذّر تحديث كلمة المرور' : 'Failed to change password');
+                    toast.error(typeof detail === 'string' ? detail : (lang === 'ar' ? 'تعذّر تحديث كلمة المرور' : 'Failed to change password'));
                   } finally {
                     setChangingPassword(false);
                   }
@@ -420,7 +428,7 @@ const Settings = () => {
                 className="mt-6 space-y-4"
               >
                 <div className="space-y-2">
-                  <Label htmlFor="current-password">Current password</Label>
+                  <Label htmlFor="current-password">{t('settings.security.currentPassword')}</Label>
                   <PasswordInput
                     id="current-password"
                     autoComplete="current-password"
@@ -430,7 +438,7 @@ const Settings = () => {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="new-password">New password</Label>
+                  <Label htmlFor="new-password">{t('settings.security.newPassword')}</Label>
                   <PasswordInput
                     id="new-password"
                     autoComplete="new-password"
@@ -440,7 +448,7 @@ const Settings = () => {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="confirm-password">Confirm new password</Label>
+                  <Label htmlFor="confirm-password">{t('settings.security.confirmNewPassword')}</Label>
                   <PasswordInput
                     id="confirm-password"
                     autoComplete="new-password"
@@ -454,7 +462,7 @@ const Settings = () => {
                   disabled={changingPassword}
                   className="bg-slate-900 text-white rounded-xl"
                 >
-                  {changingPassword ? 'Updating...' : 'Update password'}
+                  {changingPassword ? t('common.loading') : t('settings.security.updateButton')}
                 </Button>
               </form>
             </Card>
