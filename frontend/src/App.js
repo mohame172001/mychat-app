@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useEffect } from 'react';
 import './App.css';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { I18nProvider } from './lib/i18n';
 import { Toaster } from './components/ui/sonner';
 import analytics from './lib/analytics';
 import { registerRoute, preloadAfterPaint } from './lib/routePreloader';
@@ -81,6 +82,7 @@ const ProtectedRoute = ({ children }) => {
 function App() {
   return (
     <div className="App">
+      <I18nProvider>
       <AuthProvider>
         <BrowserRouter>
           <Toaster position="top-right" />
@@ -112,6 +114,7 @@ function App() {
           </Suspense>
         </BrowserRouter>
       </AuthProvider>
+      </I18nProvider>
     </div>
   );
 }
