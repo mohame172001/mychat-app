@@ -233,7 +233,7 @@ const Settings = () => {
                   className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white"
                   data-testid="profile-save"
                 >
-                  {savingProfile ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> {t('common.loading')}</>) : t('common.saveChanges')}
+                  {savingProfile ? (<><Loader2 className="w-4 h-4 me-2 animate-spin" /> {t('common.loading')}</>) : t('common.saveChanges')}
                 </Button>
               </div>
             </Card>
@@ -241,8 +241,10 @@ const Settings = () => {
 
           {tab === 'instagram' && (
             <Card className="p-6 rounded-2xl border-slate-100">
-              <h3 className="font-display font-bold text-lg">Instagram Account</h3>
-              <p className="text-sm text-slate-500">Connect your Instagram Business account to enable automations.</p>
+              <h3 className="font-display font-bold text-lg">{lang === 'ar' ? 'حساب Instagram' : 'Instagram Account'}</h3>
+              <p className="text-sm text-slate-500">
+                {lang === 'ar' ? 'اربط حساب Instagram التجاري لتفعيل الأتمتات.' : 'Connect your Instagram Business account to enable automations.'}
+              </p>
 
               {user?.instagramConnected && user?.instagramConnectionValid ? (
                 <>
@@ -253,26 +255,29 @@ const Settings = () => {
                       </div>
                       <div className="flex-1">
                         <div className="font-semibold">{user.instagramHandle}</div>
-                        <div className="text-sm text-slate-600">Business account{user.instagramFollowers ? ` • ${user.instagramFollowers.toLocaleString()} followers` : ''}</div>
+                        <div className="text-sm text-slate-600">
+                          {lang === 'ar' ? 'حساب تجاري' : 'Business account'}
+                          {user.instagramFollowers ? ` • ${user.instagramFollowers.toLocaleString()} ${lang === 'ar' ? 'متابع' : 'followers'}` : ''}
+                        </div>
                       </div>
                       <Badge className="w-fit bg-emerald-100 text-emerald-700 border-0 rounded-full">
-                        <Check className="w-3 h-3 mr-1" /> Connected
+                        <Check className="w-3 h-3 me-1" /> {lang === 'ar' ? 'مربوط' : 'Connected'}
                       </Badge>
                     </div>
                   </div>
                   <div className="mt-6 flex justify-between flex-wrap gap-2">
                     <Button variant="outline" className="rounded-xl text-red-600 border-red-200 hover:bg-red-50" onClick={async () => {
-                      try { await api.post('/instagram/disconnect'); await refreshUser(); toast.success('Disconnected'); }
-                      catch { toast.error('Failed to disconnect'); }
-                    }}>Disconnect</Button>
+                      try { await api.post('/instagram/disconnect'); await refreshUser(); toast.success(lang === 'ar' ? 'تم فصل الحساب' : 'Disconnected'); }
+                      catch { toast.error(lang === 'ar' ? 'تعذّر فصل الحساب' : 'Failed to disconnect'); }
+                    }}>{lang === 'ar' ? 'فصل الحساب' : 'Disconnect'}</Button>
                     <div className="flex gap-2">
                       <Button onClick={async () => {
                         setIgConnecting(true);
                         try { await startInstagramConnect({ mode: 'reconnect', returnTo: '/app/settings?tab=instagram' }); }
                         catch (e) { toast.error(instagramConnectExceptionMessage(e)); setIgConnecting(false); }
                       }} variant="outline" className="rounded-xl" disabled={igConnecting}>
-                        {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                        Refresh Token
+                        {igConnecting ? <Loader2 className="w-4 h-4 me-2 animate-spin" /> : null}
+                        {lang === 'ar' ? 'تحديث الرمز' : 'Refresh Token'}
                       </Button>
                     </div>
                   </div>
@@ -285,27 +290,34 @@ const Settings = () => {
                         <Instagram className="w-6 h-6 text-slate-400" />
                       </div>
                       <div className="flex-1">
-                        <div className="font-semibold text-slate-500">No account connected</div>
+                        <div className="font-semibold text-slate-500">{lang === 'ar' ? 'لا يوجد حساب مربوط' : 'No account connected'}</div>
                         <div className="text-sm text-slate-400">
-                          {user?.instagramConnectionValid === false ? 'Reconnect Instagram to verify the access token' : 'Connect an Instagram Business or Creator account'}
+                          {user?.instagramConnectionValid === false
+                            ? (lang === 'ar' ? 'أعد ربط Instagram للتحقّق من رمز الوصول' : 'Reconnect Instagram to verify the access token')
+                            : (lang === 'ar' ? 'اربط حساب Instagram تجاري أو إبداعي' : 'Connect an Instagram Business or Creator account')}
                         </div>
                       </div>
                       <Badge className="w-fit bg-slate-100 text-slate-500 border-0 rounded-full">
-                        <AlertCircle className="w-3 h-3 mr-1" /> Not connected
+                        <AlertCircle className="w-3 h-3 me-1" /> {lang === 'ar' ? 'غير مربوط' : 'Not connected'}
                       </Badge>
                     </div>
                   </div>
                   <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-700">
-                    <strong>Requirements:</strong> You need an Instagram Business or Creator account. The app verifies Graph <code className="bg-amber-100 px-1 rounded">/me</code> before showing the account as connected.
+                    <strong>{lang === 'ar' ? 'المتطلّبات:' : 'Requirements:'}</strong>{' '}
+                    {lang === 'ar'
+                      ? <>تحتاج حساب Instagram تجاري أو إبداعي. يتحقّق التطبيق من <code className="bg-amber-100 px-1 rounded">/me</code> في Graph قبل اعتبار الحساب مربوطاً.</>
+                      : <>You need an Instagram Business or Creator account. The app verifies Graph <code className="bg-amber-100 px-1 rounded">/me</code> before showing the account as connected.</>}
                   </div>
                   <div className="mt-6 flex justify-end">
                     <Button onClick={async () => {
                       setIgConnecting(true);
                       try { await startInstagramConnect({ mode: instagramReconnectMode, returnTo: '/app/settings?tab=instagram' }); }
-                      catch (e) { toast.error(instagramConnectExceptionMessage(e, 'Failed - check IG_APP_ID/IG_APP_SECRET in .env')); setIgConnecting(false); }
+                      catch (e) { toast.error(instagramConnectExceptionMessage(e, lang === 'ar' ? 'فشل العملية — تحقّق من IG_APP_ID/IG_APP_SECRET' : 'Failed - check IG_APP_ID/IG_APP_SECRET in .env')); setIgConnecting(false); }
                     }} className="w-full bg-slate-900 text-white rounded-xl sm:w-auto" disabled={igConnecting}>
-                      {igConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Instagram className="w-4 h-4 mr-2" />}
-                      {instagramReconnectMode === 'reconnect' ? 'Reconnect Instagram' : 'Connect Instagram'}
+                      {igConnecting ? <Loader2 className="w-4 h-4 me-2 animate-spin" /> : <Instagram className="w-4 h-4 me-2" />}
+                      {instagramReconnectMode === 'reconnect'
+                        ? (lang === 'ar' ? 'إعادة ربط Instagram' : 'Reconnect Instagram')
+                        : (lang === 'ar' ? 'ربط Instagram' : 'Connect Instagram')}
                     </Button>
                   </div>
 

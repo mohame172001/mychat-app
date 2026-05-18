@@ -62,7 +62,7 @@ const Topbar = () => {
         </Badge>
         <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-10" asChild>
           <Link to="/app/automations">
-            <Plus className="w-4 h-4 mr-1.5" /> {t('topbar.newAutomation')}
+            <Plus className="w-4 h-4 me-1.5" /> {t('topbar.newAutomation')}
           </Link>
         </Button>
       </div>

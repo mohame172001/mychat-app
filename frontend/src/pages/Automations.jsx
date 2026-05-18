@@ -58,7 +58,7 @@ const OptionRow = ({ active, title, children, onClick }) => (
         onClick();
       }
     }}
-    className={`w-full rounded-lg px-3 py-2.5 text-left transition ${
+    className={`w-full rounded-lg px-3 py-2.5 text-start transition ${
       active ? 'bg-white ring-2 ring-blue-500' : 'bg-slate-100 hover:bg-slate-50'
     }`}
   >
@@ -164,7 +164,7 @@ const AutomationPhonePreview = ({
                     <Heart className="h-6 w-6" />
                     <MessageCircle className="h-6 w-6" />
                     <SendIcon className="h-6 w-6" />
-                    <Bookmark className="ml-auto h-6 w-6" />
+                    <Bookmark className="ms-auto h-6 w-6" />
                   </div>
                   <div className="text-xs font-bold">{ar ? '14 إعجاباً' : '14 likes'}</div>
                   <div className="line-clamp-2 text-xs" dir="auto">
@@ -207,7 +207,7 @@ const AutomationPhonePreview = ({
             {previewTab === 'DM' && (
               <div className="min-h-[360px] px-4 py-4">
                 <div className="mb-5 text-center font-bold">{ar ? 'الرسائل الخاصة' : 'DM'}</div>
-                <div className="ml-auto max-w-[82%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm">
+                <div className="ms-auto max-w-[82%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm">
                   {commentText}
                 </div>
                 {openingDmText && (
@@ -221,7 +221,7 @@ const AutomationPhonePreview = ({
                   </div>
                 )}
                 {openingDmButtonText && (followRequestEnabled || linkDmText || linkUrl) && (
-                  <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(openingDmButtonText)}>
+                  <div className="ms-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(openingDmButtonText)}>
                     {openingDmButtonText}
                   </div>
                 )}
@@ -233,7 +233,7 @@ const AutomationPhonePreview = ({
                     <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
                       {followRequestButtonText}
                     </div>
-                    <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
+                    <div className="ms-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
                       {followRequestButtonText}
                     </div>
                   </>
@@ -264,7 +264,7 @@ const AutomationPhonePreview = ({
                     <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
                       {followRequestButtonText}
                     </div>
-                    <div className="ml-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
+                    <div className="ms-auto mt-3 max-w-[78%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm" style={autoDirStyle(followRequestButtonText)}>
                       {followRequestButtonText}
                     </div>
                     <div className="mt-3 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followNotDetectedMessage || '')}>
@@ -920,14 +920,14 @@ const Automations = () => {
               setEditingAutomation(null);
               setBuilderOpen(false);
             }}>
-              <ArrowLeft className="mr-2 h-4 w-4" /> {ar ? 'رجوع' : 'Back'}
+              <ArrowLeft className="me-2 h-4 w-4" /> {ar ? 'رجوع' : 'Back'}
             </Button>
             <Button
               onClick={submit}
               disabled={!canGoLive() || saving}
               className="rounded-lg bg-slate-950 px-5 text-white hover:bg-slate-800"
             >
-              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {saving && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
               {editingAutomation
                 ? (ar ? 'حفظ التغييرات' : 'Save Changes')
                 : (ar ? 'تفعيل الأتمتة' : 'Go Live')}
@@ -1341,11 +1341,11 @@ const Automations = () => {
             className="rounded-lg"
             data-testid="automations-refresh"
           >
-            {refreshing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+            {refreshing && <Loader2 className="me-1.5 h-4 w-4 animate-spin" />}
             {t('common.refresh')}
           </Button>
           <Button onClick={openBuilder} className="rounded-lg bg-slate-900 text-white hover:bg-slate-800">
-            <Plus className="mr-1.5 h-4 w-4" /> {t('common.createAutomation')}
+            <Plus className="me-1.5 h-4 w-4" /> {t('common.createAutomation')}
           </Button>
         </div>
       </div>
@@ -1358,12 +1358,12 @@ const Automations = () => {
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <div className="relative min-w-[240px] max-w-sm flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <Input
             placeholder={t('automations.searchPlaceholder')}
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="h-10 rounded-lg bg-white pl-9"
+            className="h-10 rounded-lg bg-white ps-9"
           />
         </div>
         <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1">

@@ -4,6 +4,7 @@ import { ArrowLeft, CheckCircle2, MessageCircle, Send } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import api from '../lib/api';
+import { useTranslation } from '../lib/i18n';
 
 const SUPPORT_EMAIL = 'mm.mohame172000@gmail.com';
 
@@ -16,6 +17,8 @@ function useConfirmationCode() {
 }
 
 const DataDeletion = () => {
+  const { lang } = useTranslation();
+  const ar = lang === 'ar';
   const confirmationCode = useConfirmationCode();
   const [email, setEmail] = useState('');
   const [details, setDetails] = useState('');
@@ -36,7 +39,9 @@ const DataDeletion = () => {
       });
       setResult(data);
     } catch (_) {
-      setError('We could not submit the request online. Please email support using the instructions below.');
+      setError(ar
+        ? 'تعذّر إرسال الطلب عبر الإنترنت. يرجى مراسلة الدعم وفق التعليمات أدناه.'
+        : 'We could not submit the request online. Please email support using the instructions below.');
     } finally {
       setSubmitting(false);
     }
@@ -53,48 +58,52 @@ const DataDeletion = () => {
             <span className="text-xl font-bold tracking-tight">mychat</span>
           </Link>
           <Link to="/" className="text-sm font-medium text-slate-600 hover:text-slate-900 flex items-center gap-1">
-            <ArrowLeft className="w-4 h-4" /> Back
+            <ArrowLeft className="w-4 h-4" /> {ar ? 'رجوع' : 'Back'}
           </Link>
         </div>
       </nav>
 
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
-        <h1 className="text-4xl font-bold tracking-tight mb-2">Data Deletion</h1>
-        <p className="text-sm text-slate-500 mb-10">Request deletion of your MyChat account data and connected Instagram data.</p>
+        <h1 className="text-4xl font-bold tracking-tight mb-2">{ar ? 'حذف البيانات' : 'Data Deletion'}</h1>
+        <p className="text-sm text-slate-500 mb-10">
+          {ar ? 'اطلب حذف بيانات حسابك في مايتشات وبيانات Instagram المرتبطة به.' : 'Request deletion of your MyChat account data and connected Instagram data.'}
+        </p>
 
         {confirmationCode && (
           <div className="mb-8 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-            <CheckCircle2 className="inline w-4 h-4 mr-1" />
-            Data deletion callback received. Confirmation code: <span className="font-mono">{confirmationCode}</span>
+            <CheckCircle2 className="inline w-4 h-4 me-1" />
+            {ar ? 'تم استلام طلب حذف البيانات. رمز التأكيد: ' : 'Data deletion callback received. Confirmation code: '}
+            <span className="font-mono">{confirmationCode}</span>
           </div>
         )}
 
         <div className="space-y-8 text-slate-700 leading-relaxed">
           <section>
-            <h2 className="text-2xl font-semibold text-slate-900 mb-3">What will be deleted</h2>
+            <h2 className="text-2xl font-semibold text-slate-900 mb-3">{ar ? 'ما سيتمّ حذفه' : 'What will be deleted'}</h2>
             <p>
-              When your request is verified, we delete or anonymize your MyChat account profile, connected Instagram
-              account records, automation rules, comment/DM processing records, usage records tied to your account,
-              and stored access tokens. We stop new Instagram data ingestion when the account is deleted or Instagram
-              is disconnected.
+              {ar
+                ? 'عند التحقّق من طلبك، نحذف أو نُجهِّل ملفّ حسابك في مايتشات، وسجلّات حساب Instagram المربوط، وقواعد الأتمتة، وسجلّات معالجة التعليقات والرسائل، وسجلّات الاستخدام المرتبطة بحسابك، ورموز الوصول المخزّنة. نتوقّف عن استلام بيانات Instagram الجديدة فور حذف الحساب أو فصل Instagram.'
+                : 'When your request is verified, we delete or anonymize your MyChat account profile, connected Instagram account records, automation rules, comment/DM processing records, usage records tied to your account, and stored access tokens. We stop new Instagram data ingestion when the account is deleted or Instagram is disconnected.'}
             </p>
           </section>
 
           <section>
-            <h2 className="text-2xl font-semibold text-slate-900 mb-3">How to request deletion</h2>
+            <h2 className="text-2xl font-semibold text-slate-900 mb-3">{ar ? 'كيفية طلب الحذف' : 'How to request deletion'}</h2>
             <p>
-              Send an email to <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>
-              {' '}from the email address associated with your MyChat account with the subject "Data Deletion Request".
-              We confirm receipt within 72 hours and complete verified deletion requests within 30 days.
+              {ar ? 'أرسل بريداً إلكترونياً إلى ' : 'Send an email to '}
+              <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>
+              {ar
+                ? ' من البريد المرتبط بحسابك في مايتشات بعنوان "Data Deletion Request". سنؤكّد الاستلام خلال 72 ساعة ونُكمل طلبات الحذف الموثّقة خلال 30 يوماً.'
+                : ' from the email address associated with your MyChat account with the subject "Data Deletion Request". We confirm receipt within 72 hours and complete verified deletion requests within 30 days.'}
             </p>
           </section>
 
           <section className="rounded-2xl border border-slate-200 p-5">
-            <h2 className="text-xl font-semibold text-slate-900 mb-3">Submit a deletion request</h2>
+            <h2 className="text-xl font-semibold text-slate-900 mb-3">{ar ? 'إرسال طلب حذف' : 'Submit a deletion request'}</h2>
             <form onSubmit={submit} className="space-y-4">
               <div>
                 <label htmlFor="deletion-email" className="block text-sm font-medium text-slate-700 mb-1">
-                  Account email
+                  {ar ? 'بريد الحساب' : 'Account email'}
                 </label>
                 <Input
                   id="deletion-email"
@@ -107,7 +116,7 @@ const DataDeletion = () => {
               </div>
               <div>
                 <label htmlFor="deletion-details" className="block text-sm font-medium text-slate-700 mb-1">
-                  Optional details
+                  {ar ? 'تفاصيل إضافية (اختياري)' : 'Optional details'}
                 </label>
                 <textarea
                   id="deletion-details"
@@ -115,17 +124,20 @@ const DataDeletion = () => {
                   onChange={(e) => setDetails(e.target.value)}
                   maxLength={500}
                   className="w-full min-h-24 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-900/10"
-                  placeholder="Add context if needed. Do not paste passwords or tokens."
+                  placeholder={ar ? 'أضف توضيحاً إذا لزم. لا تُلصق كلمات مرور أو رموز.' : 'Add context if needed. Do not paste passwords or tokens.'}
                 />
               </div>
               <Button type="submit" disabled={submitting} className="rounded-xl">
-                <Send className="w-4 h-4 mr-2" />
-                {submitting ? 'Submitting...' : 'Submit request'}
+                <Send className="w-4 h-4 me-2" />
+                {submitting
+                  ? (ar ? 'جارٍ الإرسال...' : 'Submitting...')
+                  : (ar ? 'إرسال الطلب' : 'Submit request')}
               </Button>
             </form>
             {result?.confirmation_code && (
               <p className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-700">
-                Request received. Confirmation code: <span className="font-mono">{result.confirmation_code}</span>
+                {ar ? 'تمّ استلام الطلب. رمز التأكيد: ' : 'Request received. Confirmation code: '}
+                <span className="font-mono">{result.confirmation_code}</span>
               </p>
             )}
             {error && (
@@ -134,11 +146,15 @@ const DataDeletion = () => {
           </section>
 
           <section>
-            <h2 className="text-2xl font-semibold text-slate-900 mb-3">Meta data deletion callback</h2>
+            <h2 className="text-2xl font-semibold text-slate-900 mb-3">{ar ? 'استدعاء حذف بيانات Meta' : 'Meta data deletion callback'}</h2>
             <p>
-              Meta App Review can use the backend callback endpoint at <span className="font-mono">/api/meta/data-deletion</span>.
-              The endpoint returns a confirmation code and this public status page URL. It stores only hashed request
-              metadata and does not expose stored user data.
+              {ar
+                ? 'يمكن لمراجعة تطبيقات Meta استخدام نقطة النهاية الخلفية '
+                : 'Meta App Review can use the backend callback endpoint at '}
+              <span className="font-mono">/api/meta/data-deletion</span>
+              {ar
+                ? '. تُعيد نقطة النهاية رمز تأكيد ورابط صفحة الحالة هذه. تُخزَّن بيانات وصفية مُشفّرة فقط ولا تُكشف أي بيانات مستخدم.'
+                : '. The endpoint returns a confirmation code and this public status page URL. It stores only hashed request metadata and does not expose stored user data.'}
             </p>
           </section>
         </div>
@@ -146,11 +162,11 @@ const DataDeletion = () => {
 
       <footer className="border-t border-slate-100 py-8">
         <div className="max-w-4xl mx-auto px-6 flex items-center justify-between text-sm text-slate-500">
-          <span>Copyright 2026 mychat</span>
+          <span>© 2026 mychat</span>
           <div className="flex gap-6">
-            <Link to="/privacy" className="hover:text-slate-900">Privacy</Link>
-            <Link to="/terms" className="hover:text-slate-900">Terms</Link>
-            <Link to="/data-deletion" className="hover:text-slate-900">Data Deletion</Link>
+            <Link to="/privacy" className="hover:text-slate-900">{ar ? 'الخصوصية' : 'Privacy'}</Link>
+            <Link to="/terms" className="hover:text-slate-900">{ar ? 'الشروط' : 'Terms'}</Link>
+            <Link to="/data-deletion" className="hover:text-slate-900">{ar ? 'حذف البيانات' : 'Data Deletion'}</Link>
           </div>
         </div>
       </footer>

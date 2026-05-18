@@ -95,7 +95,7 @@ const Landing = () => {
         <div className="max-w-6xl mx-auto relative">
           <div className="text-center animate-fade-up">
             <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-blue-100 rounded-full px-4 py-1.5 mb-6">
-              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+              <Sparkles className="w-3.5 h-3.5 me-1.5" />
               {t('landing.hero.badge')}
             </Badge>
             <h1 className="font-display text-4xl sm:text-6xl md:text-7xl font-extrabold leading-[1.05] tracking-tight">
@@ -108,7 +108,7 @@ const Landing = () => {
             <div className="mt-10 flex items-center justify-center gap-3 flex-wrap">
               <Link to="/signup">
                 <Button size="lg" className="bg-slate-900 hover:bg-slate-800 text-white rounded-full px-8 h-14 text-base">
-                  {t('landing.hero.cta')} <ArrowRight className="ml-2 w-4 h-4" />
+                  {t('landing.hero.cta')} <ArrowRight className="ms-2 w-4 h-4" />
                 </Button>
               </Link>
               <Link to="/status">
@@ -208,7 +208,7 @@ const Landing = () => {
             <p className="mt-4 text-lg text-slate-300 max-w-xl mx-auto">{t('landing.cta.body')}</p>
             <Link to="/signup">
               <Button size="lg" className="mt-8 bg-white text-slate-900 hover:bg-slate-100 rounded-full px-8 h-14">
-                {t('landing.cta.button')} <ArrowRight className="ml-2 w-4 h-4" />
+                {t('landing.cta.button')} <ArrowRight className="ms-2 w-4 h-4" />
               </Button>
             </Link>
           </div>
@@ -222,7 +222,7 @@ const Landing = () => {
               <MessageCircle className="w-4 h-4 text-white" strokeWidth={2.5} />
             </div>
             <span className="font-bold font-display">{t('common.brand')}</span>
-            <span className="text-sm text-slate-500 ml-2">{t('common.copyright')}</span>
+            <span className="text-sm text-slate-500 ms-2">{t('common.copyright')}</span>
           </div>
           <div className="flex gap-6 text-sm text-slate-500 items-center flex-wrap">
             <Link to="/status" className="hover:text-slate-900">{t('landing.nav.status')}</Link>

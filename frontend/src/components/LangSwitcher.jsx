@@ -96,7 +96,7 @@ export default function LangSwitcher({ variant = 'chip', className = '' }) {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 mt-2 w-44 rounded-xl border border-slate-100 bg-white shadow-xl z-50 overflow-hidden"
+          className="absolute end- mt-2 w-44 rounded-xl border border-slate-100 bg-white shadow-xl z-50 overflow-hidden"
         >
           {SUPPORTED_LANGS.map((code) => {
             const meta = LANG_META[code];
@@ -109,7 +109,7 @@ export default function LangSwitcher({ variant = 'chip', className = '' }) {
                 role="menuitemradio"
                 aria-checked={active}
                 onClick={() => onPick(code)}
-                className={`flex items-center gap-3 w-full px-3 py-2 text-sm text-left transition ${
+                className={`flex items-center gap-3 w-full px-3 py-2 text-sm text-start transition ${
                   active ? 'bg-slate-50 text-slate-900' : 'text-slate-700 hover:bg-slate-50'
                 }`}
               >

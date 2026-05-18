@@ -8,6 +8,7 @@ import {
 import api from '../lib/api';
 import { toast } from 'sonner';
 import { loadFrontendRuntimeStatus } from '../lib/frontendRuntimeStatus';
+import { useTranslation } from '../lib/i18n';
 
 /**
  * Authenticated operations health page.
@@ -34,15 +35,15 @@ function ageSeconds(iso) {
   return Math.max(0, Math.round((Date.now() - t) / 1000));
 }
 
-function statusOf(task) {
-  if (!task) return { tone: 'slate', label: 'unknown' };
+function statusOf(task, ar) {
+  if (!task) return { tone: 'slate', label: ar ? 'غير معروف' : 'unknown' };
   if (!task.running) {
-    return { tone: 'rose', label: 'stopped' };
+    return { tone: 'rose', label: ar ? 'متوقّفة' : 'stopped' };
   }
   if ((task.consecutive_failures || 0) >= 3) {
-    return { tone: 'orange', label: 'degraded' };
+    return { tone: 'orange', label: ar ? 'تعمل بصعوبة' : 'degraded' };
   }
-  return { tone: 'emerald', label: 'running' };
+  return { tone: 'emerald', label: ar ? 'تعمل' : 'running' };
 }
 
 function StatusDot({ tone }) {
@@ -69,6 +70,8 @@ function Section({ title, icon: Icon, children, hint }) {
 }
 
 const SystemHealth = () => {
+  const { lang } = useTranslation();
+  const ar = lang === 'ar';
   const [data, setData] = useState(null);
   const [observability, setObservability] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -84,8 +87,8 @@ const SystemHealth = () => {
       setRefreshedAt(new Date());
     } catch (err) {
       console.error('[SystemHealth] load failed', err);
-      setError(err?.response?.data?.detail || 'Failed to load system health');
-      toast.error('Failed to load system health');
+      setError(err?.response?.data?.detail || (ar ? 'تعذّر تحميل حالة النظام' : 'Failed to load system health'));
+      toast.error(ar ? 'تعذّر تحميل حالة النظام' : 'Failed to load system health');
     } finally {
       setLoading(false);
     }
@@ -121,89 +124,89 @@ const SystemHealth = () => {
     <div className="p-4 sm:p-6 max-w-5xl mx-auto">
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-3xl font-bold font-display">System Health</h1>
+          <h1 className="text-3xl font-bold font-display">{ar ? 'حالة النظام' : 'System Health'}</h1>
           <p className="text-slate-500 mt-1 text-sm">
-            Live operations status. Tokens and message bodies are never shown.
+            {ar ? 'حالة التشغيل المباشرة. لا تظهر هنا أي رموز أو محتوى رسائل.' : 'Live operations status. Tokens and message bodies are never shown.'}
           </p>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-slate-400">
-            Auto-refresh: 30s {refreshedAt && <>• last {fmtTime(refreshedAt)}</>}
+            {ar ? 'تحديث تلقائي: 30 ثانية' : 'Auto-refresh: 30s'} {refreshedAt && <>• {ar ? 'آخر تحديث' : 'last'} {fmtTime(refreshedAt)}</>}
           </span>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
+            {ar ? 'تحديث' : 'Refresh'}
           </Button>
         </div>
       </div>
 
       {error && (
         <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-          <AlertTriangle className="inline w-4 h-4 mr-1" />
+          <AlertTriangle className="inline w-4 h-4 me-1" />
           {error}
         </div>
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Section title="Webhook" icon={Webhook}>
+        <Section title={ar ? 'الـWebhook' : 'Webhook'} icon={Webhook}>
           <div className="space-y-2 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Last received</span>
+              <span className="text-slate-500">{ar ? 'آخر استلام' : 'Last received'}</span>
               <span className="font-mono text-slate-700">
                 {fmtTime(webhook.last_received_at)}
                 {webhookAgeRecv !== null && (
-                  <span className="text-xs text-slate-400 ml-2">({webhookAgeRecv}s ago)</span>
+                  <span className="text-xs text-slate-400 ms-2">{ar ? `(منذ ${webhookAgeRecv} ث)` : `(${webhookAgeRecv}s ago)`}</span>
                 )}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Last processed</span>
+              <span className="text-slate-500">{ar ? 'آخر معالجة' : 'Last processed'}</span>
               <span className="font-mono text-slate-700">
                 {fmtTime(webhook.last_processed_at)}
                 {webhookAgeProc !== null && (
-                  <span className="text-xs text-slate-400 ml-2">({webhookAgeProc}s ago)</span>
+                  <span className="text-xs text-slate-400 ms-2">{ar ? `(منذ ${webhookAgeProc} ث)` : `(${webhookAgeProc}s ago)`}</span>
                 )}
               </span>
             </div>
           </div>
         </Section>
 
-        <Section title="Instagram connection" icon={Activity}>
+        <Section title={ar ? 'ربط Instagram' : 'Instagram connection'} icon={Activity}>
           {accounts.length === 0 && (
-            <div className="text-sm text-slate-500">No active Instagram account.</div>
+            <div className="text-sm text-slate-500">{ar ? 'لا يوجد حساب Instagram نشط.' : 'No active Instagram account.'}</div>
           )}
           {accounts.map((a, i) => (
             <div key={i} className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">Active account</span>
+                <span className="text-slate-500">{ar ? 'الحساب النشط' : 'Active account'}</span>
                 <span className="font-mono text-slate-700">
                   {a.instagramAccountId || '—'}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">Connection</span>
+                <span className="text-slate-500">{ar ? 'الاتصال' : 'Connection'}</span>
                 <span className="flex items-center gap-2">
                   {a.instagramConnected && a.connectionValid
-                    ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> valid</>
-                    : <><XCircle className="w-4 h-4 text-rose-500" /> reconnect required</>}
+                    ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> {ar ? 'صالح' : 'valid'}</>
+                    : <><XCircle className="w-4 h-4 text-rose-500" /> {ar ? 'يلزم إعادة الربط' : 'reconnect required'}</>}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">Token present</span>
-                <span>{a.tokenPresent ? 'yes' : 'no'}</span>
+                <span className="text-slate-500">{ar ? 'الرمز متوفّر' : 'Token present'}</span>
+                <span>{a.tokenPresent ? (ar ? 'نعم' : 'yes') : (ar ? 'لا' : 'no')}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">Auth method</span>
+                <span className="text-slate-500">{ar ? 'طريقة المصادقة' : 'Auth method'}</span>
                 <span className="font-mono">{a.auth_kind || '—'}</span>
               </div>
             </div>
           ))}
         </Section>
 
-        <Section title="Background tasks" icon={Cpu} hint="poller, watchdog, follow-verifier">
+        <Section title={ar ? 'المهام الخلفية' : 'Background tasks'} icon={Cpu} hint={ar ? 'الـpoller والـwatchdog ومُتحقّق المتابعة' : 'poller, watchdog, follow-verifier'}>
           <div className="space-y-2">
             {Object.entries(tasks).map(([name, t]) => {
-              const s = statusOf(t);
+              const s = statusOf(t, ar);
               return (
                 <div key={name} className="flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2">
@@ -212,27 +215,27 @@ const SystemHealth = () => {
                     <Badge className="bg-slate-100 text-slate-700 border-0 text-[10px]">{s.label}</Badge>
                   </span>
                   <span className="text-xs text-slate-500">
-                    restarts: {t.restarts || 0} • fails: {t.consecutive_failures || 0}
+                    {ar ? `إعادات: ${t.restarts || 0} • إخفاقات: ${t.consecutive_failures || 0}` : `restarts: ${t.restarts || 0} • fails: ${t.consecutive_failures || 0}`}
                   </span>
                 </div>
               );
             })}
             {Object.keys(tasks).length === 0 && (
-              <div className="text-sm text-slate-500">No background tasks reported.</div>
+              <div className="text-sm text-slate-500">{ar ? 'لا توجد مهام خلفية مُسجّلة.' : 'No background tasks reported.'}</div>
             )}
           </div>
         </Section>
 
-        <Section title="Comment-DM job queue" icon={Database}>
+        <Section title={ar ? 'طابور رسائل التعليقات' : 'Comment-DM job queue'} icon={Database}>
           <div className="space-y-2 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Pending</span>
+              <span className="text-slate-500">{ar ? 'في الانتظار' : 'Pending'}</span>
               <span className="font-mono text-slate-700">
                 {jobs.pending_comment_dm_sessions ?? 0}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Failed</span>
+              <span className="text-slate-500">{ar ? 'فشل' : 'Failed'}</span>
               <span className="font-mono text-slate-700">
                 {jobs.failed_comment_dm_sessions ?? 0}
               </span>
@@ -240,69 +243,69 @@ const SystemHealth = () => {
           </div>
         </Section>
 
-        <Section title="Configuration" icon={Clock}>
+        <Section title={ar ? 'الإعدادات' : 'Configuration'} icon={Clock}>
           <div className="space-y-2 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Comment poller interval</span>
+              <span className="text-slate-500">{ar ? 'فترة فحص التعليقات' : 'Comment poller interval'}</span>
               <span className="font-mono text-slate-700">
-                {config.comment_poller_interval_seconds ?? '—'}s
+                {config.comment_poller_interval_seconds ?? '—'}{ar ? ' ث' : 's'}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Comment poller enabled</span>
-              <span>{config.comment_poller_enabled ? 'yes' : 'no'}</span>
+              <span className="text-slate-500">{ar ? 'فاحص التعليقات مُفعّل' : 'Comment poller enabled'}</span>
+              <span>{config.comment_poller_enabled ? (ar ? 'نعم' : 'yes') : (ar ? 'لا' : 'no')}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Follow verifier interval</span>
+              <span className="text-slate-500">{ar ? 'فترة التحقّق من المتابعة' : 'Follow verifier interval'}</span>
               <span className="font-mono text-slate-700">
-                {config.follow_verifier_interval_seconds ?? '—'}s
+                {config.follow_verifier_interval_seconds ?? '—'}{ar ? ' ث' : 's'}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Watchdog interval</span>
+              <span className="text-slate-500">{ar ? 'فترة الـwatchdog' : 'Watchdog interval'}</span>
               <span className="font-mono text-slate-700">
-                {config.watchdog_interval_seconds ?? '—'}s
+                {config.watchdog_interval_seconds ?? '—'}{ar ? ' ث' : 's'}
               </span>
             </div>
           </div>
         </Section>
 
-        <Section title="Observability" icon={Activity} hint="Sentry + PostHog">
+        <Section title={ar ? 'المراقبة' : 'Observability'} icon={Activity} hint="Sentry + PostHog">
           <div className="space-y-2 text-sm" data-testid="observability-section">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Backend Sentry</span>
+              <span className="text-slate-500">{ar ? 'Sentry (الخلفية)' : 'Backend Sentry'}</span>
               <span className="flex items-center gap-2">
                 {observability?.backend?.sentry_configured
-                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
-                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> {ar ? 'مُهيّأ' : 'configured'}</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> {ar ? 'غير مُهيّأ' : 'not configured'}</>}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Frontend Sentry</span>
+              <span className="text-slate-500">{ar ? 'Sentry (الواجهة)' : 'Frontend Sentry'}</span>
               <span className="flex items-center gap-2">
                 {observability?.frontend_runtime?.sentry_configured
-                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
-                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> {ar ? 'مُهيّأ' : 'configured'}</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> {ar ? 'غير مُهيّأ' : 'not configured'}</>}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">PostHog (frontend)</span>
+              <span className="text-slate-500">{ar ? 'PostHog (الواجهة)' : 'PostHog (frontend)'}</span>
               <span className="flex items-center gap-2">
                 {observability?.frontend_runtime?.posthog_configured
-                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> configured</>
-                  : <><XCircle className="w-4 h-4 text-slate-400" /> not configured</>}
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> {ar ? 'مُهيّأ' : 'configured'}</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> {ar ? 'غير مُهيّأ' : 'not configured'}</>}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Google Sign-In configured</span>
+              <span className="text-slate-500">{ar ? 'تسجيل الدخول عبر Google مُهيّأ' : 'Google Sign-In configured'}</span>
               <span className="flex items-center gap-2" data-testid="google-signin-configured">
                 {observability?.frontend_runtime?.google_sign_in_configured
-                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> yes</>
-                  : <><XCircle className="w-4 h-4 text-slate-400" /> no</>}
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /> {ar ? 'نعم' : 'yes'}</>
+                  : <><XCircle className="w-4 h-4 text-slate-400" /> {ar ? 'لا' : 'no'}</>}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Google config request</span>
+              <span className="text-slate-500">{ar ? 'طلب إعدادات Google' : 'Google config request'}</span>
               <span className="font-mono text-xs text-slate-700" data-testid="google-config-request-status">
                 {observability?.frontend_runtime?.google_config_request_attempted ? 'attempted' : 'not_attempted'}
                 {' / '}
@@ -314,25 +317,25 @@ const SystemHealth = () => {
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Environment</span>
+              <span className="text-slate-500">{ar ? 'البيئة' : 'Environment'}</span>
               <span className="font-mono text-slate-700">
                 {observability?.backend?.environment || '—'}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Backend build sha</span>
+              <span className="text-slate-500">{ar ? 'بصمة بناء الخلفية' : 'Backend build sha'}</span>
               <span className="font-mono text-slate-700">
                 {observability?.backend?.build_sha || '—'}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-slate-500">Frontend build sha</span>
+              <span className="text-slate-500">{ar ? 'بصمة بناء الواجهة' : 'Frontend build sha'}</span>
               <span className="font-mono text-slate-700">
                 {observability?.frontend_runtime?.build_sha || '—'}
               </span>
             </div>
             <p className="text-xs text-slate-400 pt-2 border-t border-slate-100">
-              DSN values and API keys are never returned by the API or rendered here.
+              {ar ? 'لا يتم إرجاع قيم DSN أو مفاتيح الـAPI من الخادم ولا تُعرض هنا أبداً.' : 'DSN values and API keys are never returned by the API or rendered here.'}
             </p>
           </div>
         </Section>

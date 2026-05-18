@@ -60,7 +60,8 @@ export const filterDisplayableInstagramAccounts = (payload) => (
 
 const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
+  const ar = lang === 'ar';
   const navigate = useNavigate();
   const accountsCacheKey = `instagram-accounts:${user?.id || 'anon'}`;
   const [instagramAccounts, setInstagramAccounts] = useState(() => (
@@ -127,8 +128,10 @@ const Sidebar = () => {
     ? 'add_account'
     : ((user?.instagramConnectionValid === false || user?.instagramHandle) ? 'reconnect' : 'connect');
   const connectLabel = instagramAccounts.length > 0
-    ? 'Connect another account'
-    : (connectMode === 'reconnect' ? 'Reconnect Instagram' : 'Connect Instagram');
+    ? (ar ? 'ربط حساب آخر' : 'Connect another account')
+    : (connectMode === 'reconnect'
+        ? (ar ? 'إعادة ربط Instagram' : 'Reconnect Instagram')
+        : (ar ? 'ربط Instagram' : 'Connect Instagram'));
 
   const switchInstagramAccount = async (account) => {
     if (!account?.id || account.isCurrent || switchingAccount) return;
@@ -169,7 +172,9 @@ const Sidebar = () => {
       // visible to the user.
       const refreshPromise = refreshUser?.();
       refreshPromise?.then((u) => scheduleCoreAppWarmup(u || user));
-      toast.success(`Switched to @${account.username || account.instagramAccountId}`);
+      toast.success(ar
+        ? `تم التبديل إلى @${account.username || account.instagramAccountId}`
+        : `Switched to @${account.username || account.instagramAccountId}`);
       navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {
       // Roll back the optimistic flip on failure so the dropdown
@@ -179,7 +184,7 @@ const Sidebar = () => {
         active: a.id === previousActive?.id,
         isCurrent: a.id === previousActive?.id,
       })));
-      toast.error(e?.response?.data?.detail || 'Failed to switch Instagram account');
+      toast.error(e?.response?.data?.detail || (ar ? 'تعذّر تبديل حساب Instagram' : 'Failed to switch Instagram account'));
     }
     setSwitchingAccount(false);
   };
@@ -191,7 +196,7 @@ const Sidebar = () => {
     try {
       await startInstagramConnect({ mode: connectMode, returnTo: '/app' });
     } catch (e) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Failed to start Instagram connection');
+      toast.error(e?.response?.data?.detail || e?.message || (ar ? 'تعذّر بدء ربط Instagram' : 'Failed to start Instagram connection'));
       setSwitchingAccount(false);
     }
   };
@@ -234,7 +239,7 @@ const Sidebar = () => {
       <div className="p-4 border-t border-slate-100 space-y-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-left transition hover:bg-slate-100">
+            <button className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-start transition hover:bg-slate-100">
               {currentAccountAvatar ? (
                 <img
                   src={currentAccountAvatar}
@@ -248,18 +253,18 @@ const Sidebar = () => {
               )}
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold truncate">
-                  {currentAccountName || 'No Instagram account'}
+                  {currentAccountName || (ar ? 'لا يوجد حساب Instagram' : 'No Instagram account')}
                 </div>
               </div>
               <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="w-64">
-            <DropdownMenuLabel>Instagram accounts</DropdownMenuLabel>
+            <DropdownMenuLabel>{ar ? 'حسابات Instagram' : 'Instagram accounts'}</DropdownMenuLabel>
             <DropdownMenuSeparator />
             {instagramAccounts.length === 0 && (
               <DropdownMenuItem disabled>
-                <Instagram className="h-4 w-4" /> No account connected
+                <Instagram className="h-4 w-4" /> {ar ? 'لا يوجد حساب مربوط' : 'No account connected'}
               </DropdownMenuItem>
             )}
             {instagramAccounts.map(account => (
@@ -305,11 +310,11 @@ const Sidebar = () => {
             onClick={handleContactClick}
             rel="noopener noreferrer"
           >
-            <HelpCircle className="w-4 h-4 mr-2" /> {t('nav.helpSupport')}
+            <HelpCircle className="w-4 h-4 me-2" /> {t('nav.helpSupport')}
           </a>
         </Button>
         <Button onClick={logout} variant="ghost" className="w-full justify-start text-slate-600" size="sm">
-          <LogOut className="w-4 h-4 mr-2" /> {t('common.logout')}
+          <LogOut className="w-4 h-4 me-2" /> {t('common.logout')}
         </Button>
       </div>
     </aside>

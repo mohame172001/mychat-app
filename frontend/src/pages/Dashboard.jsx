@@ -19,29 +19,49 @@ const DASHBOARD_TTL_MS = 60 * 1000;
 // UI paints from localStorage immediately and a fresh /dashboard/summary
 // call refreshes the numbers in the background.
 const DASHBOARD_MAX_STALE_MS = 24 * 60 * 60 * 1000;
-const REFRESH_FAILED_WITH_CACHE = "Couldn't refresh. Showing the latest available data.";
-const INSTAGRAM_CONNECT_REQUIRED = 'Connect or reconnect Instagram to load dashboard data.';
+const MSG = {
+  en: {
+    refreshFailed: "Couldn't refresh. Showing the latest available data.",
+    igRequired: 'Connect or reconnect Instagram to load dashboard data.',
+    cannotLoad: 'Dashboard data could not be loaded.',
+    timeout: 'Dashboard request timed out. Please try again.',
+    sessionExpired: 'Session expired. Please log in again.',
+    serverError: 'Dashboard server error. Please try again later.',
+    networkError: 'Network error. Please check your connection.',
+  },
+  ar: {
+    refreshFailed: 'تعذّر التحديث. نعرض آخر البيانات المتاحة.',
+    igRequired: 'اربط حساب Instagram أو أعد ربطه لتحميل بيانات لوحة التحكم.',
+    cannotLoad: 'تعذّر تحميل بيانات لوحة التحكم.',
+    timeout: 'انتهت مهلة الطلب. حاول مرة أخرى.',
+    sessionExpired: 'انتهت صلاحية الجلسة. سجّل الدخول من جديد.',
+    serverError: 'حدث خطأ في الخادم. حاول لاحقاً.',
+    networkError: 'خطأ في الشبكة. تحقّق من اتصالك.',
+  },
+};
 
-const classifyDashboardError = (err, user) => {
-  if (!err) return 'Dashboard data could not be loaded.';
-  if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return 'Dashboard request timed out. Please try again.';
+const classifyDashboardError = (err, user, m) => {
+  if (!err) return m.cannotLoad;
+  if (err.code === 'ECONNABORTED' || err.message?.includes?.('timeout')) return m.timeout;
   const status = err?.response?.status;
-  if (status === 401 || status === 403) return 'Session expired. Please log in again.';
-  if (status && status >= 500) return 'Dashboard server error. Please try again later.';
+  if (status === 401 || status === 403) return m.sessionExpired;
+  if (status && status >= 500) return m.serverError;
   const detail = String(err?.response?.data?.detail || err?.message || '').toLowerCase();
   const instagramConnectProblem = detail.includes('no instagram account')
     || detail.includes('instagram account')
     || detail.includes('instagram connection')
     || user?.instagramConnected === false
     || user?.instagramConnectionValid === false;
-  if (instagramConnectProblem) return INSTAGRAM_CONNECT_REQUIRED;
-  if (!status && err.message?.includes?.('Network')) return 'Network error. Please check your connection.';
-  return 'Dashboard data could not be loaded.';
+  if (instagramConnectProblem) return m.igRequired;
+  if (!status && err.message?.includes?.('Network')) return m.networkError;
+  return m.cannotLoad;
 };
 
 const Dashboard = () => {
   const { user } = useAuth();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
+  const ar = lang === 'ar';
+  const m = MSG[ar ? 'ar' : 'en'];
   const userInstagramConnected = user?.instagramConnected;
   const userInstagramConnectionValid = user?.instagramConnectionValid;
   const cacheKey = [
@@ -78,7 +98,7 @@ const Dashboard = () => {
             onUpdate: (data, updateResult) => {
               if (alive) {
                 if (data) setStats(data);
-                setError(updateResult?.error ? REFRESH_FAILED_WITH_CACHE : '');
+                setError(updateResult?.error ? m.refreshFailed : '');
               }
             },
           }
@@ -86,7 +106,7 @@ const Dashboard = () => {
         if (!alive) return;
         setStats(result.data);
         if (result.error) {
-          setError(REFRESH_FAILED_WITH_CACHE);
+          setError(m.refreshFailed);
         } else {
           setError('');
         }
@@ -96,7 +116,7 @@ const Dashboard = () => {
           setError(classifyDashboardError(err, {
             instagramConnected: userInstagramConnected,
             instagramConnectionValid: userInstagramConnectionValid,
-          }));
+          }, m));
         }
       } finally {
         if (alive) setLoading(false);
@@ -120,10 +140,10 @@ const Dashboard = () => {
       setStats(result.data);
     } catch (err) {
       console.error('[Dashboard] Refresh failed:', err);
-      setError(stats ? REFRESH_FAILED_WITH_CACHE : classifyDashboardError(err, {
+      setError(stats ? m.refreshFailed : classifyDashboardError(err, {
         instagramConnected: userInstagramConnected,
         instagramConnectionValid: userInstagramConnectionValid,
-      }));
+      }, m));
     } finally {
       setRefreshing(false);
       setLoading(false);
@@ -171,12 +191,12 @@ const Dashboard = () => {
             disabled={refreshing}
             data-testid="dashboard-refresh"
           >
-            <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 me-1.5 ${refreshing ? 'animate-spin' : ''}`} />
             {t('common.refresh')}
           </Button>
           <Link to="/app/automations">
             <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-              <Plus className="w-4 h-4 mr-1.5" /> {t('common.newAutomation')}
+              <Plus className="w-4 h-4 me-1.5" /> {t('common.newAutomation')}
             </Button>
           </Link>
         </div>
@@ -229,7 +249,7 @@ const Dashboard = () => {
               ) : (
                 <Link to="/app/automations">
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-                    <Plus className="w-4 h-4 mr-1.5" /> {t('dashboard.onboarding.createCta')}
+                    <Plus className="w-4 h-4 me-1.5" /> {t('dashboard.onboarding.createCta')}
                   </Button>
                 </Link>
               )}
@@ -274,7 +294,7 @@ const Dashboard = () => {
               <div className="h-48 animate-pulse rounded-xl bg-slate-100" data-testid="dashboard-chart-skeleton" />
             ) : (
             <div className="flex gap-3">
-              <div className="h-48 w-8 flex flex-col justify-between text-[11px] font-medium text-slate-400 text-right">
+              <div className="h-48 w-8 flex flex-col justify-between text-[11px] font-medium text-slate-400 text-end">
                 {yTicks.map((tick) => (
                   <span key={tick}>{tick}</span>
                 ))}
@@ -304,8 +324,8 @@ const Dashboard = () => {
                         {isActive && (
                           <div className="absolute -top-16 left-1/2 -translate-x-1/2 z-10 min-w-[150px] rounded-xl bg-slate-950 px-3 py-2 text-xs text-white shadow-xl">
                             <div className="font-semibold">{d.day}{d.date ? `, ${d.date}` : ''}</div>
-                            <div className="mt-1 flex justify-between gap-4"><span>Messages</span><b>{messages}</b></div>
-                            <div className="flex justify-between gap-4"><span>Conversions</span><b>{conversions}</b></div>
+                            <div className="mt-1 flex justify-between gap-4"><span>{ar ? 'الرسائل' : 'Messages'}</span><b>{messages}</b></div>
+                            <div className="flex justify-between gap-4"><span>{ar ? 'التحويلات' : 'Conversions'}</span><b>{conversions}</b></div>
                           </div>
                         )}
                         <div
@@ -325,7 +345,7 @@ const Dashboard = () => {
               </div>
             </div>
             )}
-            <div className="ml-11 mt-2 grid grid-cols-7 gap-2 sm:gap-3">
+            <div className="ms-11 mt-2 grid grid-cols-7 gap-2 sm:gap-3">
               {chart.map((d) => (
                 <div key={d.date || d.day} className="text-center text-xs text-slate-500 font-medium">{d.day}</div>
               ))}
@@ -353,10 +373,12 @@ const Dashboard = () => {
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center"><Zap className="w-5 h-5 text-white" /></div>
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-sm truncate">{a.name}</div>
-                  <div className="text-xs text-slate-500">{a.trigger} - {(a.sent || 0).toLocaleString()} sent</div>
+                  <div className="text-xs text-slate-500">{a.trigger} - {(a.sent || 0).toLocaleString()} {ar ? 'مُرسلة' : 'sent'}</div>
                 </div>
                 <Badge className={`rounded-full ${a.status === 'active' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : a.status === 'paused' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                  {a.status}
+                  {ar
+                    ? (a.status === 'active' ? 'نشطة' : a.status === 'paused' ? 'متوقّفة' : a.status === 'draft' ? 'مسودّة' : a.status)
+                    : a.status}
                 </Badge>
               </div>
             ))}

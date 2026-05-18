@@ -56,7 +56,7 @@ function StatusPill({ status }) {
     : 'OK';
   return (
     <Badge className={`${cls} border-0`}>
-      <Icon className="w-3 h-3 mr-1" /> {label}
+      <Icon className="w-3 h-3 me-1" /> {label}
     </Badge>
   );
 }
@@ -112,7 +112,7 @@ function PlanCard({ plan, current }) {
         <div>
           <h3 className="text-lg font-semibold text-slate-800">{plan.display_name}</h3>
           <div className="text-xs text-slate-500">
-            ${plan.monthly_price_placeholder ?? 0}<span className="ml-1">/ month</span>
+            ${plan.monthly_price_placeholder ?? 0}<span className="ms-1">/ month</span>
           </div>
         </div>
         {highlighted && (
@@ -142,7 +142,7 @@ function PlanCard({ plan, current }) {
         data-testid={`upgrade-btn-${plan.plan_key}`}
         className="mt-auto"
       >
-        <Lock className="w-3 h-3 mr-2" />
+        <Lock className="w-3 h-3 me-2" />
         {highlighted ? 'Current' : 'Upgrade coming soon'}
       </Button>
     </section>
@@ -214,7 +214,7 @@ export default function Billing() {
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => load({ force: true })} disabled={loading}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
           {t('common.refresh')}
         </Button>
       </div>
@@ -235,7 +235,7 @@ export default function Billing() {
 
       {error && (
         <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-          <AlertTriangle className="inline w-4 h-4 mr-1" />
+          <AlertTriangle className="inline w-4 h-4 me-1" />
           {error}
         </div>
       )}
@@ -258,7 +258,7 @@ export default function Billing() {
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
                   {lang === 'ar' ? 'الشهر:' : 'Month:'} <span className="font-mono">{current.event_month}</span>
-                  <span className="ml-3">
+                  <span className="ms-3">
                     {lang === 'ar' ? 'الفوترة:' : 'Billing:'}{' '}
                     <span className="font-semibold text-slate-700">
                       {current.billing_enabled

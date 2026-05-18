@@ -118,7 +118,7 @@ const DmAutomation = () => {
           <p className="mt-1 text-slate-600">{t('dmAutomation.subtitle')}</p>
         </div>
         <Button onClick={refreshDiag} variant="outline" className="rounded-xl sm:w-auto" disabled={diagLoading}>
-          {diagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCcw className="w-4 h-4 mr-2" />}
+          {diagLoading ? <Loader2 className="w-4 h-4 me-2 animate-spin" /> : <RefreshCcw className="w-4 h-4 me-2" />}
           {lang === 'ar' ? 'تحديث الحالة' : 'Refresh status'}
         </Button>
       </div>
@@ -177,7 +177,7 @@ const DmAutomation = () => {
             <Label>{t('dmAutomation.active')}</Label>
             <div className="h-11 flex items-center">
               <Switch checked={form.isActive} onCheckedChange={v => setForm({ ...form, isActive: v })} />
-              <span className="ml-2 text-sm text-slate-600">
+              <span className="ms-2 text-sm text-slate-600">
                 {form.isActive
                   ? (lang === 'ar' ? 'مُفعّلة' : 'Active')
                   : (lang === 'ar' ? 'مُعطّلة' : 'Inactive')}
@@ -192,7 +192,7 @@ const DmAutomation = () => {
         </div>
         <div className="mt-4 flex justify-end">
           <Button onClick={saveRule} disabled={saving} className="rounded-xl bg-slate-900 text-white">
-            {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+            {saving ? <Loader2 className="w-4 h-4 me-2 animate-spin" /> : null}
             {t('dmAutomation.saveRule')}
           </Button>
         </div>
@@ -206,7 +206,7 @@ const DmAutomation = () => {
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-slate-500 border-b border-slate-100">
+              <thead><tr className="text-start text-slate-500 border-b border-slate-100">
                 <th className="py-2">{lang === 'ar' ? 'الاسم' : 'Name'}</th>
                 <th>{t('dmAutomation.keyword')}</th>
                 <th>{t('dmAutomation.matchMode')}</th>
@@ -222,7 +222,7 @@ const DmAutomation = () => {
                     <td>{r.matchMode}</td>
                     <td className="max-w-xs truncate">{r.replyText}</td>
                     <td><Switch checked={r.isActive} onCheckedChange={() => toggleActive(r)} /></td>
-                    <td className="text-right">
+                    <td className="text-end">
                       <Button onClick={() => deleteRule(r)} variant="ghost" size="sm" className="text-rose-600">
                         <Trash2 className="w-4 h-4" />
                       </Button>
@@ -240,7 +240,7 @@ const DmAutomation = () => {
         <div className="flex items-center justify-between">
           <h3 className="font-display font-bold text-lg">{t('dmAutomation.recentEventsTitle')} ({logs.length})</h3>
           <Button onClick={loadAll} variant="ghost" size="sm" className="rounded-xl">
-            <RefreshCcw className="w-4 h-4 mr-2" /> {t('common.refresh')}
+            <RefreshCcw className="w-4 h-4 me-2" /> {t('common.refresh')}
           </Button>
         </div>
         {logs.length === 0 ? (
@@ -248,7 +248,7 @@ const DmAutomation = () => {
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-slate-500 border-b border-slate-100">
+              <thead><tr className="text-start text-slate-500 border-b border-slate-100">
                 <th className="py-2">{lang === 'ar' ? 'الوقت' : 'Time'}</th>
                 <th>{lang === 'ar' ? 'الرسالة الواردة' : 'Incoming'}</th>
                 <th>{lang === 'ar' ? 'القاعدة المُطابِقة' : 'Matched rule'}</th>
