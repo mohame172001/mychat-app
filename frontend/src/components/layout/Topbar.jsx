@@ -4,6 +4,8 @@ import { Plus, Instagram } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { useAuth } from '../../context/AuthContext';
+import { useTranslation } from '../../lib/i18n';
+import LangSwitcher from '../LangSwitcher';
 
 // Phase 2.18S: Topbar cleanup.
 // Removed two dead UI elements that confused users in the live tester
@@ -19,6 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 
 const Topbar = () => {
   const { user } = useAuth();
+  const { t, lang } = useTranslation();
   const instagramConnected = Boolean(user?.instagramConnected && user?.instagramConnectionValid);
   const hasKnownInstagramIdentity = Boolean(
     user?.instagramHandle
@@ -33,22 +36,23 @@ const Topbar = () => {
   );
   const instagramStatus = instagramConnected
     ? {
-        label: 'Connected',
+        label: t('topbar.connected'),
         className: 'bg-emerald-50 text-emerald-700 border-emerald-100',
       }
     : instagramNeedsReconnect
       ? {
-          label: 'Reconnect',
+          label: lang === 'ar' ? 'أعد الربط' : 'Reconnect',
           className: 'bg-amber-50 text-amber-700 border-amber-100',
         }
       : {
-          label: 'Not connected',
+          label: t('topbar.notConnected'),
           className: 'bg-slate-50 text-slate-600 border-slate-200',
         };
 
   return (
     <header className="hidden md:flex h-16 bg-white border-b border-slate-200 px-6 items-center justify-end topbar-shadow shrink-0">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
+        <LangSwitcher />
         <Badge
           className={`${instagramStatus.className} rounded-full hidden md:flex items-center gap-1`}
           data-testid="topbar-instagram-status"
@@ -58,7 +62,7 @@ const Topbar = () => {
         </Badge>
         <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-10" asChild>
           <Link to="/app/automations">
-            <Plus className="w-4 h-4 mr-1.5" /> New Automation
+            <Plus className="w-4 h-4 mr-1.5" /> {t('topbar.newAutomation')}
           </Link>
         </Button>
       </div>

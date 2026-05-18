@@ -20,16 +20,21 @@ import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
 import { useIsAdmin } from '../../lib/useIsAdmin';
 import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
+import { useTranslation } from '../../lib/i18n';
 import { cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../../lib/apiCache';
 import { preloadRoute } from '../../lib/routePreloader';
 import { scheduleCoreAppWarmup } from '../../lib/appWarmup';
 
+// Labels are i18n keys (under `nav.*`) — Sidebar passes them through
+// useTranslation when rendering. Old call sites that read `label`
+// directly still work because the key falls back to the English
+// string via the i18n module's missing-key fallback path.
 export const navItems = [
-  { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/app/automations', icon: Zap, label: 'Automations' },
-  { to: '/app/dm-automation', icon: Inbox, label: 'DM Automation' },
-  { to: '/app/billing', icon: CreditCard, label: 'Billing' },
-  { to: '/app/settings', icon: Settings, label: 'Settings' }
+  { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard', i18nKey: 'nav.dashboard' },
+  { to: '/app/automations', icon: Zap, label: 'Automations', i18nKey: 'nav.automations' },
+  { to: '/app/dm-automation', icon: Inbox, label: 'DM Automation', i18nKey: 'nav.dmAutomation' },
+  { to: '/app/billing', icon: CreditCard, label: 'Billing', i18nKey: 'nav.billing' },
+  { to: '/app/settings', icon: Settings, label: 'Settings', i18nKey: 'nav.settings' }
 ];
 
 const hiddenRefreshStates = new Set([
@@ -55,6 +60,7 @@ export const filterDisplayableInstagramAccounts = (payload) => (
 
 const Sidebar = () => {
   const { logout, user, refreshUser } = useAuth();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const accountsCacheKey = `instagram-accounts:${user?.id || 'anon'}`;
   const [instagramAccounts, setInstagramAccounts] = useState(() => (
@@ -199,7 +205,7 @@ const Sidebar = () => {
         <span className="text-xl font-bold font-display">mychat</span>
       </Link>
       <nav className="flex-1 p-4 space-y-1">
-        {navItems.map(({ to, end, icon: Icon, label }) => (
+        {navItems.map(({ to, end, icon: Icon, label, i18nKey }) => (
           <NavLink
             key={to}
             to={to}
@@ -209,7 +215,7 @@ const Sidebar = () => {
             className={({ isActive }) => `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
           >
             <Icon className="w-4 h-4" />
-            {label}
+            {i18nKey ? t(i18nKey, label) : label}
           </NavLink>
         ))}
         {isAdmin && (
@@ -221,7 +227,7 @@ const Sidebar = () => {
             className={({ isActive }) => `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors border-t border-slate-100 mt-2 pt-3 ${isActive ? 'bg-slate-900 text-white' : 'text-blue-700 hover:bg-blue-50'}`}
           >
             <ShieldCheck className="w-4 h-4" />
-            Admin
+            {t('nav.admin')}
           </NavLink>
         )}
       </nav>
@@ -299,11 +305,11 @@ const Sidebar = () => {
             onClick={handleContactClick}
             rel="noopener noreferrer"
           >
-            <HelpCircle className="w-4 h-4 mr-2" /> Help & Support
+            <HelpCircle className="w-4 h-4 mr-2" /> {t('nav.helpSupport')}
           </a>
         </Button>
         <Button onClick={logout} variant="ghost" className="w-full justify-start text-slate-600" size="sm">
-          <LogOut className="w-4 h-4 mr-2" /> Log out
+          <LogOut className="w-4 h-4 mr-2" /> {t('common.logout')}
         </Button>
       </div>
     </aside>

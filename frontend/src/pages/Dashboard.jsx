@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
 import { useAuth } from '../context/AuthContext';
+import { useTranslation } from '../lib/i18n';
 
 const DASHBOARD_TTL_MS = 60 * 1000;
 // Phase 2.18Y cold-start fix: keep persisted dashboard data eligible
@@ -40,6 +41,7 @@ const classifyDashboardError = (err, user) => {
 
 const Dashboard = () => {
   const { user } = useAuth();
+  const { t } = useTranslation();
   const userInstagramConnected = user?.instagramConnected;
   const userInstagramConnectionValid = user?.instagramConnectionValid;
   const cacheKey = [
@@ -138,10 +140,10 @@ const Dashboard = () => {
   const yTicks = Array.from({ length: 5 }, (_, i) => axisMax - (tickStep * i));
 
   const statsCards = [
-    { label: 'Total Contacts', value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
-    { label: 'Active Automations', value: stats?.activeAutomations ?? stats?.active_automations ?? '-', icon: Zap },
-    { label: 'Messages Sent', value: stats ? (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString() : '-', icon: Send },
-    { label: 'Conversion Rate', value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
+    { label: t('dashboard.cards.totalContacts'), value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
+    { label: t('dashboard.cards.activeAutomations'), value: stats?.activeAutomations ?? stats?.active_automations ?? '-', icon: Zap },
+    { label: t('dashboard.cards.messagesSent'), value: stats ? (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString() : '-', icon: Send },
+    { label: t('dashboard.cards.conversionRate'), value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
   ];
   const topAutomations = stats?.topAutomations || [];
 
@@ -158,8 +160,8 @@ const Dashboard = () => {
     <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto" data-testid="dashboard-page">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
-          <h1 className="font-display text-3xl font-extrabold tracking-tight">Good morning, {user?.name}</h1>
-          <p className="mt-1 text-slate-600">Here is what is happening with your Instagram automations today.</p>
+          <h1 className="font-display text-3xl font-extrabold tracking-tight">{t('dashboard.greeting').replace('{name}', user?.name || '')}</h1>
+          <p className="mt-1 text-slate-600">{t('dashboard.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -170,11 +172,11 @@ const Dashboard = () => {
             data-testid="dashboard-refresh"
           >
             <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
-            Refresh
+            {t('common.refresh')}
           </Button>
           <Link to="/app/automations">
             <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-              <Plus className="w-4 h-4 mr-1.5" /> New Automation
+              <Plus className="w-4 h-4 mr-1.5" /> {t('common.newAutomation')}
             </Button>
           </Link>
         </div>
@@ -191,29 +193,29 @@ const Dashboard = () => {
           <div className="flex items-start justify-between flex-wrap gap-4">
             <div>
               <h3 className="font-display font-bold text-lg text-slate-900">
-                {igConnected ? 'You\'re set — create your first automation' : 'Welcome to MyChat 👋'}
+                {igConnected ? t('dashboard.onboarding.titleConnected') : t('dashboard.onboarding.titleNew')}
               </h3>
               <p className="text-sm text-slate-600 mt-1 max-w-2xl">
                 {igConnected
-                  ? 'Now build a comment automation: when someone comments on your post, MyChat will reply publicly and send them a DM.'
-                  : 'To start automating Instagram comments + DMs, connect your business account first. It takes 30 seconds.'}
+                  ? t('dashboard.onboarding.bodyConnected')
+                  : t('dashboard.onboarding.bodyNew')}
               </p>
               <ol className="mt-4 space-y-2 text-sm text-slate-700">
                 <li className="flex items-center gap-2">
                   <span className={`flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold ${igConnected ? 'bg-emerald-500 text-white' : 'bg-blue-500 text-white'}`}>
                     {igConnected ? '✓' : '1'}
                   </span>
-                  Connect your Instagram business account
+                  {t('dashboard.onboarding.step1')}
                 </li>
                 <li className="flex items-center gap-2">
                   <span className={`flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold ${totalAutomations > 0 ? 'bg-emerald-500 text-white' : 'bg-slate-300 text-slate-700'}`}>
                     {totalAutomations > 0 ? '✓' : '2'}
                   </span>
-                  Create a comment automation rule
+                  {t('dashboard.onboarding.step2')}
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold bg-slate-300 text-slate-700">3</span>
-                  Comments roll in — MyChat replies + DMs them automatically
+                  {t('dashboard.onboarding.step3')}
                 </li>
               </ol>
             </div>
@@ -221,13 +223,13 @@ const Dashboard = () => {
               {!igConnected ? (
                 <Link to="/app/settings">
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-                    Connect Instagram
+                    {t('dashboard.onboarding.connectCta')}
                   </Button>
                 </Link>
               ) : (
                 <Link to="/app/automations">
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
-                    <Plus className="w-4 h-4 mr-1.5" /> Create automation
+                    <Plus className="w-4 h-4 mr-1.5" /> {t('dashboard.onboarding.createCta')}
                   </Button>
                 </Link>
               )}
@@ -259,12 +261,12 @@ const Dashboard = () => {
         <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-display font-bold text-lg">Weekly Performance</h3>
-              <p className="text-sm text-slate-500">Messages sent vs conversions</p>
+              <h3 className="font-display font-bold text-lg">{t('dashboard.weeklyTitle')}</h3>
+              <p className="text-sm text-slate-500">{t('dashboard.weeklySubtitle')}</p>
             </div>
             <div className="flex gap-3 text-xs">
-              <div className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-500" />Messages</div>
-              <div className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-pink-500" />Conversions</div>
+              <div className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-500" />{t('dashboard.legendMessages')}</div>
+              <div className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-pink-500" />{t('dashboard.legendConversions')}</div>
             </div>
           </div>
           <div className="mt-6">
@@ -335,8 +337,8 @@ const Dashboard = () => {
       <div className="mt-6">
         <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
-            <h3 className="font-display font-bold text-lg">Top Automations</h3>
-            <Link to="/app/automations" className="text-sm font-medium text-slate-600 hover:text-slate-900">View all</Link>
+            <h3 className="font-display font-bold text-lg">{t('dashboard.topAutomations')}</h3>
+            <Link to="/app/automations" className="text-sm font-medium text-slate-600 hover:text-slate-900">{t('dashboard.viewAll')}</Link>
           </div>
           <div className="mt-4 space-y-3">
             {loading && !topAutomations.length && (
@@ -358,7 +360,7 @@ const Dashboard = () => {
                 </Badge>
               </div>
             ))}
-            {!loading && topAutomations.length === 0 && <div className="text-sm text-slate-500 text-center py-6">No automations yet</div>}
+            {!loading && topAutomations.length === 0 && <div className="text-sm text-slate-500 text-center py-6">{t('dashboard.noAutomations')}</div>}
           </div>
         </Card>
       </div>

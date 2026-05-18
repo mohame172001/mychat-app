@@ -8,7 +8,8 @@ import {
   Shield, Languages,
 } from 'lucide-react';
 import { buildSupportMailtoHref, handleContactClick } from '../lib/contactSupport';
-import { useTranslation, SUPPORTED_LANGS } from '../lib/i18n';
+import { useTranslation } from '../lib/i18n';
+import LangSwitcher from '../components/LangSwitcher';
 
 
 // Feature key → icon. The actual copy comes from i18n dictionaries.
@@ -23,25 +24,9 @@ const FEATURE_ICONS = {
 const FEATURE_KEYS = Object.keys(FEATURE_ICONS);
 
 
-function LangSwitcher() {
-  const { lang, setLang, isRtl } = useTranslation();
-  return (
-    <button
-      type="button"
-      onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-      aria-label="Switch language"
-      className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 transition"
-    >
-      <Languages className="w-3.5 h-3.5" />
-      {lang === 'ar' ? 'EN' : 'العربية'}
-    </button>
-  );
-}
-
-
 const Landing = () => {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { t, isRtl } = useTranslation();
+  const { t } = useTranslation();
 
   const scrollToSection = (id) => (event) => {
     event?.preventDefault?.();
@@ -110,7 +95,7 @@ const Landing = () => {
         <div className="max-w-6xl mx-auto relative">
           <div className="text-center animate-fade-up">
             <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-blue-100 rounded-full px-4 py-1.5 mb-6">
-              <Sparkles className="w-3.5 h-3.5 mr-1.5 rtl:ml-1.5 rtl:mr-0" />
+              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
               {t('landing.hero.badge')}
             </Badge>
             <h1 className="font-display text-4xl sm:text-6xl md:text-7xl font-extrabold leading-[1.05] tracking-tight">
@@ -123,7 +108,7 @@ const Landing = () => {
             <div className="mt-10 flex items-center justify-center gap-3 flex-wrap">
               <Link to="/signup">
                 <Button size="lg" className="bg-slate-900 hover:bg-slate-800 text-white rounded-full px-8 h-14 text-base">
-                  {t('landing.hero.cta')} <ArrowRight className={`ml-2 w-4 h-4 ${isRtl ? 'rotate-180 mr-2 ml-0' : ''}`} />
+                  {t('landing.hero.cta')} <ArrowRight className="ml-2 w-4 h-4" />
                 </Button>
               </Link>
               <Link to="/status">
@@ -223,7 +208,7 @@ const Landing = () => {
             <p className="mt-4 text-lg text-slate-300 max-w-xl mx-auto">{t('landing.cta.body')}</p>
             <Link to="/signup">
               <Button size="lg" className="mt-8 bg-white text-slate-900 hover:bg-slate-100 rounded-full px-8 h-14">
-                {t('landing.cta.button')} <ArrowRight className={`ml-2 w-4 h-4 ${isRtl ? 'rotate-180 mr-2 ml-0' : ''}`} />
+                {t('landing.cta.button')} <ArrowRight className="ml-2 w-4 h-4" />
               </Button>
             </Link>
           </div>
@@ -237,7 +222,7 @@ const Landing = () => {
               <MessageCircle className="w-4 h-4 text-white" strokeWidth={2.5} />
             </div>
             <span className="font-bold font-display">{t('common.brand')}</span>
-            <span className="text-sm text-slate-500 ml-2 rtl:mr-2 rtl:ml-0">{t('common.copyright')}</span>
+            <span className="text-sm text-slate-500 ml-2">{t('common.copyright')}</span>
           </div>
           <div className="flex gap-6 text-sm text-slate-500 items-center flex-wrap">
             <Link to="/status" className="hover:text-slate-900">{t('landing.nav.status')}</Link>
