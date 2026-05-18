@@ -141,6 +141,12 @@ export const dictionaries = {
     },
   },
   ar: {
+    // Egyptian-Arabic, polished business voice. NOT literal —
+    // sentences are rewritten so they sound natural to a Cairo SaaS
+    // user, while staying professional (no slang, no joking, no
+    // overly formal MSA). Brand names (Instagram, Business, DM)
+    // intentionally stay in Latin script — that's how Egyptian
+    // marketing pages actually write them.
     common: {
       brand: 'mychat',
       login: 'تسجيل الدخول',
@@ -148,100 +154,100 @@ export const dictionaries = {
       logout: 'تسجيل الخروج',
       privacy: 'الخصوصية',
       terms: 'الشروط',
-      contact: 'تواصل',
+      contact: 'كلّمنا',
       dataDeletion: 'حذف البيانات',
-      learnMore: 'اعرف المزيد',
-      copyright: '© ٢٠٢٦ — جميع الحقوق محفوظة.',
+      learnMore: 'اعرف أكتر',
+      copyright: '© ٢٠٢٦ — كل الحقوق محفوظة.',
     },
     landing: {
       nav: {
         features: 'المميزات',
-        how: 'طريقة العمل',
+        how: 'إزاي بيشتغل',
         pricing: 'الأسعار',
         status: 'حالة الخدمة',
       },
       hero: {
-        badge: 'أتمتة Instagram لحسابات الأعمال المربوطة',
-        title1: 'حوّل محادثات',
-        title2: 'إنستجرام إلى',
-        titleEm: 'تدفقات عمل.',
+        badge: 'حل أتمتة لحسابات Instagram Business',
+        title1: 'خلّي تعليقات',
+        title2: 'Instagram تشتغل',
+        titleEm: 'لوحدها.',
         subtitle:
-          'اربط حساب Instagram Business بتاعك، اعمل قواعد للتعليقات والرسائل في flow بصري، وأدر كل الأتمتة من مكان واحد.',
+          'اربط حساب Instagram Business بتاعك، اعمل قواعد للتعليقات والـ DMs بـ flow بصري سهل، وادير كل حاجة من مكان واحد.',
         cta: 'ابدأ مجاناً',
         secondaryCta: 'حالة الخدمة',
       },
       preview: {
         triggerLabel: 'الحدث',
         triggerTitle: 'تعليق جديد',
-        triggerHint: 'على كلمة مفتاحية تختارها',
+        triggerHint: 'على كلمة بتختارها أنت',
         messageLabel: 'الرسالة',
-        messageTitle: 'رسالة افتتاحية',
-        messageHint: 'تُرسل تلقائياً',
+        messageTitle: 'DM افتتاحي',
+        messageHint: 'بيتبعت لوحده',
         actionLabel: 'الإجراء',
         actionTitle: 'رد أو لينك',
-        actionHint: 'اختر ما يحدث بعدها',
+        actionHint: 'اختار اللي يحصل بعدها',
       },
       features: {
         badge: 'المميزات',
-        title: 'كل ما تحتاجه لتوسيع نطاق المحادثات على Instagram',
-        subtitle: 'مبني حول حسابك أنت — مفيش inbox مشترك، مفيش بيانات مشتركة.',
+        title: 'كل أدواتك في مكان واحد عشان تكبّر شغلك على Instagram',
+        subtitle: 'كل حاجة مربوطة بحسابك أنت — مفيش inbox مشترك، ومحدش بيشوف بياناتك.',
         items: {
           commentTrigger: {
             title: 'محفّزات على التعليقات',
             description:
-              'رد تلقائياً لما تعليق يذكر كلمة مفتاحية اخترتها، أو تفاعل مع أي تعليق جديد على بوست محدد.',
+              'رد فوراً على أي تعليق فيه كلمة بتختارها أنت — أو خليه يتعامل مع كل تعليق جديد على بوست محدد.',
           },
           dmAutomation: {
-            title: 'أتمتة ذكية للرسائل',
+            title: 'أتمتة ذكية للـ DMs',
             description:
-              'ابعت DM متابعة للمعلّقين برسالة مخصصة، رابط، أو "follow-gate" يطلب منهم يتابعوك أولاً.',
+              'ابعت DM متابعة لكل واحد علّق — رسالة مخصصة، رابط، أو "follow-gate" يطلب منه يتابعك الأول قبل ما يستلم الرسالة.',
           },
           dashboard: {
             title: 'لوحة تحكم لحظية',
             description:
-              'اعرف الردود المُرسلة، الـ DMs اللي وصلت، وضغطات الروابط لحظة بلحظة — من نشاط حسابك مباشرة.',
+              'شوف الردود اللي اتبعتت، الـ DMs اللي وصلت، والضغطات على اللينكات لحظة بلحظة — من نشاط حسابك مباشرة.',
           },
           deliveryAware: {
-            title: 'نظام واعي بالتسليم',
+            title: 'نظام واعي بالتوصيل',
             description:
-              'بيعرف إن Instagram رفض الـ DM (نافذة ٢٤ ساعة منتهية، المستخدم رافض الرسائل، بوست مش حسابك) ويتجنبها بهدوء بدل ما يطلع فشل.',
+              'بيفهم لما Instagram يرفض الـ DM (نافذة الـ ٢٤ ساعة خلصت، المستخدم رافض الرسائل، أو بوست مش حسابك) ويتعامل معاها بهدوء بدل ما تظهر كأنها فشل.',
           },
           multiAccount: {
-            title: 'دعم حسابات متعددة',
+            title: 'دعم أكتر من حساب',
             description:
-              'اربط أكتر من حساب Instagram Business وبدّل بينهم بضغطة. كل أتمتة مرتبطة بالحساب اللي اخترته.',
+              'اربط أكتر من حساب Instagram Business وبدّل بينهم بضغطة. كل automation بتشتغل على الحساب اللي أنت محدده — مفيش خلط.',
           },
           conversionTracking: {
             title: 'تتبع التحويلات',
             description:
-              'كل رابط في DM متتبع. شوف كم مستخدم ضغط، في أي يوم، من أي automation بالضبط.',
+              'كل لينك بتبعته في DM متتبَع. شوف كم واحد ضغط، في أنهي يوم، ومن أنهي automation بالظبط.',
           },
         },
       },
       how: {
-        badge: 'طريقة العمل',
-        title: 'جاهز في ٣ خطوات',
+        badge: 'إزاي بيشتغل',
+        title: 'تشتغل في ٣ خطوات',
         steps: [
           {
             num: '٠١',
             title: 'اربط Instagram',
-            desc: 'اربط حساب Business أو Creator من الإعدادات داخل التطبيق — يبقى تمام في ٣٠ ثانية.',
+            desc: 'اربط حساب Business أو Creator من إعدادات التطبيق — هياخد منك ٣٠ ثانية وخلاص.',
           },
           {
             num: '٠٢',
             title: 'اعمل أول قاعدة',
-            desc: 'اختار بوست، حدّد كلمة مفتاحية، اكتب الرد العام ورسالة الـ DM. فعّل لما تجهز.',
+            desc: 'اختار البوست، حدّد الكلمة، اكتب الرد العام ورسالة الـ DM. فعّلها لما تكون جاهز.',
           },
           {
             num: '٠٣',
-            title: 'شوفها تشتغل',
-            desc: 'التعليقات الجديدة تشغّل القاعدة لحظياً. الردود والـ DMs تخرج تلقائياً — أنت بس تتفرج على التحليلات.',
+            title: 'سيبها تشتغل',
+            desc: 'كل تعليق جديد بيشغّل القاعدة على طول. الردود والـ DMs بتطلع لوحدها — أنت بس تتابع التحليلات.',
           },
         ],
       },
       cta: {
-        title: 'جاهز تدير أتمتة Instagram؟',
-        body: 'اعمل حسابك المجاني واربط Instagram لما تكون جاهز لأتمتة محادثات حقيقية.',
+        title: 'جاهز تأتمت تعليقاتك على Instagram؟',
+        body: 'اعمل حسابك المجاني، واربط Instagram لما تكون جاهز تشتغل على محادثات حقيقية.',
         button: 'ابدأ مجاناً',
       },
     },
