@@ -106,9 +106,13 @@ const AutomationPhonePreview = ({
   setPreviewTab,
   accountName,
   accountAvatar,
+  ar,
 }) => {
+  const TAB_LABELS = ar
+    ? { Post: 'المنشور', Comments: 'التعليقات', DM: 'الرسائل', 'Not following': 'لم يتابع' }
+    : { Post: 'Post', Comments: 'Comments', DM: 'DM', 'Not following': 'Not following' };
   const previewImage = selectedMedia?.thumbnail_url || selectedMedia?.media_url;
-  const caption = selectedMedia?.caption || 'New post caption appears here';
+  const caption = selectedMedia?.caption || (ar ? 'يظهر هنا وصف المنشور الجديد' : 'New post caption appears here');
   const handle = (accountName || 'instagram_account').replace(/^@/, '');
   const commentText = keywordText || 'Price';
   const Avatar = ({ size = 'h-9 w-9' }) => (
@@ -125,7 +129,7 @@ const AutomationPhonePreview = ({
 
   return (
     <div className="flex h-full flex-col bg-slate-50">
-      <div className="px-4 pt-4 text-sm font-medium text-slate-600">Preview</div>
+      <div className="px-4 pt-4 text-sm font-medium text-slate-600">{ar ? 'المعاينة' : 'Preview'}</div>
       <div className="flex flex-1 items-center justify-center px-3 py-3 lg:py-4">
         <div className="w-[300px] max-w-full rounded-[2.25rem] bg-slate-950 p-2.5 shadow-xl shadow-slate-300">
           <div className="overflow-hidden rounded-[2rem] bg-[#121212] text-white">
@@ -136,7 +140,7 @@ const AutomationPhonePreview = ({
             </div>
             <div className="border-b border-white/5 px-5 pb-2 text-center">
               <div className="truncate text-[11px] font-bold uppercase text-white/45">{handle}</div>
-              <div className="text-sm font-bold">Posts</div>
+              <div className="text-sm font-bold">{ar ? 'المنشورات' : 'Posts'}</div>
             </div>
 
             {previewTab === 'Post' && (
@@ -162,13 +166,17 @@ const AutomationPhonePreview = ({
                     <SendIcon className="h-6 w-6" />
                     <Bookmark className="ml-auto h-6 w-6" />
                   </div>
-                  <div className="text-xs font-bold">14 likes</div>
-                  <div className="line-clamp-2 text-xs">
+                  <div className="text-xs font-bold">{ar ? '14 إعجاباً' : '14 likes'}</div>
+                  <div className="line-clamp-2 text-xs" dir="auto">
                     <span className="font-bold">{handle}</span> {caption}
                   </div>
-                  <div className="text-xs text-white/45">View all comments</div>
+                  <div className="text-xs text-white/45">{ar ? 'عرض جميع التعليقات' : 'View all comments'}</div>
                   <div className="text-xs text-white/45">
-                    {postScope === 'any' ? 'Any post or reel' : postScope === 'next' ? 'Next post or reel' : 'Selected post'}
+                    {postScope === 'any'
+                      ? (ar ? 'أي منشور أو ريلز' : 'Any post or reel')
+                      : postScope === 'next'
+                        ? (ar ? 'المنشور أو الريلز التالي' : 'Next post or reel')
+                        : (ar ? 'المنشور المختار' : 'Selected post')}
                   </div>
                 </div>
               </>
@@ -176,7 +184,7 @@ const AutomationPhonePreview = ({
 
             {previewTab === 'Comments' && (
               <div className="min-h-[360px] px-4 py-4">
-                <div className="mb-5 text-center font-bold">Comments</div>
+                <div className="mb-5 text-center font-bold">{ar ? 'التعليقات' : 'Comments'}</div>
                 <div className="flex gap-3">
                   <div className="h-9 w-9 rounded-full bg-slate-200" />
                   <div>
@@ -198,7 +206,7 @@ const AutomationPhonePreview = ({
 
             {previewTab === 'DM' && (
               <div className="min-h-[360px] px-4 py-4">
-                <div className="mb-5 text-center font-bold">DM</div>
+                <div className="mb-5 text-center font-bold">{ar ? 'الرسائل الخاصة' : 'DM'}</div>
                 <div className="ml-auto max-w-[82%] rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm">
                   {commentText}
                 </div>
@@ -233,11 +241,11 @@ const AutomationPhonePreview = ({
                 {(linkDmText || linkUrl) && (
                   <>
                     <div className="mt-4 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(linkDmText)}>
-                      {linkDmText || 'Here is the link'}
+                      {linkDmText || (ar ? 'تفضّل، هذا هو الرابط' : 'Here is the link')}
                     </div>
                     {linkUrl && (
                       <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-center text-sm font-semibold">
-                        {linkButtonText || 'Open link ✅'}
+                        {linkButtonText || (ar ? 'افتح الرابط ✅' : 'Open link ✅')}
                       </div>
                     )}
                   </>
@@ -247,7 +255,7 @@ const AutomationPhonePreview = ({
 
             {previewTab === 'Not following' && (
               <div className="min-h-[360px] px-4 py-4" dir="auto">
-                <div className="mb-5 text-center font-bold">DM</div>
+                <div className="mb-5 text-center font-bold">{ar ? 'الرسائل الخاصة' : 'DM'}</div>
                 {followRequestEnabled && (
                   <>
                     <div className="max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followRequestMessage)}>
@@ -260,19 +268,19 @@ const AutomationPhonePreview = ({
                       {followRequestButtonText}
                     </div>
                     <div className="mt-3 max-w-[88%] rounded-2xl rounded-bl-md bg-white/10 px-3 py-2 text-sm" style={autoDirStyle(followNotDetectedMessage || '')}>
-                      {followNotDetectedMessage || 'لسه مش ظاهر عندي إنك تابعت الحساب 😊'}
+                      {followNotDetectedMessage || (ar ? 'لم يظهر لديّ أنك تابعت الحساب بعد 😊' : 'I don\'t see that you followed the account yet 😊')}
                     </div>
                     <div className="mt-2 max-w-[88%] rounded-xl border border-white/15 px-3 py-2 text-center text-sm font-semibold">
                       {followRetryButtonText || followRequestButtonText}
                     </div>
                     <div className="mt-3 px-3 py-1 text-center text-[11px] text-white/45">
-                      Final link is not sent until is_user_follow_business is true.
+                      {ar ? 'لا يُرسَل الرابط النهائي إلا بعد تأكيد المتابعة فعلياً.' : 'Final link is not sent until is_user_follow_business is true.'}
                     </div>
                   </>
                 )}
                 {!followRequestEnabled && (
                   <div className="mt-6 text-center text-sm text-white/60">
-                    Enable the follow gate to preview this branch.
+                    {ar ? 'فعّل بوّابة المتابعة لمعاينة هذا المسار.' : 'Enable the follow gate to preview this branch.'}
                   </div>
                 )}
               </div>
@@ -298,7 +306,7 @@ const AutomationPhonePreview = ({
                 previewTab === tab ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500'
               }`}
             >
-              {tab}
+              {TAB_LABELS[tab]}
             </button>
           ))}
         </div>
@@ -309,7 +317,14 @@ const AutomationPhonePreview = ({
 
 const Automations = () => {
   const { user } = useAuth();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
+  const ar = lang === 'ar';
+  const DEFAULT_COMMENT_REPLY = ar ? 'شكراً، شيك على رسائلك الخاصة.' : 'Thanks. Check your DM.';
+  const DEFAULT_OPENING_DM_TEXT = ar
+    ? 'أهلاً 👋\n\nسعيد باهتمامك. اضغط الزر بالأسفل وأرسل لك الرابط.'
+    : "Hey there. Thanks for your interest.\n\nClick below and I will send the link.";
+  const DEFAULT_OPENING_DM_BUTTON = ar ? 'أرسل لي الرابط' : 'Send me the link';
+  const DEFAULT_LINK_BUTTON = ar ? 'افتح الرابط' : 'Open link';
   const [routeSearchParams, setRouteSearchParams] = useSearchParams();
   const cacheKey = [
     'automations-summary',
@@ -342,12 +357,12 @@ const Automations = () => {
   const [match, setMatch] = useState('keyword');
   const [keyword, setKeyword] = useState('');
   const [replyUnderPost, setReplyUnderPost] = useState(false);
-  const [commentReply, setCommentReply] = useState('Thanks. Check your DM.');
+  const [commentReply, setCommentReply] = useState(DEFAULT_COMMENT_REPLY);
   const [commentReply2, setCommentReply2] = useState('');
   const [commentReply3, setCommentReply3] = useState('');
   const [openingDmEnabled, setOpeningDmEnabled] = useState(true);
-  const [openingDmText, setOpeningDmText] = useState("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
-  const [openingDmButtonText, setOpeningDmButtonText] = useState('Send me the link');
+  const [openingDmText, setOpeningDmText] = useState(DEFAULT_OPENING_DM_TEXT);
+  const [openingDmButtonText, setOpeningDmButtonText] = useState(DEFAULT_OPENING_DM_BUTTON);
   const [followRequestEnabled, setFollowRequestEnabled] = useState(false);
   const [followRequestMessage, setFollowRequestMessage] = useState(DEFAULT_FOLLOW_MESSAGE);
   const [followRequestButtonText, setFollowRequestButtonText] = useState(DEFAULT_FOLLOW_BUTTON);
@@ -361,7 +376,7 @@ const Automations = () => {
   const [maxFollowVerificationAttempts, setMaxFollowVerificationAttempts] = useState(DEFAULT_MAX_FOLLOW_VERIFICATION_ATTEMPTS);
   const [emailRequestEnabled, setEmailRequestEnabled] = useState(false);
   const [linkDmText, setLinkDmText] = useState('');
-  const [linkButtonText, setLinkButtonText] = useState('Open link');
+  const [linkButtonText, setLinkButtonText] = useState(DEFAULT_LINK_BUTTON);
   const [linkUrl, setLinkUrl] = useState('');
   const [followUpEnabled, setFollowUpEnabled] = useState(false);
   const [followUpText, setFollowUpText] = useState('');
@@ -379,6 +394,9 @@ const Automations = () => {
     setRefreshing(Boolean(force));
     setLoadError('');
     try {
+      const refreshFailedMsg = ar
+        ? 'تعذّر التحديث. نعرض آخر البيانات المتاحة.'
+        : REFRESH_FAILED_WITH_CACHE;
       const result = await cachedApiGetSWR(
         cacheKey,
         () => api.get('/automations/summary', { timeout: 8000 }),
@@ -389,16 +407,16 @@ const Automations = () => {
           persist: true,
           onUpdate: (data, updateResult) => {
             if (data) setList(data?.items || []);
-            setLoadError(updateResult?.error ? REFRESH_FAILED_WITH_CACHE : '');
+            setLoadError(updateResult?.error ? refreshFailedMsg : '');
           },
         }
       );
       setList(result.data?.items || []);
-      if (result.error) setLoadError(REFRESH_FAILED_WITH_CACHE);
+      if (result.error) setLoadError(refreshFailedMsg);
       else setLoadError('');
     } catch (err) {
-      setLoadError('Failed to load automations.');
-      toast.error('Failed to load automations');
+      setLoadError(ar ? 'تعذّر تحميل الأتمتات.' : 'Failed to load automations.');
+      toast.error(ar ? 'تعذّر تحميل الأتمتات' : 'Failed to load automations');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -459,12 +477,12 @@ const Automations = () => {
     setMatch('keyword');
     setKeyword('');
     setReplyUnderPost(false);
-    setCommentReply('Thanks. Check your DM.');
+    setCommentReply(DEFAULT_COMMENT_REPLY);
     setCommentReply2('');
     setCommentReply3('');
     setOpeningDmEnabled(true);
-    setOpeningDmText("Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
-    setOpeningDmButtonText('Send me the link');
+    setOpeningDmText(DEFAULT_OPENING_DM_TEXT);
+    setOpeningDmButtonText(DEFAULT_OPENING_DM_BUTTON);
     setFollowRequestEnabled(false);
     setFollowRequestMessage(DEFAULT_FOLLOW_MESSAGE);
     setFollowRequestButtonText(DEFAULT_FOLLOW_BUTTON);
@@ -478,7 +496,7 @@ const Automations = () => {
     setFollowGateFallbackMessage('');
     setEmailRequestEnabled(false);
     setLinkDmText('');
-    setLinkButtonText('Open link');
+    setLinkButtonText(DEFAULT_LINK_BUTTON);
     setLinkUrl('');
     setFollowUpEnabled(false);
     setFollowUpText('');
@@ -517,7 +535,7 @@ const Automations = () => {
         ? automation.reply_under_post || publicReplies.length > 0
         : publicReplies.length > 0
     );
-    setCommentReply(publicReplies[0] || 'Thanks. Check your DM.');
+    setCommentReply(publicReplies[0] || DEFAULT_COMMENT_REPLY);
     setCommentReply2(publicReplies[1] || '');
     setCommentReply3(publicReplies[2] || '');
     setOpeningDmEnabled(
@@ -525,8 +543,8 @@ const Automations = () => {
         ? automation.opening_dm_enabled
         : Boolean(automation.opening_dm_text || automation.dm_text || automation.mode === 'reply_and_dm')
     );
-    setOpeningDmText(automation.opening_dm_text || automation.dm_text || "Hey there. Thanks for your interest.\n\nClick below and I will send the link.");
-    setOpeningDmButtonText(automation.opening_dm_button_text || 'Send me the link');
+    setOpeningDmText(automation.opening_dm_text || automation.dm_text || DEFAULT_OPENING_DM_TEXT);
+    setOpeningDmButtonText(automation.opening_dm_button_text || DEFAULT_OPENING_DM_BUTTON);
     setFollowRequestEnabled(Boolean(automation.follow_request_enabled));
     setFollowRequestMessage(automation.follow_request_message || automation.followGateMessage || DEFAULT_FOLLOW_MESSAGE);
     setFollowRequestButtonText(automation.follow_request_button_text || automation.followGateButtonText || DEFAULT_FOLLOW_BUTTON);
@@ -558,7 +576,7 @@ const Automations = () => {
     );
     setEmailRequestEnabled(Boolean(automation.email_request_enabled));
     setLinkDmText(automation.link_dm_text || '');
-    setLinkButtonText(automation.link_button_text || 'Open link');
+    setLinkButtonText(automation.link_button_text || DEFAULT_LINK_BUTTON);
     setLinkUrl(automation.link_url || '');
     setFollowUpEnabled(Boolean(automation.follow_up_enabled));
     setFollowUpText(automation.follow_up_text || '');
@@ -604,7 +622,7 @@ const Automations = () => {
         setSelectedMedia((prev) => prev || items[0]);
       }
       if (items.length === 0) {
-        setMediaWarning(data?.warning || 'No Instagram media returned. Connect Instagram and publish a post first.');
+        setMediaWarning(data?.warning || (ar ? 'لم نستلم أي منشورات. اربط Instagram وانشر منشوراً أولاً.' : 'No Instagram media returned. Connect Instagram and publish a post first.'));
       } else if (data?.warning) {
         setMediaWarning(data.warning);
       } else {
@@ -634,7 +652,7 @@ const Automations = () => {
       applyMediaPayload(result.data);
     } catch (e) {
       if (!cached) {
-        setMediaError(e?.response?.data?.detail || e?.message || 'Failed to load posts. Connect Instagram first.');
+        setMediaError(e?.response?.data?.detail || e?.message || (ar ? 'تعذّر تحميل المنشورات. اربط Instagram أولاً.' : 'Failed to load posts. Connect Instagram first.'));
         setMedia([]);
       }
     }
@@ -667,7 +685,7 @@ const Automations = () => {
       applyAutomationToBuilder(fullAutomation);
       await loadMediaForBuilder({ preferredMediaId: fullAutomation.media_id || '', pickFirst: false });
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to load automation details');
+      toast.error(e?.response?.data?.detail || (ar ? 'تعذّر تحميل تفاصيل الأتمتة' : 'Failed to load automation details'));
       applyAutomationToBuilder(automation);
       await loadMediaForBuilder({ preferredMediaId: automation.media_id || '', pickFirst: false });
     }
@@ -692,7 +710,7 @@ const Automations = () => {
       invalidateApiCache('dashboard-summary');
       invalidateApiCache(`automation-detail:${a.id}`);
     } catch {
-      toast.error('Failed to update');
+      toast.error(ar ? 'تعذّر التحديث' : 'Failed to update');
       refresh({ force: true });
     }
   };
@@ -704,9 +722,9 @@ const Automations = () => {
       invalidateApiCache('automations-summary');
       invalidateApiCache('dashboard-summary');
       invalidateApiCache(`automation-detail:${id}`);
-      toast.success('Deleted');
+      toast.success(ar ? 'تم الحذف' : 'Deleted');
     } catch {
-      toast.error('Failed');
+      toast.error(ar ? 'فشل العملية' : 'Failed');
       refresh({ force: true });
     }
   };
@@ -726,12 +744,12 @@ const Automations = () => {
     setSaving(true);
     try {
       if (followRequestEnabled && !followRequestMessage.trim()) {
-        toast.error('Follow request message is required');
+        toast.error(ar ? 'رسالة طلب المتابعة مطلوبة' : 'Follow request message is required');
         setSaving(false);
         return;
       }
       if (followRequestEnabled && !followRequestButtonText.trim()) {
-        toast.error('Follow confirmation button text is required');
+        toast.error(ar ? 'نص زر تأكيد المتابعة مطلوب' : 'Follow confirmation button text is required');
         setSaving(false);
         return;
       }
@@ -865,11 +883,13 @@ const Automations = () => {
       invalidateApiCache('dashboard-summary');
       if (editingAutomation?.id) invalidateApiCache(`automation-detail:${editingAutomation.id}`);
       await refresh({ force: true });
-      toast.success(editingAutomation ? 'Automation updated. Stats preserved.' : 'Automation is live');
+      toast.success(editingAutomation
+        ? (ar ? 'تم تحديث الأتمتة مع الحفاظ على الإحصائيات.' : 'Automation updated. Stats preserved.')
+        : (ar ? 'الأتمتة فعّالة الآن' : 'Automation is live'));
       setEditingAutomation(null);
       setBuilderOpen(false);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to create automation');
+      toast.error(e?.response?.data?.detail || (ar ? 'تعذّر إنشاء الأتمتة' : 'Failed to create automation'));
     }
     setSaving(false);
   };
@@ -880,12 +900,18 @@ const Automations = () => {
         <div className="sticky top-0 z-30 -mx-3 flex flex-wrap items-end justify-between gap-3 border-b border-slate-200/70 bg-slate-50/95 px-3 py-3 backdrop-blur sm:-mx-4 sm:px-4 lg:-mx-5 lg:px-5">
           <div>
             <h1 className="font-display text-2xl font-extrabold tracking-tight">
-              {editingAutomation ? 'Edit automation' : 'Automations'}
+              {editingAutomation
+                ? (ar ? 'تعديل الأتمتة' : 'Edit automation')
+                : (ar ? 'الأتمتات' : 'Automations')}
             </h1>
             <p className="mt-0.5 text-sm text-slate-600">
               {editingAutomation
-                ? 'Update this Instagram comment automation while keeping its stats.'
-                : 'Create an Instagram comment automation inside your workspace.'}
+                ? (ar
+                    ? 'حدّث هذه الأتمتة مع الإبقاء على إحصائياتها.'
+                    : 'Update this Instagram comment automation while keeping its stats.')
+                : (ar
+                    ? 'أنشئ أتمتة جديدة لتعليقات Instagram داخل مساحة عملك.'
+                    : 'Create an Instagram comment automation inside your workspace.')}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -894,7 +920,7 @@ const Automations = () => {
               setEditingAutomation(null);
               setBuilderOpen(false);
             }}>
-              <ArrowLeft className="mr-2 h-4 w-4" /> Back
+              <ArrowLeft className="mr-2 h-4 w-4" /> {ar ? 'رجوع' : 'Back'}
             </Button>
             <Button
               onClick={submit}
@@ -902,29 +928,33 @@ const Automations = () => {
               className="rounded-lg bg-slate-950 px-5 text-white hover:bg-slate-800"
             >
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {editingAutomation ? 'Save Changes' : 'Go Live'}
+              {editingAutomation
+                ? (ar ? 'حفظ التغييرات' : 'Save Changes')
+                : (ar ? 'تفعيل الأتمتة' : 'Go Live')}
             </Button>
           </div>
         </div>
         {editingAutomation && (
           <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-            Current stats stay attached to this automation: {(editingAutomation.sent || 0).toLocaleString()} fired.
+            {ar
+              ? `الإحصائيات الحالية محفوظة لهذه الأتمتة: ${(editingAutomation.sent || 0).toLocaleString()} مرّة تشغيل.`
+              : `Current stats stay attached to this automation: ${(editingAutomation.sent || 0).toLocaleString()} fired.`}
           </div>
         )}
 
         <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(390px,0.58fr)_minmax(320px,0.42fr)]">
           <Card className="overflow-hidden rounded-xl border-slate-100 bg-white shadow-sm">
             <div className="border-b border-slate-100 px-4 py-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Comment automation</div>
-              <div className="mt-0.5 text-base font-bold">Build rule</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{ar ? 'أتمتة التعليقات' : 'Comment automation'}</div>
+              <div className="mt-0.5 text-base font-bold">{ar ? 'إعداد القاعدة' : 'Build rule'}</div>
             </div>
             <div className="px-4 py-4">
             <section>
-              <h2 className="text-lg font-extrabold tracking-tight">When someone comments on</h2>
+              <h2 className="text-lg font-extrabold tracking-tight">{ar ? 'عندما يعلّق شخص على' : 'When someone comments on'}</h2>
               <div className="mt-3 space-y-2">
                 <OptionRow
                   active={postScope === 'specific'}
-                  title="a specific post or reel"
+                  title={ar ? 'منشور أو ريلز محدّد' : 'a specific post or reel'}
                   onClick={() => setPostScope('specific')}
                 >
                   <div className="mt-3">
@@ -940,7 +970,7 @@ const Automations = () => {
                     )}
                     {mediaLoading ? (
                       <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                        <Loader2 className="h-4 w-4 animate-spin" /> Loading posts
+                        <Loader2 className="h-4 w-4 animate-spin" /> {ar ? 'جارٍ تحميل المنشورات' : 'Loading posts'}
                       </div>
                     ) : (
                       <div className="flex gap-2 overflow-x-auto pb-1">
@@ -981,17 +1011,17 @@ const Automations = () => {
                         }}
                         className="mt-3 text-sm font-semibold text-blue-600"
                       >
-                        {showAllMedia ? 'Show Less' : 'Show All'}
+                        {showAllMedia ? (ar ? 'عرض أقل' : 'Show Less') : (ar ? 'عرض الكل' : 'Show All')}
                       </button>
                     )}
                   </div>
                 </OptionRow>
 
-                <OptionRow active={postScope === 'any'} title="any post or reel" onClick={() => {
+                <OptionRow active={postScope === 'any'} title={ar ? 'أي منشور أو ريلز' : 'any post or reel'} onClick={() => {
                   setPostScope('any');
                   setProcessExistingUnreplied(false);
                 }} />
-                <OptionRow active={postScope === 'next'} title="next post or reel" onClick={() => {
+                <OptionRow active={postScope === 'next'} title={ar ? 'المنشور أو الريلز التالي' : 'next post or reel'} onClick={() => {
                   setPostScope('next');
                   setProcessExistingUnreplied(false);
                 }} />
@@ -1001,17 +1031,19 @@ const Automations = () => {
             {canProcessExistingOnSelectedPost && (
               <section className="mt-5">
                 <ToggleCard
-                  title="Reply to existing unreplied comments on this post"
+                  title={ar ? 'الردّ على التعليقات السابقة التي لم يُردّ عليها في هذا المنشور' : 'Reply to existing unreplied comments on this post'}
                   checked={processExistingUnreplied}
                   onChange={setProcessExistingUnreplied}
                   icon={MessageCircle}
                 >
                   <div className="space-y-2 text-xs leading-relaxed text-slate-600">
                     <p>
-                      When enabled, this automation can reply to old unreplied comments only on the selected post. It will not scan all posts.
+                      {ar
+                        ? 'عند التفعيل، تردّ هذه الأتمتة على التعليقات القديمة في المنشور المختار فقط، ولن تفحص بقية المنشورات.'
+                        : 'When enabled, this automation can reply to old unreplied comments only on the selected post. It will not scan all posts.'}
                     </p>
                     <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-blue-800">
-                      Selected post: {selectedMedia?.caption?.slice(0, 80) || selectedMedia?.id}
+                      {ar ? 'المنشور المختار: ' : 'Selected post: '}{selectedMedia?.caption?.slice(0, 80) || selectedMedia?.id}
                     </div>
                   </div>
                 </ToggleCard>
@@ -1019,24 +1051,24 @@ const Automations = () => {
             )}
 
             <section className="mt-5">
-              <h2 className="text-lg font-extrabold tracking-tight">And this comment has</h2>
+              <h2 className="text-lg font-extrabold tracking-tight">{ar ? 'ويحتوي التعليق على' : 'And this comment has'}</h2>
               <div className="mt-3 space-y-2">
                 <OptionRow
                   active={match === 'keyword'}
-                  title="a specific word or words"
+                  title={ar ? 'كلمة أو كلمات محدّدة' : 'a specific word or words'}
                   onClick={() => setMatch('keyword')}
                 >
                   <div className="mt-3 space-y-2.5">
                     <Input
                       value={keyword}
                       onChange={e => setKeyword(e.target.value)}
-                      placeholder="Enter a word or multiple"
+                      placeholder={ar ? 'أدخل كلمة أو أكثر' : 'Enter a word or multiple'}
                       className="h-10 rounded-lg bg-white"
                       onClick={e => e.stopPropagation()}
                     />
-                    <div className="text-xs text-slate-500">Use commas to separate words</div>
+                    <div className="text-xs text-slate-500">{ar ? 'افصل بين الكلمات بفواصل' : 'Use commas to separate words'}</div>
                     <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-                      <span>For example:</span>
+                      <span>{ar ? 'مثلاً:' : 'For example:'}</span>
                       {exampleWords.map(word => (
                         <button
                           key={word}
@@ -1057,10 +1089,10 @@ const Automations = () => {
                   </div>
                 </OptionRow>
 
-                <OptionRow active={match === 'any'} title="any word" onClick={() => setMatch('any')} />
+                <OptionRow active={match === 'any'} title={ar ? 'أي كلمة' : 'any word'} onClick={() => setMatch('any')} />
 
                 <ToggleCard
-                  title="reply to their comments under the post"
+                  title={ar ? 'الردّ على تعليقاتهم تحت المنشور' : 'reply to their comments under the post'}
                   checked={replyUnderPost}
                   onChange={setReplyUnderPost}
                   icon={MessageCircle}
@@ -1069,32 +1101,32 @@ const Automations = () => {
                     <Input
                       value={commentReply}
                       onChange={e => setCommentReply(e.target.value)}
-                      placeholder="Reply variation 1"
+                      placeholder={ar ? 'صيغة الردّ ١' : 'Reply variation 1'}
                       className="h-10 rounded-lg bg-white"
                     />
                     <Input
                       value={commentReply2}
                       onChange={e => setCommentReply2(e.target.value)}
-                      placeholder="Reply variation 2 (optional)"
+                      placeholder={ar ? 'صيغة الردّ ٢ (اختياري)' : 'Reply variation 2 (optional)'}
                       className="h-10 rounded-lg bg-white"
                     />
                     <Input
                       value={commentReply3}
                       onChange={e => setCommentReply3(e.target.value)}
-                      placeholder="Reply variation 3 (optional)"
+                      placeholder={ar ? 'صيغة الردّ ٣ (اختياري)' : 'Reply variation 3 (optional)'}
                       className="h-10 rounded-lg bg-white"
                     />
-                    <p className="text-xs text-slate-500 mt-1">We will pick one randomly to avoid spam filters.</p>
+                    <p className="text-xs text-slate-500 mt-1">{ar ? 'سنختار صيغة عشوائياً لتفادي فلاتر الإزعاج.' : 'We will pick one randomly to avoid spam filters.'}</p>
                   </div>
                 </ToggleCard>
               </div>
             </section>
 
             <section className="mt-5">
-              <h2 className="text-lg font-extrabold tracking-tight">They will get</h2>
+              <h2 className="text-lg font-extrabold tracking-tight">{ar ? 'وسيصلهم' : 'They will get'}</h2>
               <div className="mt-3 space-y-2">
                 <ToggleCard
-                  title="an opening DM"
+                  title={ar ? 'رسالة خاصة افتتاحية' : 'an opening DM'}
                   checked={openingDmEnabled}
                   onChange={setOpeningDmEnabled}
                   icon={SendIcon}
@@ -1103,18 +1135,18 @@ const Automations = () => {
                     value={openingDmText}
                     onChange={e => setOpeningDmText(e.target.value)}
                     rows={4}
-                    placeholder="Write the first DM"
+                    placeholder={ar ? 'اكتب الرسالة الأولى' : 'Write the first DM'}
                   />
                   <Input
                     value={openingDmButtonText}
                     onChange={e => setOpeningDmButtonText(e.target.value)}
-                    placeholder="Button text"
+                    placeholder={ar ? 'نص الزر' : 'Button text'}
                     className="mt-2.5 h-10 rounded-lg bg-white"
                   />
                 </ToggleCard>
 
                 <ToggleCard
-                  title="Ask them to follow before sending the link"
+                  title={ar ? 'اطلب منهم متابعة الحساب قبل إرسال الرابط' : 'Ask them to follow before sending the link'}
                   checked={followRequestEnabled}
                   onChange={setFollowRequestEnabled}
                   icon={UserPlus}
@@ -1122,19 +1154,23 @@ const Automations = () => {
                   <div className="space-y-2.5">
                     <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-900">
                       {verifyActualFollow
-                        ? 'When the user taps the button, we call Meta\'s User Profile API and only send the link if is_user_follow_business is true.'
-                        : 'Click-only gate: the link is sent as soon as the user taps the button (no live follow check).'}
+                        ? (ar
+                            ? 'عندما يضغط المستخدم الزر، نتحقّق من واجهة Meta ولا نُرسل الرابط إلا إذا كان متابعاً للحساب فعلياً.'
+                            : 'When the user taps the button, we call Meta\'s User Profile API and only send the link if is_user_follow_business is true.')
+                        : (ar
+                            ? 'وضع الضغط فقط: يُرسَل الرابط فور ضغط المستخدم على الزر دون التحقّق من المتابعة فعلياً.'
+                            : 'Click-only gate: the link is sent as soon as the user taps the button (no live follow check).')}
                     </div>
                     <TextArea
                       value={followRequestMessage}
                       onChange={e => setFollowRequestMessage(e.target.value)}
                       rows={4}
-                      placeholder="Write the follow request message"
+                      placeholder={ar ? 'اكتب رسالة طلب المتابعة' : 'Write the follow request message'}
                     />
                     <Input
                       value={followRequestButtonText}
                       onChange={e => setFollowRequestButtonText(e.target.value)}
-                      placeholder="Confirmation button text"
+                      placeholder={ar ? 'نص زر التأكيد' : 'Confirmation button text'}
                       className="h-10 rounded-lg bg-white"
                       dir={detectTextDirection(followRequestButtonText).dir}
                       style={{ textAlign: detectTextDirection(followRequestButtonText).align }}
@@ -1151,12 +1187,12 @@ const Automations = () => {
                       value={followGateFallbackMessage}
                       onChange={e => setFollowGateFallbackMessage(e.target.value)}
                       rows={2}
-                      placeholder="Optional expiry/fallback message"
+                      placeholder={ar ? 'رسالة احتياطية اختيارية عند انتهاء الصلاحية' : 'Optional expiry/fallback message'}
                     />
                     <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
                       <div className="min-w-0 flex-1">
-                        <div className="text-sm font-semibold text-slate-950">Verify actual follow via Meta API</div>
-                        <div className="text-xs text-slate-500">Recommended. Disable to fall back to a click-only gate.</div>
+                        <div className="text-sm font-semibold text-slate-950">{ar ? 'التحقّق الفعلي من المتابعة عبر Meta' : 'Verify actual follow via Meta API'}</div>
+                        <div className="text-xs text-slate-500">{ar ? 'موصى به. عطّله للاكتفاء بضغطة زر فقط دون التحقّق.' : 'Recommended. Disable to fall back to a click-only gate.'}</div>
                       </div>
                       <Switch checked={verifyActualFollow} onCheckedChange={setVerifyActualFollow} />
                     </div>
@@ -1166,12 +1202,12 @@ const Automations = () => {
                           value={followNotDetectedMessage}
                           onChange={e => setFollowNotDetectedMessage(e.target.value)}
                           rows={3}
-                          placeholder="Sent when the user tapped but is_user_follow_business is false"
+                          placeholder={ar ? 'تُرسَل إذا ضغط المستخدم لكنه لم يتابع الحساب فعلياً' : 'Sent when the user tapped but is_user_follow_business is false'}
                         />
                         <Input
                           value={followRetryButtonText}
                           onChange={e => setFollowRetryButtonText(e.target.value)}
-                          placeholder="Retry button text"
+                          placeholder={ar ? 'نص زر إعادة المحاولة' : 'Retry button text'}
                           className="h-10 rounded-lg bg-white"
                           dir={detectTextDirection(followRetryButtonText).dir}
                           style={{ textAlign: detectTextDirection(followRetryButtonText).align }}
@@ -1180,18 +1216,18 @@ const Automations = () => {
                           value={followVerificationFailedMessage}
                           onChange={e => setFollowVerificationFailedMessage(e.target.value)}
                           rows={2}
-                          placeholder="Sent when verification fails because of permission/consent"
+                          placeholder={ar ? 'تُرسَل عند تعذّر التحقّق بسبب الصلاحيات أو الموافقة' : 'Sent when verification fails because of permission/consent'}
                         />
                         <TextArea
                           value={followCooldownMessage}
                           onChange={e => setFollowCooldownMessage(e.target.value)}
                           rows={2}
-                          placeholder="Sent if the user taps again during the 30s cooldown"
+                          placeholder={ar ? 'تُرسَل إذا ضغط المستخدم مجدّداً خلال فترة الانتظار القصيرة' : 'Sent if the user taps again during the 30s cooldown'}
                         />
                         <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
                           <div className="min-w-0 flex-1">
-                            <div className="text-sm font-semibold text-slate-950">Max verification attempts</div>
-                            <div className="text-xs text-slate-500">Prevents reminder spam. After this we stop checking.</div>
+                            <div className="text-sm font-semibold text-slate-950">{ar ? 'الحدّ الأقصى لمحاولات التحقّق' : 'Max verification attempts'}</div>
+                            <div className="text-xs text-slate-500">{ar ? 'لتجنّب إزعاج المستخدم بالتذكيرات. بعد هذا العدد نتوقّف عن التحقّق.' : 'Prevents reminder spam. After this we stop checking.'}</div>
                           </div>
                           <Input
                             type="number"
@@ -1208,7 +1244,7 @@ const Automations = () => {
                 </ToggleCard>
 
                 <ToggleCard
-                  title="a DM asking for their email"
+                  title={ar ? 'رسالة خاصة لطلب البريد الإلكتروني' : 'a DM asking for their email'}
                   checked={emailRequestEnabled}
                   onChange={setEmailRequestEnabled}
                   icon={Mail}
@@ -1217,17 +1253,17 @@ const Automations = () => {
             </section>
 
             <section className="mt-5">
-              <h2 className="text-lg font-extrabold tracking-tight">And then, they will get</h2>
+              <h2 className="text-lg font-extrabold tracking-tight">{ar ? 'ثم بعد ذلك يصلهم' : 'And then, they will get'}</h2>
               <div className="mt-3 space-y-2">
                 <div className="rounded-lg bg-slate-100 p-3">
                   <div className="mb-2.5 flex items-center gap-2.5 text-sm font-semibold">
-                    <LinkIcon className="h-4 w-4 text-slate-500" /> a DM with a link
+                    <LinkIcon className="h-4 w-4 text-slate-500" /> {ar ? 'رسالة خاصة تحتوي على رابط' : 'a DM with a link'}
                   </div>
                   <TextArea
                     value={linkDmText}
                     onChange={e => setLinkDmText(e.target.value)}
                     rows={3}
-                    placeholder="Write a message"
+                    placeholder={ar ? 'اكتب الرسالة' : 'Write a message'}
                   />
                   <Input
                     value={linkUrl}
@@ -1238,13 +1274,13 @@ const Automations = () => {
                   <Input
                     value={linkButtonText}
                     onChange={e => setLinkButtonText(e.target.value)}
-                    placeholder="Button text"
+                    placeholder={ar ? 'نص الزر' : 'Button text'}
                     className="mt-2.5 h-10 rounded-lg bg-white"
                   />
                 </div>
 
                 <ToggleCard
-                  title="a follow up DM if they don't click the link"
+                  title={ar ? 'رسالة متابعة إذا لم يضغطوا على الرابط' : "a follow up DM if they don't click the link"}
                   checked={followUpEnabled}
                   onChange={setFollowUpEnabled}
                   icon={SendIcon}
@@ -1253,7 +1289,7 @@ const Automations = () => {
                     value={followUpText}
                     onChange={e => setFollowUpText(e.target.value)}
                     rows={3}
-                    placeholder="Write a follow up"
+                    placeholder={ar ? 'اكتب رسالة المتابعة' : 'Write a follow up'}
                   />
                 </ToggleCard>
 
@@ -1282,6 +1318,7 @@ const Automations = () => {
               setPreviewTab={setPreviewTab}
               accountName={previewAccountName}
               accountAvatar={previewAccountAvatar}
+              ar={ar}
             />
           </Card>
         </div>
@@ -1364,10 +1401,16 @@ const Automations = () => {
         {filtered.map(a => {
           const thumb = a.media_preview?.thumbnail_url;
           const scopeLabel = a.post_scope === 'any'
-            ? 'Any post'
-            : a.latest ? 'Next/latest post' : (a.media_preview?.caption?.slice(0, 40) || a.media_id?.slice(0, 10) || '');
-          const keywordLabel = a.match === 'keyword' && a.keyword ? `keywords "${a.keyword}"` : 'any word';
-          const modeLabel = a.mode === 'reply_only' ? 'Reply only' : 'Reply + DM';
+            ? (ar ? 'أي منشور' : 'Any post')
+            : a.latest
+              ? (ar ? 'المنشور التالي/الأحدث' : 'Next/latest post')
+              : (a.media_preview?.caption?.slice(0, 40) || a.media_id?.slice(0, 10) || '');
+          const keywordLabel = a.match === 'keyword' && a.keyword
+            ? (ar ? `كلمات "${a.keyword}"` : `keywords "${a.keyword}"`)
+            : (ar ? 'أي كلمة' : 'any word');
+          const modeLabel = a.mode === 'reply_only'
+            ? (ar ? 'ردّ فقط' : 'Reply only')
+            : (ar ? 'ردّ + رسالة' : 'Reply + DM');
           return (
             <Card key={a.id} className="rounded-lg border-slate-100 p-4 transition-shadow hover:shadow-md">
               <div className="flex flex-wrap items-center gap-4">
@@ -1381,13 +1424,13 @@ const Automations = () => {
                   </div>
                   {a.activationStartedAt && (
                     <div className="mt-1 text-xs text-slate-400">
-                      Active since {new Date(a.activationStartedAt).toLocaleString()}
+                      {ar ? 'نشطة منذ ' : 'Active since '}{new Date(a.activationStartedAt).toLocaleString()}
                     </div>
                   )}
                 </div>
                 <div className="hidden gap-6 text-sm md:flex">
                   <div>
-                    <div className="text-xs text-slate-500">Fired</div>
+                    <div className="text-xs text-slate-500">{ar ? 'مرّات التشغيل' : 'Fired'}</div>
                     <div className="font-bold">{(a.sent || 0).toLocaleString()}</div>
                   </div>
                 </div>
@@ -1398,7 +1441,9 @@ const Automations = () => {
                       ? 'border-amber-100 bg-amber-50 text-amber-700'
                       : 'border-slate-200 bg-slate-100 text-slate-600'
                 }`}>
-                  {a.status}
+                  {ar
+                    ? (a.status === 'active' ? 'نشطة' : a.status === 'paused' ? 'متوقّفة' : a.status === 'draft' ? 'مسودّة' : a.status)
+                    : a.status}
                 </Badge>
                 <Switch checked={a.status === 'active'} onCheckedChange={() => toggleStatus(a)} />
                 <Button
@@ -1407,7 +1452,7 @@ const Automations = () => {
                   size="sm"
                   className="rounded-lg"
                 >
-                  <Pencil className="h-3.5 w-3.5" /> Edit
+                  <Pencil className="h-3.5 w-3.5" /> {ar ? 'تعديل' : 'Edit'}
                 </Button>
                 <Button
                   onClick={() => handleDelete(a.id)}
@@ -1427,8 +1472,8 @@ const Automations = () => {
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-lg bg-slate-100">
               <Zap className="h-6 w-6 text-slate-400" />
             </div>
-            <h3 className="font-display mt-4 text-lg font-bold">No automations yet</h3>
-            <p className="mt-1 text-sm text-slate-500">Create your first Instagram comment automation.</p>
+            <h3 className="font-display mt-4 text-lg font-bold">{ar ? 'لا توجد أتمتات بعد' : 'No automations yet'}</h3>
+            <p className="mt-1 text-sm text-slate-500">{ar ? 'أنشئ أول أتمتة لتعليقات Instagram.' : 'Create your first Instagram comment automation.'}</p>
           </Card>
         )}
       </div>
