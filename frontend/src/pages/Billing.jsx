@@ -9,6 +9,7 @@ import { cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
 import { toast } from 'sonner';
 import analytics from '../lib/analytics';
 import { useAuth } from '../context/AuthContext';
+import { useTranslation } from '../lib/i18n';
 import {
   computeAllUsageRows,
   computeAccountRow,
@@ -150,6 +151,7 @@ function PlanCard({ plan, current }) {
 
 export default function Billing() {
   const { user } = useAuth();
+  const { t, lang } = useTranslation();
   const billingCacheKey = `billing:plan-current:${user?.id || 'anon'}`;
   const plansCacheKey = `billing:plans:${user?.id || 'anon'}`;
   const [current, setCurrent] = useState(() => getCachedApiData(billingCacheKey) || null);
@@ -204,16 +206,16 @@ export default function Billing() {
         <div>
           <div className="flex items-center gap-2 text-slate-500 text-xs uppercase tracking-wide font-semibold mb-1">
             <CreditCard className="w-4 h-4" />
-            Billing & usage
+            {lang === 'ar' ? 'الفوترة والاستهلاك' : 'Billing & usage'}
           </div>
-          <h1 className="text-3xl font-bold font-display">Billing</h1>
+          <h1 className="text-3xl font-bold font-display">{t('billing.title')}</h1>
           <p className="text-slate-500 mt-1 text-sm">
-            Your current plan, this month's usage, and remaining quota.
+            {t('billing.subtitle')}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => load({ force: true })} disabled={loading}>
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
+          {t('common.refresh')}
         </Button>
       </div>
 
@@ -224,11 +226,9 @@ export default function Billing() {
       >
         <Lock className="w-4 h-4 text-amber-700 mt-0.5 shrink-0" />
         <div className="text-sm text-amber-900">
-          <div className="font-semibold mb-1">Billing is not enabled yet.</div>
+          <div className="font-semibold mb-1">{t('billing.billingNotEnabled')}</div>
           <div className="text-amber-800">
-            Your current plan limits are enforced to keep the beta stable.
-            Contact support during beta to change your plan. Plan upgrades
-            with payment will be available later.
+            {t('billing.contactSupport')}
           </div>
         </div>
       </div>
@@ -241,7 +241,7 @@ export default function Billing() {
       )}
 
       {loading && !current && (
-        <div className="text-center py-16 text-slate-500">Loading…</div>
+        <div className="text-center py-16 text-slate-500">{t('common.loading')}</div>
       )}
 
       {current && (
@@ -251,17 +251,19 @@ export default function Billing() {
             <div className="flex items-center justify-between mb-2">
               <div>
                 <div className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
-                  Current plan
+                  {t('billing.currentPlan')}
                 </div>
                 <div className="text-2xl font-bold text-slate-800" data-testid="current-plan-name">
                   {current.display_name || current.plan_key || 'Free'}
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  Month: <span className="font-mono">{current.event_month}</span>
+                  {lang === 'ar' ? 'الشهر:' : 'Month:'} <span className="font-mono">{current.event_month}</span>
                   <span className="ml-3">
-                    Billing:{' '}
+                    {lang === 'ar' ? 'الفوترة:' : 'Billing:'}{' '}
                     <span className="font-semibold text-slate-700">
-                      {current.billing_enabled ? 'Enabled' : 'Not enabled yet'}
+                      {current.billing_enabled
+                        ? (lang === 'ar' ? 'مُفعّلة' : 'Enabled')
+                        : (lang === 'ar' ? 'غير مُفعّلة بعد' : 'Not enabled yet')}
                     </span>
                   </span>
                 </div>
@@ -271,7 +273,7 @@ export default function Billing() {
 
           {/* Counter cards */}
           <section className="mb-6">
-            <h2 className="text-sm font-semibold text-slate-700 mb-3">This month</h2>
+            <h2 className="text-sm font-semibold text-slate-700 mb-3">{t('billing.thisMonth')}</h2>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {accountRow && <UsageBar row={accountRow} />}
               {automationRow && <UsageBar row={automationRow} />}
@@ -284,15 +286,16 @@ export default function Billing() {
           {/* Plan catalogue */}
           {plans && plans.length > 0 && (
             <section className="mb-6">
-              <h2 className="text-sm font-semibold text-slate-700 mb-3">Plans</h2>
+              <h2 className="text-sm font-semibold text-slate-700 mb-3">{t('billing.plans')}</h2>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {plans.map((plan) => (
                   <PlanCard key={plan.plan_key} plan={plan} current={current} />
                 ))}
               </div>
               <p className="text-xs text-slate-400 mt-3">
-                Plan upgrades will be available after billing is enabled.
-                During beta, contact support to change your plan.
+                {lang === 'ar'
+                  ? 'ستتاح ترقية الخطة بعد تفعيل الفوترة. خلال الفترة التجريبية، تواصل مع الدعم لتغيير الخطة.'
+                  : 'Plan upgrades will be available after billing is enabled. During beta, contact support to change your plan.'}
               </p>
             </section>
           )}

@@ -8,12 +8,15 @@ import { Switch } from '../components/ui/switch';
 import { Inbox, Loader2, Trash2, RefreshCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
+import { useTranslation } from '../lib/i18n';
 
-const MATCH_MODES = [
-  { value: 'contains', label: 'contains' },
-  { value: 'exact', label: 'exact' },
-  { value: 'starts_with', label: 'starts with' },
-];
+function matchModes(lang) {
+  return [
+    { value: 'contains', label: lang === 'ar' ? 'يحتوي على' : 'contains' },
+    { value: 'exact', label: lang === 'ar' ? 'مطابقة تامة' : 'exact' },
+    { value: 'starts_with', label: lang === 'ar' ? 'يبدأ بـ' : 'starts with' },
+  ];
+}
 
 const STATUS_COLORS = {
   replied: 'bg-emerald-100 text-emerald-700',
@@ -29,6 +32,8 @@ const fmtTime = (iso) => {
 };
 
 const DmAutomation = () => {
+  const { t, lang } = useTranslation();
+  const MATCH_MODES = matchModes(lang);
   const [diag, setDiag] = useState(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [rules, setRules] = useState([]);
@@ -108,13 +113,13 @@ const DmAutomation = () => {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight flex items-center gap-2">
-            <Inbox className="w-7 h-7" /> Instagram DM Automation
+            <Inbox className="w-7 h-7" /> {t('dmAutomation.title')}
           </h1>
-          <p className="mt-1 text-slate-600">Auto-reply to direct messages based on keyword rules. Independent of comments.</p>
+          <p className="mt-1 text-slate-600">{t('dmAutomation.subtitle')}</p>
         </div>
         <Button onClick={refreshDiag} variant="outline" className="rounded-xl sm:w-auto" disabled={diagLoading}>
           {diagLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCcw className="w-4 h-4 mr-2" />}
-          Refresh status
+          {lang === 'ar' ? 'تحديث الحالة' : 'Refresh status'}
         </Button>
       </div>
 
@@ -149,57 +154,65 @@ const DmAutomation = () => {
 
       {/* Create rule form */}
       <Card className="mt-6 p-6 rounded-2xl border-slate-100">
-        <h3 className="font-display font-bold text-lg">Create DM rule</h3>
+        <h3 className="font-display font-bold text-lg">{t('dmAutomation.createTitle')}</h3>
         <div className="mt-4 grid md:grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label>Rule name</Label>
-            <Input className="h-11 rounded-xl" placeholder="e.g. Welcome reply"
+            <Label>{t('dmAutomation.ruleName')}</Label>
+            <Input className="h-11 rounded-xl"
               value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           </div>
           <div className="space-y-2">
-            <Label>Keyword</Label>
-            <Input className="h-11 rounded-xl" placeholder="e.g. hello"
+            <Label>{t('dmAutomation.keyword')}</Label>
+            <Input className="h-11 rounded-xl"
               value={form.keyword} onChange={e => setForm({ ...form, keyword: e.target.value })} />
           </div>
           <div className="space-y-2">
-            <Label>Match mode</Label>
+            <Label>{t('dmAutomation.matchMode')}</Label>
             <select className="h-11 w-full rounded-xl border border-slate-200 px-3 bg-white"
               value={form.matchMode} onChange={e => setForm({ ...form, matchMode: e.target.value })}>
               {MATCH_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
             </select>
           </div>
           <div className="space-y-2">
-            <Label>Active</Label>
+            <Label>{t('dmAutomation.active')}</Label>
             <div className="h-11 flex items-center">
               <Switch checked={form.isActive} onCheckedChange={v => setForm({ ...form, isActive: v })} />
-              <span className="ml-2 text-sm text-slate-600">{form.isActive ? 'Active' : 'Inactive'}</span>
+              <span className="ml-2 text-sm text-slate-600">
+                {form.isActive
+                  ? (lang === 'ar' ? 'مُفعّلة' : 'Active')
+                  : (lang === 'ar' ? 'مُعطّلة' : 'Inactive')}
+              </span>
             </div>
           </div>
           <div className="md:col-span-2 space-y-2">
-            <Label>Reply message</Label>
+            <Label>{t('dmAutomation.replyMessage')}</Label>
             <textarea rows={3} className="w-full rounded-xl border border-slate-200 p-3"
-              placeholder="Hi, thanks for your message!"
               value={form.replyText} onChange={e => setForm({ ...form, replyText: e.target.value })} />
           </div>
         </div>
         <div className="mt-4 flex justify-end">
           <Button onClick={saveRule} disabled={saving} className="rounded-xl bg-slate-900 text-white">
             {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-            Save rule
+            {t('dmAutomation.saveRule')}
           </Button>
         </div>
       </Card>
 
       {/* Rules table */}
       <Card className="mt-6 p-6 rounded-2xl border-slate-100">
-        <h3 className="font-display font-bold text-lg">DM rules ({rules.length})</h3>
+        <h3 className="font-display font-bold text-lg">{t('dmAutomation.rulesCount')} ({rules.length})</h3>
         {rules.length === 0 ? (
-          <div className="mt-4 text-sm text-slate-500">No rules yet.</div>
+          <div className="mt-4 text-sm text-slate-500">{t('dmAutomation.noRules')}</div>
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                <th className="py-2">Name</th><th>Keyword</th><th>Mode</th><th>Reply</th><th>Active</th><th></th>
+                <th className="py-2">{lang === 'ar' ? 'الاسم' : 'Name'}</th>
+                <th>{t('dmAutomation.keyword')}</th>
+                <th>{t('dmAutomation.matchMode')}</th>
+                <th>{lang === 'ar' ? 'الرد' : 'Reply'}</th>
+                <th>{t('dmAutomation.active')}</th>
+                <th></th>
               </tr></thead>
               <tbody>
                 {rules.map(r => (
@@ -225,18 +238,22 @@ const DmAutomation = () => {
       {/* Logs */}
       <Card className="mt-6 p-6 rounded-2xl border-slate-100">
         <div className="flex items-center justify-between">
-          <h3 className="font-display font-bold text-lg">Recent DM events ({logs.length})</h3>
+          <h3 className="font-display font-bold text-lg">{t('dmAutomation.recentEventsTitle')} ({logs.length})</h3>
           <Button onClick={loadAll} variant="ghost" size="sm" className="rounded-xl">
-            <RefreshCcw className="w-4 h-4 mr-2" /> Refresh
+            <RefreshCcw className="w-4 h-4 mr-2" /> {t('common.refresh')}
           </Button>
         </div>
         {logs.length === 0 ? (
-          <div className="mt-4 text-sm text-slate-500">No DM events yet.</div>
+          <div className="mt-4 text-sm text-slate-500">{t('dmAutomation.noEvents')}</div>
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-slate-500 border-b border-slate-100">
-                <th className="py-2">Time</th><th>Incoming</th><th>Matched rule</th><th>Status</th><th>Error</th>
+                <th className="py-2">{lang === 'ar' ? 'الوقت' : 'Time'}</th>
+                <th>{lang === 'ar' ? 'الرسالة الواردة' : 'Incoming'}</th>
+                <th>{lang === 'ar' ? 'القاعدة المُطابِقة' : 'Matched rule'}</th>
+                <th>{lang === 'ar' ? 'الحالة' : 'Status'}</th>
+                <th>{lang === 'ar' ? 'الخطأ' : 'Error'}</th>
               </tr></thead>
               <tbody>
                 {logs.map(l => {
