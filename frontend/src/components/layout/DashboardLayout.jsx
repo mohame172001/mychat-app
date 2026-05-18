@@ -9,11 +9,14 @@ import { preloadRoutes } from '../../lib/routePreloader';
 import { Button } from '../ui/button';
 import { BUILD_SHA } from '../../buildInfo.generated';
 import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
+import { useTranslation } from '../../lib/i18n';
 
 const commonRoutes = ['Automations', 'Billing', 'Settings'];
 
 const DashboardLayout = () => {
   const { logout } = useAuth();
+  const { t, lang } = useTranslation();
+  const ar = lang === 'ar';
   const { isAdmin } = useIsAdmin();
 
   useEffect(() => {
@@ -33,12 +36,12 @@ const DashboardLayout = () => {
               </div>
               <span className="text-lg font-bold font-display truncate">mychat</span>
             </Link>
-            <Button onClick={logout} variant="ghost" size="icon" className="rounded-full" aria-label="Log out">
+            <Button onClick={logout} variant="ghost" size="icon" className="rounded-full" aria-label={ar ? 'تسجيل الخروج' : 'Log out'}>
               <LogOut className="w-4 h-4" />
             </Button>
           </div>
           <nav className="mobile-nav-scroll flex gap-2 overflow-x-auto px-3 pb-3">
-            {navItems.map(({ to, end, icon: Icon, label }) => (
+            {navItems.map(({ to, end, icon: Icon, label, i18nKey }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -48,7 +51,7 @@ const DashboardLayout = () => {
                 }`}
               >
                 <Icon className="w-4 h-4" />
-                {label}
+                {i18nKey ? t(i18nKey, label) : label}
               </NavLink>
             ))}
           </nav>
@@ -59,17 +62,17 @@ const DashboardLayout = () => {
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
           <span className="flex items-center gap-2" data-testid="build-marker">
-            © 2026 mychat · Build: <span className="font-mono text-[10px] text-slate-400">{BUILD_SHA}</span>
+            © 2026 mychat · {ar ? 'الإصدار:' : 'Build:'} <span className="font-mono text-[10px] text-slate-400">{BUILD_SHA}</span>
           </span>
           <div className="flex gap-4 md:gap-5">
-            <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">Privacy</Link>
-            <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noreferrer">Terms</Link>
+            <Link to="/privacy" className="hover:text-slate-900" target="_blank" rel="noreferrer">{ar ? 'الخصوصية' : 'Privacy'}</Link>
+            <Link to="/terms" className="hover:text-slate-900" target="_blank" rel="noreferrer">{ar ? 'الشروط' : 'Terms'}</Link>
             <a
               href={buildSupportMailtoHref()}
               onClick={handleContactClick}
               className="hover:text-slate-900"
             >
-              Contact
+              {ar ? 'تواصل معنا' : 'Contact'}
             </a>
           </div>
         </footer>

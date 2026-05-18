@@ -6,6 +6,7 @@ import {
   googleClientId, googleStatus, loadGoogleRuntimeConfig, renderGoogleButton, googleErrorMessage,
 } from '../../lib/googleAuth';
 import { Button } from '../ui/button';
+import { useTranslation } from '../../lib/i18n';
 
 /**
  * Phase 2.7 reusable Google sign-in button.
@@ -17,6 +18,8 @@ import { Button } from '../ui/button';
  * logs the credential.
  */
 export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) {
+  const { lang } = useTranslation();
+  const ar = lang === 'ar';
   const slotRef = useRef(null);
   const [configStatus, setConfigStatus] = useState(() => (googleClientId() ? 'enabled' : 'loading'));
   const [configDiagnostics, setConfigDiagnostics] = useState(() => googleStatus());
@@ -47,7 +50,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
           setBusy(true);
           try {
             await loginWithGoogle(credential);
-            toast.success('Signed in with Google');
+            toast.success(ar ? 'تم تسجيل الدخول عبر Google' : 'Signed in with Google');
             if (onComplete) onComplete();
             else navigate(redirectTo);
           } catch (err) {
@@ -58,7 +61,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
           }
         },
         onError: () => {
-          if (!cancelled) toast.error('Google sign-in is temporarily unavailable');
+          if (!cancelled) toast.error(ar ? 'تسجيل الدخول عبر Google غير متاح مؤقتاً' : 'Google sign-in is temporarily unavailable');
         },
       });
       // ok=false is fine — the slot stays empty and the email/password
@@ -88,14 +91,14 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
           variant="outline"
           disabled
           className="w-full h-12 rounded-xl border-slate-200 text-slate-400 bg-slate-50"
-          aria-label="Continue with Google"
+          aria-label={ar ? 'المتابعة باستخدام Google' : 'Continue with Google'}
         >
-          Continue with Google
+          {ar ? 'المتابعة باستخدام Google' : 'Continue with Google'}
         </Button>
         <div className="text-center text-xs text-slate-400">
           {configStatus === 'loading'
-            ? 'Checking Google sign-in…'
-            : 'Google sign-in is unavailable right now. Use email and password below.'}
+            ? (ar ? 'جارٍ التحقّق من تسجيل الدخول عبر Google…' : 'Checking Google sign-in…')
+            : (ar ? 'تسجيل الدخول عبر Google غير متاح حالياً. استخدم البريد وكلمة المرور بالأسفل.' : 'Google sign-in is unavailable right now. Use email and password below.')}
         </div>
         {/* Phase 2.18R: keep the diagnostic line in the DOM for our
             own test fixtures and operator debugging — but stop
@@ -118,7 +121,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
       <div
         ref={slotRef}
         className={busy ? 'opacity-60 pointer-events-none' : ''}
-        aria-label="Continue with Google"
+        aria-label={ar ? 'المتابعة باستخدام Google' : 'Continue with Google'}
       />
       {sdkUnavailable && (
         <Button
@@ -131,7 +134,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
         </Button>
       )}
       <div className="text-center text-xs text-slate-400">
-        or continue with email below
+        {ar ? 'أو تابع باستخدام البريد الإلكتروني بالأسفل' : 'or continue with email below'}
       </div>
     </div>
   );

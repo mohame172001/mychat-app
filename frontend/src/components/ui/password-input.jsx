@@ -13,7 +13,7 @@ const PasswordInput = React.forwardRef(({ className, inputClassName, ...props },
       <Input
         ref={ref}
         type={visible ? "text" : "password"}
-        className={cn("pr-10", inputClassName)}
+        className={cn("pe-10", inputClassName)}
         {...props}
       />
       <button
@@ -21,7 +21,7 @@ const PasswordInput = React.forwardRef(({ className, inputClassName, ...props },
         aria-label={label}
         aria-controls={props.id}
         onClick={() => setVisible((value) => !value)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 rounded-md"
+        className="absolute end- top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 rounded-md"
       >
         {visible ? <EyeOff className="w-4 h-4" aria-hidden="true" /> : <Eye className="w-4 h-4" aria-hidden="true" />}
       </button>

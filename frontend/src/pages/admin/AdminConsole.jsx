@@ -24,6 +24,15 @@ import {
   PERM_AUTOMATIONS_DISABLE, PERM_MEMBERS_VIEW, PERM_MEMBERS_MANAGE,
   PERM_FAILURES_VIEW,
 } from '../../lib/adminPermissions';
+import { useTranslation } from '../../lib/i18n';
+
+function isAr() {
+  try {
+    if (typeof document !== 'undefined' && document.documentElement?.lang === 'ar') return true;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_lang') === 'ar') return true;
+  } catch (_) { /* ignore */ }
+  return false;
+}
 
 const ADMIN_CACHE_TTL_MS = 30000;
 
@@ -56,7 +65,7 @@ class AdminSectionErrorBoundary extends React.Component {
       return (
         <div className="rounded-2xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-800"
              data-testid="admin-section-error">
-          <div className="font-semibold">Could not render this user section</div>
+          <div className="font-semibold">{isAr() ? "تعذّر عرض هذا القسم" : "Could not render this user section"}</div>
           <div className="text-xs mt-1">section={this.props.name || 'unknown'}</div>
         </div>
       );
@@ -65,13 +74,13 @@ class AdminSectionErrorBoundary extends React.Component {
   }
 }
 
-function AdminErrorCard({ title = 'Could not load this section', onRetry, loading }) {
+function AdminErrorCard({ title = (isAr() ? 'تعذّر تحميل هذا القسم' : 'Could not load this section'), onRetry, loading }) {
   return (
     <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
       <div className="font-semibold">{title}</div>
       {onRetry && (
         <Button variant="outline" size="sm" className="mt-3" onClick={onRetry} disabled={loading}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
           Retry
         </Button>
       )}
@@ -140,8 +149,8 @@ function OverviewTab({ data, onRefresh, loading }) {
       );
       if (onRefresh) onRefresh();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Reclassifier failed';
-      toast.error(typeof msg === 'string' ? msg : 'Reclassifier failed');
+      const msg = err?.response?.data?.detail || (isAr() ? 'فشل إعادة التصنيف' : 'Reclassifier failed');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'فشل إعادة التصنيف' : 'Reclassifier failed'));
     } finally {
       setReclassifying(false);
     }
@@ -178,13 +187,13 @@ function OverviewTab({ data, onRefresh, loading }) {
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={runReclassifier} disabled={reclassifying}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${reclassifying ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${reclassifying ? 'animate-spin' : ''}`} />
           Run now
         </Button>
       </div>
 
       <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-6" data-testid="plan-distribution">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Plan distribution</h3>
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "توزيع الخطط" : "Plan distribution"}</h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {planDistributionRows(data.plan_distribution).map(row => (
             <div key={row.key} className="rounded-xl border border-slate-100 p-3" data-testid={`plan-dist-${row.key}`}>
@@ -221,8 +230,8 @@ function UsersTab({ onSelect }) {
       );
       setData(result.data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load users';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load users');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل المستخدمين' : 'Failed to load users');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل المستخدمين' : 'Failed to load users'));
     } finally {
       setLoading(false);
     }
@@ -234,12 +243,12 @@ function UsersTab({ onSelect }) {
     <div data-testid="admin-users">
       <div className="flex flex-wrap gap-2 mb-4">
         <div className="relative flex-1 min-w-[180px]">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search className="w-4 h-4 absolute start- top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search email or user_id"
-            className="pl-9"
+            placeholder={isAr() ? "ابحث بالبريد أو user_id" : "Search email or user_id"}
+            className="ps-9"
           />
         </div>
         <select
@@ -260,7 +269,7 @@ function UsersTab({ onSelect }) {
           }}
           disabled={loading}
         >
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
         <Button
@@ -277,9 +286,9 @@ function UsersTab({ onSelect }) {
               a.click();
               document.body.removeChild(a);
               URL.revokeObjectURL(url);
-              toast.success('CSV downloaded');
+              toast.success((isAr() ? 'تم تنزيل ملف CSV' : 'CSV downloaded'));
             } catch (err) {
-              toast.error('CSV export failed');
+              toast.error((isAr() ? 'فشل تصدير CSV' : 'CSV export failed'));
             }
           }}
         >
@@ -291,19 +300,19 @@ function UsersTab({ onSelect }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-left px-3 py-2">Email</th>
-              <th className="text-left px-3 py-2">Plan</th>
-              <th className="text-right px-3 py-2">IG</th>
-              <th className="text-right px-3 py-2">Active rules</th>
+              <th className="text-start px-3 py-2">Email</th>
+              <th className="text-start px-3 py-2">Plan</th>
+              <th className="text-end px-3 py-2">IG</th>
+              <th className="text-end px-3 py-2">Active rules</th>
               {/* Phase 2.18S: column titles now spell out the
                   current-month scoping so a fresh month showing 0
                   across the board does not look like a bug. */}
-              <th className="text-right px-3 py-2" title="Comments processed this calendar month">Comments (mo)</th>
-              <th className="text-right px-3 py-2" title="Public replies sent this calendar month">Replies (mo)</th>
-              <th className="text-right px-3 py-2" title="DMs sent this calendar month">DMs (mo)</th>
-              <th className="text-left px-3 py-2">Status</th>
-              <th className="text-left px-3 py-2">Created</th>
-              <th className="text-right px-3 py-2"></th>
+              <th className="text-end px-3 py-2" title="Comments processed this calendar month">Comments (mo)</th>
+              <th className="text-end px-3 py-2" title="Public replies sent this calendar month">Replies (mo)</th>
+              <th className="text-end px-3 py-2" title="DMs sent this calendar month">DMs (mo)</th>
+              <th className="text-start px-3 py-2">Status</th>
+              <th className="text-start px-3 py-2">Created</th>
+              <th className="text-end px-3 py-2"></th>
             </tr>
           </thead>
           <tbody>
@@ -317,18 +326,18 @@ function UsersTab({ onSelect }) {
                       {PLAN_DISPLAY[u.plan_key] || u.plan_key}
                     </Badge>
                   </td>
-                  <td className="px-3 py-2 text-right font-mono">{u.instagram_accounts_count}</td>
-                  <td className="px-3 py-2 text-right font-mono">{u.active_automations_count}</td>
-                  <td className="px-3 py-2 text-right font-mono">{u.current_month_usage?.comments_processed ?? 0}</td>
-                  <td className="px-3 py-2 text-right font-mono">{u.current_month_usage?.public_replies_sent ?? 0}</td>
-                  <td className="px-3 py-2 text-right font-mono">{u.current_month_usage?.dms_sent ?? 0}</td>
+                  <td className="px-3 py-2 text-end font-mono">{u.instagram_accounts_count}</td>
+                  <td className="px-3 py-2 text-end font-mono">{u.active_automations_count}</td>
+                  <td className="px-3 py-2 text-end font-mono">{u.current_month_usage?.comments_processed ?? 0}</td>
+                  <td className="px-3 py-2 text-end font-mono">{u.current_month_usage?.public_replies_sent ?? 0}</td>
+                  <td className="px-3 py-2 text-end font-mono">{u.current_month_usage?.dms_sent ?? 0}</td>
                   <td className="px-3 py-2">
                     {exceeded
-                      ? <Badge className="bg-rose-100 text-rose-700 border-0"><AlertTriangle className="w-3 h-3 mr-1" />Limit</Badge>
-                      : <Badge className="bg-emerald-100 text-emerald-700 border-0"><CheckCircle2 className="w-3 h-3 mr-1" />OK</Badge>}
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0"><AlertTriangle className="w-3 h-3 me-1" />Limit</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0"><CheckCircle2 className="w-3 h-3 me-1" />OK</Badge>}
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-500">{formatTimestamp(u.created_at)}</td>
-                  <td className="px-3 py-2 text-right">
+                  <td className="px-3 py-2 text-end">
                     <Button size="sm" variant="ghost" onClick={() => onSelect(u.user_id)}>
                       View
                     </Button>
@@ -406,9 +415,9 @@ function UserDetailTab({ userId, onBack, me }) {
       setPlanKey(result.data?.plan?.plan_key || 'free');
       if (result.stale) setLoadError('Showing cached user detail. Refresh failed.');
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load user';
-      setLoadError(typeof msg === 'string' ? msg : 'Failed to load user');
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load user');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل المستخدم' : 'Failed to load user');
+      setLoadError(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل المستخدم' : 'Failed to load user'));
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل المستخدم' : 'Failed to load user'));
     } finally {
       setLoading(false);
     }
@@ -447,8 +456,8 @@ function UserDetailTab({ userId, onBack, me }) {
       }
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Plan assignment failed';
-      toast.error(typeof msg === 'string' ? msg : 'Plan assignment failed');
+      const msg = err?.response?.data?.detail || (isAr() ? 'فشل تعيين الخطة' : 'Plan assignment failed');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'فشل تعيين الخطة' : 'Plan assignment failed'));
     } finally {
       setAssigning(false);
     }
@@ -463,7 +472,7 @@ function UserDetailTab({ userId, onBack, me }) {
     if (parseInt(allowanceRepliesExtra, 10) > 0)
       metrics.public_replies_sent_extra = parseInt(allowanceRepliesExtra, 10);
     if (Object.keys(metrics).length === 0) {
-      toast.error('Enter at least one numeric allowance');
+      toast.error((isAr() ? 'أدخل قيمة رقمية واحدة على الأقل' : 'Enter at least one numeric allowance'));
       return;
     }
     setGrantBusy(true);
@@ -475,7 +484,7 @@ function UserDetailTab({ userId, onBack, me }) {
         starts_at: new Date().toISOString(), ends_at,
         reason: allowanceReason || 'manual_admin_grant',
       });
-      toast.success('Allowance granted');
+      toast.success((isAr() ? 'تم منح الحصّة' : 'Allowance granted'));
       setAllowanceCommentsExtra('');
       setAllowanceDmsExtra('');
       setAllowanceRepliesExtra('');
@@ -483,8 +492,8 @@ function UserDetailTab({ userId, onBack, me }) {
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to grant';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to grant');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر المنح' : 'Failed to grant');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر المنح' : 'Failed to grant'));
     } finally {
       setGrantBusy(false);
     }
@@ -498,12 +507,12 @@ function UserDetailTab({ userId, onBack, me }) {
         `/admin/users/${encodeURIComponent(userId)}/limit-overrides/${encodeURIComponent(overrideId)}/revoke`,
         { reason: 'admin_revoke' },
       );
-      toast.success('Allowance revoked');
+      toast.success((isAr() ? 'تم سحب الحصّة' : 'Allowance revoked'));
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to revoke';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to revoke');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر السحب' : 'Failed to revoke');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر السحب' : 'Failed to revoke'));
     }
   }, [userId, load]);
 
@@ -511,22 +520,22 @@ function UserDetailTab({ userId, onBack, me }) {
     const reasonText = window.prompt('Suspend reason (optional):', '') || '';
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/suspend`, { reason: reasonText });
-      toast.success('User suspended');
+      toast.success((isAr() ? 'تم إيقاف المستخدم' : 'User suspended'));
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Failed to suspend');
+      toast.error(err?.response?.data?.detail || (isAr() ? 'تعذّر إيقاف المستخدم' : 'Failed to suspend'));
     }
   }, [userId, load]);
 
   const onUnsuspend = useCallback(async () => {
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/unsuspend`, {});
-      toast.success('User reactivated');
+      toast.success((isAr() ? 'تم إعادة تفعيل المستخدم' : 'User reactivated'));
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Failed to unsuspend');
+      toast.error(err?.response?.data?.detail || (isAr() ? 'تعذّر إعادة التفعيل' : 'Failed to unsuspend'));
     }
   }, [userId, load]);
 
@@ -539,11 +548,11 @@ function UserDetailTab({ userId, onBack, me }) {
     if (!window.confirm(`Confirm soft-delete of ${userId}? This cannot be undone via UI.`)) return;
     try {
       await api.post(`/admin/users/${encodeURIComponent(userId)}/delete`, { reason: reasonText });
-      toast.success('User soft-deleted');
+      toast.success((isAr() ? 'تم حذف المستخدم مؤقّتاً' : 'User soft-deleted'));
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Failed to delete');
+      toast.error(err?.response?.data?.detail || (isAr() ? 'تعذّر الحذف' : 'Failed to delete'));
     }
   }, [userId, load]);
 
@@ -553,12 +562,12 @@ function UserDetailTab({ userId, onBack, me }) {
       await api.post(`/admin/automations/${encodeURIComponent(automationId)}/disable`, {
         reason: 'admin_pause',
       });
-      toast.success('Automation paused');
+      toast.success((isAr() ? 'تم إيقاف الأتمتة' : 'Automation paused'));
       invalidateAdminUserCaches(userId);
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to pause';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to pause');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر الإيقاف' : 'Failed to pause');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر الإيقاف' : 'Failed to pause'));
     }
   }, [userId, load]);
 
@@ -574,7 +583,7 @@ function UserDetailTab({ userId, onBack, me }) {
   return (
     <div data-testid="admin-user-detail">
       <Button variant="ghost" size="sm" onClick={onBack} className="mb-4">
-        <ArrowLeft className="w-4 h-4 mr-2" /> Back to users
+        <ArrowLeft className="w-4 h-4 me-2" /> Back to users
       </Button>
 
       {loading && !data && (
@@ -616,7 +625,7 @@ function UserDetailTab({ userId, onBack, me }) {
                 <div className="text-xs text-slate-500 mt-1">
                   Billing: <span className="font-semibold">Not enabled yet</span>
                   {plan.assignment_reason && (
-                    <span className="ml-2 text-slate-400">· last reason: {plan.assignment_reason}</span>
+                    <span className="ms-2 text-slate-400">· last reason: {plan.assignment_reason}</span>
                   )}
                 </div>
               </div>
@@ -632,7 +641,7 @@ function UserDetailTab({ userId, onBack, me }) {
                   {planOptions().map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
                 <Input
-                  placeholder="Reason (e.g. 'beta tester')"
+                  placeholder={isAr() ? "السبب (مثل: مختبر تجريبي)" : "Reason (e.g. 'beta tester')"}
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   className="flex-1 min-w-[180px]"
@@ -660,7 +669,7 @@ function UserDetailTab({ userId, onBack, me }) {
                       ? <Badge className="bg-rose-100 text-rose-700 border-0">Deleted</Badge>
                       : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
                   {profile.google_linked && (
-                    <Badge className="ml-2 bg-blue-100 text-blue-700 border-0">Google linked</Badge>
+                    <Badge className="ms-2 bg-blue-100 text-blue-700 border-0">Google linked</Badge>
                   )}
                 </div>
               </div>
@@ -700,7 +709,7 @@ function UserDetailTab({ userId, onBack, me }) {
 
           {/* Active allowances + grant form */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-allowances">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Custom allowances</h3>
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "حصص مخصّصة" : "Custom allowances"}</h3>
             {activeOverrides.length === 0 && (
               <div className="text-sm text-slate-500 mb-3">No active grants.</div>
             )}
@@ -711,11 +720,11 @@ function UserDetailTab({ userId, onBack, me }) {
                     <div>
                       <div className="font-semibold">
                         {ov.grant_name || ov.type}
-                        <Badge className="ml-2 bg-slate-100 text-slate-700 border-0 text-[10px]">{ov.type}</Badge>
+                        <Badge className="ms-2 bg-slate-100 text-slate-700 border-0 text-[10px]">{ov.type}</Badge>
                       </div>
                       <div className="text-xs text-slate-500 font-mono mt-1">
                         {Object.entries(ov.metrics || {}).map(([k, v]) => (
-                          <span key={k} className="mr-3">{k}: +{v}</span>
+                          <span key={k} className="me-3">{k}: +{v}</span>
                         ))}
                       </div>
                       <div className="text-xs text-slate-400 mt-1">
@@ -745,18 +754,18 @@ function UserDetailTab({ userId, onBack, me }) {
                     <option value="additive_allowance">Additive (extras on top of plan)</option>
                     <option value="trial_grant">Trial grant (extras with end date)</option>
                   </select>
-                  <Input type="number" min="0" placeholder="Days valid (0 = no end)"
+                  <Input type="number" min="0" placeholder={isAr() ? "عدد الأيام (0 = بلا نهاية)" : "Days valid (0 = no end)"}
                          value={allowanceDays} onChange={(e) => setAllowanceDays(e.target.value)} />
-                  <Input type="number" min="0" placeholder="Extra comments processed"
+                  <Input type="number" min="0" placeholder={isAr() ? "تعليقات إضافية" : "Extra comments processed"}
                          value={allowanceCommentsExtra}
                          onChange={(e) => setAllowanceCommentsExtra(e.target.value)} />
-                  <Input type="number" min="0" placeholder="Extra DMs sent"
+                  <Input type="number" min="0" placeholder={isAr() ? "رسائل إضافية" : "Extra DMs sent"}
                          value={allowanceDmsExtra}
                          onChange={(e) => setAllowanceDmsExtra(e.target.value)} />
-                  <Input type="number" min="0" placeholder="Extra public replies"
+                  <Input type="number" min="0" placeholder={isAr() ? "ردود علنية إضافية" : "Extra public replies"}
                          value={allowanceRepliesExtra}
                          onChange={(e) => setAllowanceRepliesExtra(e.target.value)} />
-                  <Input placeholder="Reason / grant name (optional)"
+                  <Input placeholder={isAr() ? "السبب / اسم المنحة (اختياري)" : "Reason / grant name (optional)"}
                          value={allowanceReason}
                          onChange={(e) => setAllowanceReason(e.target.value)} />
                 </div>
@@ -790,7 +799,7 @@ function UserDetailTab({ userId, onBack, me }) {
 
           {/* Instagram accounts */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Instagram accounts</h3>
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "حسابات Instagram" : "Instagram accounts"}</h3>
             {instagramAccounts.length === 0 && (
               <div className="text-sm text-slate-500">None connected.</div>
             )}
@@ -812,7 +821,7 @@ function UserDetailTab({ userId, onBack, me }) {
 
           {/* Automations */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Automations</h3>
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "الأتمتات" : "Automations"}</h3>
             {automations.length === 0 && (
               <div className="text-sm text-slate-500">No automations.</div>
             )}
@@ -843,7 +852,7 @@ function UserDetailTab({ userId, onBack, me }) {
 
           {/* Recent failures */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Recent failures</h3>
+            <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "الأعطال الحديثة" : "Recent failures"}</h3>
             {recentFailures.length === 0 && (
               <div className="text-sm text-slate-500">No recent failures.</div>
             )}
@@ -903,8 +912,8 @@ function AdminsTab({ me }) {
       );
       setData(result.data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load members';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load members');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل الأعضاء' : 'Failed to load members');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل الأعضاء' : 'Failed to load members'));
     } finally {
       setLoading(false);
     }
@@ -927,8 +936,8 @@ function AdminsTab({ me }) {
       invalidateApiCache('admin:members');
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to add member';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to add member');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر إضافة العضو' : 'Failed to add member');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر إضافة العضو' : 'Failed to add member'));
     } finally {
       setSubmitting(false);
     }
@@ -943,8 +952,8 @@ function AdminsTab({ me }) {
       invalidateApiCache('admin:members');
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to change role';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to change role');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تغيير الدور' : 'Failed to change role');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تغيير الدور' : 'Failed to change role'));
     }
   }, [load]);
 
@@ -952,12 +961,12 @@ function AdminsTab({ me }) {
     if (!window.confirm(`Remove ${member.email}?`)) return;
     try {
       await api.delete(`/admin/members/${encodeURIComponent(member.user_id)}`);
-      toast.success('Member removed');
+      toast.success((isAr() ? 'تمت إزالة العضو' : 'Member removed'));
       invalidateApiCache('admin:members');
       await load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to remove member';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to remove member');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر إزالة العضو' : 'Failed to remove member');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر إزالة العضو' : 'Failed to remove member'));
     }
   }, [load]);
 
@@ -973,7 +982,7 @@ function AdminsTab({ me }) {
         <div className="text-base font-semibold text-slate-800">
           {ROLE_DISPLAY[myRole] || myRole}
           {me?.bootstrap_owner && (
-            <span className="ml-2 text-xs text-blue-700">(bootstrap owner via ADMIN_EMAILS)</span>
+            <span className="ms-2 text-xs text-blue-700">(bootstrap owner via ADMIN_EMAILS)</span>
           )}
         </div>
         <div className="text-xs text-slate-400 mt-1">{(me?.permissions || []).length} permissions</div>
@@ -981,7 +990,7 @@ function AdminsTab({ me }) {
 
       {canManage && (
         <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-add-member">
-          <h3 className="text-sm font-semibold text-slate-700 mb-3">Add admin member</h3>
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "إضافة عضو إدارة" : "Add admin member"}</h3>
           <form className="flex flex-wrap gap-2 items-center" onSubmit={onAdd}>
             <Input
               placeholder="email@example.com"
@@ -1001,7 +1010,7 @@ function AdminsTab({ me }) {
               ))}
             </select>
             <Input
-              placeholder="Reason (optional)"
+              placeholder={isAr() ? "السبب (اختياري)" : "Reason (optional)"}
               value={addReason}
               onChange={(e) => setAddReason(e.target.value)}
               className="flex-1 min-w-[160px]"
@@ -1020,12 +1029,12 @@ function AdminsTab({ me }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-left px-3 py-2">Email</th>
-              <th className="text-left px-3 py-2">Role</th>
-              <th className="text-left px-3 py-2">Status</th>
-              <th className="text-left px-3 py-2">Added by</th>
-              <th className="text-left px-3 py-2">Created</th>
-              <th className="text-right px-3 py-2"></th>
+              <th className="text-start px-3 py-2">Email</th>
+              <th className="text-start px-3 py-2">Role</th>
+              <th className="text-start px-3 py-2">Status</th>
+              <th className="text-start px-3 py-2">Added by</th>
+              <th className="text-start px-3 py-2">Created</th>
+              <th className="text-end px-3 py-2"></th>
             </tr>
           </thead>
           <tbody>
@@ -1035,7 +1044,7 @@ function AdminsTab({ me }) {
                 <tr key={m.user_id || m.email} className="border-t border-slate-100">
                   <td className="px-3 py-2 font-mono">
                     {m.email}
-                    {m.bootstrap_owner && <span className="ml-2 text-[10px] text-blue-700">bootstrap</span>}
+                    {m.bootstrap_owner && <span className="ms-2 text-[10px] text-blue-700">bootstrap</span>}
                   </td>
                   <td className="px-3 py-2">
                     <Badge className="bg-slate-100 text-slate-700 border-0">
@@ -1049,7 +1058,7 @@ function AdminsTab({ me }) {
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{m.added_by_email || '—'}</td>
                   <td className="px-3 py-2 text-xs text-slate-500">{formatTimestamp(m.created_at)}</td>
-                  <td className="px-3 py-2 text-right">
+                  <td className="px-3 py-2 text-end">
                     {canMutate && !m.disabled_at && (
                       <span className="inline-flex gap-1">
                         <select
@@ -1101,8 +1110,8 @@ function ReconciliationTab() {
       );
       setData(result.data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load reconciliation';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load reconciliation');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل التسوية' : 'Failed to load reconciliation');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل التسوية' : 'Failed to load reconciliation'));
     } finally {
       setLoading(false);
     }
@@ -1115,7 +1124,7 @@ function ReconciliationTab() {
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-slate-700">
           Metrics reconciliation
-          {data?.event_month && <span className="text-slate-400 font-mono ml-2">{data.event_month}</span>}
+          {data?.event_month && <span className="text-slate-400 font-mono ms-2">{data.event_month}</span>}
         </h3>
         <Button
           variant="outline"
@@ -1126,14 +1135,14 @@ function ReconciliationTab() {
           }}
           disabled={loading}
         >
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
       {data && data.mismatch_count > 0 && (
         <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
              data-testid="reconciliation-mismatch-banner">
-          <AlertTriangle className="inline w-4 h-4 mr-1" />
+          <AlertTriangle className="inline w-4 h-4 me-1" />
           {data.mismatch_count} mismatch(es) detected. Review the table below.
         </div>
       )}
@@ -1141,21 +1150,21 @@ function ReconciliationTab() {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-left px-3 py-2">Metric</th>
-              <th className="text-right px-3 py-2">Dashboard</th>
-              <th className="text-right px-3 py-2">Recomputed</th>
-              <th className="text-right px-3 py-2">Δ</th>
-              <th className="text-left px-3 py-2">Status</th>
-              <th className="text-left px-3 py-2">Source</th>
+              <th className="text-start px-3 py-2">Metric</th>
+              <th className="text-end px-3 py-2">Dashboard</th>
+              <th className="text-end px-3 py-2">Recomputed</th>
+              <th className="text-end px-3 py-2">Δ</th>
+              <th className="text-start px-3 py-2">Status</th>
+              <th className="text-start px-3 py-2">Source</th>
             </tr>
           </thead>
           <tbody>
             {(data?.items || []).map((row) => (
               <tr key={row.metric_name} className="border-t border-slate-100">
                 <td className="px-3 py-2 font-mono text-xs">{row.metric_name}</td>
-                <td className="px-3 py-2 text-right font-mono">{row.dashboard_value}</td>
-                <td className="px-3 py-2 text-right font-mono">{row.recomputed_value}</td>
-                <td className="px-3 py-2 text-right font-mono">{row.difference ?? '—'}</td>
+                <td className="px-3 py-2 text-end font-mono">{row.dashboard_value}</td>
+                <td className="px-3 py-2 text-end font-mono">{row.recomputed_value}</td>
+                <td className="px-3 py-2 text-end font-mono">{row.difference ?? '—'}</td>
                 <td className="px-3 py-2">
                   {row.status === 'ok'
                     ? <Badge className="bg-emerald-100 text-emerald-700 border-0">OK</Badge>
@@ -1195,8 +1204,8 @@ function AuditLogTab() {
       );
       setData(result.data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load audit log';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load audit log');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل سجلّ التدقيق' : 'Failed to load audit log');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل سجلّ التدقيق' : 'Failed to load audit log'));
     } finally {
       setLoading(false);
     }
@@ -1212,7 +1221,7 @@ function AuditLogTab() {
         <h3 className="text-sm font-semibold text-slate-700">
           Admin audit log
           {data?.count !== undefined && (
-            <span className="ml-2 text-slate-400 font-mono">({data.count})</span>
+            <span className="ms-2 text-slate-400 font-mono">({data.count})</span>
           )}
         </h3>
         <Button
@@ -1224,7 +1233,7 @@ function AuditLogTab() {
           }}
           disabled={loading}
         >
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
@@ -1239,11 +1248,11 @@ function AuditLogTab() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
               <tr>
-                <th className="text-left px-3 py-2">When</th>
-                <th className="text-left px-3 py-2">Admin</th>
-                <th className="text-left px-3 py-2">Action</th>
-                <th className="text-left px-3 py-2">Target user</th>
-                <th className="text-left px-3 py-2">Details</th>
+                <th className="text-start px-3 py-2">When</th>
+                <th className="text-start px-3 py-2">Admin</th>
+                <th className="text-start px-3 py-2">Action</th>
+                <th className="text-start px-3 py-2">Target user</th>
+                <th className="text-start px-3 py-2">Details</th>
               </tr>
             </thead>
             <tbody>
@@ -1303,8 +1312,8 @@ function WebhookDlqTab() {
       setItems(data.items || []);
       setCounts(data.counts || {});
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load webhook DLQ';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load webhook DLQ');
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر تحميل طابور الأخطاء' : 'Failed to load webhook DLQ');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر تحميل طابور الأخطاء' : 'Failed to load webhook DLQ'));
     } finally {
       setLoading(false);
     }
@@ -1344,7 +1353,7 @@ function WebhookDlqTab() {
             key={tile.key}
             type="button"
             onClick={() => setFilter(filter === tile.key ? '' : tile.key)}
-            className={`rounded-2xl border p-4 text-left transition ${
+            className={`rounded-2xl border p-4 text-start transition ${
               filter === tile.key ? 'ring-2 ring-slate-900' : 'hover:shadow-sm'
             } ${
               tile.tone === 'amber' ? 'border-amber-200 bg-amber-50' :
@@ -1372,7 +1381,7 @@ function WebhookDlqTab() {
               <Button variant="outline" size="sm" onClick={() => setFilter('')}>Clear filter</Button>
             )}
             <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-              <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
+              <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
             </Button>
           </div>
         </div>
@@ -1401,7 +1410,7 @@ function WebhookDlqTab() {
                     onClick={() => replayOne(entry.id)}
                     disabled={retrying[entry.id]}
                   >
-                    <RotateCcw className={`w-4 h-4 mr-2 ${retrying[entry.id] ? 'animate-spin' : ''}`} />
+                    <RotateCcw className={`w-4 h-4 me-2 ${retrying[entry.id] ? 'animate-spin' : ''}`} />
                     Replay now
                   </Button>
                 )}
@@ -1433,6 +1442,8 @@ function WebhookDlqTab() {
 
 export default function AdminConsole() {
   const { user } = useAuth();
+  const { lang } = useTranslation();
+  const ar = lang === 'ar';
   const [me, setMe] = useState(null);   // null = loading
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -1462,8 +1473,8 @@ export default function AdminConsole() {
       );
       setOverview(result.data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Failed to load overview';
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load overview');
+      const msg = err?.response?.data?.detail || (ar ? 'تعذّر تحميل النظرة العامة' : 'Failed to load overview');
+      toast.error(typeof msg === 'string' ? msg : (ar ? 'تعذّر تحميل النظرة العامة' : 'Failed to load overview'));
     } finally {
       setOverviewLoading(false);
     }
@@ -1474,7 +1485,7 @@ export default function AdminConsole() {
   }, [me, tab, overview, loadOverview]);
 
   if (me === null) {
-    return <div className="p-6 text-slate-500">Checking admin access…</div>;
+    return <div className="p-6 text-slate-500">{ar ? 'جارٍ التحقّق من صلاحية الإدارة…' : 'Checking admin access…'}</div>;
   }
   if (!me.is_admin) {
     return (
@@ -1482,11 +1493,12 @@ export default function AdminConsole() {
         <div className="bg-white rounded-2xl border border-slate-100 p-6">
           <div className="flex items-center gap-2 text-rose-600 mb-2">
             <ShieldAlert className="w-5 h-5" />
-            <h1 className="text-lg font-semibold">Not available</h1>
+            <h1 className="text-lg font-semibold">{ar ? 'غير متاح' : 'Not available'}</h1>
           </div>
           <p className="text-sm text-slate-600">
-            This page is for the product owner. If you reached this by
-            mistake, head back to the dashboard.
+            {ar
+              ? 'هذه الصفحة مخصّصة لمالك المنتج. إذا وصلت إليها بالخطأ، عُد إلى لوحة التحكّم.'
+              : 'This page is for the product owner. If you reached this by mistake, head back to the dashboard.'}
           </p>
         </div>
       </div>
@@ -1508,15 +1520,16 @@ export default function AdminConsole() {
       <div className="mb-6">
         <div className="flex items-center gap-2 text-amber-700 mb-1">
           <Lock className="w-4 h-4" />
-          <span className="text-xs font-semibold uppercase tracking-wide">Owner console</span>
+          <span className="text-xs font-semibold uppercase tracking-wide">{ar ? 'وحدة تحكّم المالك' : 'Owner console'}</span>
           <Badge className="bg-blue-100 text-blue-700 border-0 text-[10px]" data-testid="admin-current-role">
             {ROLE_DISPLAY[me?.role] || me?.role}
           </Badge>
         </div>
-        <h1 className="text-3xl font-bold font-display">Admin</h1>
+        <h1 className="text-3xl font-bold font-display">{ar ? 'الإدارة' : 'Admin'}</h1>
         <p className="text-slate-500 mt-1 text-sm">
-          Monitor users, plans, usage, and failures. No payment controls
-          here — billing is enabled later.
+          {ar
+            ? 'متابعة المستخدمين والخطط والاستهلاك والأعطال. لا توجد عناصر تحكّم في المدفوعات هنا — الفوترة تُفعَّل لاحقاً.'
+            : 'Monitor users, plans, usage, and failures. No payment controls here — billing is enabled later.'}
         </p>
       </div>
 
@@ -1528,7 +1541,7 @@ export default function AdminConsole() {
             onClick={() => { setTab('overview'); setSelectedUserId(null); }}
             data-testid="admin-tab-overview"
           >
-            <Activity className="w-4 h-4 mr-2" /> Overview
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'نظرة عامة' : 'Overview'}
           </Button>
         )}
         {canViewUsers && (
@@ -1538,7 +1551,7 @@ export default function AdminConsole() {
             onClick={() => { setTab('users'); setSelectedUserId(null); }}
             data-testid="admin-tab-users"
           >
-            <Users className="w-4 h-4 mr-2" /> Users
+            <Users className="w-4 h-4 me-2" /> {ar ? 'المستخدمون' : 'Users'}
           </Button>
         )}
         {canViewMembers && (
@@ -1548,7 +1561,7 @@ export default function AdminConsole() {
             onClick={() => { setTab('admins'); setSelectedUserId(null); }}
             data-testid="admin-tab-admins"
           >
-            <UserCog className="w-4 h-4 mr-2" /> Admins
+            <UserCog className="w-4 h-4 me-2" /> {ar ? 'المسؤولون' : 'Admins'}
           </Button>
         )}
         {canViewMetrics && (
@@ -1558,7 +1571,7 @@ export default function AdminConsole() {
             onClick={() => { setTab('metrics'); setSelectedUserId(null); }}
             data-testid="admin-tab-metrics"
           >
-            <BarChart3 className="w-4 h-4 mr-2" /> Metrics
+            <BarChart3 className="w-4 h-4 me-2" /> {ar ? 'المقاييس' : 'Metrics'}
           </Button>
         )}
         {canViewAudit && (
@@ -1568,7 +1581,7 @@ export default function AdminConsole() {
             onClick={() => { setTab('audit'); setSelectedUserId(null); }}
             data-testid="admin-tab-audit"
           >
-            <ScrollText className="w-4 h-4 mr-2" /> Audit log
+            <ScrollText className="w-4 h-4 me-2" /> {ar ? 'سجلّ التدقيق' : 'Audit log'}
           </Button>
         )}
         {canViewDlq && (
@@ -1578,10 +1591,10 @@ export default function AdminConsole() {
             onClick={() => { setTab('webhook-dlq'); setSelectedUserId(null); }}
             data-testid="admin-tab-webhook-dlq"
           >
-            <Inbox className="w-4 h-4 mr-2" /> Webhook DLQ
+            <Inbox className="w-4 h-4 me-2" /> {ar ? 'طابور الأخطاء' : 'Webhook DLQ'}
           </Button>
         )}
-        <div className="ml-auto" />
+        <div className="ms-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
             variant="outline"
@@ -1592,8 +1605,8 @@ export default function AdminConsole() {
             }}
             disabled={overviewLoading}
           >
-            <RefreshCw className={`w-4 h-4 mr-2 ${overviewLoading ? 'animate-spin' : ''}`} />
-            Refresh
+            <RefreshCw className={`w-4 h-4 me-2 ${overviewLoading ? 'animate-spin' : ''}`} />
+            {ar ? 'تحديث' : 'Refresh'}
           </Button>
         )}
       </div>

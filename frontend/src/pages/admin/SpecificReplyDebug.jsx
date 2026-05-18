@@ -9,6 +9,14 @@ import api from '../../lib/api';
 import { toast } from 'sonner';
 import { diagnosisPassFail } from '../../lib/specificReplyDiagnosis';
 
+function isAr() {
+  try {
+    if (typeof document !== 'undefined' && document.documentElement?.lang === 'ar') return true;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_lang') === 'ar') return true;
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
 /**
  * Phase 1.4H admin debug page — TEMPORARY support tool.
  *
@@ -40,7 +48,7 @@ function StatusPill({ ok, label }) {
   const Icon = ok ? CheckCircle2 : XCircle;
   return (
     <Badge className={`${cls} border-0`}>
-      <Icon className="w-3 h-3 mr-1" /> {label}
+      <Icon className="w-3 h-3 me-1" /> {label}
     </Badge>
   );
 }
@@ -52,7 +60,7 @@ function Field({ label, value, mono = true }) {
   return (
     <div className="flex justify-between gap-3 text-sm py-1 border-b border-slate-100 last:border-b-0">
       <span className="text-slate-500">{label}</span>
-      <span className="text-slate-700 text-right break-all">{display}</span>
+      <span className="text-slate-700 text-end break-all">{display}</span>
     </div>
   );
 }
@@ -68,12 +76,12 @@ function DiagnosisCard({ data }) {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Eye className="w-4 h-4 text-slate-500" />
-          <h3 className="text-sm font-semibold text-slate-700">Diagnosis</h3>
+          <h3 className="text-sm font-semibold text-slate-700">{isAr() ? "التشخيص" : "Diagnosis"}</h3>
         </div>
         <div data-testid="diagnosis-pass-fail">
           {allPass
-            ? <StatusPill ok label={verdict.label || 'Consistent'} />
-            : <StatusPill ok={false} label={anyForbidden ? 'FAIL — forbidden state' : `FAIL — ${verdict.label || verdict.reason}`} />}
+            ? <StatusPill ok label={verdict.label || (isAr() ? 'متّسق' : 'Consistent')} />
+            : <StatusPill ok={false} label={anyForbidden ? (isAr() ? 'فشل — حالة غير مسموحة' : 'FAIL — forbidden state') : `FAIL — ${verdict.label || verdict.reason}`} />}
         </div>
       </div>
 
@@ -166,7 +174,7 @@ export default function SpecificReplyDebug() {
       );
       setDiagnosis(data);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Diagnosis failed';
+      const msg = err?.response?.data?.detail || (isAr() ? 'فشل التشخيص' : 'Diagnosis failed');
       toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
       setBusy('diagnose', false);
@@ -183,10 +191,10 @@ export default function SpecificReplyDebug() {
         `/admin/comments/${encodeURIComponent(id)}/repair-specific-public-reply`
       );
       setRepairResult(data);
-      if (data?.repaired) toast.success('Repaired — public reply re-queued. DM untouched.');
+      if (data?.repaired) toast.success((isAr() ? 'تم الإصلاح — أُعيد إدراج الردّ العلني. الرسالة الخاصة لم تُمَس.' : 'Repaired — public reply re-queued. DM untouched.'));
       else toast.info(`Not repaired: ${data?.reason || 'unknown'}`);
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Repair failed';
+      const msg = err?.response?.data?.detail || (isAr() ? 'فشل الإصلاح' : 'Repair failed');
       toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
       setBusy('repair', false);
@@ -202,11 +210,11 @@ export default function SpecificReplyDebug() {
         `/admin/comments/${encodeURIComponent(id)}/process-retry-now`
       );
       setRetryResult(data);
-      if (data?.reply_provider_response_ok) toast.success('Public reply confirmed by Instagram.');
-      else if (data?.public_reply_attempted) toast.info('Retry attempted — see result card.');
-      else toast.info('Retry not attempted (see result).');
+      if (data?.reply_provider_response_ok) toast.success((isAr() ? 'تم تأكيد الردّ العلني من Instagram.' : 'Public reply confirmed by Instagram.'));
+      else if (data?.public_reply_attempted) toast.info((isAr() ? 'جرت المحاولة — راجع بطاقة النتيجة.' : 'Retry attempted — see result card.'));
+      else toast.info((isAr() ? 'لم تُجرَ المحاولة (راجع النتيجة).' : 'Retry not attempted (see result).'));
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Retry failed';
+      const msg = err?.response?.data?.detail || (isAr() ? 'فشلت المحاولة' : 'Retry failed');
       toast.error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
       setBusy('retry', false);
@@ -215,7 +223,7 @@ export default function SpecificReplyDebug() {
 
   if (enabled === null) {
     return (
-      <div className="p-6 text-slate-500">Checking admin tools…</div>
+      <div className="p-6 text-slate-500">{isAr() ? "جارٍ التحقّق من أدوات الإدارة…" : "Checking admin tools…"}</div>
     );
   }
   if (!enabled) {
@@ -224,7 +232,7 @@ export default function SpecificReplyDebug() {
         <div className="bg-white rounded-2xl border border-slate-100 p-6">
           <div className="flex items-center gap-2 text-rose-600 mb-2">
             <ShieldAlert className="w-5 h-5" />
-            <h1 className="text-lg font-semibold">Not available</h1>
+            <h1 className="text-lg font-semibold">{isAr() ? "غير متاح" : "Not available"}</h1>
           </div>
           <p className="text-sm text-slate-600">
             This page is internal support tooling and is disabled by default.
@@ -241,10 +249,10 @@ export default function SpecificReplyDebug() {
       <div className="mb-6">
         <div className="flex items-center gap-2 text-amber-700 mb-1">
           <ShieldAlert className="w-4 h-4" />
-          <span className="text-xs font-semibold uppercase tracking-wide">Admin debug</span>
+          <span className="text-xs font-semibold uppercase tracking-wide">{isAr() ? "تشخيص الإدارة" : "Admin debug"}</span>
           {isAdmin && <Badge className="bg-blue-100 text-blue-700 border-0 text-[10px]">admin</Badge>}
         </div>
-        <h1 className="text-3xl font-bold font-display">Specific reply debug</h1>
+        <h1 className="text-3xl font-bold font-display">{isAr() ? "تشخيص ردّ منشور محدّد" : "Specific reply debug"}</h1>
         <p className="text-slate-500 mt-1 text-sm">
           Diagnose, repair, and retry a single comment's specific-post-rule
           public reply. Never resends DM. Never exposes raw comment, reply,
@@ -260,7 +268,7 @@ export default function SpecificReplyDebug() {
           <Input
             value={igCommentId}
             onChange={(e) => setIgCommentId(e.target.value)}
-            placeholder="e.g. 18004285310876247"
+            placeholder={isAr() ? 'مثال: 18004285310876247' : 'e.g. 18004285310876247'}
             data-testid="ig-comment-id-input"
             className="font-mono"
           />
@@ -283,8 +291,8 @@ export default function SpecificReplyDebug() {
             disabled={!igCommentId.trim() || !!loading.diagnose}
             data-testid="diagnose-btn"
           >
-            <Eye className="w-4 h-4 mr-2" />
-            {loading.diagnose ? 'Diagnosing…' : 'Diagnose'}
+            <Eye className="w-4 h-4 me-2" />
+            {loading.diagnose ? (isAr() ? 'جارٍ التشخيص…' : 'Diagnosing…') : (isAr() ? 'تشخيص' : 'Diagnose')}
           </Button>
           <Button
             onClick={onRepair}
@@ -292,8 +300,8 @@ export default function SpecificReplyDebug() {
             disabled={!igCommentId.trim() || !!loading.repair || !diagnosis?.repairable}
             data-testid="repair-btn"
           >
-            <Wrench className="w-4 h-4 mr-2" />
-            {loading.repair ? 'Repairing…' : 'Repair'}
+            <Wrench className="w-4 h-4 me-2" />
+            {loading.repair ? (isAr() ? 'جارٍ الإصلاح…' : 'Repairing…') : (isAr() ? 'إصلاح' : 'Repair')}
           </Button>
           <Button
             onClick={onProcessRetry}
@@ -301,12 +309,12 @@ export default function SpecificReplyDebug() {
             disabled={!igCommentId.trim() || !!loading.retry}
             data-testid="retry-btn"
           >
-            <PlayCircle className="w-4 h-4 mr-2" />
-            {loading.retry ? 'Running…' : 'Process retry now'}
+            <PlayCircle className="w-4 h-4 me-2" />
+            {loading.retry ? (isAr() ? 'جارٍ التنفيذ…' : 'Running…') : (isAr() ? 'تنفيذ المحاولة الآن' : 'Process retry now')}
           </Button>
           {diagnosis && (
-            <Button onClick={onDiagnose} variant="ghost" size="sm" className="ml-auto">
-              <RefreshCw className={`w-3 h-3 mr-1 ${loading.diagnose ? 'animate-spin' : ''}`} />
+            <Button onClick={onDiagnose} variant="ghost" size="sm" className="ms-auto">
+              <RefreshCw className={`w-3 h-3 me-1 ${loading.diagnose ? 'animate-spin' : ''}`} />
               Refresh
             </Button>
           )}
@@ -314,8 +322,8 @@ export default function SpecificReplyDebug() {
       </section>
 
       <DiagnosisCard data={diagnosis} />
-      <ResultCard title="Repair result" icon={Wrench} data={repairResult} />
-      <ResultCard title="Retry result" icon={PlayCircle} data={retryResult} />
+      <ResultCard title={isAr() ? "نتيجة الإصلاح" : "Repair result"} icon={Wrench} data={repairResult} />
+      <ResultCard title={isAr() ? "نتيجة المحاولة" : "Retry result"} icon={PlayCircle} data={retryResult} />
 
       <p className="text-xs text-slate-400 mt-4">
         Repair sets <span className="font-mono">reply_status=failed_retryable</span> +

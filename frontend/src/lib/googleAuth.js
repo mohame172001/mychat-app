@@ -268,19 +268,29 @@ export async function renderGoogleButton(targetEl, { onCredential, onError } = {
  * Map a backend HTTP error from /api/auth/google to a user-facing
  * message. Pure function — testable without React.
  */
+function isArabic() {
+  try {
+    if (typeof document !== 'undefined' && document.documentElement?.lang === 'ar') return true;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_lang') === 'ar') return true;
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
 export function googleErrorMessage(detail) {
   const authCode = authErrorCode(detail);
   if (authCode === 'account_suspended' || authCode === 'account_deleted') {
     return authErrorMessage(detail);
   }
+  const ar = isArabic();
   const s = String(detail || '').toLowerCase();
-  if (!s) return 'Google sign-in failed';
-  if (s.includes('google_auth_not_configured')) return 'Google sign-in is not configured';
-  if (s.includes('google_auth_sdk_not_installed')) return 'Google sign-in is temporarily unavailable';
-  if (s.includes('google_email_not_verified')) return 'Email not verified by Google';
-  if (s.includes('google_account_already_linked')) return 'This Google account is already linked to another user';
-  if (s.includes('google_account_conflict')) return 'A conflicting account already exists for this email or Google account';
-  if (s.includes('google_credential_invalid:token_expired')) return 'Google sign-in expired, try again';
-  if (s.includes('google_credential_invalid')) return 'Google sign-in failed';
-  return 'Google sign-in failed';
+  const failed = ar ? 'فشل تسجيل الدخول عبر Google' : 'Google sign-in failed';
+  if (!s) return failed;
+  if (s.includes('google_auth_not_configured')) return ar ? 'تسجيل الدخول عبر Google غير مُهيّأ' : 'Google sign-in is not configured';
+  if (s.includes('google_auth_sdk_not_installed')) return ar ? 'تسجيل الدخول عبر Google غير متاح مؤقتاً' : 'Google sign-in is temporarily unavailable';
+  if (s.includes('google_email_not_verified')) return ar ? 'البريد الإلكتروني غير موثّق من Google' : 'Email not verified by Google';
+  if (s.includes('google_account_already_linked')) return ar ? 'حساب Google هذا مرتبط بمستخدم آخر بالفعل' : 'This Google account is already linked to another user';
+  if (s.includes('google_account_conflict')) return ar ? 'يوجد حساب آخر بنفس البريد الإلكتروني أو حساب Google' : 'A conflicting account already exists for this email or Google account';
+  if (s.includes('google_credential_invalid:token_expired')) return ar ? 'انتهت صلاحية الجلسة، حاول مرة أخرى' : 'Google sign-in expired, try again';
+  if (s.includes('google_credential_invalid')) return failed;
+  return failed;
 }

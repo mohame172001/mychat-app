@@ -54,17 +54,32 @@ async function copyToClipboard(text) {
  * preventDefault — the browser still tries the mailto: link in
  * parallel so users who DO have a mail client get the friendly path).
  */
+function isArabic() {
+  try {
+    if (typeof document !== 'undefined' && document.documentElement?.lang === 'ar') return true;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_lang') === 'ar') return true;
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
 export async function handleContactClick(/* event */) {
+  const ar = isArabic();
   const copied = await copyToClipboard(SUPPORT_EMAIL);
   if (copied) {
-    toast.success(`Support email copied: ${SUPPORT_EMAIL}`, {
-      description: 'Paste it into your mail client to reach us.',
-      duration: 6000,
-    });
+    toast.success(
+      ar ? `تم نسخ بريد الدعم: ${SUPPORT_EMAIL}` : `Support email copied: ${SUPPORT_EMAIL}`,
+      {
+        description: ar ? 'الصقه في تطبيق البريد للتواصل معنا.' : 'Paste it into your mail client to reach us.',
+        duration: 6000,
+      }
+    );
   } else {
-    toast.message(`Contact: ${SUPPORT_EMAIL}`, {
-      description: "We couldn't auto-copy — please copy this address manually.",
-      duration: 8000,
-    });
+    toast.message(
+      ar ? `للتواصل: ${SUPPORT_EMAIL}` : `Contact: ${SUPPORT_EMAIL}`,
+      {
+        description: ar ? 'تعذّر النسخ التلقائي — يرجى نسخ هذا العنوان يدوياً.' : "We couldn't auto-copy — please copy this address manually.",
+        duration: 8000,
+      }
+    );
   }
 }

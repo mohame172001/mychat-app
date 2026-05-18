@@ -9,10 +9,13 @@ const AUTH_MESSAGES = {
     generic: 'Could not sign in. Please try again.',
   },
   ar: {
-    account_suspended: 'تم إيقاف حسابك مؤقتًا. تواصل مع الدعم.',
+    account_suspended: 'تم إيقاف حسابك مؤقّتاً. تواصل مع الدعم.',
     account_deleted: 'تم حذف الحساب أو تعطيله. تواصل مع الدعم.',
     invalid_credentials: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
-    generic: 'تعذر تسجيل الدخول. حاول مرة أخرى.',
+    email_verification_required: 'يرجى توثيق بريدك الإلكتروني قبل المتابعة.',
+    email_verification_not_configured: 'توثيق البريد الإلكتروني غير مُهيّأ. تواصل مع الدعم.',
+    session_revoked: 'انتهت صلاحية الجلسة. يرجى تسجيل الدخول من جديد.',
+    generic: 'تعذّر تسجيل الدخول. حاول مرة أخرى.',
   },
 };
 
@@ -44,9 +47,15 @@ export function authErrorCode(detail) {
 }
 
 export function authLocale(locale) {
-  const raw = String(locale || (
-    typeof navigator !== 'undefined' ? navigator.language : 'en'
-  ) || 'en').toLowerCase();
+  if (locale) {
+    const raw = String(locale).toLowerCase();
+    return raw.startsWith('ar') ? 'ar' : 'en';
+  }
+  try {
+    if (typeof document !== 'undefined' && document.documentElement?.lang === 'ar') return 'ar';
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_lang') === 'ar') return 'ar';
+  } catch (_) { /* ignore */ }
+  const raw = String((typeof navigator !== 'undefined' ? navigator.language : 'en') || 'en').toLowerCase();
   return raw.startsWith('ar') ? 'ar' : 'en';
 }
 
