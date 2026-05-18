@@ -65,7 +65,7 @@ const Settings = () => {
       // Roll back on failure.
       setNotif((n) => ({ ...n, [key]: previous }));
       const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Could not save preference');
+      toast.error(typeof detail === 'string' ? detail : (lang === 'ar' ? 'تعذّر حفظ التفضيل' : 'Could not save preference'));
     } finally {
       setNotifSaving(false);
     }

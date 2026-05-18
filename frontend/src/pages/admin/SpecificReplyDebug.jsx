@@ -126,7 +126,7 @@ function ResultCard({ title, icon: Icon, data }) {
       <div className="flex items-center gap-2 mb-3">
         <Icon className="w-4 h-4 text-slate-500" />
         <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
-        {typeof data.ok === 'boolean' && <StatusPill ok={data.ok} label={data.ok ? 'OK' : 'NOT OK'} />}
+        {typeof data.ok === 'boolean' && <StatusPill ok={data.ok} label={data.ok ? (isAr() ? 'سليم' : 'OK') : (isAr() ? 'غير سليم' : 'NOT OK')} />}
       </div>
       <div className="grid gap-1 md:grid-cols-2">
         {Object.entries(data).map(([key, value]) => {
@@ -235,9 +235,9 @@ export default function SpecificReplyDebug() {
             <h1 className="text-lg font-semibold">{isAr() ? "غير متاح" : "Not available"}</h1>
           </div>
           <p className="text-sm text-slate-600">
-            This page is internal support tooling and is disabled by default.
-            If you are a user looking for your comments or automations,
-            please go back to the Comments page.
+            {isAr()
+              ? "هذه الصفحة أداة دعم داخلية ومُعطّلة افتراضياً. إذا كنت تبحث عن تعليقاتك أو أتمتاتك، عُد إلى صفحة التعليقات."
+              : "This page is internal support tooling and is disabled by default. If you are a user looking for your comments or automations, please go back to the Comments page."}
           </p>
         </div>
       </div>
@@ -254,9 +254,9 @@ export default function SpecificReplyDebug() {
         </div>
         <h1 className="text-3xl font-bold font-display">{isAr() ? "تشخيص ردّ منشور محدّد" : "Specific reply debug"}</h1>
         <p className="text-slate-500 mt-1 text-sm">
-          Diagnose, repair, and retry a single comment's specific-post-rule
-          public reply. Never resends DM. Never exposes raw comment, reply,
-          or DM text.
+          {isAr()
+            ? "تشخيص وإصلاح وإعادة محاولة الردّ العلني لتعليق واحد على قاعدة منشور محدّد. لا تُعيد إرسال الرسالة الخاصة، ولا تُظهر النصّ الخام للتعليق أو الردّ أو الرسالة."
+            : "Diagnose, repair, and retry a single comment's specific-post-rule public reply. Never resends DM. Never exposes raw comment, reply, or DM text."}
         </p>
       </div>
 
@@ -279,9 +279,9 @@ export default function SpecificReplyDebug() {
               size="sm"
               className="rounded-full"
               type="button"
-              title="Dev-only shortcut for the Phase 1.4 investigation comment"
+              title={isAr() ? "اختصار مطوّر لتعليق الفحص" : "Dev-only shortcut for the Phase 1.4 investigation comment"}
             >
-              Paste dev test id
+              {isAr() ? "ألصق مُعرّف الاختبار" : "Paste dev test id"}
             </Button>
           )}
         </div>
@@ -315,7 +315,7 @@ export default function SpecificReplyDebug() {
           {diagnosis && (
             <Button onClick={onDiagnose} variant="ghost" size="sm" className="ms-auto">
               <RefreshCw className={`w-3 h-3 me-1 ${loading.diagnose ? 'animate-spin' : ''}`} />
-              Refresh
+              {isAr() ? "تحديث" : "Refresh"}
             </Button>
           )}
         </div>
@@ -326,12 +326,11 @@ export default function SpecificReplyDebug() {
       <ResultCard title={isAr() ? "نتيجة المحاولة" : "Retry result"} icon={PlayCircle} data={retryResult} />
 
       <p className="text-xs text-slate-400 mt-4">
-        Repair sets <span className="font-mono">reply_status=failed_retryable</span> +
-        <span className="font-mono"> skip_reason=public_reply_required_not_attempted</span> and
-        re-queues the public reply only. Repair never sends an Instagram message
-        and never modifies a successful DM state. Process retry uses the
-        provider-proof-guarded retry endpoint and short-circuits when proof
-        already exists.
+        {isAr() ? (
+          <>الإصلاح يضبط <span className="font-mono">reply_status=failed_retryable</span> + <span className="font-mono">skip_reason=public_reply_required_not_attempted</span> ويُعيد إدراج الردّ العلني فقط. لا يُرسل رسالة Instagram ولا يُعدّل حالة الرسالة الخاصة الناجحة. "تنفيذ المحاولة" يستخدم نقطة النهاية المحمية بإثبات المزوّد ويتوقّف فور وجود إثبات سابق.</>
+        ) : (
+          <>Repair sets <span className="font-mono">reply_status=failed_retryable</span> + <span className="font-mono">skip_reason=public_reply_required_not_attempted</span> and re-queues the public reply only. Repair never sends an Instagram message and never modifies a successful DM state. Process retry uses the provider-proof-guarded retry endpoint and short-circuits when proof already exists.</>
+        )}
       </p>
     </div>
   );

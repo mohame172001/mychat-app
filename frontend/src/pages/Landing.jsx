@@ -81,7 +81,7 @@ const Landing = () => {
               <Link to="/status" onClick={() => setMenuOpen(false)} className="text-sm font-medium">{t('landing.nav.status')}</Link>
               <Link to="/privacy" onClick={() => setMenuOpen(false)} className="text-sm font-medium">{t('common.privacy')}</Link>
               <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                <span className="text-xs text-slate-500">Language</span>
+                <span className="text-xs text-slate-500">{lang === "ar" ? "اللغة" : "Language"}</span>
                 <LangSwitcher />
               </div>
               <Link to="/login"><Button variant="outline" className="w-full">{t('common.login')}</Button></Link>

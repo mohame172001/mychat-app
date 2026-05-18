@@ -52,7 +52,7 @@ const DmAutomation = () => {
       setLogs(l.data.items || []);
       setDiag(d.data);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to load DM data');
+      toast.error(e?.response?.data?.detail || (lang === 'ar' ? 'تعذّر تحميل بيانات الرسائل' : 'Failed to load DM data'));
     }
   }, []);
 
@@ -64,7 +64,7 @@ const DmAutomation = () => {
       const { data } = await api.get('/instagram/dm/diagnostics');
       setDiag(data);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Diagnostics failed');
+      toast.error(e?.response?.data?.detail || (lang === 'ar' ? 'فشل التشخيص' : 'Diagnostics failed'));
     } finally {
       setDiagLoading(false);
     }
@@ -72,17 +72,17 @@ const DmAutomation = () => {
 
   const saveRule = async () => {
     if (!form.name.trim() || !form.keyword.trim() || !form.replyText.trim()) {
-      toast.error('Name, keyword and reply are required');
+      toast.error(lang === 'ar' ? 'الاسم والكلمة المفتاحية والردّ مطلوبة' : 'Name, keyword and reply are required');
       return;
     }
     setSaving(true);
     try {
       await api.post('/instagram/dm/rules', form);
-      toast.success('Rule created');
+      toast.success(lang === 'ar' ? 'تمّ إنشاء القاعدة' : 'Rule created');
       setForm({ name: '', keyword: '', matchMode: 'contains', replyText: '', isActive: true });
       await loadAll();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to create rule');
+      toast.error(e?.response?.data?.detail || (lang === 'ar' ? 'تعذّر إنشاء القاعدة' : 'Failed to create rule'));
     } finally {
       setSaving(false);
     }
@@ -93,18 +93,18 @@ const DmAutomation = () => {
       await api.patch(`/instagram/dm/rules/${rule.id}`, { isActive: !rule.isActive });
       await loadAll();
     } catch (e) {
-      toast.error('Failed to toggle');
+      toast.error(lang === 'ar' ? 'تعذّر التبديل' : 'Failed to toggle');
     }
   };
 
   const deleteRule = async (rule) => {
-    if (!window.confirm(`Delete rule "${rule.name}"?`)) return;
+    if (!window.confirm(lang === "ar" ? `حذف القاعدة "${rule.name}"؟` : `Delete rule "${rule.name}"?`)) return;
     try {
       await api.delete(`/instagram/dm/rules/${rule.id}`);
-      toast.success('Deleted');
+      toast.success(lang === 'ar' ? 'تمّ الحذف' : 'Deleted');
       await loadAll();
     } catch (e) {
-      toast.error('Failed to delete');
+      toast.error(lang === 'ar' ? 'تعذّر الحذف' : 'Failed to delete');
     }
   };
 
@@ -128,26 +128,26 @@ const DmAutomation = () => {
         <Card className="mt-6 p-4 rounded-2xl border-slate-100">
           <div className="flex flex-wrap gap-2">
             {[
-              ['Instagram connected', diag.connected],
-              ['Messaging webhook subscribed', diag.messagingWebhookSubscribed],
-              [`Active DM rules: ${diag.activeDmRules}`, diag.activeDmRules > 0],
+              [lang === 'ar' ? 'Instagram مربوط' : 'Instagram connected', diag.connected],
+              [lang === 'ar' ? 'الـwebhook مُشترَك' : 'Messaging webhook subscribed', diag.messagingWebhookSubscribed],
+              [lang === 'ar' ? `قواعد الرسائل النشطة: ${diag.activeDmRules}` : `Active DM rules: ${diag.activeDmRules}`, diag.activeDmRules > 0],
             ].map(([k, v]) => (
               <Badge key={k} className={`rounded-full border-0 ${v ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
                 {v ? '✓' : '✗'} {k}
               </Badge>
             ))}
             <Badge className="rounded-full border-0 bg-slate-100 text-slate-700">
-              Recent messaging events: {diag.recentMessagingEvents ?? 0}
+              {lang === 'ar' ? 'أحداث الرسائل الحديثة: ' : 'Recent messaging events: '}{diag.recentMessagingEvents ?? 0}
             </Badge>
             <Badge className="rounded-full border-0 bg-slate-100 text-slate-700">
-              Last DM: {diag.lastMessageAt ? fmtTime(diag.lastMessageAt) : 'none'}
+              {lang === 'ar' ? 'آخر رسالة: ' : 'Last DM: '}{diag.lastMessageAt ? fmtTime(diag.lastMessageAt) : (lang === 'ar' ? 'لا يوجد' : 'none')}
             </Badge>
             <Badge className={`rounded-full border-0 ${STATUS_COLORS[diag.lastReplyStatus] || 'bg-slate-100 text-slate-700'}`}>
-              Last reply: {diag.lastReplyStatus || 'none'}
+              {lang === 'ar' ? 'آخر ردّ: ' : 'Last reply: '}{diag.lastReplyStatus || (lang === 'ar' ? 'لا يوجد' : 'none')}
             </Badge>
           </div>
           {diag.subscriptionError && (
-            <div className="mt-2 text-xs text-rose-700">Subscription check error: {diag.subscriptionError}</div>
+            <div className="mt-2 text-xs text-rose-700">{lang === 'ar' ? 'خطأ التحقّق من الاشتراك: ' : 'Subscription check error: '}{diag.subscriptionError}</div>
           )}
         </Card>
       )}

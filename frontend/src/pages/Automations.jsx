@@ -1178,7 +1178,7 @@ const Automations = () => {
                     <Input
                       value={followConfirmationKeywords}
                       onChange={e => setFollowConfirmationKeywords(e.target.value)}
-                      placeholder="Following, I followed, تمت المتابعة"
+                      placeholder={ar ? "تمت المتابعة, تابعت, Following" : "Following, I followed, تمت المتابعة"}
                       className="h-10 rounded-lg bg-white"
                       dir={detectTextDirection(followConfirmationKeywords).dir}
                       style={{ textAlign: detectTextDirection(followConfirmationKeywords).align }}

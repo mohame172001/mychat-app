@@ -86,7 +86,7 @@ export default function LangSwitcher({ variant = 'chip', className = '' }) {
         className={base}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label="Change language"
+        aria-label={lang === 'ar' ? 'تغيير اللغة' : 'Change language'}
       >
         <CurrentFlag />
         <span>{LANG_META[lang].label}</span>

@@ -42,18 +42,16 @@ const TONE_BAR = {
   slate:   'bg-slate-300',
 };
 
-function StatusPill({ status }) {
+function StatusPill({ status, ar }) {
   const tone = statusToTone(status);
   const cls = TONE_BG[tone] || TONE_BG.slate;
   const Icon = status === 'exceeded' ? XCircle
     : status === 'near_limit' ? AlertTriangle
     : status === 'unlimited' ? Info
     : CheckCircle2;
-  const label =
-    status === 'exceeded' ? 'Exceeded'
-    : status === 'near_limit' ? 'Near limit'
-    : status === 'unlimited' ? 'Unlimited'
-    : 'OK';
+  const label = ar
+    ? (status === 'exceeded' ? 'تجاوز الحدّ' : status === 'near_limit' ? 'قارب الحدّ' : status === 'unlimited' ? 'بلا حدود' : 'سليم')
+    : (status === 'exceeded' ? 'Exceeded' : status === 'near_limit' ? 'Near limit' : status === 'unlimited' ? 'Unlimited' : 'OK');
   return (
     <Badge className={`${cls} border-0`}>
       <Icon className="w-3 h-3 me-1" /> {label}
@@ -61,7 +59,7 @@ function StatusPill({ status }) {
   );
 }
 
-function UsageBar({ row }) {
+function UsageBar({ row, ar }) {
   const tone = statusToTone(row.status);
   const barCls = TONE_BAR[tone] || TONE_BAR.slate;
   const percent = row.percent === null ? 0 : row.percent;
@@ -69,16 +67,16 @@ function UsageBar({ row }) {
     <div className="bg-white rounded-2xl border border-slate-100 p-4" data-testid={`usage-row-${row.key || row.label}`}>
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="text-sm font-medium text-slate-700">{row.label}</div>
-        <StatusPill status={row.status} />
+        <StatusPill status={row.status} ar={ar} />
       </div>
       <div className="flex items-baseline gap-2 text-xs text-slate-500 mb-2">
         <span className="text-base font-semibold text-slate-800 font-mono">{row.used}</span>
         {row.limit === null
-          ? <span>/ unlimited</span>
+          ? <span>{ar ? '/ بلا حدود' : '/ unlimited'}</span>
           : <>
               <span>/ {row.limit}</span>
               <span className="text-slate-400">·</span>
-              <span>{row.remaining} remaining</span>
+              <span>{row.remaining} {ar ? 'متبقّية' : 'remaining'}</span>
             </>
         }
       </div>
@@ -95,9 +93,9 @@ function UsageBar({ row }) {
   );
 }
 
-function PlanCard({ plan, current }) {
+function PlanCard({ plan, current, ar }) {
   const highlighted = isCurrentPlan(plan, current);
-  const formatLimit = (n) => n === null || n === undefined ? 'Unlimited' : n.toLocaleString();
+  const formatLimit = (n) => n === null || n === undefined ? (ar ? 'بلا حدود' : 'Unlimited') : n.toLocaleString();
   return (
     <section
       className={
@@ -112,21 +110,21 @@ function PlanCard({ plan, current }) {
         <div>
           <h3 className="text-lg font-semibold text-slate-800">{plan.display_name}</h3>
           <div className="text-xs text-slate-500">
-            ${plan.monthly_price_placeholder ?? 0}<span className="ms-1">/ month</span>
+            ${plan.monthly_price_placeholder ?? 0}<span className="ms-1">{ar ? '/ شهر' : '/ month'}</span>
           </div>
         </div>
         {highlighted && (
           <Badge className="bg-blue-600 text-white border-0" data-testid="current-plan-badge">
-            Current plan
+            {ar ? 'الخطة الحالية' : 'Current plan'}
           </Badge>
         )}
       </div>
       <ul className="text-sm text-slate-600 space-y-1.5">
-        <li>{formatLimit(plan.max_instagram_accounts)} Instagram accounts</li>
-        <li>{formatLimit(plan.max_active_automations)} active automations</li>
-        <li>{formatLimit(plan.monthly_comments_processed_limit)} comments processed / month</li>
-        <li>{formatLimit(plan.monthly_public_replies_sent_limit)} public replies / month</li>
-        <li>{formatLimit(plan.monthly_dms_sent_limit)} DMs / month</li>
+        <li>{formatLimit(plan.max_instagram_accounts)} {ar ? 'حسابات Instagram' : 'Instagram accounts'}</li>
+        <li>{formatLimit(plan.max_active_automations)} {ar ? 'أتمتات نشطة' : 'active automations'}</li>
+        <li>{formatLimit(plan.monthly_comments_processed_limit)} {ar ? 'تعليق معالَج / شهر' : 'comments processed / month'}</li>
+        <li>{formatLimit(plan.monthly_public_replies_sent_limit)} {ar ? 'ردّ علني / شهر' : 'public replies / month'}</li>
+        <li>{formatLimit(plan.monthly_dms_sent_limit)} {ar ? 'رسالة خاصة / شهر' : 'DMs / month'}</li>
       </ul>
       {plan.features && plan.features.length > 0 && (
         <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
@@ -138,12 +136,12 @@ function PlanCard({ plan, current }) {
       <Button
         variant="outline"
         disabled
-        title="Plan upgrades will be available after billing is enabled"
+        title={ar ? 'ستتاح ترقية الخطة بعد تفعيل الفوترة' : 'Plan upgrades will be available after billing is enabled'}
         data-testid={`upgrade-btn-${plan.plan_key}`}
         className="mt-auto"
       >
         <Lock className="w-3 h-3 me-2" />
-        {highlighted ? 'Current' : 'Upgrade coming soon'}
+        {highlighted ? (ar ? 'الحالية' : 'Current') : (ar ? 'الترقية قريباً' : 'Upgrade coming soon')}
       </Button>
     </section>
   );
@@ -183,9 +181,10 @@ export default function Billing() {
       setPlans(plansResp.data?.plans || []);
     } catch (err) {
       console.error('[Billing] load failed', err);
-      const msg = err?.response?.data?.detail || 'Failed to load billing info';
-      setError(typeof msg === 'string' ? msg : 'Failed to load billing info');
-      toast.error(typeof msg === 'string' ? msg : 'Failed to load billing info');
+      const fallback = lang === 'ar' ? 'تعذّر تحميل بيانات الفوترة' : 'Failed to load billing info';
+      const msg = err?.response?.data?.detail || fallback;
+      setError(typeof msg === 'string' ? msg : fallback);
+      toast.error(typeof msg === 'string' ? msg : fallback);
     } finally {
       setLoading(false);
     }
@@ -275,10 +274,10 @@ export default function Billing() {
           <section className="mb-6">
             <h2 className="text-sm font-semibold text-slate-700 mb-3">{t('billing.thisMonth')}</h2>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {accountRow && <UsageBar row={accountRow} />}
-              {automationRow && <UsageBar row={automationRow} />}
+              {accountRow && <UsageBar row={accountRow} ar={lang === "ar"} />}
+              {automationRow && <UsageBar row={automationRow} ar={lang === "ar"} />}
               {usageRows.map((row) => (
-                <UsageBar key={row.key} row={row} />
+                <UsageBar key={row.key} row={row} ar={lang === "ar"} />
               ))}
             </div>
           </section>
@@ -289,7 +288,7 @@ export default function Billing() {
               <h2 className="text-sm font-semibold text-slate-700 mb-3">{t('billing.plans')}</h2>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {plans.map((plan) => (
-                  <PlanCard key={plan.plan_key} plan={plan} current={current} />
+                  <PlanCard key={plan.plan_key} plan={plan} current={current} ar={lang === 'ar'} />
                 ))}
               </div>
               <p className="text-xs text-slate-400 mt-3">

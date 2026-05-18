@@ -81,7 +81,7 @@ function AdminErrorCard({ title = (isAr() ? 'تعذّر تحميل هذا الق
       {onRetry && (
         <Button variant="outline" size="sm" className="mt-3" onClick={onRetry} disabled={loading}>
           <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
-          Retry
+          {isAr() ? "إعادة المحاولة" : "Retry"}
         </Button>
       )}
     </div>
@@ -180,15 +180,15 @@ function OverviewTab({ data, onRefresh, loading }) {
           every 15 min, but the button is here for instant feedback. */}
       <div className="mb-6 flex items-center justify-between bg-white rounded-2xl border border-slate-100 px-5 py-4 gap-4 flex-wrap">
         <div className="text-sm">
-          <div className="font-semibold text-slate-700">Reclassify collab failures</div>
+          <div className="font-semibold text-slate-700">{isAr() ? "إعادة تصنيف أعطال الـCollab" : "Reclassify collab failures"}</div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Scans recent permanent/partial failures for comments on posts
+            {isAr() ? "يفحص الأعطال الدائمة/الجزئية الحديثة للتعليقات على المنشورات" : "Scans recent permanent/partial failures for comments on posts"}
             you don't own and moves them out of the failure count.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={runReclassifier} disabled={reclassifying}>
           <RefreshCw className={`w-4 h-4 me-2 ${reclassifying ? 'animate-spin' : ''}`} />
-          Run now
+          {isAr() ? "تشغيل الآن" : "Run now"}
         </Button>
       </div>
 
@@ -257,7 +257,7 @@ function UsersTab({ onSelect }) {
           className="rounded-md border border-slate-200 px-2 text-sm h-10"
           data-testid="admin-users-plan-filter"
         >
-          <option value="">All plans</option>
+          <option value="">{isAr() ? "جميع الخطط" : "All plans"}</option>
           {PLAN_KEYS.map(k => <option key={k} value={k}>{PLAN_DISPLAY[k]}</option>)}
         </select>
         <Button
@@ -270,7 +270,7 @@ function UsersTab({ onSelect }) {
           disabled={loading}
         >
           <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
+          {isAr() ? "تحديث" : "Refresh"}
         </Button>
         <Button
           variant="outline"
@@ -292,7 +292,7 @@ function UsersTab({ onSelect }) {
             }
           }}
         >
-          Export CSV
+          {isAr() ? "تصدير CSV" : "Export CSV"}
         </Button>
       </div>
 
@@ -300,18 +300,18 @@ function UsersTab({ onSelect }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-start px-3 py-2">Email</th>
-              <th className="text-start px-3 py-2">Plan</th>
-              <th className="text-end px-3 py-2">IG</th>
-              <th className="text-end px-3 py-2">Active rules</th>
+              <th className="text-start px-3 py-2">{isAr() ? "البريد" : "Email"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "الخطة" : "Plan"}</th>
+              <th className="text-end px-3 py-2">{isAr() ? "Instagram" : "IG"}</th>
+              <th className="text-end px-3 py-2">{isAr() ? "القواعد النشطة" : "Active rules"}</th>
               {/* Phase 2.18S: column titles now spell out the
                   current-month scoping so a fresh month showing 0
                   across the board does not look like a bug. */}
-              <th className="text-end px-3 py-2" title="Comments processed this calendar month">Comments (mo)</th>
-              <th className="text-end px-3 py-2" title="Public replies sent this calendar month">Replies (mo)</th>
+              <th className="text-end px-3 py-2" title={isAr() ? "التعليقات المعالَجة هذا الشهر" : "Comments processed this calendar month"}>{isAr() ? "تعليقات (شهري)" : "Comments (mo)"}</th>
+              <th className="text-end px-3 py-2" title={isAr() ? "الردود العلنية المُرسلة هذا الشهر" : "Public replies sent this calendar month"}>{isAr() ? "ردود (شهري)" : "Replies (mo)"}</th>
               <th className="text-end px-3 py-2" title="DMs sent this calendar month">DMs (mo)</th>
-              <th className="text-start px-3 py-2">Status</th>
-              <th className="text-start px-3 py-2">Created</th>
+              <th className="text-start px-3 py-2">{isAr() ? "الحالة" : "Status"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "تاريخ الإنشاء" : "Created"}</th>
               <th className="text-end px-3 py-2"></th>
             </tr>
           </thead>
@@ -333,13 +333,13 @@ function UsersTab({ onSelect }) {
                   <td className="px-3 py-2 text-end font-mono">{u.current_month_usage?.dms_sent ?? 0}</td>
                   <td className="px-3 py-2">
                     {exceeded
-                      ? <Badge className="bg-rose-100 text-rose-700 border-0"><AlertTriangle className="w-3 h-3 me-1" />Limit</Badge>
-                      : <Badge className="bg-emerald-100 text-emerald-700 border-0"><CheckCircle2 className="w-3 h-3 me-1" />OK</Badge>}
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0"><AlertTriangle className="w-3 h-3 me-1" />{isAr() ? "تجاوز الحدّ" : "Limit"}</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0"><CheckCircle2 className="w-3 h-3 me-1" />{isAr() ? "سليم" : "OK"}</Badge>}
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-500">{formatTimestamp(u.created_at)}</td>
                   <td className="px-3 py-2 text-end">
                     <Button size="sm" variant="ghost" onClick={() => onSelect(u.user_id)}>
-                      View
+                      {isAr() ? "عرض" : "View"}
                     </Button>
                   </td>
                 </tr>
@@ -367,13 +367,13 @@ function UsersTab({ onSelect }) {
       {data?.pagination && data.pagination.total_pages > 1 && (
         <div className="flex items-center justify-end gap-2 mt-3 text-sm">
           <span className="text-slate-500">
-            Page {data.pagination.page} / {data.pagination.total_pages}
+            {isAr() ? 'الصفحة ' : 'Page '}{data.pagination.page} / {data.pagination.total_pages}
           </span>
           <Button variant="outline" size="sm" disabled={page <= 1}
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}>{isAr() ? "السابق" : "Prev"}</Button>
           <Button variant="outline" size="sm"
                   disabled={page >= data.pagination.total_pages}
-                  onClick={() => setPage((p) => p + 1)}>Next</Button>
+                  onClick={() => setPage((p) => p + 1)}>{isAr() ? "التالي" : "Next"}</Button>
         </div>
       )}
     </div>
@@ -606,11 +606,11 @@ function UserDetailTab({ userId, onBack, me }) {
       {data && (
         <>
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
-            <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">User</div>
-            <div className="mt-1 text-2xl font-bold text-slate-800 font-mono">{profile.email || 'Unknown user'}</div>
+            <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">{isAr() ? "المستخدم" : "User"}</div>
+            <div className="mt-1 text-2xl font-bold text-slate-800 font-mono">{profile.email || (isAr() ? 'مستخدم غير معروف' : 'Unknown user')}</div>
             <div className="text-xs text-slate-500 font-mono mt-1">{data.user_id || userId}</div>
             <div className="text-xs text-slate-400 mt-1">
-              Created: {formatTimestamp(profile.created_at)}
+              {isAr() ? 'تاريخ الإنشاء: ' : 'Created: '}{formatTimestamp(profile.created_at)}
             </div>
           </section>
 
@@ -618,14 +618,14 @@ function UserDetailTab({ userId, onBack, me }) {
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
               <div>
-                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Plan</div>
+                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">{isAr() ? "الخطة" : "Plan"}</div>
                 <div className="mt-1 text-2xl font-bold text-slate-800">
-                  {plan.display_name || PLAN_DISPLAY[plan.plan_key] || plan.plan_key || 'Free'}
+                  {plan.display_name || PLAN_DISPLAY[plan.plan_key] || plan.plan_key || (isAr() ? 'المجانية' : 'Free')}
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  Billing: <span className="font-semibold">Not enabled yet</span>
+                  {isAr() ? 'الفوترة: ' : 'Billing: '}<span className="font-semibold">{isAr() ? 'غير مُفعّلة بعد' : 'Not enabled yet'}</span>
                   {plan.assignment_reason && (
-                    <span className="ms-2 text-slate-400">· last reason: {plan.assignment_reason}</span>
+                    <span className="ms-2 text-slate-400">· {isAr() ? 'آخر سبب: ' : 'last reason: '}{plan.assignment_reason}</span>
                   )}
                 </div>
               </div>
@@ -647,12 +647,12 @@ function UserDetailTab({ userId, onBack, me }) {
                   className="flex-1 min-w-[180px]"
                 />
                 <Button onClick={onAssign} disabled={assigning} data-testid="admin-detail-assign-btn">
-                  {assigning ? 'Saving…' : 'Assign plan'}
+                  {assigning ? (isAr() ? 'جارٍ الحفظ…' : 'Saving…') : (isAr() ? 'تعيين الخطة' : 'Assign plan')}
                 </Button>
               </div>
             ) : (
               <div className="text-xs text-slate-500" data-testid="admin-detail-plan-readonly">
-                You don't have permission to change this user's plan.
+                {isAr() ? 'ليس لديك صلاحية لتغيير خطة هذا المستخدم.' : "You don't have permission to change this user's plan."}
               </div>
             )}
           </section>
@@ -661,48 +661,48 @@ function UserDetailTab({ userId, onBack, me }) {
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-user-status">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <div>
-                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">Status</div>
+                <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold">{isAr() ? "الحالة" : "Status"}</div>
                 <div className="mt-1 text-base font-semibold">
                   {profile.status === 'suspended'
-                    ? <Badge className="bg-amber-100 text-amber-800 border-0">Suspended</Badge>
+                    ? <Badge className="bg-amber-100 text-amber-800 border-0">{isAr() ? "موقوف" : "Suspended"}</Badge>
                     : profile.status === 'deleted'
-                      ? <Badge className="bg-rose-100 text-rose-700 border-0">Deleted</Badge>
-                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0">{isAr() ? "محذوف" : "Deleted"}</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">{isAr() ? "نشط" : "Active"}</Badge>}
                   {profile.google_linked && (
-                    <Badge className="ms-2 bg-blue-100 text-blue-700 border-0">Google linked</Badge>
+                    <Badge className="ms-2 bg-blue-100 text-blue-700 border-0">{isAr() ? "مرتبط بـGoogle" : "Google linked"}</Badge>
                   )}
                 </div>
               </div>
               <div className="flex gap-2">
                 {canManageUsers && (profile.status || 'active') === 'active' && (
                   <Button size="sm" variant="outline" onClick={onSuspend} data-testid="admin-suspend-btn">
-                    Suspend
+                    {isAr() ? "إيقاف" : "Suspend"}
                   </Button>
                 )}
                 {canManageUsers && profile.status === 'suspended' && (
                   <Button size="sm" variant="outline" onClick={onUnsuspend} data-testid="admin-unsuspend-btn">
-                    Unsuspend
+                    {isAr() ? "إعادة تفعيل" : "Unsuspend"}
                   </Button>
                 )}
                 {canDeleteUsers && profile.status !== 'deleted' && (
                   <Button size="sm" variant="outline"
                           className="text-rose-700 border-rose-200 hover:bg-rose-50"
                           onClick={onSoftDelete} data-testid="admin-soft-delete-btn">
-                    Soft delete
+                    {isAr() ? "حذف مؤقّت" : "Soft delete"}
                   </Button>
                 )}
               </div>
             </div>
             {profile.suspended_at && (
               <div className="text-xs text-slate-500">
-                Suspended at {formatTimestamp(profile.suspended_at)}
-                {profile.suspended_by && <> by <span className="font-mono">{profile.suspended_by}</span></>}
+                {isAr() ? 'تاريخ الإيقاف: ' : 'Suspended at '}{formatTimestamp(profile.suspended_at)}
+                {profile.suspended_by && <> {isAr() ? 'بواسطة ' : 'by '}<span className="font-mono">{profile.suspended_by}</span></>}
               </div>
             )}
             {profile.deleted_at && (
               <div className="text-xs text-slate-500">
-                Deleted at {formatTimestamp(profile.deleted_at)}
-                {profile.deleted_by && <> by <span className="font-mono">{profile.deleted_by}</span></>}
+                {isAr() ? 'تاريخ الحذف: ' : 'Deleted at '}{formatTimestamp(profile.deleted_at)}
+                {profile.deleted_by && <> {isAr() ? 'بواسطة ' : 'by '}<span className="font-mono">{profile.deleted_by}</span></>}
               </div>
             )}
           </section>
@@ -711,7 +711,7 @@ function UserDetailTab({ userId, onBack, me }) {
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4" data-testid="admin-allowances">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">{isAr() ? "حصص مخصّصة" : "Custom allowances"}</h3>
             {activeOverrides.length === 0 && (
-              <div className="text-sm text-slate-500 mb-3">No active grants.</div>
+              <div className="text-sm text-slate-500 mb-3">{isAr() ? "لا توجد منح نشطة." : "No active grants."}</div>
             )}
             {activeOverrides.length > 0 && (
               <ul className="space-y-2 text-sm mb-3">
@@ -735,7 +735,7 @@ function UserDetailTab({ userId, onBack, me }) {
                     </div>
                     {canAssignPlan && (
                       <Button size="sm" variant="ghost" onClick={() => onRevokeAllowance(ov.id)}>
-                        Revoke
+                        {isAr() ? "إلغاء" : "Revoke"}
                       </Button>
                     )}
                   </li>
@@ -745,14 +745,14 @@ function UserDetailTab({ userId, onBack, me }) {
             {canAssignPlan && (
               <div className="border-t border-slate-100 pt-3">
                 <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-2">
-                  Grant new allowance
+                  {isAr() ? "منح حصّة جديدة" : "Grant new allowance"}
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <select value={allowanceType} onChange={(e) => setAllowanceType(e.target.value)}
                           className="rounded-md border border-slate-200 px-2 text-sm h-10"
                           data-testid="admin-allowance-type-select">
-                    <option value="additive_allowance">Additive (extras on top of plan)</option>
-                    <option value="trial_grant">Trial grant (extras with end date)</option>
+                    <option value="additive_allowance">{isAr() ? "إضافي (فوق الخطة)" : "Additive (extras on top of plan)"}</option>
+                    <option value="trial_grant">{isAr() ? "منحة تجريبية (بتاريخ انتهاء)" : "Trial grant (extras with end date)"}</option>
                   </select>
                   <Input type="number" min="0" placeholder={isAr() ? "عدد الأيام (0 = بلا نهاية)" : "Days valid (0 = no end)"}
                          value={allowanceDays} onChange={(e) => setAllowanceDays(e.target.value)} />
@@ -772,7 +772,7 @@ function UserDetailTab({ userId, onBack, me }) {
                 <div className="mt-2">
                   <Button onClick={onCreateAllowance} disabled={grantBusy}
                           data-testid="admin-grant-allowance-btn">
-                    {grantBusy ? 'Granting…' : 'Grant allowance'}
+                    {grantBusy ? (isAr() ? 'جارٍ المنح…' : 'Granting…') : (isAr() ? 'منح الحصّة' : 'Grant allowance')}
                   </Button>
                 </div>
               </div>
@@ -782,7 +782,7 @@ function UserDetailTab({ userId, onBack, me }) {
           {/* Usage */}
           <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
             <h3 className="text-sm font-semibold text-slate-700 mb-3">
-              Usage — {usage.event_month || 'current month'}
+              {isAr() ? 'الاستهلاك — ' : 'Usage — '}{usage.event_month || (isAr() ? 'الشهر الحالي' : 'current month')}
             </h3>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {Object.entries(usageCounters).map(([k, v]) => (
@@ -809,11 +809,11 @@ function UserDetailTab({ userId, onBack, me }) {
                   <div>
                     <div className="font-mono">{a.username || a.instagram_account_id}</div>
                     <div className="text-xs text-slate-500">
-                      {a.connectionValid ? 'Connected' : 'Disconnected'} ·
+                      {a.connectionValid ? (isAr() ? 'مربوط' : 'Connected') : (isAr() ? 'غير مربوط' : 'Disconnected')} ·
                       {' '}token: {a.tokenSource || '—'} · expires: {formatTimestamp(a.tokenExpiresAt)}
                     </div>
                   </div>
-                  {a.active && <Badge className="bg-blue-100 text-blue-700 border-0">Active</Badge>}
+                  {a.active && <Badge className="bg-blue-100 text-blue-700 border-0">{isAr() ? "نشط" : "Active"}</Badge>}
                 </li>
               ))}
             </ul>
@@ -837,11 +837,11 @@ function UserDetailTab({ userId, onBack, me }) {
                   </div>
                   <div className="flex items-center gap-2">
                     {a.active
-                      ? <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>
+                      ? <Badge className="bg-emerald-100 text-emerald-700 border-0">{isAr() ? "نشط" : "Active"}</Badge>
                       : <Badge className="bg-slate-100 text-slate-600 border-0">{a.status || 'paused'}</Badge>}
                     {a.active && canDisableAutomation && (
                       <Button size="sm" variant="outline" onClick={() => onDisableAutomation(a.automation_id)}>
-                        Pause
+                        {isAr() ? "إيقاف مؤقت" : "Pause"}
                       </Button>
                     )}
                   </div>
@@ -977,7 +977,7 @@ function AdminsTab({ me }) {
     <div data-testid="admin-admins">
       <section className="bg-white rounded-2xl border border-slate-100 p-5 mb-4">
         <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1">
-          You are
+          {isAr() ? 'أنت' : 'You are'}
         </div>
         <div className="text-base font-semibold text-slate-800">
           {ROLE_DISPLAY[myRole] || myRole}
@@ -1016,11 +1016,11 @@ function AdminsTab({ me }) {
               className="flex-1 min-w-[160px]"
             />
             <Button type="submit" disabled={submitting || !addEmail.trim()} data-testid="admin-add-member-btn">
-              {submitting ? 'Adding…' : 'Add member'}
+              {submitting ? (isAr() ? 'جارٍ الإضافة…' : 'Adding…') : (isAr() ? 'إضافة عضو' : 'Add member')}
             </Button>
           </form>
           <p className="text-xs text-slate-400 mt-2">
-            User must already have an account. No invitation email is sent.
+            {isAr() ? 'يجب أن يكون لدى المستخدم حساب بالفعل. لا يُرسل بريد دعوة.' : 'User must already have an account. No invitation email is sent.'}
           </p>
         </section>
       )}
@@ -1029,11 +1029,11 @@ function AdminsTab({ me }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-start px-3 py-2">Email</th>
-              <th className="text-start px-3 py-2">Role</th>
-              <th className="text-start px-3 py-2">Status</th>
-              <th className="text-start px-3 py-2">Added by</th>
-              <th className="text-start px-3 py-2">Created</th>
+              <th className="text-start px-3 py-2">{isAr() ? "البريد" : "Email"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "الدور" : "Role"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "الحالة" : "Status"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "أضافه" : "Added by"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "تاريخ الإنشاء" : "Created"}</th>
               <th className="text-end px-3 py-2"></th>
             </tr>
           </thead>
@@ -1053,8 +1053,8 @@ function AdminsTab({ me }) {
                   </td>
                   <td className="px-3 py-2">
                     {m.disabled_at
-                      ? <Badge className="bg-rose-100 text-rose-700 border-0">Disabled</Badge>
-                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">Active</Badge>}
+                      ? <Badge className="bg-rose-100 text-rose-700 border-0">{isAr() ? "مُعطّل" : "Disabled"}</Badge>
+                      : <Badge className="bg-emerald-100 text-emerald-700 border-0">{isAr() ? "نشط" : "Active"}</Badge>}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{m.added_by_email || '—'}</td>
                   <td className="px-3 py-2 text-xs text-slate-500">{formatTimestamp(m.created_at)}</td>
@@ -1076,7 +1076,7 @@ function AdminsTab({ me }) {
                           )}
                         </select>
                         <Button size="sm" variant="ghost" onClick={() => onRemove(m)}>
-                          Remove
+                          {isAr() ? "إزالة" : "Remove"}
                         </Button>
                       </span>
                     )}
@@ -1123,7 +1123,7 @@ function ReconciliationTab() {
     <div data-testid="admin-reconciliation">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-slate-700">
-          Metrics reconciliation
+          {isAr() ? 'تسوية المقاييس' : 'Metrics reconciliation'}
           {data?.event_month && <span className="text-slate-400 font-mono ms-2">{data.event_month}</span>}
         </h3>
         <Button
@@ -1136,7 +1136,7 @@ function ReconciliationTab() {
           disabled={loading}
         >
           <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
+          {isAr() ? "تحديث" : "Refresh"}
         </Button>
       </div>
       {data && data.mismatch_count > 0 && (
@@ -1150,12 +1150,12 @@ function ReconciliationTab() {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="text-start px-3 py-2">Metric</th>
-              <th className="text-end px-3 py-2">Dashboard</th>
-              <th className="text-end px-3 py-2">Recomputed</th>
+              <th className="text-start px-3 py-2">{isAr() ? "المقياس" : "Metric"}</th>
+              <th className="text-end px-3 py-2">{isAr() ? "لوحة التحكّم" : "Dashboard"}</th>
+              <th className="text-end px-3 py-2">{isAr() ? "المُعاد حسابه" : "Recomputed"}</th>
               <th className="text-end px-3 py-2">Δ</th>
-              <th className="text-start px-3 py-2">Status</th>
-              <th className="text-start px-3 py-2">Source</th>
+              <th className="text-start px-3 py-2">{isAr() ? "الحالة" : "Status"}</th>
+              <th className="text-start px-3 py-2">{isAr() ? "المصدر" : "Source"}</th>
             </tr>
           </thead>
           <tbody>
@@ -1167,8 +1167,8 @@ function ReconciliationTab() {
                 <td className="px-3 py-2 text-end font-mono">{row.difference ?? '—'}</td>
                 <td className="px-3 py-2">
                   {row.status === 'ok'
-                    ? <Badge className="bg-emerald-100 text-emerald-700 border-0">OK</Badge>
-                    : <Badge className="bg-amber-100 text-amber-800 border-0">Mismatch</Badge>}
+                    ? <Badge className="bg-emerald-100 text-emerald-700 border-0">{isAr() ? "سليم" : "OK"}</Badge>
+                    : <Badge className="bg-amber-100 text-amber-800 border-0">{isAr() ? "غير متطابق" : "Mismatch"}</Badge>}
                 </td>
                 <td className="px-3 py-2 text-xs text-slate-500">{row.source}</td>
               </tr>
@@ -1219,7 +1219,7 @@ function AuditLogTab() {
     <div data-testid="admin-audit-log">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-slate-700">
-          Admin audit log
+          {isAr() ? 'سجلّ تدقيق الإدارة' : 'Admin audit log'}
           {data?.count !== undefined && (
             <span className="ms-2 text-slate-400 font-mono">({data.count})</span>
           )}
@@ -1234,25 +1234,25 @@ function AuditLogTab() {
           disabled={loading}
         >
           <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
+          {isAr() ? "تحديث" : "Refresh"}
         </Button>
       </div>
       {loading && items.length === 0 ? (
         <AdminSkeleton rows={6} />
       ) : items.length === 0 ? (
         <div className="rounded-2xl border border-slate-100 bg-white p-6 text-center text-sm text-slate-500">
-          No admin actions recorded yet.
+          {isAr() ? "لم تُسجَّل أي إجراءات إدارية بعد." : "No admin actions recorded yet."}
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-slate-100 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
               <tr>
-                <th className="text-start px-3 py-2">When</th>
-                <th className="text-start px-3 py-2">Admin</th>
-                <th className="text-start px-3 py-2">Action</th>
-                <th className="text-start px-3 py-2">Target user</th>
-                <th className="text-start px-3 py-2">Details</th>
+                <th className="text-start px-3 py-2">{isAr() ? "الوقت" : "When"}</th>
+                <th className="text-start px-3 py-2">{isAr() ? "المسؤول" : "Admin"}</th>
+                <th className="text-start px-3 py-2">{isAr() ? "الإجراء" : "Action"}</th>
+                <th className="text-start px-3 py-2">{isAr() ? "المستخدم المستهدف" : "Target user"}</th>
+                <th className="text-start px-3 py-2">{isAr() ? "التفاصيل" : "Details"}</th>
               </tr>
             </thead>
             <tbody>
@@ -1325,11 +1325,11 @@ function WebhookDlqTab() {
     setRetrying((prev) => ({ ...prev, [id]: true }));
     try {
       await api.post(`/admin/webhook-dlq/${encodeURIComponent(id)}/retry`);
-      toast.success('Replayed successfully');
+      toast.success(isAr() ? 'تمّت إعادة التشغيل بنجاح' : 'Replayed successfully');
       await load();
     } catch (err) {
-      const detail = err?.response?.data?.detail || 'Replay failed';
-      toast.error(typeof detail === 'string' ? detail : 'Replay failed');
+      const detail = err?.response?.data?.detail || (isAr() ? 'فشلت إعادة التشغيل' : 'Replay failed');
+      toast.error(typeof detail === 'string' ? detail : (isAr() ? 'فشلت إعادة التشغيل' : 'Replay failed'));
     } finally {
       setRetrying((prev) => ({ ...prev, [id]: false }));
     }
@@ -1345,9 +1345,9 @@ function WebhookDlqTab() {
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {[
-          { key: 'pending_retry', label: 'Pending retry', value: counts.pending_retry, tone: 'amber' },
-          { key: 'permanently_failed', label: 'Permanently failed', value: counts.permanently_failed, tone: 'rose' },
-          { key: 'replayed', label: 'Replayed', value: counts.replayed, tone: 'emerald' },
+          { key: 'pending_retry', label: (isAr() ? 'بانتظار إعادة المحاولة' : 'Pending retry'), value: counts.pending_retry, tone: 'amber' },
+          { key: 'permanently_failed', label: (isAr() ? 'فشل دائم' : 'Permanently failed'), value: counts.permanently_failed, tone: 'rose' },
+          { key: 'replayed', label: (isAr() ? 'أُعيد تشغيلها' : 'Replayed'), value: counts.replayed, tone: 'emerald' },
         ].map((tile) => (
           <button
             key={tile.key}
@@ -1374,11 +1374,11 @@ function WebhookDlqTab() {
       <div className="bg-white rounded-2xl border border-slate-100 p-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h3 className="text-sm font-semibold text-slate-700">
-            Webhook DLQ {filter && <span className="text-slate-500 font-normal">— filtered: {filter}</span>}
+            {isAr() ? "طابور أخطاء الـWebhook" : "Webhook DLQ"} {filter && <span className="text-slate-500 font-normal">— {isAr() ? "مفلتر: " : "filtered: "}{filter}</span>}
           </h3>
           <div className="flex items-center gap-2">
             {filter && (
-              <Button variant="outline" size="sm" onClick={() => setFilter('')}>Clear filter</Button>
+              <Button variant="outline" size="sm" onClick={() => setFilter('')}>{isAr() ? "مسح الفلتر" : "Clear filter"}</Button>
             )}
             <Button variant="outline" size="sm" onClick={load} disabled={loading}>
               <RefreshCw className={`w-4 h-4 me-2 ${loading ? 'animate-spin' : ''}`} /> Refresh
@@ -1411,7 +1411,7 @@ function WebhookDlqTab() {
                     disabled={retrying[entry.id]}
                   >
                     <RotateCcw className={`w-4 h-4 me-2 ${retrying[entry.id] ? 'animate-spin' : ''}`} />
-                    Replay now
+                    {isAr() ? "إعادة التشغيل الآن" : "Replay now"}
                   </Button>
                 )}
               </div>
