@@ -70,37 +70,42 @@ class AuthOut(BaseModel):
     user: UserPublic
 
 
+# Phase 2.19 hardening: caps reflect realistic upper bounds for each
+# free-text field. comment_reply/dm_text are capped at 1000 to match
+# Instagram's own DM length cap (≈1000 chars). The follow-gate copy
+# fields use the same 1000-char ceiling. button_text fields stay
+# small (≤80) since they render inside Meta's reply-button affordance.
 class AutomationIn(BaseModel):
-    name: str
-    trigger: str = 'Manual'
-    status: str = 'draft'
-    nodes: Optional[List[Dict[str, Any]]] = None
-    edges: Optional[List[Dict[str, Any]]] = None
-    match: Optional[str] = None
-    keyword: Optional[str] = None
-    mode: Optional[str] = None
-    comment_reply: Optional[str] = None
-    comment_reply_2: Optional[str] = None
-    comment_reply_3: Optional[str] = None
-    dm_text: Optional[str] = None
-    media_id: Optional[str] = None
+    name: str = Field(min_length=1, max_length=200)
+    trigger: str = Field(default='Manual', max_length=64)
+    status: str = Field(default='draft', max_length=32)
+    nodes: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=200)
+    edges: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=200)
+    match: Optional[str] = Field(default=None, max_length=32)
+    keyword: Optional[str] = Field(default=None, max_length=500)
+    mode: Optional[str] = Field(default=None, max_length=32)
+    comment_reply: Optional[str] = Field(default=None, max_length=1000)
+    comment_reply_2: Optional[str] = Field(default=None, max_length=1000)
+    comment_reply_3: Optional[str] = Field(default=None, max_length=1000)
+    dm_text: Optional[str] = Field(default=None, max_length=1000)
+    media_id: Optional[str] = Field(default=None, max_length=64)
     latest: Optional[bool] = None
     media_preview: Optional[Dict[str, Any]] = None
-    instagramAccountId: Optional[str] = None
-    igUserId: Optional[str] = None
-    instagramUsername: Optional[str] = None
+    instagramAccountId: Optional[str] = Field(default=None, max_length=64)
+    igUserId: Optional[str] = Field(default=None, max_length=64)
+    instagramUsername: Optional[str] = Field(default=None, max_length=64)
     follow_request_enabled: Optional[bool] = None
-    follow_request_message: Optional[str] = None
-    follow_request_button_text: Optional[str] = None
-    follow_confirmation_keywords: Optional[List[str]] = None
-    follow_gate_expires_after_minutes: Optional[int] = None
-    follow_gate_fallback_message: Optional[str] = None
+    follow_request_message: Optional[str] = Field(default=None, max_length=1000)
+    follow_request_button_text: Optional[str] = Field(default=None, max_length=80)
+    follow_confirmation_keywords: Optional[List[str]] = Field(default=None, max_length=50)
+    follow_gate_expires_after_minutes: Optional[int] = Field(default=None, ge=0, le=43200)
+    follow_gate_fallback_message: Optional[str] = Field(default=None, max_length=1000)
     verify_actual_follow: Optional[bool] = None
-    follow_not_detected_message: Optional[str] = None
-    follow_verification_failed_message: Optional[str] = None
-    follow_retry_button_text: Optional[str] = None
-    follow_cooldown_message: Optional[str] = None
-    max_follow_verification_attempts: Optional[int] = None
+    follow_not_detected_message: Optional[str] = Field(default=None, max_length=1000)
+    follow_verification_failed_message: Optional[str] = Field(default=None, max_length=1000)
+    follow_retry_button_text: Optional[str] = Field(default=None, max_length=80)
+    follow_cooldown_message: Optional[str] = Field(default=None, max_length=1000)
+    max_follow_verification_attempts: Optional[int] = Field(default=None, ge=1, le=10)
     processExistingComments: bool = False
     process_existing_unreplied_comments: Optional[bool] = None
     processExistingUnrepliedComments: Optional[bool] = None
