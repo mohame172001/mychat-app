@@ -129,7 +129,23 @@ const Contacts = () => {
             <Button variant="ghost" size="icon" className="rounded-lg" aria-label={ar ? 'المزيد من الخيارات' : 'More options'}><MoreVertical className="w-4 h-4" /></Button>
           </div>
         ))}
-        {list.length === 0 && (<div className="p-12 text-center text-slate-500 text-sm">{ar ? 'لا توجد جهات اتصال مطابقة لبحثك.' : 'No contacts match your search.'}</div>)}
+        {list.length === 0 && (
+          <div className="p-12 text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100">
+              <Search className="w-6 h-6 text-slate-400" />
+            </div>
+            <h3 className="mt-4 font-display text-lg font-bold">
+              {ar
+                ? (search ? 'لا توجد نتائج' : 'لا توجد جهات اتصال بعد')
+                : (search ? 'No results' : 'No contacts yet')}
+            </h3>
+            <p className="mt-1 text-sm text-slate-500">
+              {ar
+                ? (search ? 'جرّب كلمات مختلفة أو امسح البحث.' : 'سيظهر هنا كل من تتفاعل معه عبر أتمتات Instagram.')
+                : (search ? 'Try different keywords or clear the search.' : 'Anyone who interacts with your Instagram automations will appear here.')}
+            </p>
+          </div>
+        )}
       </Card>
     </div>
   );
