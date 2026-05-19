@@ -149,6 +149,22 @@ class RootErrorBoundary extends React.Component {
   }
 }
 
+// Phase 2.19: surface unhandled promise rejections to telemetry so we
+// see them in PostHog even if they don't trip the React error
+// boundary. The browser already prints them to console; this just
+// echoes a sanitized event to analytics.
+if (typeof window !== 'undefined' && !window.__mychat_unhandled_installed__) {
+  window.__mychat_unhandled_installed__ = true;
+  window.addEventListener('unhandledrejection', (event) => {
+    try {
+      const reason = event?.reason;
+      const name = (reason && reason.name) || 'UnhandledRejection';
+      const message = String((reason && reason.message) || reason || '').slice(0, 200);
+      analytics.capture('unhandled_rejection', { name, message });
+    } catch (_) { /* never let the listener itself throw */ }
+  });
+}
+
 function App() {
   return (
     <div className="App">
