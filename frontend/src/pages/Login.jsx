@@ -22,13 +22,21 @@ const Login = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!username || !password) {
-      toast.error(lang === 'ar' ? 'يرجى تعبئة جميع الحقول' : 'Please fill in all fields');
+    const ar = lang === 'ar';
+    const u = username.trim();
+    if (!u || !password) {
+      toast.error(ar ? 'يرجى تعبئة جميع الحقول' : 'Please fill in all fields');
+      return;
+    }
+    // Mirror the backend's LoginIn caps so an oversize value gets a
+    // clear inline message instead of a 422 round-trip.
+    if (u.length > 64 || password.length > 128) {
+      toast.error(ar ? 'القيمة المُدخَلة طويلة جداً' : 'Input too long');
       return;
     }
     setLoading(true);
     try {
-      await login(username, password);
+      await login(u, password);
       toast.success(t('auth.login.title'));
       navigate('/app');
     } catch (err) {

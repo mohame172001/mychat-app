@@ -83,6 +83,7 @@ const ForgotPassword = () => {
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  maxLength={254}
                   className="h-12 rounded-xl"
                 />
               </div>
