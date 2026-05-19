@@ -131,7 +131,7 @@ const Signup = () => {
               ) : (
                 <>
                   By signing up you agree to our{' '}
-                  <Link to="/terms" className="hover:text-slate-900 underline">{lang === "ar" ? "الشروط" : "Terms"}</Link>
+                  <Link to="/terms" className="hover:text-slate-900 underline">Terms</Link>
                   {' '}and{' '}
                   <Link to="/privacy" className="hover:text-slate-900 underline">Privacy Policy</Link>.
                   {' '}Data deletion instructions are available{' '}
