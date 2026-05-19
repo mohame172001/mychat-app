@@ -27,10 +27,26 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Phase 2.19: console noise hurts perceived professionalism when
+// power-users open DevTools on a live site. Gate the verbose perf
+// chatter behind explicit opt-in (?debug=1 in the URL or
+// localStorage.mychat_debug=1) so production stays silent by default
+// while ops/staff can still flip it on when needed.
+const _devLogsEnabled = () => {
+  try {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('debug') === '1') return true;
+    }
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mychat_debug') === '1') return true;
+  } catch (_) { /* ignore */ }
+  return process.env.NODE_ENV !== 'production';
+};
+
 api.interceptors.response.use(
   (r) => {
     const start = r.config?.metadata?.startTime;
-    if (start) {
+    if (start && _devLogsEnabled()) {
       const duration = Date.now() - start;
       const backendTime = r.headers['x-response-time'];
       const isDashboardSummary = String(r.config.url || '').includes('/dashboard/summary');
@@ -58,7 +74,7 @@ api.interceptors.response.use(
     const resp = err?.response;
     const status = resp?.status || 'network';
     const backendTime = resp?.headers?.['x-response-time'];
-    if (duration > 1000 || status === 'network') {
+    if ((duration > 1000 || status === 'network') && _devLogsEnabled()) {
       console.warn(
         `[api] FAIL ${err?.config?.method?.toUpperCase()} ${err?.config?.url} ` +
         `client=${duration}ms backend=${backendTime || '?'}s status=${status}` +

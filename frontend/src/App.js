@@ -8,6 +8,7 @@ import analytics from './lib/analytics';
 import { registerRoute, preloadAfterPaint } from './lib/routePreloader';
 
 import DashboardLayout from './components/layout/DashboardLayout';
+import OfflineBanner from './components/OfflineBanner';
 
 const landingFn = () => import('./pages/Landing');
 const loginFn = () => import('./pages/Login');
@@ -61,7 +62,17 @@ function PageViewTracker() {
   const navStart = React.useRef(performance.now());
   useEffect(() => {
     const elapsed = (performance.now() - navStart.current).toFixed(0);
-    if (elapsed > 200) console.log(`[route] ${location.pathname}${location.search} rendered in ${elapsed}ms`);
+    // Gate route-timing chatter the same way api.js does: silent in
+    // production unless the user opts in via ?debug=1 or
+    // localStorage.mychat_debug=1.
+    let debug = process.env.NODE_ENV !== 'production';
+    try {
+      if (!debug) {
+        const params = new URLSearchParams(window.location.search);
+        debug = params.get('debug') === '1' || localStorage.getItem('mychat_debug') === '1';
+      }
+    } catch (_) { /* ignore */ }
+    if (elapsed > 200 && debug) console.log(`[route] ${location.pathname}${location.search} rendered in ${elapsed}ms`);
     navStart.current = performance.now();
     analytics.pageView(location.pathname + (location.search || ''));
   }, [location.pathname, location.search]);
@@ -145,6 +156,7 @@ function App() {
       <I18nProvider>
       <AuthProvider>
         <BrowserRouter>
+          <OfflineBanner />
           <Toaster position="top-right" />
           <PageViewTracker />
           <Suspense fallback={<PageLoading />}>
