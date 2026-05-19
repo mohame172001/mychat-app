@@ -27,17 +27,28 @@ class UserPublic(BaseModel):
     activeInstagramIgUserId: Optional[str] = None
 
 
+# Phase 2.19 hardening: explicit max-length on every free-text field
+# that reaches the DB or the password hasher. Bcrypt silently truncates
+# inputs past 72 bytes, so we cap passwords at 128 here so the user gets
+# a clear 422 before that truncation can mask a typo. Username/email
+# caps are well above realistic real-world values but block trivial
+# payload-bloat / log-flood DoS attempts.
+USERNAME_MAX = 64
+EMAIL_MAX = 254  # RFC 5321
+PASSWORD_MAX = 128
+
+
 class SignupIn(BaseModel):
-    username: str
-    email: EmailStr
-    password: str
+    username: str = Field(min_length=1, max_length=USERNAME_MAX)
+    email: EmailStr = Field(max_length=EMAIL_MAX)
+    password: str = Field(min_length=8, max_length=PASSWORD_MAX)
 
 
 class ProfileUpdateIn(BaseModel):
     """Phase 2.18U: editable profile fields. Email changes require a
     separate verification flow and are intentionally NOT supported here."""
-    name: Optional[str] = None
-    username: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=120)
+    username: Optional[str] = Field(default=None, max_length=USERNAME_MAX)
 
 
 class NotificationPreferencesIn(BaseModel):
@@ -50,8 +61,8 @@ class NotificationPreferencesIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=USERNAME_MAX)
+    password: str = Field(min_length=1, max_length=PASSWORD_MAX)
 
 
 class AuthOut(BaseModel):

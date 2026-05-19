@@ -4081,8 +4081,10 @@ async def login(data: LoginIn, request: Request):
 
 
 class PasswordChangeIn(BaseModel):
-    current_password: str
-    new_password: str
+    # Phase 2.19 hardening: cap inputs so bcrypt's 72-byte truncation
+    # never silently masks a typo and trivial body-bloat DoS is blocked.
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 @api.post('/auth/password')
@@ -4831,7 +4833,9 @@ async def _issue_password_reset(user: dict) -> dict:
 
 
 class ForgotPasswordIn(BaseModel):
-    email: str
+    # Phase 2.19 hardening: cap email at RFC 5321's 254 chars so we never
+    # spend hashing/normalisation CPU on absurdly-long bodies.
+    email: str = Field(min_length=1, max_length=254)
 
 
 @api.post('/auth/forgot-password')
@@ -4876,8 +4880,11 @@ async def auth_forgot_password(
 
 
 class ResetPasswordIn(BaseModel):
-    token: str
-    new_password: str
+    # The reset token we mint via secrets.token_urlsafe(32) is ~43 chars
+    # (256 bits b64-url-encoded). Cap at 128 to block trivial payload
+    # bloat without disrupting legitimate tokens.
+    token: str = Field(min_length=16, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 @api.post('/auth/reset-password')
@@ -18812,6 +18819,31 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+# Phase 2.19 hardening: hard request-body size limit. FastAPI / Starlette
+# have no built-in cap, so a malicious client could POST a multi-GB body
+# and exhaust memory before any handler runs. 2 MB covers every legitimate
+# JSON payload in this app (the largest is the automation builder save).
+# Webhooks from Meta are also under this size in practice. Override with
+# REQUEST_BODY_MAX_BYTES if a future feature needs more.
+REQUEST_BODY_MAX_BYTES = int(os.environ.get('REQUEST_BODY_MAX_BYTES', 2 * 1024 * 1024))
+
+
+@app.middleware('http')
+async def body_size_limit_middleware(request, call_next):
+    declared = request.headers.get('content-length')
+    if declared is not None:
+        try:
+            if int(declared) > REQUEST_BODY_MAX_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={'detail': 'request_body_too_large'},
+                )
+        except (TypeError, ValueError):
+            # Malformed Content-Length — let the framework handle it.
+            pass
+    return await call_next(request)
 
 
 @app.middleware('http')

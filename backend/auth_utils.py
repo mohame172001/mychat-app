@@ -9,6 +9,15 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 JWT_SECRET = os.environ.get('JWT_SECRET', '')
 if not JWT_SECRET:
     raise RuntimeError('JWT_SECRET environment variable is required')
+# Phase 2.19 hardening: with HS256 the signing strength equals the
+# secret's entropy. Reject obviously-weak production secrets at startup
+# rather than discovering it after a token is forged. 32 bytes (~256
+# bits) is the OWASP-recommended minimum; we encourage 64 in practice.
+if len(JWT_SECRET) < 32 and (os.environ.get('NODE_ENV') == 'production'
+                              or os.environ.get('RAILWAY_ENVIRONMENT') == 'production'):
+    raise RuntimeError(
+        'JWT_SECRET must be at least 32 characters in production'
+    )
 JWT_ALGO = 'HS256'
 JWT_TTL_DAYS = 30
 
