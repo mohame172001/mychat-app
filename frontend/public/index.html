@@ -3,11 +3,27 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#000000" />
+        <meta name="theme-color" content="#0f172a" />
+        <meta name="robots" content="index, follow" />
         <meta
             name="description"
-            content="MyChat helps creators manage Instagram automations and conversations."
+            content="mychat — turn Instagram comments into conversations that sell. Automate replies, DMs, and follow-ups in minutes."
         />
+        <!-- Social cards: surface a clean preview when the URL is shared
+             on Twitter, Facebook, WhatsApp, Slack, LinkedIn, etc. -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="mychat" />
+        <meta property="og:title" content="mychat — Instagram conversations that sell" />
+        <meta property="og:description" content="Turn Instagram comments into conversations that sell. Automate replies, DMs, and follow-ups in minutes." />
+        <meta property="og:image" content="%PUBLIC_URL%/logo512.png" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="mychat — Instagram conversations that sell" />
+        <meta name="twitter:description" content="Turn Instagram comments into conversations that sell." />
+        <meta name="twitter:image" content="%PUBLIC_URL%/logo512.png" />
+        <link rel="canonical" href="https://frontend-production-6eb2.up.railway.app/" />
+        <!-- Inline SVG favicon so we don't 404 on a missing asset. The
+             gradient matches the in-app logo (blue → cyan → pink). -->
+        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%233b82f6'/%3E%3Cstop offset='50%25' stop-color='%2322d3ee'/%3E%3Cstop offset='100%25' stop-color='%23ec4899'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M18 24a8 8 0 0 1 8-8h12a8 8 0 0 1 8 8v8a8 8 0 0 1-8 8h-7l-6 6v-6h-1a6 6 0 0 1-6-6v-10z' fill='white' stroke='white' stroke-width='2.5' stroke-linejoin='round'/%3E%3C/svg%3E" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <!-- Phase 2.18D: open the TCP+TLS connection to the backend
@@ -31,11 +47,11 @@
         work correctly both with client-side routing and a non-root public URL.
         Learn how to configure a non-root public URL by running `npm run build`.
         -->
-        <title>MyChat</title>
+        <title>mychat — Instagram conversations that sell</title>
         <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);</script>
     </head>
     <body>
-        <noscript>You need to enable JavaScript to run this app.</noscript>
+        <noscript>You need to enable JavaScript to run mychat. / يجب تفعيل JavaScript لتشغيل مايتشات.</noscript>
         <div id="root"></div>
         <!--
       This HTML file is a template.

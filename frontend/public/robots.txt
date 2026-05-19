@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /app/
+Disallow: /admin/
+Disallow: /reset-password
+Disallow: /data-deletion
+
+Sitemap: https://frontend-production-6eb2.up.railway.app/sitemap.xml

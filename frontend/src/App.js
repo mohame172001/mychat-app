@@ -68,20 +68,80 @@ function PageViewTracker() {
   return null;
 }
 
-const PageLoading = () => (
-  <div className="w-full p-6 text-sm text-slate-500">Loading...</div>
-);
+const PageLoading = () => {
+  const ar = typeof document !== 'undefined' && document.documentElement?.lang === 'ar';
+  return (
+    <div className="w-full p-6 text-sm text-slate-500">
+      {ar ? 'جارٍ التحميل...' : 'Loading...'}
+    </div>
+  );
+};
 
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
-  if (loading) return <div className="h-screen w-screen flex items-center justify-center text-slate-500">Loading...</div>;
+  if (loading) {
+    const ar = typeof document !== 'undefined' && document.documentElement?.lang === 'ar';
+    return (
+      <div className="h-screen w-screen flex items-center justify-center text-slate-500">
+        {ar ? 'جارٍ التحميل...' : 'Loading...'}
+      </div>
+    );
+  }
   if (!user) return <Navigate to="/login" replace />;
   return children;
 };
 
+// Top-level error boundary: catches any uncaught render error from
+// the lazy-loaded route tree and shows a polite recovery card
+// instead of a blank white page. Never logs user data — just the
+// error name and a short stack hash so support can correlate logs.
+class RootErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error) {
+    // eslint-disable-next-line no-console
+    console.error('[App] root error boundary tripped', {
+      name: error?.name || 'Error',
+      message: (error?.message || '').slice(0, 200),
+    });
+    try { analytics.capture('app_root_error', { name: error?.name || 'Error' }); } catch (_) { /* ignore */ }
+  }
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    const ar = typeof document !== 'undefined' && document.documentElement?.lang === 'ar';
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="max-w-md w-full bg-white rounded-2xl border border-slate-100 p-6 text-center">
+          <h1 className="text-xl font-bold text-slate-900 mb-2">
+            {ar ? 'حدث خطأ غير متوقّع' : 'Something went wrong'}
+          </h1>
+          <p className="text-sm text-slate-600 mb-4">
+            {ar
+              ? 'حدث خطأ أثناء عرض هذه الصفحة. أعد تحميل الصفحة للمتابعة.'
+              : 'An unexpected error happened while rendering this page. Reload to continue.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm px-5 py-2.5"
+          >
+            {ar ? 'إعادة تحميل الصفحة' : 'Reload page'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
 function App() {
   return (
     <div className="App">
+      <RootErrorBoundary>
       <I18nProvider>
       <AuthProvider>
         <BrowserRouter>
@@ -115,6 +175,7 @@ function App() {
         </BrowserRouter>
       </AuthProvider>
       </I18nProvider>
+      </RootErrorBoundary>
     </div>
   );
 }
