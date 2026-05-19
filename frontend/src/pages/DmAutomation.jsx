@@ -223,7 +223,7 @@ const DmAutomation = () => {
                     <td className="max-w-xs truncate">{r.replyText}</td>
                     <td><Switch checked={r.isActive} onCheckedChange={() => toggleActive(r)} /></td>
                     <td className="text-end">
-                      <Button onClick={() => deleteRule(r)} variant="ghost" size="sm" className="text-rose-600">
+                      <Button onClick={() => deleteRule(r)} variant="ghost" size="sm" className="text-rose-600" aria-label={lang === 'ar' ? `حذف قاعدة ${r.name}` : `Delete rule ${r.name}`}>
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </td>

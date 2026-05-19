@@ -26,6 +26,13 @@ const DashboardLayout = () => {
 
   return (
     <div className="h-[100dvh] flex bg-slate-50 overflow-hidden">
+      {/* Skip link for keyboard users — only visible when focused. */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:start-2 focus:z-50 focus:rounded-lg focus:bg-slate-900 focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
+      >
+        {ar ? 'تخطّي إلى المحتوى الرئيسي' : 'Skip to main content'}
+      </a>
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <div className="md:hidden shrink-0 border-b border-slate-200 bg-white">
@@ -57,7 +64,7 @@ const DashboardLayout = () => {
           </nav>
         </div>
         <Topbar />
-        <main className="flex-1 overflow-y-auto pb-4 md:pb-0">
+        <main id="main-content" tabIndex={-1} className="flex-1 overflow-y-auto pb-4 md:pb-0 focus:outline-none">
           <Outlet />
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">

@@ -53,6 +53,21 @@ code { font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', mon
   body { @apply bg-background text-foreground; }
 }
 
+/* Respect the user's motion preference. Disable our long fade/slide
+   animations and Tailwind's transition utilities for visitors who set
+   prefers-reduced-motion. This is a baseline a11y requirement and a
+   small ux improvement on low-power devices. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* RTL flip for shadcn Switch thumb. Radix Switch puts data-state on
    both the Root and the Thumb; we target the inner Thumb (which has
    role=none and is wrapped by the Root button) so the checked-state

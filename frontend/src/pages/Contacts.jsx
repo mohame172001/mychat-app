@@ -126,7 +126,7 @@ const Contacts = () => {
               {c.tags.map(t => (<Badge key={t} className={`rounded-full text-[11px] ${tagColors[t] || 'bg-slate-100 text-slate-700'}`}>{t}</Badge>))}
             </div>
             <div className="text-xs text-slate-600 sm:text-sm">{ar ? 'مؤخّراً' : 'recently'}</div>
-            <Button variant="ghost" size="icon" className="rounded-lg"><MoreVertical className="w-4 h-4" /></Button>
+            <Button variant="ghost" size="icon" className="rounded-lg" aria-label={ar ? 'المزيد من الخيارات' : 'More options'}><MoreVertical className="w-4 h-4" /></Button>
           </div>
         ))}
         {list.length === 0 && (<div className="p-12 text-center text-slate-500 text-sm">{ar ? 'لا توجد جهات اتصال مطابقة لبحثك.' : 'No contacts match your search.'}</div>)}

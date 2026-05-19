@@ -1477,6 +1477,7 @@ const Automations = () => {
                   variant="ghost"
                   size="icon"
                   className="rounded-lg text-red-500 hover:bg-red-50 hover:text-red-600"
+                  aria-label={ar ? 'حذف الأتمتة' : 'Delete automation'}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
