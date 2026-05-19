@@ -243,7 +243,9 @@ const Sidebar = () => {
               {currentAccountAvatar ? (
                 <img
                   src={currentAccountAvatar}
-                  alt={currentAccountName || 'Instagram account'}
+                  alt={currentAccountName || (ar ? 'حساب Instagram' : 'Instagram account')}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
                   className="w-8 h-8 rounded-full object-cover"
                 />
               ) : (
@@ -277,7 +279,9 @@ const Sidebar = () => {
                 {account.profilePictureUrl ? (
                   <img
                     src={account.profilePictureUrl}
-                    alt={account.username || 'Instagram account'}
+                    alt={account.username || (ar ? 'حساب Instagram' : 'Instagram account')}
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
                     className="h-5 w-5 rounded-full object-cover"
                   />
                 ) : (
