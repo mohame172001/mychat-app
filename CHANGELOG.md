@@ -66,6 +66,24 @@ deploy; commit shas link to the exact code in `master`.
 - New `SECURITY.md` with vulnerability reporting flow + inventory of
   hardening controls
 - Refreshed `backend/.env.example` documenting every variable
+- New `CHANGELOG.md` (this file)
+- New `frontend/public/manifest.json` + iOS web-app meta tags so
+  the site can be installed as a PWA
+
+### Continued polish (post-CHANGELOG)
+
+| sha | summary |
+|---|---|
+| `84cedb9` | PWA manifest + apple-mobile-web-app meta tags |
+| `89eea8d` | Login + ForgotPassword input caps matching backend |
+| `aba08f7` | aria-busy on every submitting auth button |
+| `df90d1f` | Confirm prompt before disconnecting Instagram |
+| `8d8fbe4` | Confirm prompt before deleting an automation |
+| `8f6b321` | `window.unhandledrejection` → analytics |
+| `c5004a2` | Friendlier `{field}_too_long`-style 422 detail strings |
+| `5211827` | Caps Lock warning on Login password field |
+| `98c4ebc` | Toaster slides in from reading-start corner (LTR/RTL aware) |
+| `7a9b47c` | Go Live button tooltip explains why it's disabled |
 
 ## Earlier phases
 
