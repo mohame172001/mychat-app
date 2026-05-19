@@ -16,9 +16,19 @@ const Login = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
   const { t, lang } = useTranslation();
+
+  const handlePasswordKey = (e) => {
+    // KeyboardEvent.getModifierState exists in every evergreen
+    // browser; .getModifierState('CapsLock') flips between focus
+    // and key events, so we update on every keystroke for accuracy.
+    if (typeof e?.getModifierState === 'function') {
+      setCapsLock(e.getModifierState('CapsLock'));
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -72,7 +82,22 @@ const Login = () => {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">{t('auth.login.password')}</Label>
-                <PasswordInput id="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} maxLength={128} inputClassName="h-12 rounded-xl" />
+                <PasswordInput
+                  id="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyUp={handlePasswordKey}
+                  onKeyDown={handlePasswordKey}
+                  maxLength={128}
+                  inputClassName="h-12 rounded-xl"
+                />
+                {capsLock && (
+                  <p className="text-xs text-amber-700 flex items-center gap-1.5" role="status" aria-live="polite">
+                    <span aria-hidden="true">⚠️</span>
+                    {lang === 'ar' ? 'مفتاح Caps Lock مُفعّل' : 'Caps Lock is on'}
+                  </p>
+                )}
               </div>
               <Button type="submit" disabled={loading} aria-busy={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? t('common.loading') : t('auth.login.submit')}
