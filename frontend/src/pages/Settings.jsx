@@ -110,19 +110,25 @@ const Settings = () => {
       if (nextName !== (user?.name || '').trim()) payload.name = nextName;
       if (nextUsername !== (user?.username || '').trim()) payload.username = nextUsername;
       await api.patch('/auth/me', payload);
-      toast.success('Profile updated');
+      toast.success(lang === 'ar' ? 'تم تحديث الملف الشخصي' : 'Profile updated');
       if (typeof refreshUser === 'function') {
         await refreshUser();
       }
     } catch (err) {
       const detail = err?.response?.data?.detail;
-      const map = {
+      const ar = lang === 'ar';
+      const map = ar ? {
+        username_already_taken: 'اسم المستخدم هذا مأخوذ بالفعل — اختر اسماً آخر.',
+        username_invalid_characters: 'يجب أن يحتوي اسم المستخدم على أحرف وأرقام وشرطات سفلية ونقاط وشرطات فقط.',
+        username_length_out_of_range: 'يجب أن يكون اسم المستخدم بين 3 و32 حرفاً.',
+        name_length_out_of_range: 'يجب أن يكون الاسم بين 1 و80 حرفاً.',
+      } : {
         username_already_taken: 'That username is already taken — pick another.',
         username_invalid_characters: 'Username can only contain letters, numbers, underscores, dots, and hyphens.',
         username_length_out_of_range: 'Username must be 3 to 32 characters.',
         name_length_out_of_range: 'Name must be 1 to 80 characters.',
       };
-      toast.error(map[detail] || (typeof detail === 'string' ? detail : 'Profile update failed'));
+      toast.error(map[detail] || (typeof detail === 'string' ? detail : (ar ? 'تعذّر تحديث الملف الشخصي' : 'Profile update failed')));
     } finally {
       setSavingProfile(false);
     }
@@ -142,7 +148,7 @@ const Settings = () => {
     const igStatus = params.get('ig');
     if (igStatus === 'connected') {
       setTab('instagram');
-      refreshUser().then(() => toast.success('Instagram connected successfully!'));
+      refreshUser().then(() => toast.success(lang === 'ar' ? 'تم ربط Instagram بنجاح!' : 'Instagram connected successfully!'));
       window.history.replaceState({}, '', location.pathname);
     } else if (igStatus === 'error') {
       setTab('instagram');
