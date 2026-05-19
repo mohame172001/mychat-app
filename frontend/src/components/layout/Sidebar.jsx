@@ -209,7 +209,7 @@ const Sidebar = () => {
         </div>
         <span className="text-xl font-bold font-display">mychat</span>
       </Link>
-      <nav className="flex-1 p-4 space-y-1">
+      <nav className="flex-1 p-4 space-y-1" aria-label={ar ? 'القائمة الرئيسية' : 'Main navigation'}>
         {navItems.map(({ to, end, icon: Icon, label, i18nKey }) => (
           <NavLink
             key={to}

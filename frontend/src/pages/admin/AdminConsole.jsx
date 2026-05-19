@@ -593,7 +593,7 @@ function UserDetailTab({ userId, onBack, me }) {
       </Button>
 
       {loading && !data && (
-        <div className="text-center py-12 text-slate-500">Loading…</div>
+        <div className="text-center py-12 text-slate-500">{isAr() ? 'جارٍ التحميل…' : 'Loading…'}</div>
       )}
 
       {loadError && (

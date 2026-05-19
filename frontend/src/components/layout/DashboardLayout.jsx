@@ -47,7 +47,7 @@ const DashboardLayout = () => {
               <LogOut className="w-4 h-4" />
             </Button>
           </div>
-          <nav className="mobile-nav-scroll flex gap-2 overflow-x-auto px-3 pb-3">
+          <nav className="mobile-nav-scroll flex gap-2 overflow-x-auto px-3 pb-3" aria-label={ar ? 'قائمة التطبيق' : 'App navigation'}>
             {navItems.map(({ to, end, icon: Icon, label, i18nKey }) => (
               <NavLink
                 key={to}

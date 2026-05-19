@@ -46,7 +46,7 @@ const Landing = () => {
 
   return (
     <div className="min-h-screen bg-white text-slate-900 overflow-x-hidden">
-      <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-white/80 border-b border-slate-100">
+      <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-white/80 border-b border-slate-100" aria-label={lang === 'ar' ? 'شريط التنقّل' : 'Site navigation'}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
