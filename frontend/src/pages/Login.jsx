@@ -74,7 +74,7 @@ const Login = () => {
                 <Label htmlFor="password">{t('auth.login.password')}</Label>
                 <PasswordInput id="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} maxLength={128} inputClassName="h-12 rounded-xl" />
               </div>
-              <Button type="submit" disabled={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
+              <Button type="submit" disabled={loading} aria-busy={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? t('common.loading') : t('auth.login.submit')}
               </Button>
               <p className="text-xs text-center text-slate-500">

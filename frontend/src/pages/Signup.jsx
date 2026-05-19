@@ -111,7 +111,7 @@ const Signup = () => {
                 <Label htmlFor="password">{t('auth.signup.password')}</Label>
                 <PasswordInput id="password" autoComplete="new-password" placeholder={t('auth.signup.passwordHint')} value={password} onChange={e => setPassword(e.target.value)} maxLength={128} inputClassName="h-12 rounded-xl" />
               </div>
-              <Button type="submit" disabled={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
+              <Button type="submit" disabled={loading} aria-busy={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? t('common.loading') : t('auth.signup.submit')}
               </Button>
             </form>

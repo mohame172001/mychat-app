@@ -90,6 +90,7 @@ const ForgotPassword = () => {
               <Button
                 type="submit"
                 disabled={loading}
+                aria-busy={loading}
                 className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white"
                 data-testid="forgot-password-submit"
               >
