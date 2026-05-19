@@ -2,8 +2,16 @@ import React, { Suspense, lazy, useEffect } from 'react';
 import './App.css';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { I18nProvider } from './lib/i18n';
+import { I18nProvider, useTranslation } from './lib/i18n';
 import { Toaster } from './components/ui/sonner';
+
+// Toaster wrapper that flips the corner the toast slides in from
+// based on the active locale: top-right in LTR, top-left in RTL so
+// the toast still appears at the start of the reading direction.
+function LocaleAwareToaster() {
+  const { lang } = useTranslation();
+  return <Toaster position={lang === 'ar' ? 'top-left' : 'top-right'} dir={lang === 'ar' ? 'rtl' : 'ltr'} />;
+}
 import analytics from './lib/analytics';
 import { registerRoute, preloadAfterPaint } from './lib/routePreloader';
 
@@ -173,7 +181,7 @@ function App() {
       <AuthProvider>
         <BrowserRouter>
           <OfflineBanner />
-          <Toaster position="top-right" />
+          <LocaleAwareToaster />
           <PageViewTracker />
           <Suspense fallback={<PageLoading />}>
 <Routes>
