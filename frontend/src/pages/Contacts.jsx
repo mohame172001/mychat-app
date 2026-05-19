@@ -115,7 +115,13 @@ const Contacts = () => {
           <div key={c.id} className="grid grid-cols-[32px_minmax(0,1fr)_88px_36px] md:grid-cols-[40px_1fr_260px_140px_40px] items-center gap-3 px-3 py-3 sm:px-5 border-b border-slate-50 hover:bg-slate-50 transition-colors last:border-0">
             <Checkbox checked={selected.includes(c.id)} onCheckedChange={() => toggleOne(c.id)} />
             <div className="flex items-center gap-3 min-w-0">
-              <img src={c.avatar} alt={c.name} className="w-9 h-9 rounded-full object-cover" />
+              <img
+                src={c.avatar}
+                alt={c.name}
+                loading="lazy"
+                onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                className="w-9 h-9 rounded-full object-cover"
+              />
               <div className="min-w-0">
                 <div className="font-semibold text-sm truncate">{c.name}</div>
                 <div className="text-xs text-slate-500 truncate">{c.username}</div>
