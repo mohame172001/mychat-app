@@ -18657,6 +18657,26 @@ async def api_health() -> dict:
     return {'ok': True, 'service': 'mychat-backend'}
 
 
+@api.get('/version')
+async def api_version() -> dict:
+    """Ops-grade build identification. Returns the same RAILWAY_GIT_COMMIT_SHA
+    the frontend embeds, so support can verify "are we running the
+    deploy I think we're running?" with one curl. No auth, no sensitive
+    data — just the commit sha + the resolved environment."""
+    sha = (
+        os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+        or os.environ.get('GIT_COMMIT_SHA')
+        or os.environ.get('VERCEL_GIT_COMMIT_SHA')
+        or ''
+    )[:12]
+    return {
+        'ok': True,
+        'service': 'mychat-backend',
+        'environment': ENV_NAME,
+        'build_sha': sha or 'unknown',
+    }
+
+
 @api.get('/status')
 async def public_status() -> dict:
     """Phase 2.18Z: public service-status snapshot for the /status page.
@@ -18844,6 +18864,31 @@ async def body_size_limit_middleware(request, call_next):
             # Malformed Content-Length — let the framework handle it.
             pass
     return await call_next(request)
+
+
+@app.middleware('http')
+async def request_id_middleware(request, call_next):
+    """Stamp every request/response with an X-Request-Id so support can
+    correlate a user's report ('I saw a 500 at 12:43') with the exact
+    server log line. Accept the client-supplied id if it's short and
+    matches our character whitelist, otherwise mint a fresh one. Never
+    let arbitrary client headers reach our log line — that's a log-
+    injection vector."""
+    import re as _re
+    incoming = (request.headers.get('x-request-id') or '').strip()
+    if incoming and len(incoming) <= 64 and _re.fullmatch(r'[A-Za-z0-9_-]+', incoming):
+        rid = incoming
+    else:
+        rid = secrets.token_urlsafe(12)
+    # Make the id visible to log records emitted during this request.
+    request.state.request_id = rid
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Re-raise — exception handlers further down emit the 500.
+        raise
+    response.headers['X-Request-Id'] = rid
+    return response
 
 
 @app.middleware('http')
