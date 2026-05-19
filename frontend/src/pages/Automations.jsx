@@ -756,15 +756,31 @@ const Automations = () => {
     }
   };
 
-  const canGoLive = () => {
-    if (postScope === 'specific' && !selectedMedia) return false;
-    if (match === 'keyword' && keywordList.length === 0) return false;
-    if (replyUnderPost && !commentReply.trim() && !commentReply2.trim() && !commentReply3.trim()) return false;
-    if (openingDmEnabled && !openingDmText.trim()) return false;
-    if (followRequestEnabled && (!followRequestMessage.trim() || !followRequestButtonText.trim())) return false;
-    if (!replyUnderPost && !openingDmEnabled && !linkDmText.trim() && !linkUrl.trim()) return false;
-    return true;
+  // Phase 2.19: return the *reason* the rule isn't ready so we can
+  // surface it as a tooltip on the disabled Go Live button. Empty
+  // string = ready.
+  const goLiveBlockReason = () => {
+    if (postScope === 'specific' && !selectedMedia) {
+      return ar ? 'اختر منشوراً أولاً' : 'Pick a post first';
+    }
+    if (match === 'keyword' && keywordList.length === 0) {
+      return ar ? 'أدخل كلمة مفتاحية واحدة على الأقل' : 'Enter at least one keyword';
+    }
+    if (replyUnderPost && !commentReply.trim() && !commentReply2.trim() && !commentReply3.trim()) {
+      return ar ? 'اكتب صيغة ردّ واحدة على الأقل' : 'Write at least one reply variation';
+    }
+    if (openingDmEnabled && !openingDmText.trim()) {
+      return ar ? 'اكتب نصّ الرسالة الافتتاحية' : 'Write the opening DM text';
+    }
+    if (followRequestEnabled && (!followRequestMessage.trim() || !followRequestButtonText.trim())) {
+      return ar ? 'أكمل بيانات بوّابة المتابعة' : 'Complete the follow-gate fields';
+    }
+    if (!replyUnderPost && !openingDmEnabled && !linkDmText.trim() && !linkUrl.trim()) {
+      return ar ? 'فعِّل ردّاً واحداً على الأقل (تعليق أو رسالة)' : 'Enable at least one action (reply or DM)';
+    }
+    return '';
   };
+  const canGoLive = () => goLiveBlockReason() === '';
 
   const submit = async () => {
     if (!canGoLive()) return;
@@ -952,7 +968,9 @@ const Automations = () => {
             <Button
               onClick={submit}
               disabled={!canGoLive() || saving}
-              className="rounded-lg bg-slate-950 px-5 text-white hover:bg-slate-800"
+              aria-busy={saving}
+              title={goLiveBlockReason() || undefined}
+              className="rounded-lg bg-slate-950 px-5 text-white hover:bg-slate-800 disabled:cursor-not-allowed"
             >
               {saving && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
               {editingAutomation
