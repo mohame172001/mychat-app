@@ -12467,11 +12467,16 @@ async def instagram_callback(request: Request,
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, dict) else {}
                 if exc.status_code == 409 and detail.get('code') == 'instagram_account_already_connected':
+                    # _store_oauth_failure reads the closure-captured `audit`
+                    # dict, so we mutate it in place before calling rather
+                    # than trying to pass an `audit=` kwarg (which would
+                    # raise TypeError — the function never declared that
+                    # parameter).
+                    audit['canonicalIgUserIdExists'] = True
                     await _store_oauth_failure(
                         user_id,
                         'instagram_account_already_connected',
                         clear_existing_connection=False,
-                        audit={'canonicalIgUserIdExists': True},
                     )
                     return RedirectResponse(_frontend_redirect_url(return_to, {
                         'ig': 'error',
