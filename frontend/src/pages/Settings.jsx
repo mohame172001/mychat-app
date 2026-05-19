@@ -273,6 +273,10 @@ const Settings = () => {
                   </div>
                   <div className="mt-6 flex justify-between flex-wrap gap-2">
                     <Button variant="outline" className="rounded-xl text-red-600 border-red-200 hover:bg-red-50" onClick={async () => {
+                      const confirmMsg = lang === 'ar'
+                        ? 'سيتمّ إيقاف جميع الأتمتات لهذا الحساب. هل أنت متأكّد من فصل Instagram؟'
+                        : 'All automations for this account will stop firing. Disconnect Instagram?';
+                      if (!window.confirm(confirmMsg)) return;
                       try { await api.post('/instagram/disconnect'); await refreshUser(); toast.success(lang === 'ar' ? 'تم فصل الحساب' : 'Disconnected'); }
                       catch { toast.error(lang === 'ar' ? 'تعذّر فصل الحساب' : 'Failed to disconnect'); }
                     }}>{lang === 'ar' ? 'فصل الحساب' : 'Disconnect'}</Button>
