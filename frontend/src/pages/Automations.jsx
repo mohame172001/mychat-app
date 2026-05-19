@@ -136,7 +136,7 @@ const AutomationPhonePreview = ({
   const Avatar = ({ size = 'h-9 w-9' }) => (
     <div className={`${size} shrink-0 overflow-hidden rounded-full bg-slate-200`}>
       {accountAvatar ? (
-        <img src={accountAvatar} alt="" className="h-full w-full object-cover" />
+        <img src={accountAvatar} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-full w-full object-cover" />
       ) : (
         <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400">
           <Instagram className="h-1/2 w-1/2 text-white" />
@@ -170,7 +170,7 @@ const AutomationPhonePreview = ({
                 </div>
                 <div className="aspect-square bg-slate-900">
                   {previewImage ? (
-                    <img src={previewImage} alt="" className="h-full w-full object-cover" />
+                    <img src={previewImage} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-full w-full object-cover" />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-800 via-fuchsia-900 to-orange-700">
                       <Instagram className="h-16 w-16 text-white/70" />
@@ -1009,7 +1009,7 @@ const Automations = () => {
                               }`}
                             >
                               {thumb ? (
-                                <img src={thumb} alt="" className="h-full w-full object-cover" />
+                                <img src={thumb} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-full w-full object-cover" />
                               ) : (
                                 <div className="flex h-full w-full items-center justify-center">
                                   <Instagram className="h-7 w-7 text-slate-400" />
@@ -1433,7 +1433,7 @@ const Automations = () => {
             <Card key={a.id} className="rounded-lg border-slate-100 p-4 transition-shadow hover:shadow-md">
               <div className="flex flex-wrap items-center gap-4">
                 <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-pink-500 via-fuchsia-500 to-orange-400">
-                  {thumb ? <img src={thumb} alt="" className="h-full w-full object-cover" /> : <Zap className="h-6 w-6 text-white" />}
+                  {thumb ? <img src={thumb} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-full w-full object-cover" /> : <Zap className="h-6 w-6 text-white" />}
                 </div>
                 <div className="min-w-[200px] flex-1">
                   <div className="font-semibold">{ar ? translateAutomationName(a.name) : a.name}</div>
