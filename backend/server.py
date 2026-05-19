@@ -9766,10 +9766,12 @@ async def admin_lookup_instagram_account_by_handle(
 
 
 class AdminForceDisconnectIn(BaseModel):
-    row_id: Optional[str] = None
-    instagram_account_id: Optional[str] = None
-    username: Optional[str] = None
-    reason: Optional[str] = None
+    # Phase 2.19 hardening: cap every free-text field so log lines stay
+    # bounded and no admin endpoint becomes a write-amp vector.
+    row_id: Optional[str] = Field(default=None, max_length=64)
+    instagram_account_id: Optional[str] = Field(default=None, max_length=64)
+    username: Optional[str] = Field(default=None, max_length=64)
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 @api.post('/admin/instagram/accounts/force-disconnect')
@@ -9850,11 +9852,11 @@ async def admin_force_disconnect_instagram_account(
 
 
 class AdminRestoreIn(BaseModel):
-    row_id: Optional[str] = None
-    target_user_id: Optional[str] = None
-    instagram_account_id: Optional[str] = None
-    username: Optional[str] = None
-    reason: Optional[str] = None
+    row_id: Optional[str] = Field(default=None, max_length=64)
+    target_user_id: Optional[str] = Field(default=None, max_length=64)
+    instagram_account_id: Optional[str] = Field(default=None, max_length=64)
+    username: Optional[str] = Field(default=None, max_length=64)
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 @api.post('/admin/instagram/accounts/restore')

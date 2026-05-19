@@ -212,16 +212,16 @@ class Automation(BaseModel):
 
 
 class ContactIn(BaseModel):
-    name: str
-    username: str
-    avatar: Optional[str] = None
-    tags: List[str] = []
+    name: str = Field(min_length=1, max_length=120)
+    username: str = Field(min_length=1, max_length=64)
+    avatar: Optional[str] = Field(default=None, max_length=2048)
+    tags: List[str] = Field(default_factory=list, max_length=20)
     subscribed: bool = True
 
 
 class ContactPatch(BaseModel):
-    name: Optional[str] = None
-    tags: Optional[List[str]] = None
+    name: Optional[str] = Field(default=None, max_length=120)
+    tags: Optional[List[str]] = Field(default=None, max_length=20)
     subscribed: Optional[bool] = None
 
 
@@ -238,15 +238,15 @@ class Contact(BaseModel):
 
 
 class BroadcastIn(BaseModel):
-    name: str
-    message: str
-    audience_size: Optional[int] = None
+    name: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=4000)
+    audience_size: Optional[int] = Field(default=None, ge=0, le=10_000_000)
 
 
 class BroadcastPatch(BaseModel):
-    status: Optional[str] = None
-    name: Optional[str] = None
-    message: Optional[str] = None
+    status: Optional[str] = Field(default=None, max_length=32)
+    name: Optional[str] = Field(default=None, max_length=120)
+    message: Optional[str] = Field(default=None, max_length=4000)
 
 
 class Broadcast(BaseModel):
