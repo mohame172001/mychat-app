@@ -734,6 +734,15 @@ const Automations = () => {
   };
 
   const handleDelete = async (id) => {
+    // Deletion is permanent — the backend hard-deletes the rule and
+    // all attached stats. Require an explicit confirm so a stray
+    // click can't wipe a live automation.
+    const target = list.find(a => a.id === id);
+    const name = target?.name || (ar ? 'هذه الأتمتة' : 'this automation');
+    const msg = ar
+      ? `حذف "${name}"؟ سيتمّ إيقاف الردود تلقائياً ولا يمكن التراجع عن هذا الإجراء.`
+      : `Delete "${name}"? Replies will stop firing immediately and this cannot be undone.`;
+    if (!window.confirm(msg)) return;
     setList(prev => prev.filter(a => a.id !== id));
     try {
       await api.delete(`/automations/${id}`);
