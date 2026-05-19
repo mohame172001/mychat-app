@@ -224,6 +224,43 @@ if IS_PRODUCTION:
 app = FastAPI(**_FASTAPI_KW)
 api = APIRouter(prefix='/api')
 
+
+# Phase 2.19: tame the default FastAPI 422 envelope. The raw shape
+# leaks our Pydantic model paths (loc=["body","password","min_length"])
+# which is harmless but unfriendly. We collapse it to a single
+# detail string the frontend already knows how to render, while
+# keeping the structured errors under .errors for ops/debugging.
+from fastapi.exceptions import RequestValidationError as _RVE
+from fastapi.requests import Request as _Req
+
+
+@app.exception_handler(_RVE)
+async def _pydantic_validation_handler(request: _Req, exc: _RVE):
+    errors = exc.errors() if hasattr(exc, 'errors') else []
+    first_msg = 'validation_error'
+    if errors:
+        try:
+            err = errors[0]
+            loc = err.get('loc') or []
+            field = loc[-1] if loc else 'input'
+            etype = (err.get('type') or '').lower()
+            if 'too_long' in etype or 'max_length' in etype:
+                first_msg = f'{field}_too_long'
+            elif 'too_short' in etype or 'min_length' in etype:
+                first_msg = f'{field}_too_short'
+            elif 'missing' in etype:
+                first_msg = f'{field}_required'
+            elif 'value_error' in etype:
+                first_msg = f'{field}_invalid'
+            else:
+                first_msg = f'{field}_invalid'
+        except Exception:
+            first_msg = 'validation_error'
+    return JSONResponse(
+        status_code=422,
+        content={'detail': first_msg, 'errors': errors},
+    )
+
 logger = logging.getLogger('mychat')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
