@@ -42,6 +42,10 @@ const ResetPassword = () => {
       toast.error(ar ? 'كلمة المرور يجب ألّا تقلّ عن 8 أحرف' : 'Password must be at least 8 characters');
       return;
     }
+    if (newPassword.length > 128) {
+      toast.error(ar ? 'كلمة المرور طويلة جداً (الحدّ الأقصى 128 حرفاً)' : 'Password is too long (max 128 characters)');
+      return;
+    }
     if (newPassword !== confirmPassword) {
       toast.error(ar ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match');
       return;

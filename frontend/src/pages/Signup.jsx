@@ -23,17 +23,39 @@ const Signup = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!username || !email || !password) {
-      toast.error(lang === 'ar' ? 'يرجى تعبئة جميع الحقول' : 'Please fill in all fields');
+    const ar = lang === 'ar';
+    const u = username.trim();
+    const em = email.trim();
+    if (!u || !em || !password) {
+      toast.error(ar ? 'يرجى تعبئة جميع الحقول' : 'Please fill in all fields');
+      return;
+    }
+    // Phase 2.19: client-side validation that mirrors the backend's
+    // SignupIn Pydantic constraints so the user gets instant feedback
+    // instead of waiting for a server round-trip.
+    if (u.length < 3 || u.length > 32) {
+      toast.error(ar ? 'يجب أن يكون اسم المستخدم بين 3 و32 حرفاً' : 'Username must be 3 to 32 characters');
+      return;
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(u)) {
+      toast.error(ar ? 'يحتوي اسم المستخدم على أحرف غير مسموحة' : 'Username contains invalid characters');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) {
+      toast.error(ar ? 'البريد الإلكتروني غير صالح' : 'Invalid email address');
       return;
     }
     if (password.length < 8) {
-      toast.error(lang === 'ar' ? 'يجب ألا تقلّ كلمة المرور عن ٨ أحرف' : 'Password must be at least 8 characters');
+      toast.error(ar ? 'يجب ألا تقلّ كلمة المرور عن ٨ أحرف' : 'Password must be at least 8 characters');
+      return;
+    }
+    if (password.length > 128) {
+      toast.error(ar ? 'كلمة المرور طويلة جداً (الحدّ الأقصى 128 حرفاً)' : 'Password is too long (max 128 characters)');
       return;
     }
     setLoading(true);
     try {
-      await signup(username, email, password);
+      await signup(u, em, password);
       toast.success(lang === 'ar' ? 'تم إنشاء الحساب — أهلاً بك في MyChat' : 'Account created! Welcome to mychat');
       navigate('/app');
     } catch (err) {
@@ -79,15 +101,15 @@ const Signup = () => {
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="username">{t('auth.signup.username')}</Label>
-                <Input id="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} maxLength={32} className="h-12 rounded-xl" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="email">{t('auth.signup.email')}</Label>
-                <Input id="email" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="email" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} maxLength={254} className="h-12 rounded-xl" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">{t('auth.signup.password')}</Label>
-                <PasswordInput id="password" autoComplete="new-password" placeholder={t('auth.signup.passwordHint')} value={password} onChange={e => setPassword(e.target.value)} inputClassName="h-12 rounded-xl" />
+                <PasswordInput id="password" autoComplete="new-password" placeholder={t('auth.signup.passwordHint')} value={password} onChange={e => setPassword(e.target.value)} maxLength={128} inputClassName="h-12 rounded-xl" />
               </div>
               <Button type="submit" disabled={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? t('common.loading') : t('auth.signup.submit')}

@@ -60,11 +60,11 @@ const Login = () => {
             <form onSubmit={handleSubmit} className="mt-6 space-y-5">
               <div className="space-y-2">
                 <Label htmlFor="username">{t('auth.login.emailOrUsername')}</Label>
-                <Input id="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} className="h-12 rounded-xl" />
+                <Input id="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} maxLength={64} className="h-12 rounded-xl" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">{t('auth.login.password')}</Label>
-                <PasswordInput id="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} inputClassName="h-12 rounded-xl" />
+                <PasswordInput id="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} maxLength={128} inputClassName="h-12 rounded-xl" />
               </div>
               <Button type="submit" disabled={loading} className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">
                 {loading ? t('common.loading') : t('auth.login.submit')}

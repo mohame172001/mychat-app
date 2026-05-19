@@ -422,6 +422,10 @@ const Settings = () => {
                     toast.error(lang === 'ar' ? 'يجب ألا تقلّ كلمة المرور الجديدة عن ٨ أحرف' : 'New password must be at least 8 characters');
                     return;
                   }
+                  if (newPassword.length > 128) {
+                    toast.error(lang === 'ar' ? 'كلمة المرور طويلة جداً (الحدّ الأقصى 128 حرفاً)' : 'Password is too long (max 128 characters)');
+                    return;
+                  }
                   if (newPassword !== confirmPassword) {
                     toast.error(t('auth.reset.mismatch'));
                     return;
