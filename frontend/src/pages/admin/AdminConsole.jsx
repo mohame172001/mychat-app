@@ -143,8 +143,12 @@ function OverviewTab({ data, onRefresh, loading }) {
         + (s.reclassified_as_gone_skip || 0);
       toast.success(
         moved > 0
-          ? `Reclassifier moved ${moved} row(s) out of the failure bucket`
-          : `Reclassifier scanned ${s.scanned || 0} row(s) — nothing to move`,
+          ? (isAr()
+              ? `أُعيد تصنيف ${moved} سجلّ من سلّة الأعطال`
+              : `Reclassifier moved ${moved} row(s) out of the failure bucket`)
+          : (isAr()
+              ? `تم فحص ${s.scanned || 0} سجلّ — لا شيء لإعادة تصنيفه`
+              : `Reclassifier scanned ${s.scanned || 0} row(s) — nothing to move`),
         { duration: 6000 },
       );
       if (onRefresh) onRefresh();
@@ -161,18 +165,18 @@ function OverviewTab({ data, onRefresh, loading }) {
   return (
     <div data-testid="admin-overview">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-6">
-        <StatCard label="Total users" value={data.total_users} hint={`${data.users_created_7d || 0} new in 7d`} />
-        <StatCard label="Connected IG accounts" value={data.connected_instagram_accounts} hint={`of ${data.total_instagram_accounts} total`} />
-        <StatCard label="Active automations" value={data.active_automations} hint={`of ${data.total_automations} total`} />
-        <StatCard label="Plan limited (comments)" value={data.plan_limited_counts} />
-        <StatCard label="Comments this month" value={totals.comments_processed || 0} />
-        <StatCard label="Public replies this month" value={totals.public_replies_sent || 0} />
-        <StatCard label="DMs this month" value={totals.dms_sent || 0} />
-        <StatCard label="Link clicks this month" value={totals.links_clicked || 0} />
-        <StatCard label="Retryable failures" value={data.retryable_failure_counts || 0} />
-        <StatCard label="Permanent failures" value={data.permanent_failure_counts || 0} />
-        <StatCard label="Queue pending" value={(data.queue_health || {}).pending || 0} />
-        <StatCard label="New users today" value={data.users_created_today || 0} />
+        <StatCard label={isAr() ? "إجمالي المستخدمين" : "Total users"} value={data.total_users} hint={isAr() ? `${data.users_created_7d || 0} جديد خلال 7 أيام` : `${data.users_created_7d || 0} new in 7d`} />
+        <StatCard label={isAr() ? "حسابات Instagram المربوطة" : "Connected IG accounts"} value={data.connected_instagram_accounts} hint={isAr() ? `من إجمالي ${data.total_instagram_accounts}` : `of ${data.total_instagram_accounts} total`} />
+        <StatCard label={isAr() ? "الأتمتات النشطة" : "Active automations"} value={data.active_automations} hint={isAr() ? `من إجمالي ${data.total_automations}` : `of ${data.total_automations} total`} />
+        <StatCard label={isAr() ? "متجاوزون لحدّ التعليقات" : "Plan limited (comments)"} value={data.plan_limited_counts} />
+        <StatCard label={isAr() ? "تعليقات هذا الشهر" : "Comments this month"} value={totals.comments_processed || 0} />
+        <StatCard label={isAr() ? "ردود علنية هذا الشهر" : "Public replies this month"} value={totals.public_replies_sent || 0} />
+        <StatCard label={isAr() ? "رسائل هذا الشهر" : "DMs this month"} value={totals.dms_sent || 0} />
+        <StatCard label={isAr() ? "نقرات الروابط هذا الشهر" : "Link clicks this month"} value={totals.links_clicked || 0} />
+        <StatCard label={isAr() ? "أعطال قابلة لإعادة المحاولة" : "Retryable failures"} value={data.retryable_failure_counts || 0} />
+        <StatCard label={isAr() ? "أعطال دائمة" : "Permanent failures"} value={data.permanent_failure_counts || 0} />
+        <StatCard label={isAr() ? "في الطابور" : "Queue pending"} value={(data.queue_health || {}).pending || 0} />
+        <StatCard label={isAr() ? "مستخدمون جدد اليوم" : "New users today"} value={data.users_created_today || 0} />
       </div>
 
       {/* Operator tools — sweep collab/unauthorized comments out of the
@@ -432,7 +436,9 @@ function UserDetailTab({ userId, onBack, me }) {
         plan_key: planKey,
         reason: reason || 'manual_admin_assignment',
       });
-      toast.success(`Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
+      toast.success(isAr()
+        ? `تم تعيين الخطة إلى ${PLAN_DISPLAY[planKey] || planKey}`
+        : `Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
       setReason('');
       invalidateAdminUserCaches(userId);
       // Phase 2.18J: if the admin assigned the plan to themselves,
@@ -728,9 +734,9 @@ function UserDetailTab({ userId, onBack, me }) {
                         ))}
                       </div>
                       <div className="text-xs text-slate-400 mt-1">
-                        starts {formatTimestamp(ov.starts_at)}
-                        {ov.ends_at && <> · ends {formatTimestamp(ov.ends_at)}</>}
-                        {ov.created_by_email && <> · by {ov.created_by_email}</>}
+                        {isAr() ? 'تبدأ ' : 'starts '}{formatTimestamp(ov.starts_at)}
+                        {ov.ends_at && <> · {isAr() ? 'تنتهي ' : 'ends '}{formatTimestamp(ov.ends_at)}</>}
+                        {ov.created_by_email && <> · {isAr() ? 'بواسطة ' : 'by '}{ov.created_by_email}</>}
                       </div>
                     </div>
                     {canAssignPlan && (
@@ -931,7 +937,9 @@ function AdminsTab({ me }) {
         role: addRole,
         reason: addReason || 'manual_admin_assignment',
       });
-      toast.success(`Added ${addEmail} as ${ROLE_DISPLAY[addRole]}`);
+      toast.success(isAr()
+        ? `أُضيف ${addEmail} بدور ${ROLE_DISPLAY[addRole]}`
+        : `Added ${addEmail} as ${ROLE_DISPLAY[addRole]}`);
       setAddEmail(''); setAddReason(''); setAddRole('viewer');
       invalidateApiCache('admin:members');
       await load();
@@ -948,7 +956,9 @@ function AdminsTab({ me }) {
       await api.patch(`/admin/members/${encodeURIComponent(member.user_id)}`, {
         role: newRole, reason: 'admin_role_change',
       });
-      toast.success(`Role changed to ${ROLE_DISPLAY[newRole]}`);
+      toast.success(isAr()
+        ? `تم تغيير الدور إلى ${ROLE_DISPLAY[newRole]}`
+        : `Role changed to ${ROLE_DISPLAY[newRole]}`);
       invalidateApiCache('admin:members');
       await load();
     } catch (err) {
