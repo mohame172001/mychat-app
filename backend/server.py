@@ -2914,6 +2914,44 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
     import uuid as _uuid
     access_token = user_doc.get('meta_access_token', '')
     ig_user_id = user_doc.get('ig_user_id', '')
+    # Just-in-time webhook subscription health check. The opening DM is
+    # the moment we start expecting a click webhook back; if this account
+    # is missing the messages / messaging_postbacks subscriptions (the
+    # silent-breakage that took down @mogehad17's button clicks for
+    # days), nothing we do downstream matters because the click event
+    # never reaches our backend. Force a re-subscribe inline so the next
+    # 5-10 minutes of clicks land properly.
+    if ig_user_id and access_token:
+        try:
+            async with httpx.AsyncClient(timeout=8) as _c:
+                _gr = await _c.get(
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                    params={'access_token': access_token},
+                )
+                _present = set()
+                if _gr.status_code == 200:
+                    for _entry in (_gr.json() or {}).get('data') or []:
+                        for _f in _entry.get('subscribed_fields') or []:
+                            _present.add(_f)
+                _critical = {'messages', 'messaging_postbacks'}
+                if _critical - _present:
+                    logger.warning(
+                        'comment_dm_opening_subscription_partial ig_user_id=%s '
+                        'missing=%s — force-resubscribing before sending opening DM',
+                        ig_user_id, sorted(_critical - _present),
+                    )
+                    _fields = 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'
+                    await _c.post(
+                        f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                        params={'access_token': access_token,
+                                'subscribed_fields': _fields},
+                    )
+        except Exception as _exc:
+            logger.info(
+                'comment_dm_opening_subscription_check_failed ig_user_id=%s err=%s '
+                '— proceeding with opening DM anyway',
+                ig_user_id, type(_exc).__name__,
+            )
     opening_text = (automation.get('opening_dm_text') or automation.get('dm_text') or '').strip()
     button_text = (automation.get('opening_dm_button_text') or 'Send me the link').strip()
     has_deferred_step = any([
