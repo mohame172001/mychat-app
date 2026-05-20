@@ -7565,6 +7565,249 @@ async def admin_reset_stuck_comment_dm_sessions(
     return {'ok': True, 'reset_count': result.modified_count}
 
 
+@api.post('/admin/instagram/reset-test-flow')
+async def admin_reset_test_flow(
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Surgical reset of ONE specific (account, automation, media,
+    commenter) opening-flow state so the operator can re-test without
+    being silently blocked by stale dedupe data.
+
+    Required body keys (every field must be present and non-empty):
+      - instagram_account_id  — the IG numeric id (e.g. 17841...)
+      - automation_id         — the rule id
+      - media_id              — the post/media id the rule fired on
+      - commenter_id          — the commenter / recipient IG id
+
+    Optional:
+      - dry_run (default true)  — when true, only count what WOULD be
+                                  reset; no writes
+      - confirm (default false) — must be explicitly true to actually
+                                  mutate state (in addition to
+                                  dry_run=false)
+
+    Behavior on confirm:
+      - matching comment_dm_sessions rows are DELETED (so the
+        per-payload session lookup will report missing, which is
+        the expected post-reset state)
+      - matching comments rows have ``opening_dedupe_key`` /
+        ``openingDedupeKey`` cleared to null and a
+        ``reset_by_admin_at`` marker added. The row itself stays so
+        existing per-ig_comment_id audit trail is preserved.
+      - dm_logs are intentionally untouched (keep history)
+      - The scope is computed via the same SHA-256 dedupe key the
+        production opener uses, so the reset hits exactly what the
+        opener would otherwise treat as a duplicate.
+
+    Safety:
+      - Scoped to the caller's own user_id. Cannot touch another
+        user's records.
+      - Refuses to run without all four required keys.
+      - Logs the safe summary of every confirmed reset.
+
+    Privacy: no tokens, no full DM/comment text, no full payloads in
+    the response. External ids in the response are partial-redacted
+    via _safe_partial_identifier.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    payload = body or {}
+    instagram_account_id = str(payload.get('instagram_account_id') or '').strip()
+    automation_id = str(payload.get('automation_id') or '').strip()
+    media_id = str(payload.get('media_id') or '').strip()
+    commenter_id = str(
+        payload.get('commenter_id') or payload.get('recipient_id') or ''
+    ).strip()
+    dry_run = bool(payload.get('dry_run', True))
+    confirm = bool(payload.get('confirm', False))
+
+    missing = [k for k, v in {
+        'instagram_account_id': instagram_account_id,
+        'automation_id': automation_id,
+        'media_id': media_id,
+        'commenter_id': commenter_id,
+    }.items() if not v]
+    if missing:
+        raise HTTPException(
+            400,
+            f'Missing required fields: {", ".join(missing)}. '
+            f'All four (instagram_account_id, automation_id, media_id, '
+            f'commenter_id) are required so the reset cannot fan out to '
+            f'unrelated rows.',
+        )
+
+    dedupe_key = _comment_opening_dedupe_key(
+        user_id, instagram_account_id, automation_id, media_id, commenter_id,
+    )
+    if not dedupe_key:
+        raise HTTPException(400, 'Failed to compute opening_dedupe_key for the supplied keys.')
+
+    # Build the same query the production opener uses, but also match
+    # by recipient_id as a belt-and-braces clause in case a session was
+    # written before opening_dedupe_key was stored on the row.
+    account_match = {'$or': [
+        {'instagramAccountId': instagram_account_id},
+        {'igUserId': instagram_account_id},
+        {'ig_user_id': instagram_account_id},
+    ]}
+    session_match = {
+        'user_id': user_id,
+        '$and': [
+            account_match,
+            {'$or': [
+                {'opening_dedupe_key': dedupe_key},
+                {'$and': [
+                    {'recipient_id': commenter_id},
+                    {'automation_id': automation_id},
+                    {'$or': [
+                        {'media_id': media_id},
+                        {'mediaId': media_id},
+                    ]},
+                ]},
+            ]},
+        ],
+    }
+    comment_match = {
+        'user_id': user_id,
+        '$and': [
+            account_match,
+            {'$or': [
+                {'opening_dedupe_key': dedupe_key},
+                {'$and': [
+                    {'commenter_id': commenter_id},
+                    {'$or': [
+                        {'rule_id': automation_id},
+                        {'ruleId': automation_id},
+                        {'matched_rule_id': automation_id},
+                    ]},
+                    {'$or': [
+                        {'media_id': media_id},
+                        {'mediaId': media_id},
+                    ]},
+                ]},
+            ]},
+        ],
+    }
+
+    sessions = await db.comment_dm_sessions.find(session_match).to_list(50)
+    comments = await db.comments.find(comment_match).to_list(50)
+
+    def _safe_session(s: dict) -> dict:
+        return {
+            'session_id': s.get('id'),
+            'status': s.get('status'),
+            'stage': s.get('stage'),
+            'automation_id': s.get('automation_id'),
+            'media_id': _safe_partial_identifier(s.get('media_id')),
+            'recipient_id': _safe_partial_identifier(s.get('recipient_id')),
+            'commenter_id': _safe_partial_identifier(s.get('commenter_id')),
+            'opening_dedupe_key': _safe_partial_identifier(s.get('opening_dedupe_key')),
+            'created': s.get('created').isoformat() if isinstance(s.get('created'), datetime) else None,
+            'finalDmSentAt': s.get('finalDmSentAt').isoformat() if isinstance(s.get('finalDmSentAt'), datetime) else None,
+        }
+
+    def _safe_comment(c: dict) -> dict:
+        return {
+            'comment_id': c.get('id'),
+            'ig_comment_id': _safe_partial_identifier(c.get('ig_comment_id')),
+            'media_id': _safe_partial_identifier(c.get('media_id')),
+            'commenter_id': _safe_partial_identifier(c.get('commenter_id')),
+            'rule_id': c.get('rule_id') or c.get('ruleId'),
+            'action_status': c.get('action_status'),
+            'reply_status': c.get('reply_status'),
+            'dm_status': c.get('dm_status'),
+            'opening_dedupe_key': _safe_partial_identifier(c.get('opening_dedupe_key')),
+        }
+
+    plan_sessions = [_safe_session(s) for s in sessions]
+    plan_comments = [_safe_comment(c) for c in comments]
+
+    if dry_run or not confirm:
+        return {
+            'ok': True,
+            'dry_run': True,
+            'confirm': confirm,
+            'inputs': {
+                'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id),
+                'automation_id': automation_id,
+                'media_id_partial': _safe_partial_identifier(media_id),
+                'commenter_id_partial': _safe_partial_identifier(commenter_id),
+                'dedupe_key_partial': _safe_partial_identifier(dedupe_key),
+            },
+            'would_delete_sessions': plan_sessions,
+            'would_clear_opening_dedupe_on_comments': plan_comments,
+            'note': (
+                'Set dry_run=false AND confirm=true to actually apply. '
+                'Sessions matching this exact 4-tuple will be deleted; '
+                'comments will keep their row but lose their '
+                'opening_dedupe_key so the opener treats the next '
+                'comment from this commenter as fresh.'
+            ),
+        }
+
+    now = datetime.utcnow()
+    sessions_deleted = 0
+    comments_cleared = 0
+    if sessions:
+        del_result = await db.comment_dm_sessions.delete_many(session_match)
+        sessions_deleted = del_result.deleted_count or 0
+    if comments:
+        upd_result = await db.comments.update_many(
+            comment_match,
+            {'$set': {
+                'opening_dedupe_key': None,
+                'openingDedupeKey': None,
+                'reset_by_admin_at': now,
+                'reset_by_admin_caller_id': caller.get('id'),
+                'updated': now,
+            }},
+        )
+        comments_cleared = upd_result.modified_count or 0
+
+    await _record_admin_action(
+        caller,
+        action='instagram_reset_test_flow',
+        target_user_id=user_id,
+        metadata={
+            'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id),
+            'automation_id': automation_id,
+            'media_id_partial': _safe_partial_identifier(media_id),
+            'commenter_id_partial': _safe_partial_identifier(commenter_id),
+            'dedupe_key_partial': _safe_partial_identifier(dedupe_key),
+            'sessions_deleted': sessions_deleted,
+            'comments_cleared': comments_cleared,
+        },
+    )
+    logger.info(
+        'instagram_reset_test_flow_applied user_id=%s instagram_account=%s '
+        'automation_id=%s media_id=%s commenter_id=%s dedupe_key=%s '
+        'sessions_deleted=%s comments_cleared=%s',
+        user_id,
+        _safe_partial_identifier(instagram_account_id),
+        automation_id,
+        _safe_partial_identifier(media_id),
+        _safe_partial_identifier(commenter_id),
+        _safe_partial_identifier(dedupe_key),
+        sessions_deleted, comments_cleared,
+    )
+    return {
+        'ok': True,
+        'dry_run': False,
+        'confirm': True,
+        'inputs': {
+            'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id),
+            'automation_id': automation_id,
+            'media_id_partial': _safe_partial_identifier(media_id),
+            'commenter_id_partial': _safe_partial_identifier(commenter_id),
+            'dedupe_key_partial': _safe_partial_identifier(dedupe_key),
+        },
+        'sessions_deleted': sessions_deleted,
+        'comments_cleared': comments_cleared,
+        'matched_sessions': plan_sessions,
+        'matched_comments': plan_comments,
+    }
+
+
 @api.get('/admin/comment-dm-sessions/recent')
 async def admin_comment_dm_sessions_recent(
     user_id: str = Depends(get_current_active_user_id),

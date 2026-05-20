@@ -940,3 +940,394 @@ def test_handle_new_comment_does_not_silently_match_when_media_id_missing(monkey
         source='webhook',
     ))
     assert result['matched'] is False
+
+
+# ---------------------------------------------------------------------------
+# Admin reset-test-flow endpoint (Task F: targeted unblock for stale dedupe)
+# ---------------------------------------------------------------------------
+
+def _seed_dedupe_state(db, *, user_id, ig_account_id, automation_id,
+                      media_id, commenter_id, session_id='sess-x',
+                      comment_id='comm-x', extra_session_for_commenter=None):
+    """Insert one matching session + one matching comment row with a real
+    SHA-256 opening_dedupe_key, so the reset endpoint can find them
+    exactly like the production opener would."""
+    dedupe_key = server._comment_opening_dedupe_key(
+        user_id, ig_account_id, automation_id, media_id, commenter_id,
+    )
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': session_id,
+        'user_id': user_id,
+        'ig_user_id': ig_account_id,
+        'instagramAccountId': ig_account_id,
+        'igUserId': ig_account_id,
+        'automation_id': automation_id,
+        'media_id': media_id,
+        'mediaId': media_id,
+        'recipient_id': commenter_id,
+        'commenter_id': commenter_id,
+        'opening_dedupe_key': dedupe_key,
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': f'comment_flow:{session_id}:continue',
+        'created': now,
+        'updated': now,
+        'finalDmSentAt': None,
+    })
+    db.comments.docs.append({
+        'id': comment_id,
+        'user_id': user_id,
+        'instagramAccountId': ig_account_id,
+        'igUserId': ig_account_id,
+        'ig_comment_id': f'ig-{comment_id}',
+        'media_id': media_id,
+        'mediaId': media_id,
+        'commenter_id': commenter_id,
+        'rule_id': automation_id,
+        'ruleId': automation_id,
+        'matched_rule_id': automation_id,
+        'opening_dedupe_key': dedupe_key,
+        'openingDedupeKey': dedupe_key,
+        'action_status': 'success',
+        'reply_status': 'success',
+        'dm_status': 'success',
+        'created': now,
+        'updated': now,
+    })
+    return dedupe_key
+
+
+def _patch_admin_gate(monkeypatch):
+    async def allow_admin(*args, **kwargs):
+        return ({'id': 'admin-1', 'email': 'owner@example.com'}, 'owner')
+    monkeypatch.setattr(server, '_require_admin_permission', allow_admin)
+
+
+async def _record_action_noop(*args, **kwargs):
+    return None
+
+
+def test_admin_reset_test_flow_dry_run_lists_matching_session_and_comment(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+    )
+
+    result = _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': True,
+            'confirm': False,
+        },
+        user_id='u1',
+    ))
+    assert result['dry_run'] is True
+    assert result['confirm'] is False
+    assert len(result['would_delete_sessions']) == 1
+    assert len(result['would_clear_opening_dedupe_on_comments']) == 1
+    # No mutation must have happened.
+    assert len(db.comment_dm_sessions.docs) == 1
+    assert db.comments.docs[0]['opening_dedupe_key'] is not None
+
+
+def test_admin_reset_test_flow_confirm_deletes_session_and_clears_dedupe(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+    )
+
+    result = _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': False,
+            'confirm': True,
+        },
+        user_id='u1',
+    ))
+    assert result['dry_run'] is False
+    assert result['confirm'] is True
+    assert result['sessions_deleted'] == 1
+    assert result['comments_cleared'] == 1
+    assert db.comment_dm_sessions.docs == []
+    # Comment row remains, dedupe key nulled out, reset marker set.
+    assert db.comments.docs[0]['opening_dedupe_key'] is None
+    assert db.comments.docs[0]['openingDedupeKey'] is None
+    assert 'reset_by_admin_at' in db.comments.docs[0]
+
+
+def test_admin_reset_test_flow_does_not_touch_other_accounts(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    # Account B target — to be reset.
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+        session_id='sess-b', comment_id='comm-b',
+    )
+    # Account A neighbor — same commenter on a different IG account.
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igA',
+        automation_id='ruleA', media_id='mediaA', commenter_id='igsid-tester',
+        session_id='sess-a', comment_id='comm-a',
+    )
+
+    _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': False,
+            'confirm': True,
+        },
+        user_id='u1',
+    ))
+    # Only Account B's session deleted; A's session untouched.
+    remaining_session_ids = {s['id'] for s in db.comment_dm_sessions.docs}
+    assert remaining_session_ids == {'sess-a'}
+    # Only Account B's comment dedupe cleared.
+    a_comment = next(c for c in db.comments.docs if c['id'] == 'comm-a')
+    b_comment = next(c for c in db.comments.docs if c['id'] == 'comm-b')
+    assert a_comment['opening_dedupe_key'] is not None
+    assert b_comment['opening_dedupe_key'] is None
+
+
+def test_admin_reset_test_flow_does_not_touch_other_commenters(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-target',
+        session_id='sess-target', comment_id='comm-target',
+    )
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-other',
+        session_id='sess-other', comment_id='comm-other',
+    )
+
+    _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-target',
+            'dry_run': False,
+            'confirm': True,
+        },
+        user_id='u1',
+    ))
+    remaining_session_ids = {s['id'] for s in db.comment_dm_sessions.docs}
+    assert remaining_session_ids == {'sess-other'}
+    other_comment = next(c for c in db.comments.docs if c['id'] == 'comm-other')
+    target_comment = next(c for c in db.comments.docs if c['id'] == 'comm-target')
+    assert other_comment['opening_dedupe_key'] is not None
+    assert target_comment['opening_dedupe_key'] is None
+
+
+def test_admin_reset_test_flow_requires_all_four_fields(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+
+    for missing_key in ('instagram_account_id', 'automation_id', 'media_id', 'commenter_id'):
+        body = {
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': True,
+            'confirm': False,
+        }
+        body[missing_key] = ''
+        try:
+            _run(server.admin_reset_test_flow(body=body, user_id='u1'))
+        except server.HTTPException as exc:
+            assert exc.status_code == 400
+            assert missing_key in str(exc.detail)
+        else:
+            raise AssertionError(f'expected HTTPException(400) when {missing_key} is empty')
+
+
+def test_admin_reset_test_flow_dry_run_default_when_confirm_omitted(monkeypatch):
+    """Safety: even if the caller forgets dry_run, the endpoint defaults
+    to dry-run preview unless BOTH dry_run=false AND confirm=true."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+    )
+
+    # Caller forgets to set confirm — must default to dry-run, NOT mutate.
+    result = _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': False,
+        },
+        user_id='u1',
+    ))
+    assert result['dry_run'] is True
+    assert result['confirm'] is False
+    assert len(db.comment_dm_sessions.docs) == 1
+
+
+def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
+    """End-to-end safety: after a confirmed reset, the same external
+    commenter posting a fresh comment on the same post + rule must hit
+    the opener path again (no dedupe block) and produce a public reply
+    + opening DM."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-flow', 'mediaB'),
+    ]
+    db.automations.docs[0]['activationStartedAt'] = datetime.utcnow() - timedelta(days=1)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB-flow', media_id='mediaB', commenter_id='igsid-tester',
+    )
+
+    _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB-flow',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': False,
+            'confirm': True,
+        },
+        user_id='u1',
+    ))
+
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append({'access_token': access_token, 'ig_user_id': ig_user_id})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'fresh-comment-after-reset',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'commenter_username': 'tester',
+            'text': 'send me',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-flow'
+    assert any(c['access_token'] == 'token-b' for c in reply_calls)
+    assert any(c['ig_user_id'] == 'igB' for c in send_calls)
+
+
+def test_after_reset_dedupe_still_blocks_immediate_repeat_on_same_new_comment(monkeypatch):
+    """Post-reset, the SAME commenter immediately re-opening must hit
+    the freshly created session/comment dedupe — the reset must not
+    permanently disable dedupe for this triple."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-flow', 'mediaB'),
+    ]
+    db.automations.docs[0]['activationStartedAt'] = datetime.utcnow() - timedelta(days=1)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB-flow', media_id='mediaB', commenter_id='igsid-tester',
+    )
+    _run(server.admin_reset_test_flow(
+        body={
+            'instagram_account_id': 'igB',
+            'automation_id': 'ruleB-flow',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'dry_run': False,
+            'confirm': True,
+        },
+        user_id='u1',
+    ))
+
+    async def reply_ok(access_token, comment_id, text):
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    # First fresh comment — fires.
+    _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'fresh-1',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    # Second fresh comment from same commenter — must be dedupe-blocked.
+    second = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'fresh-2',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'text': 'test again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert second.get('already_processed') is True
+    assert second.get('classified_reason') == 'same_commenter_same_post_same_rule'
