@@ -3194,14 +3194,16 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
         'recipient_id': sender_id,
         'status': 'pending',
     }
-    # Phase 2.19 reverted: the earlier ig_user_id filter (e709ecd) broke
-    # normal end users — session.ig_user_id stored at comment-poll time
-    # could disagree with user_doc.ig_user_id at webhook time when the
-    # owning IG account isn't the currently-active one in the user's
-    # users row. The cross-account quirk (muhammad_gehad ↔ mogehad17
-    # under one mychat user) is rarer than the false-negative this
-    # filter caused for real users, so we revert until we have a
-    # safer disambiguation strategy.
+    # Phase 2.19 re-enabled: with the comment poller now iterating
+    # instagram_accounts directly and scoping the user_doc per account,
+    # session.ig_user_id (set at poll time) and user_doc.ig_user_id (set
+    # at webhook time via _with_instagram_account_context) always agree
+    # on the IG account that owns the post + receives the webhook. The
+    # filter is safe and prevents cross-talk when one mychat user has
+    # multiple IG accounts linked.
+    ig_user_id = user_doc.get('ig_user_id')
+    if ig_user_id:
+        q['ig_user_id'] = ig_user_id
     if payload and str(payload).startswith('comment_flow:'):
         parts = str(payload).split(':')
         if len(parts) >= 2 and parts[1]:
@@ -16859,21 +16861,58 @@ async def _comment_poller_loop():
         cycle_ok = True
         cycle_err: Optional[BaseException] = None
         try:
-            cursor = db.users.find({'instagramConnected': True})
-            users = await cursor.to_list(500)
-            logger.info('comment_poller_tick accounts=%s', len(users))
-            for u in users:
+            # Phase 2.19 fix: iterate every LINKED INSTAGRAM ACCOUNT, not
+            # every mychat user. Users can have multiple IG accounts
+            # connected (admin + creator brand, two brands under one
+            # operator, etc); before this change we only polled the
+            # account flagged "active" in users.ig_user_id and every
+            # other linked account silently went un-polled, so its
+            # comments never triggered automations and the comment-DM
+            # sessions on those posts were never created.
+            #
+            # For each linked account we build a SCOPED user_doc via
+            # _with_instagram_account_context so user_doc.ig_user_id,
+            # meta_access_token, and instagramHandle line up with the
+            # account being polled — not whichever one happens to be
+            # users.ig_user_id at the time. That makes the
+            # _find_pending_comment_dm_session lookup deterministic on
+            # the webhook side and keeps cross-account flows clean.
+            cursor = db.instagram_accounts.find({
+                'isActive': {'$ne': False},
+                'connectionValid': True,
+            })
+            accounts = await cursor.to_list(500)
+            logger.info('comment_poller_tick accounts=%s', len(accounts))
+            _owner_cache: Dict[str, Optional[dict]] = {}
+            for account in accounts:
                 if IS_SHUTTING_DOWN:
                     break
+                owner_id = account.get('userId') or account.get('user_id')
+                if not owner_id:
+                    continue
+                if owner_id in _owner_cache:
+                    owner = _owner_cache[owner_id]
+                else:
+                    owner = await db.users.find_one({'id': owner_id})
+                    _owner_cache[owner_id] = owner
+                if not owner:
+                    continue
+                if owner.get('status') in ('deleted', 'suspended'):
+                    continue
+                scoped = _with_instagram_account_context(owner, account)
                 try:
-                    s = await _poll_user_comments(u)
+                    s = await _poll_user_comments(scoped)
                     if s.get('newComments'):
-                        logger.info('polling_user_summary user_id=%s new=%s matched=%s ok=%s fail=%s',
-                                    u.get('id'), s['newComments'], s['matched'],
-                                    s['actionsSucceeded'], s['actionsFailed'])
+                        logger.info(
+                            'polling_user_summary user_id=%s ig_user_id=%s new=%s matched=%s ok=%s fail=%s',
+                            owner_id, scoped.get('ig_user_id'), s['newComments'],
+                            s['matched'], s['actionsSucceeded'], s['actionsFailed'],
+                        )
                 except Exception as per_user_exc:
-                    logger.exception('comment_poller_per_user_error user_id=%s',
-                                     u.get('id'))
+                    logger.exception(
+                        'comment_poller_per_account_error user_id=%s ig_user_id=%s',
+                        owner_id, scoped.get('ig_user_id'),
+                    )
                     cycle_err = per_user_exc
         except asyncio.CancelledError:
             raise
