@@ -7043,6 +7043,42 @@ async def admin_tools_enabled(user_id: str = Depends(get_current_active_user_id)
     }
 
 
+@api.get('/admin/webhook-log/recent')
+async def admin_webhook_log_recent(
+    user_id: str = Depends(get_current_active_user_id),
+    limit: int = 30,
+):
+    """Phase 2.19 ops diagnostic: return the last N raw webhook events
+    we received from Meta. Used to confirm whether a specific webhook
+    (e.g. a button-click quick_reply) actually arrived at our backend
+    before any of the downstream session lookup or DM dispatch code
+    runs."""
+    me_doc = await db.users.find_one({'id': user_id}) or {}
+    if not (me_doc.get('is_admin') or me_doc.get('email') in ADMIN_EMAILS):
+        raise HTTPException(403, 'forbidden')
+    safe_limit = max(1, min(int(limit or 30), 100))
+    cursor = db.webhook_log.find({}).sort('received', -1).limit(safe_limit)
+    out = []
+    async for doc in cursor:
+        entry_summaries = doc.get('entry_summaries') or []
+        out.append({
+            'received': doc.get('received').isoformat() if hasattr(doc.get('received'), 'isoformat') else None,
+            'object': doc.get('object'),
+            'entry_count': doc.get('entry_count'),
+            'signature_valid': doc.get('signature_valid'),
+            'signature_reason': doc.get('signature_reason'),
+            'enforce_mode': doc.get('enforce_mode'),
+            'entry_summaries': [
+                {
+                    'entry_id_hash': e.get('entry_id_hash'),
+                    'messaging_count': e.get('messaging_count'),
+                    'changes_count': e.get('changes_count'),
+                } for e in entry_summaries
+            ],
+        })
+    return {'count': len(out), 'items': out}
+
+
 @api.get('/admin/comment-dm-sessions/recent')
 async def admin_comment_dm_sessions_recent(
     user_id: str = Depends(get_current_active_user_id),
