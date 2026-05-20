@@ -265,7 +265,24 @@ export default function Billing() {
                         : (lang === 'ar' ? 'غير مُفعّلة بعد' : 'Not enabled yet')}
                     </span>
                   </span>
+                  {current.current_period_end && (
+                    <span className="ms-3" data-testid="plan-period-end">
+                      {current.plan_expired
+                        ? (lang === 'ar' ? 'انتهت الخطة في: ' : 'Expired on: ')
+                        : (lang === 'ar' ? 'تنتهي في: ' : 'Renews / expires: ')}
+                      <span className="font-mono">{new Date(current.current_period_end).toLocaleString()}</span>
+                    </span>
+                  )}
                 </div>
+                {current.plan_expired && (
+                  <div className="mt-2 inline-flex items-center gap-2 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-1"
+                       data-testid="plan-expired-banner">
+                    <AlertTriangle className="w-3 h-3" />
+                    {lang === 'ar'
+                      ? `انتهت صلاحية خطتك (${current.expired_plan_key}). تواصل مع الدعم للتجديد.`
+                      : `Your ${current.expired_plan_key} plan expired. Contact support to renew.`}
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -281,6 +298,52 @@ export default function Billing() {
               ))}
             </div>
           </section>
+
+          {/* Per-Instagram-account usage breakdown */}
+          {Array.isArray(current.per_account_counters) && current.per_account_counters.length > 0 && (
+            <section className="mb-6" data-testid="per-account-usage">
+              <h2 className="text-sm font-semibold text-slate-700 mb-3">
+                {lang === 'ar' ? 'الاستهلاك لكل حساب Instagram' : 'Usage per Instagram account'}
+              </h2>
+              <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="text-start px-3 py-2">{lang === 'ar' ? 'الحساب' : 'Account'}</th>
+                      <th className="text-end px-3 py-2">{lang === 'ar' ? 'تعليقات' : 'Comments'}</th>
+                      <th className="text-end px-3 py-2">{lang === 'ar' ? 'ردود علنية' : 'Public replies'}</th>
+                      <th className="text-end px-3 py-2">{lang === 'ar' ? 'رسائل خاصة' : 'DMs'}</th>
+                      <th className="text-end px-3 py-2">{lang === 'ar' ? 'نقرات الرابط' : 'Link clicks'}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {current.per_account_counters.map((row) => {
+                      const c = row.counters || {};
+                      return (
+                        <tr key={row.instagramAccountId}
+                            className="border-t border-slate-100"
+                            data-testid={`per-account-row-${row.instagramAccountId}`}>
+                          <td className="px-3 py-2">
+                            <div className="font-semibold text-slate-700">@{row.username || row.instagramAccountId}</div>
+                            <div className="text-xs text-slate-400 font-mono">{row.instagramAccountId}</div>
+                          </td>
+                          <td className="text-end px-3 py-2 font-mono">{c.comments_processed || 0}</td>
+                          <td className="text-end px-3 py-2 font-mono">{c.public_replies_sent || 0}</td>
+                          <td className="text-end px-3 py-2 font-mono">{c.dms_sent || 0}</td>
+                          <td className="text-end px-3 py-2 font-mono">{c.links_clicked || 0}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-slate-400 mt-2">
+                {lang === 'ar'
+                  ? 'الأرقام هنا منفصلة لكل حساب Instagram لتسهيل تتبّع الاستهلاك حين تربط أكثر من حساب.'
+                  : 'These counters are split per Instagram account so you can attribute usage when multiple accounts are linked.'}
+              </p>
+            </section>
+          )}
 
           {/* Plan catalogue */}
           {plans && plans.length > 0 && (

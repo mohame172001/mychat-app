@@ -827,20 +827,39 @@ async def _effective_plan_distribution(total_users: Optional[int] = None) -> dic
 
 
 async def get_user_plan(user_id: str) -> dict:
-    """Return the user's plan definition. Missing row -> free plan."""
+    """Return the user's plan definition. Missing row -> free plan.
+
+    Phase 2.20: if the row has a ``current_period_end`` in the past, we
+    treat the user as having lapsed back to the default free plan. The
+    paid plan_key is still surfaced in ``_assignment.expired_plan_key``
+    so the UI can show a "Renew" CTA without losing the history.
+    """
     if not user_id:
         return _plans.get_plan_limits(_plans.DEFAULT_PLAN_KEY)
     row = await _get_user_plan_assignment(str(user_id))
     plan_key = (row or {}).get('plan_key')
     if not _plans.is_valid_plan_key(plan_key):
         plan_key = _plans.DEFAULT_PLAN_KEY
-    plan = _plans.get_plan_limits(plan_key)
+    now = datetime.utcnow()
+    period_end = (row or {}).get('current_period_end')
+    expired = False
+    if isinstance(period_end, datetime) and period_end <= now and plan_key != _plans.DEFAULT_PLAN_KEY:
+        expired = True
+        effective_plan_key = _plans.DEFAULT_PLAN_KEY
+    else:
+        effective_plan_key = plan_key
+    plan = _plans.get_plan_limits(effective_plan_key)
     plan['_assignment'] = {
         'assigned_by': (row or {}).get('assigned_by'),
         'assignment_reason': (row or {}).get('assignment_reason'),
         'billing_status': (row or {}).get('billing_status') or 'manual',
         'billing_enabled': False,
         'updated_at': (row or {}).get('updated_at'),
+        'current_period_start': (row or {}).get('current_period_start'),
+        'current_period_end': period_end,
+        'status': 'expired' if expired else ((row or {}).get('status') or ('active' if isinstance(period_end, datetime) else 'no_period')),
+        'expired': expired,
+        'expired_plan_key': plan_key if expired else None,
     }
     return plan
 
@@ -850,8 +869,14 @@ async def assign_user_plan(
     plan_key: str,
     assigned_by: str,
     reason: Optional[str] = None,
+    period_days: Optional[int] = None,
+    extend: bool = False,
 ) -> dict:
-    """Manually assign a plan to a user. Idempotent upsert.
+    """Manually assign or renew a plan for a user. Idempotent upsert.
+
+    period_days: when provided, sets current_period_end. If extend=True
+    and a future current_period_end already exists, we add period_days
+    on top of it (renewal). Otherwise period_days is counted from now.
 
     Phase 2.18J: also clears the dashboard_summaries read-through
     snapshot for the target user so the next /api/dashboard/summary
@@ -863,18 +888,34 @@ async def assign_user_plan(
     if not user_id:
         raise HTTPException(400, 'user_id is required')
     now = datetime.utcnow()
+    # Compute the new period_end based on the renewal semantics.
+    new_period_end = None
+    if period_days and int(period_days) > 0:
+        days = int(period_days)
+        base = now
+        if extend:
+            existing = await db.user_plans.find_one({'user_id': str(user_id)}) or {}
+            cur_end = existing.get('current_period_end')
+            if isinstance(cur_end, datetime) and cur_end > now:
+                base = cur_end
+        new_period_end = base + timedelta(days=days)
+    set_fields: Dict[str, Any] = {
+        'user_id': str(user_id),
+        'plan_key': plan_key,
+        'assigned_by': str(assigned_by) if assigned_by else None,
+        'assignment_reason': (reason or '')[:200] or None,
+        'billing_status': 'manual',
+        'billing_enabled': False,
+        'updated_at': now,
+    }
+    if new_period_end is not None:
+        set_fields['current_period_start'] = now if not extend else set_fields.get('current_period_start', now)
+        set_fields['current_period_end'] = new_period_end
+        set_fields['status'] = 'active'
     await db.user_plans.update_one(
         {'user_id': str(user_id)},
         {
-            '$set': {
-                'user_id': str(user_id),
-                'plan_key': plan_key,
-                'assigned_by': str(assigned_by) if assigned_by else None,
-                'assignment_reason': (reason or '')[:200] or None,
-                'billing_status': 'manual',
-                'billing_enabled': False,
-                'updated_at': now,
-            },
+            '$set': set_fields,
             '$setOnInsert': {
                 'id': secrets.token_urlsafe(12),
                 'created_at': now,
@@ -984,6 +1025,29 @@ async def get_current_usage_with_limits(user_id: str, month: Optional[str] = Non
         {key: plan.get(key) for key in _overrides.ALL_METRIC_KEYS},
         overrides,
     )
+    # Per-IG-account counters: surface the same monthly_usage rows we
+    # already write under limit_subject_type='instagram_account' so the
+    # billing UI can show each linked account's actual consumption.
+    event_month_str = month or _usage_month(datetime.utcnow())
+    per_account: List[Dict[str, Any]] = []
+    try:
+        accounts_cursor = db.instagram_accounts.find({'userId': str(user_id)})
+        async for acc in accounts_cursor:
+            ig_id = acc.get('instagramAccountId') or acc.get('igUserId')
+            if not ig_id:
+                continue
+            ig_counters = await _instagram_monthly_counters(str(ig_id), event_month_str)
+            per_account.append({
+                'instagramAccountId': str(ig_id),
+                'username': acc.get('username'),
+                'isActive': acc.get('isActive', True) is not False,
+                'connectionValid': acc.get('connectionValid'),
+                'counters': ig_counters,
+            })
+    except Exception as exc:
+        logger.info('per_account_counters_failed user_id=%s err=%s',
+                    user_id, type(exc).__name__)
+    assignment = plan.get('_assignment') or {}
     return {
         'plan_key': plan['plan_key'],
         'display_name': plan['display_name'],
@@ -1001,7 +1065,22 @@ async def get_current_usage_with_limits(user_id: str, month: Optional[str] = Non
         'base_max_active_automations': plan.get('max_active_automations'),
         'active_overrides_count': len(overrides),
         'limits_explanation': explanation,
-        'event_month': month or _usage_month(datetime.utcnow()),
+        'event_month': event_month_str,
+        'per_account_counters': per_account,
+        # Plan period / subscription state (manual grants while billing
+        # is not yet wired). Lets the UI render Activate/Renew CTAs and
+        # show the remaining days until the manual grant lapses.
+        'current_period_start': (
+            assignment.get('current_period_start').isoformat()
+            if isinstance(assignment.get('current_period_start'), datetime) else None
+        ),
+        'current_period_end': (
+            assignment.get('current_period_end').isoformat()
+            if isinstance(assignment.get('current_period_end'), datetime) else None
+        ),
+        'plan_status': assignment.get('status'),
+        'plan_expired': bool(assignment.get('expired')),
+        'expired_plan_key': assignment.get('expired_plan_key'),
     }
 
 
@@ -8575,37 +8654,179 @@ async def admin_assign_user_plan(
     body: dict = Body(...),
     user_id: str = Depends(get_current_active_user_id),
 ):
-    """Manually assign a plan to a user. Requires admin.plans.assign.
-    Independent of ENABLE_ADMIN_REPAIR_TOOLS. No Stripe."""
+    """Manually assign or renew a plan for a user. Requires admin.plans.assign.
+
+    Body accepts:
+        plan_key:    one of starter/pro/business/free (required)
+        reason:      optional manual note (capped 200 chars)
+        period_days: optional int. When provided, sets
+                     current_period_end to now+period_days (or to
+                     current_period_end+period_days when extend=true).
+        extend:      bool, defaults false. When true and the existing
+                     row has a future current_period_end, period_days
+                     is added on top instead of resetting to now.
+
+    Independent of ENABLE_ADMIN_REPAIR_TOOLS. No Stripe.
+    """
     caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
     plan_key = (body or {}).get('plan_key')
     reason = (body or {}).get('reason') or 'manual_admin_assignment'
+    period_days = (body or {}).get('period_days')
+    extend = bool((body or {}).get('extend'))
     if not _plans.is_valid_plan_key(plan_key):
         raise HTTPException(400, f'plan_key must be one of: {", ".join(_plans.PLAN_KEYS)}')
+    if period_days is not None:
+        try:
+            period_days = int(period_days)
+        except (TypeError, ValueError):
+            raise HTTPException(400, 'period_days must be an integer (days)')
+        if period_days < 0 or period_days > 366 * 5:
+            raise HTTPException(400, 'period_days must be between 0 and 1830')
     # Phase 2.18Y: validate the target user actually exists before
     # writing a user_plans row. Without this, a typoed user id silently
     # created a stray plan assignment row that would never reconcile.
     target_user = await db.users.find_one({'id': target_user_id}, {'id': 1})
     if not target_user:
         raise HTTPException(404, 'User not found')
-    plan = await assign_user_plan(target_user_id, plan_key, assigned_by=user_id, reason=reason)
+    plan = await assign_user_plan(
+        target_user_id,
+        plan_key,
+        assigned_by=user_id,
+        reason=reason,
+        period_days=period_days,
+        extend=extend,
+    )
     logger.info(
-        'admin_plan_assigned target_user_id=%s plan_key=%s assigned_by=%s',
-        target_user_id, plan_key, user_id,
+        'admin_plan_assigned target_user_id=%s plan_key=%s assigned_by=%s period_days=%s extend=%s',
+        target_user_id, plan_key, user_id, period_days, extend,
     )
     # Phase 2.4 admin audit log entry. Best-effort — never blocks the action.
     await _record_admin_action(
         caller,
         action='plan_assign',
         target_user_id=target_user_id,
-        metadata={'plan_key': plan_key, 'reason_length': len(str(reason or ''))},
+        metadata={'plan_key': plan_key, 'reason_length': len(str(reason or '')),
+                  'period_days': period_days, 'extend': extend},
     )
+    assignment = plan.get('_assignment') or {}
     return {
         'ok': True,
         'user_id': target_user_id,
         'plan_key': plan['plan_key'],
         'display_name': plan['display_name'],
         'billing_enabled': False,
+        'current_period_end': (
+            assignment.get('current_period_end').isoformat()
+            if isinstance(assignment.get('current_period_end'), datetime) else None
+        ),
+        'status': assignment.get('status'),
+    }
+
+
+@api.post('/admin/users/{target_user_id}/plan/recompute-usage')
+async def admin_recompute_user_usage(
+    target_user_id: str,
+    month: Optional[str] = None,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Rebuild monthly_usage counters for a user from the source-of-
+    truth usage_events log. Use this when the displayed counters look
+    wrong (e.g. show 0 even though events were recorded) — most often
+    after a hot path was patched and we need to backfill.
+
+    Walks every usage_event in the target month for the target user,
+    re-derives the per-counter totals, and overwrites the monthly_usage
+    row for both the user scope and every instagram_account scope. Safe
+    to re-run: it sets exact totals, it doesn't increment.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    event_month = (month or _usage_month(datetime.utcnow())).strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', event_month):
+        raise HTTPException(400, 'month must be YYYY-MM')
+    target_user = await db.users.find_one({'id': target_user_id}, {'id': 1})
+    if not target_user:
+        raise HTTPException(404, 'User not found')
+
+    # Tally events grouped by (subject_type, subject_id, counter_field).
+    user_totals: Dict[str, int] = {f: 0 for f in USAGE_COUNTER_FIELDS}
+    account_totals: Dict[str, Dict[str, int]] = {}
+    cursor = db.usage_events.find({
+        'user_id': str(target_user_id),
+        'event_month': event_month,
+    })
+    scanned = 0
+    async for ev in cursor:
+        scanned += 1
+        counter = USAGE_COUNTER_BY_EVENT.get(ev.get('event_type'))
+        if not counter:
+            continue
+        user_totals[counter] = user_totals.get(counter, 0) + 1
+        ig_id = ev.get('instagram_account_id')
+        if ig_id:
+            bucket = account_totals.setdefault(str(ig_id), {f: 0 for f in USAGE_COUNTER_FIELDS})
+            bucket[counter] = bucket.get(counter, 0) + 1
+
+    now = datetime.utcnow()
+    snapshots = await _usage_snapshots_for_user(str(target_user_id))
+    # User-scope upsert.
+    await db.monthly_usage.update_one(
+        _monthly_usage_user_query(str(target_user_id), event_month),
+        {
+            '$set': {
+                **user_totals,
+                'user_id': str(target_user_id),
+                'limit_subject_type': 'user',
+                'limit_subject_id': str(target_user_id),
+                'event_month': event_month,
+                'updated_at': now,
+                **snapshots,
+            },
+            '$setOnInsert': {
+                'id': secrets.token_urlsafe(12),
+                'created_at': now,
+            },
+        },
+        upsert=True,
+    )
+    # Per-account upserts.
+    for ig_id, totals in account_totals.items():
+        await db.monthly_usage.update_one(
+            _monthly_usage_instagram_query(ig_id, event_month),
+            {
+                '$set': {
+                    **totals,
+                    'user_id': str(target_user_id),
+                    'limit_subject_type': 'instagram_account',
+                    'limit_subject_id': ig_id,
+                    'instagram_account_id': ig_id,
+                    'event_month': event_month,
+                    'updated_at': now,
+                },
+                '$setOnInsert': {
+                    'id': secrets.token_urlsafe(12),
+                    'created_at': now,
+                },
+            },
+            upsert=True,
+        )
+    try:
+        await invalidate_dashboard_summary(str(target_user_id), month=event_month)
+    except Exception:
+        pass
+    await _record_admin_action(
+        caller,
+        action='usage_recompute',
+        target_user_id=target_user_id,
+        metadata={'event_month': event_month, 'events_scanned': scanned,
+                  'accounts_updated': len(account_totals)},
+    )
+    return {
+        'ok': True,
+        'user_id': target_user_id,
+        'event_month': event_month,
+        'events_scanned': scanned,
+        'user_totals': user_totals,
+        'per_account_totals': account_totals,
     }
 
 
@@ -9406,7 +9627,25 @@ async def admin_user_detail(
             'plan_key': plan['plan_key'],
             'display_name': plan['display_name'],
             'billing_enabled': False,
-            **plan.get('_assignment', {}),
+            **{k: v for k, v in (plan.get('_assignment') or {}).items()
+               if k not in ('current_period_start', 'current_period_end',
+                            'expired', 'updated_at')},
+            'plan_expired': bool((plan.get('_assignment') or {}).get('expired')),
+            'current_period_start': (
+                (plan.get('_assignment') or {}).get('current_period_start').isoformat()
+                if isinstance((plan.get('_assignment') or {}).get('current_period_start'), datetime)
+                else None
+            ),
+            'current_period_end': (
+                (plan.get('_assignment') or {}).get('current_period_end').isoformat()
+                if isinstance((plan.get('_assignment') or {}).get('current_period_end'), datetime)
+                else None
+            ),
+            'updated_at': (
+                (plan.get('_assignment') or {}).get('updated_at').isoformat()
+                if isinstance((plan.get('_assignment') or {}).get('updated_at'), datetime)
+                else None
+            ),
         },
         'active_overrides': [
             _overrides.safe_override_summary(r)

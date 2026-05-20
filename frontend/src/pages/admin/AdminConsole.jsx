@@ -429,16 +429,28 @@ function UserDetailTab({ userId, onBack, me }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const onAssign = useCallback(async () => {
+  const onAssign = useCallback(async (opts = {}) => {
     setAssigning(true);
     try {
-      await api.post(`/admin/users/${encodeURIComponent(userId)}/plan`, {
+      const body = {
         plan_key: planKey,
         reason: reason || 'manual_admin_assignment',
-      });
-      toast.success(isAr()
-        ? `تم تعيين الخطة إلى ${PLAN_DISPLAY[planKey] || planKey}`
-        : `Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
+      };
+      if (opts.period_days != null) body.period_days = opts.period_days;
+      if (opts.extend) body.extend = true;
+      await api.post(`/admin/users/${encodeURIComponent(userId)}/plan`, body);
+      const msg = opts.period_days != null
+        ? (opts.extend
+            ? (isAr()
+                ? `تم تجديد الخطة ${PLAN_DISPLAY[planKey] || planKey} لمدة ${opts.period_days} يوم`
+                : `Renewed ${PLAN_DISPLAY[planKey] || planKey} for ${opts.period_days} more days`)
+            : (isAr()
+                ? `تم تفعيل الخطة ${PLAN_DISPLAY[planKey] || planKey} لمدة ${opts.period_days} يوم`
+                : `Activated ${PLAN_DISPLAY[planKey] || planKey} for ${opts.period_days} days`))
+        : (isAr()
+            ? `تم تعيين الخطة إلى ${PLAN_DISPLAY[planKey] || planKey}`
+            : `Plan set to ${PLAN_DISPLAY[planKey] || planKey}`);
+      toast.success(msg);
       setReason('');
       invalidateAdminUserCaches(userId);
       // Phase 2.18J: if the admin assigned the plan to themselves,
@@ -468,6 +480,27 @@ function UserDetailTab({ userId, onBack, me }) {
       setAssigning(false);
     }
   }, [userId, planKey, reason, load, user?.id, refreshUser]);
+
+  const [recomputeBusy, setRecomputeBusy] = useState(false);
+  const onRecomputeUsage = useCallback(async () => {
+    setRecomputeBusy(true);
+    try {
+      const r = await api.post(`/admin/users/${encodeURIComponent(userId)}/plan/recompute-usage`);
+      const scanned = r.data?.events_scanned ?? 0;
+      toast.success(isAr()
+        ? `أُعيد احتساب الاستخدام من ${scanned} حدث`
+        : `Recomputed usage from ${scanned} events`);
+      invalidateAdminUserCaches(userId);
+      invalidateApiCache('billing:plan-current');
+      invalidateApiCache('dashboard-summary');
+      await load();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || (isAr() ? 'تعذّر إعادة الاحتساب' : 'Failed to recompute usage');
+      toast.error(typeof msg === 'string' ? msg : (isAr() ? 'تعذّر إعادة الاحتساب' : 'Failed to recompute usage'));
+    } finally {
+      setRecomputeBusy(false);
+    }
+  }, [userId, load]);
 
   const onCreateAllowance = useCallback(async () => {
     const metrics = {};
@@ -636,6 +669,22 @@ function UserDetailTab({ userId, onBack, me }) {
                 </div>
               </div>
             </div>
+            {/* Current plan-period summary (manual grant while billing is off) */}
+            {(plan.current_period_end || plan.plan_expired) && (
+              <div className="mb-3 text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-md p-2"
+                   data-testid="admin-detail-plan-period">
+                {plan.plan_expired ? (
+                  <span className="text-rose-700 font-semibold">
+                    {isAr() ? 'انتهت صلاحية الخطة — رجع للحساب المجاني' : 'Plan expired — fell back to Free'}
+                  </span>
+                ) : (
+                  <span>
+                    {isAr() ? 'تنتهي في: ' : 'Renews / expires: '}
+                    <span className="font-mono">{formatTimestamp(plan.current_period_end)}</span>
+                  </span>
+                )}
+              </div>
+            )}
             {canAssignPlan ? (
               <div className="flex flex-wrap gap-2 items-center" data-testid="admin-detail-plan-controls">
                 <select
@@ -652,8 +701,37 @@ function UserDetailTab({ userId, onBack, me }) {
                   onChange={(e) => setReason(e.target.value)}
                   className="flex-1 min-w-[180px]"
                 />
-                <Button onClick={onAssign} disabled={assigning} data-testid="admin-detail-assign-btn">
+                <Button onClick={() => onAssign()} disabled={assigning} data-testid="admin-detail-assign-btn">
                   {assigning ? (isAr() ? 'جارٍ الحفظ…' : 'Saving…') : (isAr() ? 'تعيين الخطة' : 'Assign plan')}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => onAssign({ period_days: 30 })}
+                  disabled={assigning}
+                  data-testid="admin-detail-activate-30d-btn"
+                  title={isAr() ? 'فعّل الخطة لمدة 30 يوم اعتباراً من الآن' : 'Activate plan for 30 days starting now'}
+                >
+                  {isAr() ? 'تفعيل 30 يوم' : 'Activate 30 days'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => onAssign({ period_days: 30, extend: true })}
+                  disabled={assigning}
+                  data-testid="admin-detail-renew-30d-btn"
+                  title={isAr() ? 'أضف 30 يوم فوق الفترة الحالية' : 'Add 30 days on top of the current period'}
+                >
+                  {isAr() ? 'تمديد +30 يوم' : 'Extend +30 days'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={onRecomputeUsage}
+                  disabled={recomputeBusy}
+                  data-testid="admin-detail-recompute-usage-btn"
+                  title={isAr() ? 'أعد احتساب عدّادات الاستهلاك من السجل الخام' : 'Rebuild monthly usage counters from raw events'}
+                >
+                  {recomputeBusy
+                    ? (isAr() ? 'جارٍ الاحتساب…' : 'Recomputing…')
+                    : (isAr() ? 'إعادة احتساب الاستهلاك' : 'Recompute usage')}
                 </Button>
               </div>
             ) : (
