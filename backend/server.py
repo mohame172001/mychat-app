@@ -7041,6 +7041,51 @@ async def admin_tools_enabled(user_id: str = Depends(get_current_active_user_id)
     }
 
 
+@api.get('/admin/comment-dm-sessions/recent')
+async def admin_comment_dm_sessions_recent(
+    user_id: str = Depends(get_current_active_user_id),
+    limit: int = 20,
+):
+    """Phase 2.19 ops diagnostic: return the caller's most recent
+    comment_dm_sessions so we can see whether sessions are being
+    created, what stage they're in, and why they aren't advancing.
+    No tokens or message bodies leak — only the metadata fields that
+    drive the matching logic in _find_pending_comment_dm_session.
+    """
+    me_doc = await db.users.find_one({'id': user_id}) or {}
+    if not (me_doc.get('is_admin') or me_doc.get('email') in ADMIN_EMAILS):
+        raise HTTPException(403, 'forbidden')
+    safe_limit = max(1, min(int(limit or 20), 100))
+    cursor = db.comment_dm_sessions.find({'user_id': user_id}).sort('created', -1).limit(safe_limit)
+    out = []
+    async for doc in cursor:
+        out.append({
+            'id': doc.get('id'),
+            'created': (doc.get('created') or '').isoformat() if hasattr(doc.get('created'), 'isoformat') else None,
+            'updated': (doc.get('updated') or '').isoformat() if hasattr(doc.get('updated'), 'isoformat') else None,
+            'status': doc.get('status'),
+            'stage': doc.get('stage'),
+            'ig_user_id': doc.get('ig_user_id'),
+            'instagramAccountId': doc.get('instagramAccountId'),
+            'instagramUsername': doc.get('instagramUsername'),
+            'recipient_id': doc.get('recipient_id'),
+            'follow_request_enabled': doc.get('follow_request_enabled'),
+            'follow_confirmed': doc.get('follow_confirmed'),
+            'follow_verified': doc.get('follow_verified'),
+            'follow_verification_attempts': doc.get('follow_verification_attempts'),
+            'lastFollowCheckOk': doc.get('lastFollowCheckOk'),
+            'lastFollowCheckStatus': doc.get('lastFollowCheckStatus'),
+            'lastFollowVerificationError': doc.get('lastFollowVerificationError'),
+            'followPromptSentAt': doc.get('followPromptSentAt').isoformat() if hasattr(doc.get('followPromptSentAt'), 'isoformat') else None,
+            'followLastCheckedAt': doc.get('followLastCheckedAt').isoformat() if hasattr(doc.get('followLastCheckedAt'), 'isoformat') else None,
+            'finalDmSentAt': doc.get('finalDmSentAt').isoformat() if hasattr(doc.get('finalDmSentAt'), 'isoformat') else None,
+            'sentSteps': doc.get('sentSteps'),
+            'payload': doc.get('payload'),
+            'expiresAt': doc.get('expiresAt').isoformat() if hasattr(doc.get('expiresAt'), 'isoformat') else None,
+        })
+    return {'count': len(out), 'items': out}
+
+
 @api.get('/admin/comments/{ig_comment_id}/specific-reply-diagnosis')
 async def admin_specific_reply_diagnosis(
     ig_comment_id: str,
