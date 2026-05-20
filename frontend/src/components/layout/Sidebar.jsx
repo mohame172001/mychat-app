@@ -194,7 +194,12 @@ const Sidebar = () => {
     event?.stopPropagation?.();
     setSwitchingAccount(true);
     try {
-      await startInstagramConnect({ mode: connectMode, returnTo: '/app' });
+      // Phase 2.19 UX fix: route the OAuth return through Settings →
+      // Instagram tab so its useEffect can pick up ?ig=error&reason=…
+      // and surface a translated toast. Returning to /app (Dashboard)
+      // dropped the error silently because Dashboard has no handler
+      // for those params.
+      await startInstagramConnect({ mode: connectMode, returnTo: '/app/settings?tab=instagram' });
     } catch (e) {
       toast.error(e?.response?.data?.detail || e?.message || (ar ? 'تعذّر بدء ربط Instagram' : 'Failed to start Instagram connection'));
       setSwitchingAccount(false);
