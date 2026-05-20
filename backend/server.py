@@ -2183,6 +2183,25 @@ FOLLOW_VERIFICATION_COOLDOWN_SECONDS = _follow_verification_cooldown_seconds()
 # Meta updates is_user_follow_business a few seconds AFTER the user follows.
 FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS = 25
 FOLLOW_BACKGROUND_VERIFIER_MAX_AGE_MINUTES = 30
+# Webhook subscription self-heal loop — re-checks Meta's subscribed_fields
+# every WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS and re-subscribes any
+# account that is missing critical fields (messages / messaging_postbacks).
+# Default: every 30 minutes. Set to 0 to disable.
+try:
+    WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS = int(
+        os.environ.get('WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS', '1800')
+    )
+except Exception:
+    WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS = 1800
+# Fields we treat as critical for the comment-DM flow. If any of these is
+# missing from Meta's /subscribed_apps for an account, the self-heal loop
+# re-subscribes it. messages + messaging_postbacks are the ones that
+# carry button-click quick_reply events, which is exactly the symptom
+# we keep hitting (comments arrive, clicks don't).
+WEBHOOK_REQUIRED_FIELDS = {
+    'comments', 'messages', 'messaging_postbacks',
+    'messaging_seen', 'message_reactions', 'live_comments',
+}
 # Sent once per cooldown window when the user taps again before the
 # cooldown elapses. Rate-limited by lastCooldownNoticeAt on the session.
 DEFAULT_FOLLOW_COOLDOWN_MESSAGE = (
@@ -17172,6 +17191,127 @@ async def _follow_verifier_loop():
             await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
 
 
+async def _webhook_subscription_heal_loop():
+    """Self-heal background loop: every ~30 min, for every active IG
+    account, ask Meta what fields are currently subscribed. If
+    `messages` or `messaging_postbacks` is missing — the exact silent-
+    breakage we saw with @mogehad17 (comments arrive, button clicks
+    don't) — POST /subscribed_apps to re-subscribe the full field set.
+
+    This is a no-op when Meta already has the full set, so it's safe to
+    run continuously. It exists because Meta sometimes silently drops
+    fields from a long-lived subscription (during permission re-prompts,
+    after token refreshes, or during App review state changes) without
+    erroring or notifying us — which leaves the account looking healthy
+    to our local state while button-click webhooks just stop arriving.
+    """
+    if WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS <= 0:
+        logger.info('webhook_subscription_heal_disabled')
+        return
+    logger.info('webhook_subscription_heal_started interval=%ss',
+                WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS)
+    # On boot, run one cycle quickly so a fresh deploy fixes any
+    # already-broken accounts within ~30s instead of waiting an hour.
+    first_run = True
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
+        cycle_ok = True
+        cycle_err: Optional[BaseException] = None
+        try:
+            cursor = db.instagram_accounts.find({
+                'isActive': {'$ne': False},
+                'connectionValid': {'$ne': False},
+                'accessToken': {'$nin': [None, '']},
+            })
+            accounts = await cursor.to_list(500)
+            healed = 0
+            checked = 0
+            async with httpx.AsyncClient(timeout=15) as c:
+                for acc in accounts:
+                    if IS_SHUTTING_DOWN:
+                        break
+                    ig_user_id = acc.get('instagramAccountId') or acc.get('igUserId') or ''
+                    token = acc.get('accessToken') or ''
+                    if not (ig_user_id and token):
+                        continue
+                    checked += 1
+                    try:
+                        gr = await c.get(
+                            f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                            params={'access_token': token},
+                        )
+                        present = set()
+                        if gr.status_code == 200:
+                            for entry in (gr.json() or {}).get('data') or []:
+                                for f in entry.get('subscribed_fields') or []:
+                                    present.add(f)
+                        missing = WEBHOOK_REQUIRED_FIELDS - present
+                        await db.instagram_accounts.update_one(
+                            {'id': acc['id']},
+                            {'$set': {
+                                'webhookSubscriptionLastCheckedAt': datetime.utcnow(),
+                                'webhookSubscriptionFields': sorted(present),
+                                'webhookSubscriptionMissing': sorted(missing),
+                            }},
+                        )
+                        if missing and gr.status_code == 200:
+                            # Re-subscribe the whole field set; Meta upserts.
+                            healed += 1
+                            logger.warning(
+                                'webhook_subscription_heal_resubscribing '
+                                'ig_user_id=%s username=%s missing=%s',
+                                ig_user_id, acc.get('username'), sorted(missing),
+                            )
+                            fields = ','.join(sorted(WEBHOOK_REQUIRED_FIELDS))
+                            try:
+                                pr = await c.post(
+                                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                                    params={'access_token': token,
+                                            'subscribed_fields': fields},
+                                )
+                                await db.instagram_accounts.update_one(
+                                    {'id': acc['id']},
+                                    {'$set': {
+                                        'webhookSubscriptionLastHealedAt': datetime.utcnow(),
+                                        'webhookSubscriptionLastHealStatus': pr.status_code,
+                                    }},
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    'webhook_subscription_heal_post_failed '
+                                    'ig_user_id=%s err=%s',
+                                    ig_user_id, type(exc).__name__,
+                                )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.info(
+                            'webhook_subscription_heal_per_account_error '
+                            'ig_user_id=%s err=%s',
+                            ig_user_id, type(exc).__name__,
+                        )
+            if checked:
+                logger.info(
+                    'webhook_subscription_heal_tick checked=%s healed=%s',
+                    checked, healed,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            cycle_ok = False
+            cycle_err = exc
+            logger.exception('webhook_subscription_heal_tick_failed')
+        _bg_tick('webhook_subscription_heal', success=cycle_ok, error=cycle_err)
+        # Short first-run delay, then normal cadence.
+        wait_s = 30 if first_run else WEBHOOK_SUBSCRIPTION_HEAL_INTERVAL_SECONDS
+        first_run = False
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=wait_s)
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(wait_s)
+
+
 @api.get('/instagram/automation-health')
 async def instagram_automation_health(user_id: str = Depends(get_current_active_user_id)):
     """Operational status for comment / DM / follow automation.
@@ -19705,6 +19845,7 @@ async def _startup():
     _register_bg_task('webhook_dlq', _webhook_dlq_loop)
     _register_bg_task('collab_reclassifier', _collab_reclassifier_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
+    _register_bg_task('webhook_subscription_heal', _webhook_subscription_heal_loop)
     # Watchdog last so it can supervise the others.
     _register_bg_task('watchdog', _watchdog_loop)
 
