@@ -3194,18 +3194,14 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
         'recipient_id': sender_id,
         'status': 'pending',
     }
-    # Phase 2.19 fix: when the SAME mychat user has two Instagram
-    # accounts linked (e.g. @muhammad_gehad + @mogehad17), a DM the
-    # bot sends from account A reaches account B's inbox, which
-    # fires B's webhook. Without an ig_user_id filter, the lookup
-    # would match A's pending session and try to advance the flow
-    # from the wrong direction — sending the next step from B back
-    # to A, which Instagram rejects (or, worse, kicks off a loop).
-    # Restricting the lookup to the IG account that actually owns
-    # the webhook prevents the cross-talk.
-    ig_user_id = user_doc.get('ig_user_id')
-    if ig_user_id:
-        q['ig_user_id'] = ig_user_id
+    # Phase 2.19 reverted: the earlier ig_user_id filter (e709ecd) broke
+    # normal end users — session.ig_user_id stored at comment-poll time
+    # could disagree with user_doc.ig_user_id at webhook time when the
+    # owning IG account isn't the currently-active one in the user's
+    # users row. The cross-account quirk (muhammad_gehad ↔ mogehad17
+    # under one mychat user) is rarer than the false-negative this
+    # filter caused for real users, so we revert until we have a
+    # safer disambiguation strategy.
     if payload and str(payload).startswith('comment_flow:'):
         parts = str(payload).split(':')
         if len(parts) >= 2 and parts[1]:
