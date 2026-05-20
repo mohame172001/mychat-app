@@ -3529,36 +3529,76 @@ def _comment_opening_dedupe_key(user_id: str, instagram_account_id: str,
 
 async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
                                            payload: Optional[str] = None) -> Optional[dict]:
-    q = {
+    """Resolve a pending comment-flow session from a messaging event.
+
+    Architecture (Task F):
+    1. Secure payload (``comment_flow:<session_id>:continue``) is the
+       PRIMARY identity proof. The session_id is a server-minted UUID,
+       so once it round-trips through Meta we trust it. We look up the
+       session by ``(user_id, id=session_id, status=pending)`` and only
+       advisorily verify that the user_doc's IG account matches the
+       session's stored IG account. A mismatch is logged but does not
+       suppress the lookup — that would silently break legitimate
+       continuations whenever a session's ``ig_user_id`` field was
+       stored as ``''`` or in a slightly different format.
+    2. If no payload (free-text reply on an old session, postback
+       without payload) we fall back to a recipient+ig_user_id lookup.
+       That fallback must still be account-scoped because there is no
+       other identity proof.
+    """
+    ig_user_id = str(user_doc.get('ig_user_id') or '')
+    base_q = {
         'user_id': user_doc['id'],
         'status': 'pending',
     }
-    # Phase 2.19 re-enabled: with the comment poller now iterating
-    # instagram_accounts directly and scoping the user_doc per account,
-    # session.ig_user_id (set at poll time) and user_doc.ig_user_id (set
-    # at webhook time via _with_instagram_account_context) always agree
-    # on the IG account that owns the post + receives the webhook. The
-    # filter is safe and prevents cross-talk when one mychat user has
-    # multiple IG accounts linked.
-    ig_user_id = user_doc.get('ig_user_id')
-    if ig_user_id:
-        q['ig_user_id'] = ig_user_id
     session_id = _comment_flow_session_id_from_payload(payload)
+    logger.info(
+        'comment_flow_session_lookup_started instagram_account_id=%s sender=%s payload_session=%s',
+        _safe_partial_identifier(ig_user_id),
+        _safe_partial_identifier(sender_id),
+        _safe_partial_identifier(session_id),
+    )
     if session_id:
-        by_payload = {**q, 'id': session_id}
-        session = await db.comment_dm_sessions.find_one(by_payload, sort=[('created', -1)])
+        # Payload-first lookup. We deliberately do NOT add an
+        # ``ig_user_id`` filter here — the server-minted UUID inside
+        # the payload is sufficient identity and adding a brittle
+        # equality filter on ``ig_user_id`` is what caused both
+        # "first DM works, click does nothing" reports.
+        by_payload = {**base_q, 'id': session_id}
+        session = await db.comment_dm_sessions.find_one(
+            by_payload, sort=[('created', -1)]
+        )
         if session:
-            if sender_id and session.get('recipient_id') and str(session.get('recipient_id')) != str(sender_id):
+            stored_ig_user = (
+                session.get('ig_user_id')
+                or session.get('instagramAccountId')
+                or session.get('igUserId')
+                or ''
+            )
+            if ig_user_id and stored_ig_user and str(stored_ig_user) != ig_user_id:
+                # Advisory only. The session id is the source of
+                # truth; downstream send paths re-scope the user_doc
+                # via _send_comment_dm_flow_completion's safety net
+                # so the correct token is used to deliver the next
+                # message.
+                logger.warning(
+                    'comment_flow_session_account_drift session_id=%s '
+                    'session_ig=%s webhook_ig=%s — continuing via payload',
+                    session.get('id'),
+                    _safe_partial_identifier(stored_ig_user),
+                    _safe_partial_identifier(ig_user_id),
+                )
+            if sender_id and session.get('recipient_id') and \
+                    str(session.get('recipient_id')) != str(sender_id):
                 logger.info(
-                    'postback_flow_sender_mismatch session_id=%s instagram_account_id=%s '
+                    'comment_flow_session_sender_mismatch session_id=%s '
                     'stored_recipient=%s webhook_sender=%s',
                     session.get('id'),
-                    _safe_partial_identifier(ig_user_id),
                     _safe_partial_identifier(session.get('recipient_id')),
                     _safe_partial_identifier(sender_id),
                 )
             logger.info(
-                'postback_flow_state_found session_id=%s instagram_account_id=%s '
+                'comment_flow_session_found session_id=%s instagram_account_id=%s '
                 'automation_id=%s recipient=%s lookup=payload',
                 session.get('id'),
                 _safe_partial_identifier(ig_user_id),
@@ -3567,21 +3607,43 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
             )
             return session
         logger.info(
-            'postback_flow_state_missing session_id=%s instagram_account_id=%s lookup=payload',
+            'comment_flow_session_missing session_id=%s instagram_account_id=%s lookup=payload',
             _safe_partial_identifier(session_id),
             _safe_partial_identifier(ig_user_id),
         )
     if not sender_id:
         return None
-    q['recipient_id'] = sender_id
-    session = await db.comment_dm_sessions.find_one(q, sort=[('created', -1)])
+    # Free-text fallback: we have no signed session id, so we must
+    # narrow by both recipient AND account. The account match accepts
+    # any of the three stored shapes (ig_user_id / instagramAccountId
+    # / igUserId) since sessions written by older code paths can be
+    # in either field.
+    fallback_q = {
+        **base_q,
+        'recipient_id': sender_id,
+    }
+    if ig_user_id:
+        fallback_q['$or'] = [
+            {'ig_user_id': ig_user_id},
+            {'instagramAccountId': ig_user_id},
+            {'igUserId': ig_user_id},
+        ]
+    session = await db.comment_dm_sessions.find_one(
+        fallback_q, sort=[('created', -1)]
+    )
     if session:
         logger.info(
-            'comment_opening_flow_state_found session_id=%s instagram_account_id=%s '
+            'comment_flow_session_found session_id=%s instagram_account_id=%s '
             'automation_id=%s recipient=%s lookup=recipient',
             session.get('id'),
             _safe_partial_identifier(ig_user_id),
             session.get('automation_id'),
+            _safe_partial_identifier(sender_id),
+        )
+    else:
+        logger.info(
+            'comment_flow_session_missing instagram_account_id=%s sender=%s lookup=recipient',
+            _safe_partial_identifier(ig_user_id),
             _safe_partial_identifier(sender_id),
         )
     return session
@@ -7546,6 +7608,154 @@ async def admin_comment_dm_sessions_recent(
             'expiresAt': doc.get('expiresAt').isoformat() if hasattr(doc.get('expiresAt'), 'isoformat') else None,
         })
     return {'count': len(out), 'items': out}
+
+
+@api.get('/admin/instagram/automation-trace')
+async def admin_automation_trace(
+    user_id: str = Depends(get_current_active_user_id),
+    instagram_account_id: Optional[str] = None,
+    limit: int = 10,
+):
+    """Safe per-account flow trace. Returns the most recent comment +
+    comment-DM-session + dm_log rows for one linked Instagram account,
+    scoped to the caller's user_id, so a multi-account user can compare
+    Account 1 vs Account 2 in a single response.
+
+    Output is sanitized:
+      - external IG ids are partially redacted via _safe_partial_identifier
+      - no access tokens, raw comment text, raw DM bodies, or webhook
+        payloads are returned
+      - includes the resolved rule's post_scope + selected_media_id and
+        each comment's match decision so the operator can see WHY a
+        rule fired (or didn't) for a given media_id
+
+    Requires admin.users.view RBAC. Independent of
+    ENABLE_ADMIN_REPAIR_TOOLS — this is read-only structured metadata
+    suitable for any admin role.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    safe_limit = max(1, min(int(limit or 10), 50))
+
+    accounts_q: Dict[str, Any] = {'userId': user_id}
+    if instagram_account_id:
+        accounts_q['$or'] = [
+            {'instagramAccountId': str(instagram_account_id)},
+            {'igUserId': str(instagram_account_id)},
+            {'id': str(instagram_account_id)},
+        ]
+    accounts = await db.instagram_accounts.find(accounts_q).to_list(20)
+    out_accounts: List[Dict[str, Any]] = []
+    for account in accounts:
+        ig_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+        if not ig_id:
+            continue
+        ig_filter = {
+            'user_id': user_id,
+            '$or': [
+                {'instagramAccountId': str(ig_id)},
+                {'igUserId': str(ig_id)},
+                {'ig_user_id': str(ig_id)},
+            ],
+        }
+        comments_cursor = db.comments.find(ig_filter).sort('created', -1).limit(safe_limit)
+        comments_safe: List[Dict[str, Any]] = []
+        async for c in comments_cursor:
+            comments_safe.append({
+                'comment_id': c.get('id'),
+                'ig_comment_id': _safe_partial_identifier(c.get('ig_comment_id')),
+                'media_id': _safe_partial_identifier(c.get('media_id')),
+                'commenter_id': _safe_partial_identifier(c.get('commenter_id')),
+                'rule_id': c.get('rule_id') or c.get('ruleId'),
+                'matched_rule_priority': c.get('matched_rule_priority'),
+                'matched_rule_scope': c.get('matched_rule_scope'),
+                'broad_rules_skipped_due_specific_match': c.get('broad_rules_skipped_due_specific_match'),
+                'action_status': c.get('action_status'),
+                'reply_status': c.get('reply_status'),
+                'dm_status': c.get('dm_status'),
+                'reply_failure_reason': c.get('reply_failure_reason'),
+                'dm_failure_reason': c.get('dm_failure_reason'),
+                'skip_reason': c.get('skip_reason'),
+                'opening_dedupe_key': _safe_partial_identifier(c.get('opening_dedupe_key')),
+                'created': c.get('created').isoformat() if isinstance(c.get('created'), datetime) else None,
+                'source': c.get('source'),
+            })
+        sessions_cursor = db.comment_dm_sessions.find(ig_filter).sort('created', -1).limit(safe_limit)
+        sessions_safe: List[Dict[str, Any]] = []
+        async for s in sessions_cursor:
+            sessions_safe.append({
+                'session_id': s.get('id'),
+                'status': s.get('status'),
+                'stage': s.get('stage'),
+                'automation_id': s.get('automation_id'),
+                'media_id': _safe_partial_identifier(s.get('media_id')),
+                'recipient_id': _safe_partial_identifier(s.get('recipient_id')),
+                'commenter_id': _safe_partial_identifier(s.get('commenter_id')),
+                'follow_request_enabled': bool(s.get('follow_request_enabled')),
+                'follow_confirmed': bool(s.get('follow_confirmed')),
+                'follow_verified': bool(s.get('follow_verified')),
+                'finalDmSentAt': s.get('finalDmSentAt').isoformat() if isinstance(s.get('finalDmSentAt'), datetime) else None,
+                'opening_dedupe_key': _safe_partial_identifier(s.get('opening_dedupe_key')),
+                'created': s.get('created').isoformat() if isinstance(s.get('created'), datetime) else None,
+                'updated': s.get('updated').isoformat() if isinstance(s.get('updated'), datetime) else None,
+            })
+        dm_logs_cursor = db.dm_logs.find(ig_filter).sort('created', -1).limit(safe_limit)
+        dm_logs_safe: List[Dict[str, Any]] = []
+        async for l in dm_logs_cursor:
+            dm_logs_safe.append({
+                'log_id': l.get('id'),
+                'event_kind': l.get('event_kind'),
+                'status': l.get('status'),
+                'skip_reason': l.get('skip_reason'),
+                'matched_rule_id': l.get('matched_rule_id'),
+                'comment_flow_session_id': l.get('comment_flow_session_id'),
+                'sender_id': _safe_partial_identifier(l.get('sender_id')),
+                'recipient_id': _safe_partial_identifier(l.get('recipient_id')),
+                'has_quick_reply_payload': bool(l.get('quick_reply_payload')),
+                'has_postback_payload': bool(l.get('postback_payload')),
+                'created': l.get('created').isoformat() if isinstance(l.get('created'), datetime) else None,
+            })
+        rules_cursor = db.automations.find({
+            **_account_scoped_query(user_id, ig_id),
+            'status': 'active',
+        })
+        rules_safe: List[Dict[str, Any]] = []
+        async for r in rules_cursor:
+            rules_safe.append({
+                'rule_id': r.get('id'),
+                'name': r.get('name'),
+                'trigger': r.get('trigger'),
+                'post_scope': r.get('post_scope'),
+                'selected_media_id': _safe_partial_identifier(_selected_specific_media_id(r)),
+                'mode': r.get('mode'),
+                'reply_under_post': bool(r.get('reply_under_post')),
+                'has_opening_dm': bool(r.get('opening_dm_text') or r.get('dm_text')),
+                'follow_request_enabled': bool(r.get('follow_request_enabled')),
+                'activationStartedAt': (
+                    r.get('activationStartedAt').isoformat()
+                    if isinstance(r.get('activationStartedAt'), datetime) else r.get('activationStartedAt')
+                ),
+            })
+        out_accounts.append({
+            'instagram_account_id': _safe_partial_identifier(ig_id),
+            'username': account.get('username'),
+            'isActive': account.get('isActive', True),
+            'connectionValid': account.get('connectionValid'),
+            'rules': rules_safe,
+            'recent_comments': comments_safe,
+            'recent_sessions': sessions_safe,
+            'recent_dm_logs': dm_logs_safe,
+        })
+    await _record_admin_action(
+        caller,
+        action='automation_trace_view',
+        target_user_id=user_id,
+        metadata={'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id)},
+    )
+    return {
+        'ok': True,
+        'user_id': user_id,
+        'accounts': out_accounts,
+    }
 
 
 @api.get('/admin/comments/{ig_comment_id}/specific-reply-diagnosis')
@@ -12570,9 +12780,40 @@ def _is_comment_automation_rule(rule: dict) -> bool:
 
 
 def _selected_specific_media_id(rule: dict) -> Optional[str]:
-    """Return the one selected media id for a single-post rule, else None."""
-    media_id = str(rule.get('media_id') or rule.get('trigger_media_id') or '').strip()
-    post_scope = str(rule.get('post_scope') or '').strip().lower()
+    """Return the one selected media id for a single-post rule, else None.
+
+    Accepts the full set of alias keys the frontend / migration scripts
+    have used over time so we never silently drop a post-specific rule
+    because of a key-name drift. Documented alias order matches the
+    canonical-first preference (``media_id`` was the contract; the
+    rest are legacy/forward-compat). Task D — Correct rule matching.
+    """
+    media_alias_keys = (
+        'media_id',
+        'trigger_media_id',
+        'selected_media_id',
+        'selectedMediaId',
+        'target_media_id',
+        'targetMediaId',
+        'selected_post_id',
+        'selectedPostId',
+        'target_post_id',
+        'targetPostId',
+        'instagram_media_id',
+        'instagramMediaId',
+        'post_id',
+        'postId',
+        'ig_media_id',
+        'igMediaId',
+    )
+    media_id = ''
+    for key in media_alias_keys:
+        candidate = rule.get(key)
+        if candidate:
+            media_id = str(candidate).strip()
+            if media_id:
+                break
+    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
     trigger = _comment_rule_trigger_value(rule).strip()
     trigger_l = trigger.lower()
 
@@ -16845,6 +17086,15 @@ async def _process_webhook(payload: dict):
                 event_user_id = user_id
                 event_ig_account_id = ig_account_id
                 recipient_id = (event.get('recipient') or {}).get('id') if isinstance(event, dict) else None
+                logger.info(
+                    'messaging_event_detected entry_id=%s entry_account=%s recipient=%s sender=%s',
+                    _safe_partial_identifier(entry.get('id')),
+                    _safe_partial_identifier(ig_account_id),
+                    _safe_partial_identifier(recipient_id),
+                    _safe_partial_identifier(
+                        (event.get('sender') or {}).get('id') if isinstance(event, dict) else None
+                    ),
+                )
                 if recipient_id:
                     try:
                         recipient_user_doc, recipient_mapping_via = await _find_user_doc_for_instagram_account_id(recipient_id)
@@ -16852,7 +17102,7 @@ async def _process_webhook(payload: dict):
                         recipient_user_doc = None
                         recipient_mapping_via = None
                         logger.info(
-                            'postback_account_resolution_recipient_lookup_failed recipient=%s err=%s',
+                            'account_resolution_recipient_lookup_failed recipient=%s err=%s',
                             _safe_partial_identifier(recipient_id),
                             type(exc).__name__,
                         )
@@ -16860,16 +17110,15 @@ async def _process_webhook(payload: dict):
                         event_user_doc = recipient_user_doc
                         event_user_id = recipient_user_doc.get('id') or event_user_id
                         event_ig_account_id = recipient_user_doc.get('ig_user_id') or event_ig_account_id
-                        if event_ig_account_id != ig_account_id:
-                            logger.info(
-                                'postback_account_resolved_from_recipient entry_id=%s recipient=%s '
-                                'entry_account=%s event_account=%s via=%s',
-                                _safe_partial_identifier(entry.get('id')),
-                                _safe_partial_identifier(recipient_id),
-                                _safe_partial_identifier(ig_account_id),
-                                _safe_partial_identifier(event_ig_account_id),
-                                recipient_mapping_via,
-                            )
+                        logger.info(
+                            'account_resolution_from_recipient entry_id=%s recipient=%s '
+                            'entry_account=%s event_account=%s via=%s',
+                            _safe_partial_identifier(entry.get('id')),
+                            _safe_partial_identifier(recipient_id),
+                            _safe_partial_identifier(ig_account_id),
+                            _safe_partial_identifier(event_ig_account_id),
+                            recipient_mapping_via,
+                        )
                 # ALWAYS feed the DM automation handler first, with the raw
                 # messaging item, so every event (read/delivery/reaction/
                 # postback/text/echo) produces an explicit dm_logs row.
@@ -16949,6 +17198,25 @@ async def _process_webhook(payload: dict):
                 if is_comment:
                     commenter = value.get('from', {}) or {}
                     media_obj = value.get('media') or {}
+                    # Comment-event media id resolution. IG Graph + FB Page
+                    # feed both send ``value.media.id`` for normal comments,
+                    # but older payload shapes (Page feed for video posts,
+                    # carousel reposts) sometimes only carry ``post_id`` or
+                    # a flat ``media_id``. We accept every alias the docs
+                    # have used so post-specific rules can never silently
+                    # miss because of an envelope shape change. We DO NOT
+                    # fall back to ``value.parent_id`` here — that field is
+                    # the parent COMMENT id on replies, not the media id,
+                    # and using it would mis-route the post-specific match.
+                    media_id_resolved = (
+                        media_obj.get('id')
+                        or media_obj.get('media_id')
+                        or value.get('media_id')
+                        or value.get('post_id')
+                        or value.get('postId')
+                        or value.get('mediaId')
+                        or value.get('ig_media_id')
+                    )
                     # entry.time is a Unix timestamp (int) set by Meta when the
                     # entry was dispatched. It is a reliable proxy for "now"
                     # when the comment payload itself carries no timestamp.
@@ -16960,9 +17228,29 @@ async def _process_webhook(payload: dict):
                                 int(entry_time_unix)).strftime('%Y-%m-%dT%H:%M:%S+0000')
                         except (ValueError, OSError, OverflowError):
                             entry_time_iso = None
+                    logger.info(
+                        'comment_event_detected user_id=%s instagram_account_id=%s '
+                        'media_id=%s comment_id=%s commenter_id=%s '
+                        'media_id_source=%s',
+                        user_id,
+                        _safe_partial_identifier(ig_account_id),
+                        _safe_partial_identifier(media_id_resolved),
+                        _safe_partial_identifier(value.get('comment_id') or value.get('id')),
+                        _safe_partial_identifier(commenter.get('id')),
+                        (
+                            'media.id' if media_obj.get('id')
+                            else 'media.media_id' if media_obj.get('media_id')
+                            else 'value.media_id' if value.get('media_id')
+                            else 'value.post_id' if value.get('post_id')
+                            else 'value.postId' if value.get('postId')
+                            else 'value.mediaId' if value.get('mediaId')
+                            else 'value.ig_media_id' if value.get('ig_media_id')
+                            else 'none'
+                        ),
+                    )
                     await _handle_new_comment(user_doc, {
                         'ig_comment_id': value.get('comment_id') or value.get('id'),
-                        'media_id': media_obj.get('id') or value.get('post_id') or value.get('parent_id'),
+                        'media_id': media_id_resolved,
                         'commenter_id': commenter.get('id'),
                         'commenter_username': commenter.get('username') or commenter.get('name'),
                         'text': value.get('text') or value.get('message', ''),

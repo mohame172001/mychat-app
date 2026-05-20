@@ -523,3 +523,420 @@ def test_classify_instagram_quick_reply_aliases_and_nested_postback_payloads():
         },
     })
     assert nested_postback['postback_payload'] == 'comment_flow:session-b:continue'
+
+
+def test_session_lookup_resolves_by_payload_when_session_ig_user_id_is_blank(monkeypatch):
+    """Production failure mode: a pending session was written with an
+    empty ``ig_user_id`` field (legacy doc, migration, or a session
+    created before _with_instagram_account_context applied). The
+    secure payload session_id must still resolve the session — adding
+    a brittle ig_user_id equality filter is what broke quick-reply
+    continuation on the second account."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-legacy-blank',
+        'user_id': 'u1',
+        # Intentionally blank account fields — this is the production
+        # shape that broke the old query.
+        'ig_user_id': '',
+        'instagramAccountId': '',
+        'igUserId': '',
+        'recipient_id': 'igsid-external',
+        'automation_id': 'ruleB',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-legacy-blank:continue',
+        'created': now,
+        'updated': now,
+    })
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    session = _run(server._find_pending_comment_dm_session(
+        owner_b, 'igsid-external',
+        payload='comment_flow:session-legacy-blank:continue',
+    ))
+    assert session is not None
+    assert session['id'] == 'session-legacy-blank'
+
+
+def test_session_lookup_payload_first_when_session_account_drifted(monkeypatch):
+    """Production failure mode: session was written with a different
+    ig_user_id than the click webhook resolved to (e.g. the user
+    re-linked an IG account and the canonical id rotated). The signed
+    payload session_id is sufficient identity; the lookup must NOT
+    silently drop the session because of the drift."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-drifted',
+        'user_id': 'u1',
+        'ig_user_id': 'igOLD',  # drifted/stale account id
+        'instagramAccountId': 'igOLD',
+        'igUserId': 'igOLD',
+        'recipient_id': 'igsid-external',
+        'automation_id': 'ruleB',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-drifted:continue',
+        'created': now,
+        'updated': now,
+    })
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    session = _run(server._find_pending_comment_dm_session(
+        owner_b, 'igsid-external',
+        payload='comment_flow:session-drifted:continue',
+    ))
+    assert session is not None
+    assert session['id'] == 'session-drifted'
+
+
+def test_selected_specific_media_id_accepts_alias_field_names():
+    """Post-specific rules must be matched even when stored under any
+    of the historical alias names (selected_media_id, target_post_id,
+    instagram_media_id, etc). A field-name drift must never silently
+    convert a post-specific rule into a no-match."""
+    aliases = [
+        'media_id',
+        'trigger_media_id',
+        'selected_media_id',
+        'selectedMediaId',
+        'target_media_id',
+        'targetMediaId',
+        'selected_post_id',
+        'selectedPostId',
+        'target_post_id',
+        'targetPostId',
+        'instagram_media_id',
+        'instagramMediaId',
+        'post_id',
+        'postId',
+        'ig_media_id',
+        'igMediaId',
+    ]
+    for key in aliases:
+        rule = {'post_scope': 'specific', key: 'mediaP'}
+        assert server._selected_specific_media_id(rule) == 'mediaP', (
+            f'media_id alias {key} should resolve to mediaP but did not')
+
+
+def test_selected_specific_media_id_returns_none_for_broad_rule():
+    rule = {'post_scope': 'any', 'trigger': 'comment:any'}
+    assert server._selected_specific_media_id(rule) is None
+    latest = {'post_scope': 'latest', 'trigger': 'comment:latest'}
+    assert server._selected_specific_media_id(latest) is None
+
+
+def test_post_specific_rule_does_not_fire_on_unrelated_media(monkeypatch):
+    """Account B's post-specific rule for mediaP must NOT fire when a
+    comment lands on mediaQ on Account B."""
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific', 'mediaP'),
+    ]
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append((access_token, ig_user_id, recipient_id, message))
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-q-1',
+            'media_id': 'mediaQ',
+            'commenter_id': 'igsid-external',
+            'commenter_username': 'follower',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is False
+    assert reply_calls == []
+    assert send_calls == []
+
+
+def test_account_a_general_rule_does_not_fire_on_account_b_post(monkeypatch):
+    """Sibling-account scoping: Account A's general comment:any rule
+    must only fire on Account A posts. A comment on Account B that
+    routes via owner_b must hit Account B's rule set only."""
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _comment_rule('accA', 'igA', 'ruleA-general'),
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific', 'mediaP'),
+    ]
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({
+            'access_token': access_token, 'comment_id': comment_id, 'text': text,
+        })
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append({
+            'access_token': access_token, 'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-on-mediaP',
+            'media_id': 'mediaP',
+            'commenter_id': 'igsid-external',
+            'commenter_username': 'follower',
+            'text': 'pls send',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-specific'
+    # Public reply + opening DM must both go via Account B's token
+    assert all(c['access_token'] == 'token-b' for c in reply_calls)
+    assert all(c['access_token'] == 'token-b' for c in send_calls)
+
+
+def test_quick_reply_routes_to_account_b_when_entry_id_belongs_to_account_a(monkeypatch):
+    """Live production failure shape: Meta delivers a quick-reply event
+    inside an entry whose ``entry.id`` is Account A, but the
+    ``messaging[].recipient.id`` is Account B. The flow continuation
+    must use Account B's token + ig_user_id (the recipient is the
+    business account that received the click)."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-b-entry-drift',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'recipient_id': 'igsid-external',
+        'automation_id': 'ruleB',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-b-entry-drift:continue',
+        'created': now,
+        'updated': now,
+    })
+    completion_calls = []
+
+    async def completion_ok(user_doc, session):
+        completion_calls.append({
+            'ig_user_id': user_doc.get('ig_user_id'),
+            'token': user_doc.get('meta_access_token'),
+            'session_id': session.get('id'),
+        })
+        return True
+
+    monkeypatch.setattr(server, '_send_comment_dm_flow_completion', completion_ok)
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            'id': 'igA',  # entry.id misleadingly points at Account A
+            'time': int(datetime.utcnow().timestamp()),
+            'messaging': [{
+                'sender': {'id': 'igsid-external'},
+                'recipient': {'id': 'igB'},
+                'timestamp': int(datetime.utcnow().timestamp() * 1000),
+                'message': {
+                    'mid': 'mid-quick-reply-cross-entry',
+                    'text': 'continue',
+                    'quick_reply': {
+                        'payload': 'comment_flow:session-b-entry-drift:continue',
+                    },
+                },
+            }],
+        }],
+    }))
+    assert completion_calls == [{
+        'ig_user_id': 'igB',
+        'token': 'token-b',
+        'session_id': 'session-b-entry-drift',
+    }]
+
+
+def test_comment_webhook_value_alias_media_id_fields_resolve(monkeypatch):
+    """When IG sends the comment value with the older
+    ``value.post_id`` / ``value.mediaId`` shape instead of
+    ``value.media.id``, the resolved media_id must still flow into the
+    comment row so the post-specific rule matching can succeed.
+
+    We assert at the comments doc level (the structural contract) so
+    the test does not depend on fire-and-forget action background
+    tasks; the public-reply + opening-DM happiness path is already
+    covered by test_account_b_post_specific_quick_reply_routes_by_recipient_not_entry.
+    """
+    import time as _time
+    db = _install_multi_account_db(monkeypatch)
+    rule_b = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific', 'mediaAliasP')
+    # Push the rule's activation cutoff a full day into the past so
+    # the entry.time derived from time.time() is unambiguously after
+    # the activation regardless of local timezone interactions in the
+    # test process.
+    rule_b['activationStartedAt'] = datetime.utcnow() - timedelta(days=1)
+    db.automations.docs = [rule_b]
+
+    async def reply_ok(access_token, comment_id, text):
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            'id': 'igB',
+            'time': int(_time.time()),
+            'changes': [{
+                'field': 'comments',
+                'value': {
+                    'id': 'comment-alias',
+                    'from': {'id': 'igsid-external', 'username': 'follower'},
+                    # value.post_id alias — no value.media.id field
+                    'post_id': 'mediaAliasP',
+                    'text': 'send me',
+                },
+            }],
+        }],
+    }))
+    assert db.comments.docs, 'expected the alias-shape webhook to produce a comment row'
+    assert db.comments.docs[0]['media_id'] == 'mediaAliasP'
+    # Post-specific rule MUST match — the resolved media_id is the
+    # rule's selected_specific_media_id.
+    assert db.comments.docs[0]['rule_id'] == 'ruleB-specific'
+    assert db.comments.docs[0]['matched_rule_scope'] == 'specific_post_exact'
+
+
+def test_quick_reply_continuation_not_blocked_by_sibling_loop_guard(monkeypatch):
+    """Task H: when the click on Account B's opening DM comes back
+    via Meta as ``sender = sibling Account A``, the secure
+    ``comment_flow:`` payload continuation MUST run BEFORE the
+    sibling-account DM loop guard. The continuation is a known-safe
+    response to a comment-DM session the bot itself started, not a
+    free-form DM that could ping-pong with another bot."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-sibling-click',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        # recipient_id captured at session creation == the original
+        # commenter, which IS one of our linked accounts (the user
+        # tested by commenting from their other linked account).
+        'recipient_id': 'igA',
+        'automation_id': 'ruleB',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-sibling-click:continue',
+        'created': now,
+        'updated': now,
+    })
+    completion_calls = []
+
+    async def completion_ok(user_doc, session):
+        completion_calls.append({
+            'session_id': session.get('id'),
+            'ig_user_id': user_doc.get('ig_user_id'),
+        })
+        return True
+
+    monkeypatch.setattr(server, '_send_comment_dm_flow_completion', completion_ok)
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_b,
+        {
+            'sender': {'id': 'igA'},  # sibling account sender
+            'recipient': {'id': 'igB'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-sibling-click',
+                'text': 'continue',
+                'quick_reply': {'payload': 'comment_flow:session-sibling-click:continue'},
+            },
+        },
+        source='webhook',
+    ))
+    # Comment-flow continuation must succeed without being silenced
+    # by the sibling-account-sender guard.
+    assert result['status'] == 'replied'
+    assert completion_calls == [{
+        'session_id': 'session-sibling-click',
+        'ig_user_id': 'igB',
+    }]
+    # No skip-row should have been written for the sibling guard.
+    assert all(l.get('skip_reason') != 'sibling_account_sender'
+               for l in db.dm_logs.docs)
+
+
+def test_handle_new_comment_does_not_silently_match_when_media_id_missing(monkeypatch):
+    """If the webhook delivers a comment with NO resolvable media_id,
+    a post-specific rule must NOT silently fire. Without this, a
+    payload shape change (e.g. Meta moves the field) could route any
+    comment to the post-specific rule's recipient list."""
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific', 'mediaP'),
+    ]
+
+    async def reply_ok(access_token, comment_id, text):
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-no-media',
+            'media_id': None,  # the alias resolution returned nothing
+            'commenter_id': 'igsid-external',
+            'commenter_username': 'follower',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is False
