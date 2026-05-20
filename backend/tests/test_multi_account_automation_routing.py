@@ -67,6 +67,39 @@ def _comment_rule(account_db_id, ig_id, rule_id, trigger='comment:any'):
     }
 
 
+def _post_specific_comment_flow_rule(account_db_id, ig_id, rule_id, media_id):
+    rule = _comment_rule(account_db_id, ig_id, rule_id, trigger=f'comment:{media_id}')
+    rule.update({
+        'post_scope': 'specific',
+        'media_id': media_id,
+        'trigger_media_id': media_id,
+        'opening_dm_text': 'أهلاً 👋 شوفت تعليقك على الفيديو، حابب أبعتلك اللينك؟',
+        'opening_dm_button_text': 'ابعت',
+        'link_dm_text': 'اتفضل اللينك',
+        'link_button_text': 'افتح اللينك',
+        'link_url': 'https://example.com/live-test',
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {
+                'id': 'n_reply',
+                'type': 'reply_comment',
+                'data': {'text': f'public reply from {ig_id}',
+                         'replies': [f'public reply from {ig_id}']},
+            },
+            {
+                'id': 'n_opening',
+                'type': 'message',
+                'data': {'text': rule['opening_dm_text']},
+            },
+        ],
+        'edges': [
+            {'source': 'n_trigger', 'target': 'n_reply'},
+            {'source': 'n_reply', 'target': 'n_opening'},
+        ],
+    })
+    return rule
+
+
 def _install_multi_account_db(monkeypatch):
     accounts = [
         _account(id='accA', userId='u1', instagramAccountId='igA',
@@ -367,3 +400,126 @@ def test_comment_flow_quick_reply_uses_payload_session_for_second_account(monkey
         'session_id': 'session-b',
     }]
     assert db.dm_logs.docs[0]['comment_flow_session_id'] == 'session-b'
+
+
+def test_account_b_post_specific_quick_reply_routes_by_recipient_not_entry(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _comment_rule('accA', 'igA', 'ruleA'),
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'mediaB'),
+    ]
+    reply_calls = []
+    message_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({
+            'access_token': access_token,
+            'comment_id': comment_id,
+            'text': text,
+        })
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+            'allow_workspace_recipient': allow_workspace_recipient,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    start = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-on-b-from-a',
+            'media_id': 'mediaB',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert start['matched'] is True
+    assert reply_calls[0]['access_token'] == 'token-b'
+    assert len(message_calls) == 1
+    opening = message_calls[0]
+    assert opening['access_token'] == 'token-b'
+    assert opening['ig_user_id'] == 'igB'
+    assert opening['recipient_id'] == 'igA'
+    assert opening['allow_workspace_recipient'] is True
+    quick_replies = opening['message']['quick_replies']
+    assert quick_replies[0]['title'] == 'ابعت'
+    payload = quick_replies[0]['payload']
+    assert payload.startswith('comment_flow:')
+    session_id = payload.split(':')[1]
+    assert db.comment_dm_sessions.docs[0]['id'] == session_id
+    assert db.comment_dm_sessions.docs[0]['instagramAccountId'] == 'igB'
+    assert db.comment_dm_sessions.docs[0]['automation_id'] == 'ruleB'
+    assert db.comment_dm_sessions.docs[0]['media_id'] == 'mediaB'
+
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            # Live failure mode: entry.id can be ambiguous/wrong for the
+            # button click, but recipient.id is the business account that
+            # must own the comment-flow continuation.
+            'id': 'igA',
+            'time': int(datetime.utcnow().timestamp()),
+            'messaging': [{
+                'sender': {'id': 'igA'},
+                'recipient': {'id': 'igB'},
+                'timestamp': int(datetime.utcnow().timestamp() * 1000),
+                'message': {
+                    'mid': 'mid-click-b',
+                    'text': 'ابعت',
+                    'quick_reply': {'payload': payload},
+                },
+            }],
+        }],
+    }))
+
+    assert len(message_calls) == 2
+    next_step = message_calls[1]
+    assert next_step['access_token'] == 'token-b'
+    assert next_step['ig_user_id'] == 'igB'
+    assert next_step['recipient_id'] == 'igA'
+    assert next_step['allow_workspace_recipient'] is True
+    button = next_step['message']['attachment']['payload']['buttons'][0]
+    assert button['title'] == 'افتح اللينك'
+    assert button['url'].startswith('https://example.com/')
+    assert db.dm_logs.docs[0]['comment_flow_session_id'] == session_id
+
+
+def test_classify_instagram_quick_reply_aliases_and_nested_postback_payloads():
+    quick = server._classify_messaging_event({
+        'sender': {'id': 'external'},
+        'recipient': {'id': 'igB'},
+        'message': {
+            'mid': 'mid1',
+            'text': 'ابعت',
+            'quickReply': {'payload': 'comment_flow:session-b:continue'},
+        },
+    })
+    assert quick['kind'] == 'quick_reply'
+    assert quick['quick_reply_payload'] == 'comment_flow:session-b:continue'
+
+    nested_postback = server._classify_messaging_event({
+        'sender': {'id': 'external'},
+        'recipient': {'id': 'igB'},
+        'message': {
+            'mid': 'mid2',
+            'postback': {'payload': 'comment_flow:session-b:continue', 'title': 'ابعت'},
+        },
+    })
+    assert nested_postback['postback_payload'] == 'comment_flow:session-b:continue'

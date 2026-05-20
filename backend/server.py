@@ -16128,10 +16128,25 @@ def _classify_messaging_event(event: dict) -> dict:
     has_message = isinstance(message, dict)
     is_echo = bool(message.get('is_echo')) if has_message else False
     text = (message.get('text') if has_message else None) or ''
-    quick_reply = message.get('quick_reply') if has_message and isinstance(message.get('quick_reply'), dict) else None
+    quick_reply = None
+    if has_message:
+        for key in ('quick_reply', 'quickReply'):
+            candidate = message.get(key)
+            if isinstance(candidate, dict):
+                quick_reply = candidate
+                break
     quick_reply_payload = (quick_reply or {}).get('payload') if quick_reply else None
-    postback_payload = (postback or {}).get('payload') if isinstance(postback, dict) else None
-    postback_title = (postback or {}).get('title') if isinstance(postback, dict) else None
+    if not quick_reply_payload and has_message:
+        for key in ('quick_reply_payload', 'quickReplyPayload', 'payload'):
+            candidate = message.get(key)
+            if candidate and str(candidate).startswith('comment_flow:'):
+                quick_reply_payload = candidate
+                break
+    message_postback = message.get('postback') if has_message and isinstance(message.get('postback'), dict) else None
+    if message_postback:
+        has_postback = True
+    postback_payload = (postback or message_postback or {}).get('payload') if isinstance(postback or message_postback, dict) else None
+    postback_title = (postback or message_postback or {}).get('title') if isinstance(postback or message_postback, dict) else None
     attachments = message.get('attachments') if has_message else None
     has_attachments = bool(attachments)
     message_id = (message.get('mid') or message.get('id')) if has_message else None
@@ -16328,6 +16343,30 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 event_kind, sender_id, message_id, is_echo, item_keys, message_keys)
     logger.info('dm_webhook_received ig_account=%s sender=%s msg_id=%s echo=%s kind=%s',
                 ig_account_id, sender_id, message_id, is_echo, event_kind)
+    if quick_reply_payload:
+        logger.info(
+            'quick_reply_payload_seen kind=%s instagram_account_id=%s sender=%s payload_session=%s',
+            event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(quick_reply_payload)),
+        )
+    if postback_payload:
+        logger.info(
+            'postback_payload_seen kind=%s instagram_account_id=%s sender=%s payload_session=%s',
+            event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(postback_payload)),
+        )
+    if (quick_reply_payload or postback_payload) and str(quick_reply_payload or postback_payload).startswith('comment_flow:'):
+        logger.info(
+            'comment_flow_payload_detected kind=%s instagram_account_id=%s sender=%s payload_session=%s',
+            event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(quick_reply_payload or postback_payload)),
+        )
 
     # Compute a dedup key that NEVER collides on null. Prefer Meta's mid/id;
     # otherwise hash the available identifying surface for THIS event kind so
@@ -16482,10 +16521,16 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     comment_flow_payload = quick_reply_payload or postback_payload
     if comment_flow_payload and str(comment_flow_payload).startswith('comment_flow:'):
         logger.info(
-            'postback_received source=%s event_kind=%s instagram_account_id=%s '
+            'comment_flow_continuation_detected source=%s event_kind=%s instagram_account_id=%s '
             'sender=%s payload_session=%s',
             source,
             event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(comment_flow_payload)),
+        )
+        logger.info(
+            'comment_flow_session_lookup_started instagram_account_id=%s sender=%s payload_session=%s',
             _safe_partial_identifier(ig_account_id),
             _safe_partial_identifier(sender_id),
             _safe_partial_identifier(_comment_flow_session_id_from_payload(comment_flow_payload)),
@@ -16494,6 +16539,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             user_doc, sender_id, payload=comment_flow_payload
         )
         if session:
+            logger.info(
+                'comment_flow_session_found session_id=%s instagram_account_id=%s automation_id=%s',
+                session.get('id'),
+                _safe_partial_identifier(ig_account_id),
+                session.get('automation_id'),
+            )
             logger.info(
                 'postback_account_resolved session_id=%s instagram_account_id=%s '
                 'automation_id=%s',
@@ -16521,7 +16572,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                           'skip_reason': None if ok else 'comment_flow_send_failed'}},
             )
             logger.info(
-                'postback_next_step_%s session_id=%s instagram_account_id=%s automation_id=%s',
+                'comment_flow_next_step_%s session_id=%s instagram_account_id=%s automation_id=%s',
                 'sent' if ok else 'failed',
                 session.get('id'),
                 _safe_partial_identifier(ig_account_id),
@@ -16531,6 +16582,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                     'status': 'replied' if ok else 'failed',
                     'reason': 'comment_flow_response',
                     'log_id': log_doc['id'], 'event_kind': event_kind}
+        logger.info(
+            'comment_flow_session_missing instagram_account_id=%s sender=%s payload_session=%s',
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(comment_flow_payload)),
+        )
     # Cross-account loop guard: if the sender is another linked IG
     # account on this same workspace, treat as self_message. Without
     # this, account A's bot receives a DM whose sender is account B's
@@ -16784,16 +16841,45 @@ async def _process_webhook(payload: dict):
                         entry.get('id'), user_id, mapping_via)
 
             for event in entry.get('messaging', []):
+                event_user_doc = user_doc
+                event_user_id = user_id
+                event_ig_account_id = ig_account_id
+                recipient_id = (event.get('recipient') or {}).get('id') if isinstance(event, dict) else None
+                if recipient_id:
+                    try:
+                        recipient_user_doc, recipient_mapping_via = await _find_user_doc_for_instagram_account_id(recipient_id)
+                    except Exception as exc:
+                        recipient_user_doc = None
+                        recipient_mapping_via = None
+                        logger.info(
+                            'postback_account_resolution_recipient_lookup_failed recipient=%s err=%s',
+                            _safe_partial_identifier(recipient_id),
+                            type(exc).__name__,
+                        )
+                    if recipient_user_doc and recipient_user_doc.get('ig_user_id'):
+                        event_user_doc = recipient_user_doc
+                        event_user_id = recipient_user_doc.get('id') or event_user_id
+                        event_ig_account_id = recipient_user_doc.get('ig_user_id') or event_ig_account_id
+                        if event_ig_account_id != ig_account_id:
+                            logger.info(
+                                'postback_account_resolved_from_recipient entry_id=%s recipient=%s '
+                                'entry_account=%s event_account=%s via=%s',
+                                _safe_partial_identifier(entry.get('id')),
+                                _safe_partial_identifier(recipient_id),
+                                _safe_partial_identifier(ig_account_id),
+                                _safe_partial_identifier(event_ig_account_id),
+                                recipient_mapping_via,
+                            )
                 # ALWAYS feed the DM automation handler first, with the raw
                 # messaging item, so every event (read/delivery/reaction/
                 # postback/text/echo) produces an explicit dm_logs row.
                 try:
-                    await _handle_new_dm_message(user_doc, event, source='webhook')
+                    await _handle_new_dm_message(event_user_doc, event, source='webhook')
                 except Exception:
                     logger.exception('DM automation handler error')
 
                 sender_id = event.get('sender', {}).get('id')
-                if sender_id == ig_account_id:
+                if sender_id == event_ig_account_id:
                     continue  # skip own messages for legacy conv/flow path
                 msg_obj = event.get('message', {})
                 msg_text = msg_obj.get('text', '')
@@ -16803,11 +16889,11 @@ async def _process_webhook(payload: dict):
                 # Save incoming message to conversation
                 import uuid as _uuid
                 conv = await db.conversations.find_one({
-                    'user_id': user_id,
+                    'user_id': event_user_id,
                     'contact.ig_id': sender_id,
                     '$or': [
-                        {'instagramAccountId': ig_account_id},
-                        {'igUserId': ig_account_id},
+                        {'instagramAccountId': event_ig_account_id},
+                        {'igUserId': event_ig_account_id},
                         {'instagramAccountId': {'$exists': False}},
                     ],
                 })
@@ -16815,10 +16901,10 @@ async def _process_webhook(payload: dict):
                     # Create new conversation for this contact
                     conv_id = str(_uuid.uuid4())
                     conv = {
-                        'id': conv_id, 'user_id': user_id,
-                        'instagramAccountId': ig_account_id,
-                        'igUserId': ig_account_id,
-                        'instagramUsername': (user_doc.get('instagramHandle') or '').replace('@', ''),
+                        'id': conv_id, 'user_id': event_user_id,
+                        'instagramAccountId': event_ig_account_id,
+                        'igUserId': event_ig_account_id,
+                        'instagramUsername': (event_user_doc.get('instagramHandle') or '').replace('@', ''),
                         'contact': {'name': f'User {sender_id[:8]}', 'username': f'@ig_{sender_id[:8]}',
                                     'avatar': f'https://i.pravatar.cc/150?u={sender_id}',
                                     'ig_id': sender_id},
@@ -16837,20 +16923,20 @@ async def _process_webhook(payload: dict):
                      '$set': {'lastMessage': msg_text, 'time': 'now', 'unread': 1}}
                 )
                 # Push to live WS if user is connected
-                await ws_manager.send(user_id, {'type': 'incoming', 'conv_id': conv_id, 'message': incoming})
+                await ws_manager.send(event_user_id, {'type': 'incoming', 'conv_id': conv_id, 'message': incoming})
 
                 # Match automations by keyword trigger (legacy flow builder)
                 automations = await db.automations.find(
-                    {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
+                    {**_account_scoped_query(event_user_id, event_ig_account_id), 'status': 'active'}
                 ).to_list(100)
                 for auto in automations:
                     trigger = (auto.get('trigger') or '').lower()
                     if trigger.startswith('keyword:'):
                         keyword = trigger.split(':', 1)[1].strip()
                         if keyword and keyword.lower() in msg_text.lower():
-                            create_tracked_task(execute_flow(user_doc, auto, sender_id, msg_text), 'execute_flow')
+                            create_tracked_task(execute_flow(event_user_doc, auto, sender_id, msg_text), 'execute_flow')
                     elif trigger == 'new follower' and event.get('follow'):
-                        create_tracked_task(execute_flow(user_doc, auto, sender_id, msg_text), 'execute_flow')
+                        create_tracked_task(execute_flow(event_user_doc, auto, sender_id, msg_text), 'execute_flow')
 
                 # DM Automation handler was already called at the top of the
                 # loop with the raw messaging item.
