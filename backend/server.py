@@ -15863,7 +15863,12 @@ async def _process_webhook(payload: dict):
 # Until App Review completes, we poll GET /{media_id}/comments directly.
 # Source: https://developers.facebook.com/docs/instagram-platform/webhooks/ —
 # "Advanced Access is required to receive comments and live_comments webhook notifications."
-IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '60'))
+# Phase 2.19: drop default from 60s to 15s. Live testing showed comment
+# webhooks aren't always delivered to apps without Advanced Access, so the
+# poller is the user-visible critical path. 15s keeps the worst-case latency
+# under a quarter of a minute while staying well below Meta's rate limits
+# (one /comments call per linked IG account per tick = trivial fan-out).
+IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
