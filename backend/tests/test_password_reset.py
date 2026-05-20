@@ -326,7 +326,10 @@ def test_reset_empty_token_rejected(monkeypatch):
     _setup(monkeypatch, users=[])
     with pytest.raises(server.HTTPException) as exc:
         _run(server.auth_reset_password(
-            server.ResetPasswordIn(token='', new_password='Brand-New-9!'),
+            server.ResetPasswordIn.model_construct(
+                token='',
+                new_password='Brand-New-9!',
+            ),
         ))
     assert exc.value.status_code == 400
 
@@ -335,7 +338,10 @@ def test_reset_password_too_short_rejected(monkeypatch):
     db, token = _issue_token_for(monkeypatch)
     with pytest.raises(server.HTTPException) as exc:
         _run(server.auth_reset_password(
-            server.ResetPasswordIn(token=token, new_password='abc'),
+            server.ResetPasswordIn.model_construct(
+                token=token,
+                new_password='abc',
+            ),
         ))
     assert exc.value.status_code == 400
     assert exc.value.detail == 'password_too_short'
@@ -355,7 +361,10 @@ def test_settings_password_change_too_short_rejected(monkeypatch):
 
     with pytest.raises(HTTPException) as exc:
         _run(server.change_password(
-            server.PasswordChangeIn(current_password='OldPass123!', new_password='abc'),
+            server.PasswordChangeIn.model_construct(
+                current_password='OldPass123!',
+                new_password='abc',
+            ),
             user_id='u1',
         ))
 

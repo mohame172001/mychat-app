@@ -130,19 +130,21 @@ def install_fakes(monkeypatch, follows_returns, send_calls):
             return {'ok': False, 'reason': 'temporary_api_error', 'raw_status': None}
         return queue.pop(0)
 
-    async def fake_quick_reply(token, ig_user, recipient, text, button, payload):  # noqa: ARG001
+    async def fake_quick_reply(token, ig_user, recipient, text, button, payload,
+                               **_kwargs):  # noqa: ARG001
         send_calls['quick_reply'].append(
             {'recipient': recipient, 'text': text, 'button': button, 'payload': payload}
         )
         return {'ok': True, 'body': {'message_id': 'm-qr'}}
 
-    async def fake_url_button(token, ig_user, recipient, text, button, url):  # noqa: ARG001
+    async def fake_url_button(token, ig_user, recipient, text, button, url,
+                              **_kwargs):  # noqa: ARG001
         send_calls['url_button'].append(
             {'recipient': recipient, 'text': text, 'button': button, 'url': url}
         )
         return {'ok': True, 'body': {'message_id': 'm-link'}}
 
-    async def fake_dm(token, ig_user, recipient, text):  # noqa: ARG001
+    async def fake_dm(token, ig_user, recipient, text, **_kwargs):  # noqa: ARG001
         send_calls['text_dm'].append({'recipient': recipient, 'text': text})
         return True
 

@@ -1684,7 +1684,8 @@ _LAST_DM_FAILURE: _DMContextVar = _DMContextVar('_LAST_DM_FAILURE', default={})
 
 
 async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: str,
-                          message: dict) -> dict:
+                          message: dict,
+                          allow_workspace_recipient: bool = False) -> dict:
     """Send a raw Instagram message object. Tokens are never returned.
 
     On failure, writes the classified Graph error reason to
@@ -1704,7 +1705,9 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
     # be account B's IG user id (e.g. an echo of B's own DM that leaked
     # past the self-message check) and then A's bot DMs B — which IG
     # accepts, and then B's webhook fires and B's bot replies, looping.
-    # The guard breaks the loop at the lowest level so it can never start.
+    # The guard breaks the loop at the lowest level for normal sends. A
+    # comment-to-DM flow can opt in to allow_workspace_recipient=True so that
+    # a legitimate cross-account comment test still receives its opening DM.
     if recipient_ig_id and recipient_ig_id != ig_user_id:
         try:
             same_workspace = await db.instagram_accounts.find_one(
@@ -1712,9 +1715,8 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                     {'instagramAccountId': str(recipient_ig_id)},
                     {'igUserId': str(recipient_ig_id)},
                 ], 'isActive': {'$ne': False}},
-                {'instagramAccountId': 1, 'userId': 1, 'username': 1},
             )
-            if same_workspace:
+            if same_workspace and not allow_workspace_recipient:
                 logger.warning(
                     'send_ig_message_cross_account_recipient_blocked '
                     'sender_ig=%s recipient_ig=%s recipient_username=%s — '
@@ -1726,10 +1728,21 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                     'failure_reason': 'cross_account_recipient_blocked',
                     'status_code': None,
                 })
-                return _detailed_send_result(
+                result = _detailed_send_result(
                     False, None,
-                    error={'message': 'cross_account_recipient_blocked',
+                    error={'message': 'workspace_recipient_loop_guard',
                            'recipient_ig_id': recipient_ig_id},
+                )
+                result['failure_reason'] = 'cross_account_recipient_blocked'
+                result['safe_label'] = 'cross_account_recipient_blocked'
+                result['retryable'] = False
+                return result
+            elif same_workspace:
+                logger.info(
+                    'send_ig_message_cross_account_recipient_allowed '
+                    'sender_ig=%s recipient_ig=%s recipient_username=%s '
+                    'reason=comment_dm_flow',
+                    ig_user_id, recipient_ig_id, same_workspace.get('username'),
                 )
         except Exception as exc:
             # Don't fail the send on a guard-lookup error — log and proceed.
@@ -1815,14 +1828,28 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
 
 
 async def send_ig_dm_detailed(access_token: str, ig_user_id: str,
-                              recipient_ig_id: str, text: str) -> dict:
+                              recipient_ig_id: str, text: str,
+                              allow_workspace_recipient: bool = False) -> dict:
     """Send a text DM and return a safe detailed result."""
-    return await send_ig_message(access_token, ig_user_id, recipient_ig_id, {'text': text})
+    return await send_ig_message(
+        access_token,
+        ig_user_id,
+        recipient_ig_id,
+        {'text': text},
+        allow_workspace_recipient=allow_workspace_recipient,
+    )
 
 
-async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str, text: str) -> bool:
+async def send_ig_dm(access_token: str, ig_user_id: str, recipient_ig_id: str,
+                     text: str, allow_workspace_recipient: bool = False) -> bool:
     """Send a text DM via Instagram Graph API. Returns True on success."""
-    result = await send_ig_dm_detailed(access_token, ig_user_id, recipient_ig_id, text)
+    result = await send_ig_dm_detailed(
+        access_token,
+        ig_user_id,
+        recipient_ig_id,
+        text,
+        allow_workspace_recipient=allow_workspace_recipient,
+    )
     return bool(result.get('ok'))
 
 
@@ -2430,7 +2457,8 @@ def _normalize_follow_gate_config(data: dict) -> dict:
 
 
 async def send_ig_quick_reply(access_token: str, ig_user_id: str, recipient_ig_id: str,
-                              text: str, title: str, payload: str) -> dict:
+                              text: str, title: str, payload: str,
+                              allow_workspace_recipient: bool = False) -> dict:
     return await send_ig_message(
         access_token,
         ig_user_id,
@@ -2443,11 +2471,13 @@ async def send_ig_quick_reply(access_token: str, ig_user_id: str, recipient_ig_i
                 'payload': payload[:1000],
             }],
         },
+        allow_workspace_recipient=allow_workspace_recipient,
     )
 
 
 async def send_ig_url_button(access_token: str, ig_user_id: str, recipient_ig_id: str,
-                             text: str, button_title: str, url: str) -> dict:
+                             text: str, button_title: str, url: str,
+                             allow_workspace_recipient: bool = False) -> dict:
     return await send_ig_message(
         access_token,
         ig_user_id,
@@ -2466,6 +2496,7 @@ async def send_ig_url_button(access_token: str, ig_user_id: str, recipient_ig_id
                 },
             },
         },
+        allow_workspace_recipient=allow_workspace_recipient,
     )
 
 
@@ -2749,7 +2780,8 @@ async def _mark_tracked_link_unused(tracked_link: Optional[dict], status: str = 
     )
 
 
-async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, text: str) -> bool:
+async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, text: str,
+                                               allow_workspace_recipient: bool = False) -> bool:
     text_to_send = text
     tracked_link = None
     original_url = _extract_first_url(text)
@@ -2762,6 +2794,7 @@ async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, te
         user_doc.get('ig_user_id', ''),
         session.get('recipient_id'),
         text_to_send,
+        allow_workspace_recipient=allow_workspace_recipient,
     )
     if ok:
         await _activate_tracked_link(tracked_link)
@@ -2866,7 +2899,13 @@ async def _send_comment_dm_follow_gate_prompt(user_doc: dict, session: dict) -> 
         fallback = (session.get('follow_gate_fallback_message') or '').strip()
         sent_fallback = False
         if fallback:
-            sent_fallback = await send_ig_dm(access_token, ig_user_id, recipient_id, fallback)
+            sent_fallback = await send_ig_dm(
+                access_token,
+                ig_user_id,
+                recipient_id,
+                fallback,
+                allow_workspace_recipient=True,
+            )
         await db.comment_dm_sessions.update_one(
             {'id': session.get('id')},
             {'$set': {'status': 'expired', 'stage': 'expired', 'updated': now}},
@@ -2889,10 +2928,17 @@ async def _send_comment_dm_follow_gate_prompt(user_doc: dict, session: dict) -> 
         prompt,
         button,
         payload,
+        allow_workspace_recipient=True,
     )
     prompt_sent = bool(result.get('ok'))
     if not prompt_sent:
-        prompt_sent = await send_ig_dm(access_token, ig_user_id, recipient_id, prompt)
+        prompt_sent = await send_ig_dm(
+            access_token,
+            ig_user_id,
+            recipient_id,
+            prompt,
+            allow_workspace_recipient=True,
+        )
     await db.comment_dm_sessions.update_one(
         {'id': session.get('id')},
         {'$set': {
@@ -2968,6 +3014,7 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
         result = await send_ig_quick_reply(
             access_token, ig_user_id, recipient_ig_id,
             opening_text, button_text, payload,
+            allow_workspace_recipient=True,
         )
         if result.get('ok'):
             logger.info('comment_dm_opening_quick_reply_sent rule_id=%s recipient=%s',
@@ -2977,7 +3024,13 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
                        automation.get('id'), result.get('error'))
         # Keep the pending session active. If quick replies are not accepted by
         # Meta for this account, the user can still type any response to continue.
-        return await send_ig_dm(access_token, ig_user_id, recipient_ig_id, opening_text)
+        return await send_ig_dm(
+            access_token,
+            ig_user_id,
+            recipient_ig_id,
+            opening_text,
+            allow_workspace_recipient=True,
+        )
 
     if opening_text:
         return await _send_text_dm_with_optional_tracking(
@@ -2994,6 +3047,7 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
                 ),
             },
             opening_text,
+            allow_workspace_recipient=True,
         )
 
     if has_deferred_step:
@@ -3039,10 +3093,17 @@ async def _send_follow_reminder(user_doc: dict, session: dict, message: str,
     payload = session.get('follow_payload') or f'comment_flow:{session.get("id")}:followed'
     result = await send_ig_quick_reply(
         access_token, ig_user_id, recipient_id, message, button, payload,
+        allow_workspace_recipient=True,
     )
     sent = bool(result.get('ok'))
     if not sent:
-        sent = await send_ig_dm(access_token, ig_user_id, recipient_id, message)
+        sent = await send_ig_dm(
+            access_token,
+            ig_user_id,
+            recipient_id,
+            message,
+            allow_workspace_recipient=True,
+        )
     now = datetime.utcnow()
     if session.get('id'):
         await db.comment_dm_sessions.update_one(
@@ -3334,6 +3395,7 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         result = await send_ig_url_button(
             access_token, ig_user_id, recipient_id,
             text_for_button, link_button, url_to_send,
+            allow_workspace_recipient=True,
         )
         if result.get('ok'):
             await _activate_tracked_link(
@@ -3343,7 +3405,13 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
             sent_steps.append('link_button')
         else:
             fallback_text = f'{text_for_button}\n\n{url_to_send}'.strip()
-            ok = await send_ig_dm(access_token, ig_user_id, recipient_id, fallback_text)
+            ok = await send_ig_dm(
+                access_token,
+                ig_user_id,
+                recipient_id,
+                fallback_text,
+                allow_workspace_recipient=True,
+            )
             ok_all = ok_all and ok
             sent_steps.append('link_text_fallback')
             if ok:
@@ -3354,7 +3422,13 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
                 logger.warning('comment_dm_link_fallback_failed session=%s err=%s',
                                session.get('id'), result.get('error'))
     elif link_text:
-        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, text_to_send)
+        ok = await send_ig_dm(
+            access_token,
+            ig_user_id,
+            recipient_id,
+            text_to_send,
+            allow_workspace_recipient=True,
+        )
         ok_all = ok_all and ok
         sent_steps.append('link_text')
         if ok:
@@ -3369,7 +3443,13 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
         extra_messages.append((session.get('follow_up_text') or '').strip())
 
     for text in [m for m in extra_messages if m]:
-        ok = await send_ig_dm(access_token, ig_user_id, recipient_id, text)
+        ok = await send_ig_dm(
+            access_token,
+            ig_user_id,
+            recipient_id,
+            text,
+            allow_workspace_recipient=True,
+        )
         ok_all = ok_all and ok
         sent_steps.append('extra_message')
 
@@ -14882,36 +14962,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     ig_comment_id, user_doc.get('email'), source)
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'bot_own_reply'}
-    # Cross-account guard: if the commenter is ANOTHER linked IG account
-    # on this same workspace, skip. This stops the loop where bot A
-    # comments on bot B's post (or vice versa) and triggers infinite
-    # back-and-forth automations between the two accounts. Without this,
-    # a single comment-DM rule on each side would have the bots talking
-    # to each other forever.
-    try:
-        sibling_account = await db.instagram_accounts.find_one(
-            {
-                'userId': user_id,
-                '$or': [
-                    {'instagramAccountId': str(commenter_id)},
-                    {'igUserId': str(commenter_id)},
-                ],
-                'isActive': {'$ne': False},
-            },
-            {'instagramAccountId': 1, 'username': 1},
-        )
-    except Exception:
-        sibling_account = None
-    if sibling_account:
-        logger.info(
-            'comment_skipped_sibling_account_commenter ig_comment_id=%s '
-            'commenter_ig=%s sibling_username=%s source=%s — commenter is '
-            'another linked IG account on this workspace, refusing to fire '
-            'automations to prevent bot-vs-bot loops',
-            ig_comment_id, commenter_id, sibling_account.get('username'), source,
-        )
-        return {'processed': False, 'matched': False, 'action_status': 'skipped',
-                'reason': 'sibling_account_commenter'}
+    # NOTE: we INTENTIONALLY do not skip when commenter_id is a sibling
+    # linked IG account on this workspace. The user routinely tests their
+    # own automations by commenting from one of their other linked
+    # accounts, and a blanket sibling-commenter skip silently swallowed
+    # those tests (no opening DM, no log other than skipped). The
+    # bot-vs-bot loop concern only manifests on the DM side. The opening
+    # comment-to-DM is allowed for this real test path, and any later inbound
+    # DM from the sibling account is stopped by _handle_new_dm_message's
+    # sibling-sender guard so DM automations cannot ping-pong.
 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
@@ -15198,6 +15257,12 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
+    logger.info(
+        'automation_rules_loaded event_type=comment user_id=%s instagram_account_id=%s count=%s',
+        user_id,
+        _safe_partial_identifier(ig_account_id),
+        len(automations),
+    )
     automations = _sort_comment_rules_by_priority(automations, media_id)
     logger.info(
         'rule_priority_sorted comment_id=%s media_id=%s count=%s order=%s',
@@ -15359,6 +15424,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if matched:
         logger.info('rule_matched source=%s ig_comment_id=%s rule_id=%s user=%s',
                     source, ig_comment_id, rule_id, user_doc.get('email'))
+        logger.info(
+            'automation_rule_matched event_type=comment user_id=%s instagram_account_id=%s rule_id=%s media_id=%s',
+            user_id,
+            _safe_partial_identifier(ig_account_id),
+            rule_id,
+            _safe_partial_identifier(media_id),
+        )
         logger.info('comment_rule_matched comment_id=%s media_id=%s source=%s rule_id=%s user_id=%s instagramAccountId=%s',
                     ig_comment_id, media_id, source, rule_id, user_id, ig_account_id)
         if source in ('polling', 'manual_catchup'):
@@ -15369,6 +15441,13 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
     else:
         cutoff_skip_reason = 'no_rule_match'
+        logger.info(
+            'automation_rule_not_matched event_type=comment user_id=%s instagram_account_id=%s media_id=%s reason=%s',
+            user_id,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(media_id),
+            cutoff_skip_reason,
+        )
         logger.info('rule_not_matched ig_comment_id=%s user=%s',
                     ig_comment_id, user_doc.get('email'))
 
@@ -16322,6 +16401,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
     rules = await db.dm_rules.find(
         {**_account_scoped_query(user_id, _current_instagram_context(user_doc)), 'is_active': True}
     ).to_list(200)
+    logger.info(
+        'automation_rules_loaded event_type=dm user_id=%s instagram_account_id=%s count=%s',
+        user_id,
+        _safe_partial_identifier(ig_account_id),
+        len(rules),
+    )
     logger.info('dm_rule_loaded count=%s user=%s', len(rules), user_doc.get('email'))
 
     if not rules:
@@ -16344,6 +16429,12 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 'reason': 'no_rule_match', 'log_id': log_doc['id']}
 
     rule_id = matched_rule.get('id')
+    logger.info(
+        'automation_rule_matched event_type=dm user_id=%s instagram_account_id=%s rule_id=%s',
+        user_id,
+        _safe_partial_identifier(ig_account_id),
+        rule_id,
+    )
     logger.info('dm_rule_matched rule_id=%s dedup_key=%s', rule_id, dedup_key)
     log_doc = _mk_log('matched', matched_rule=matched_rule)
     if not await _persist(log_doc):
@@ -16430,6 +16521,10 @@ async def _process_webhook(payload: dict):
     try:
         for entry in payload.get('entry', []):
             ig_account_id = entry.get('id')
+            logger.info(
+                'account_resolution_started event_type=webhook_entry entry_id=%s',
+                _safe_partial_identifier(ig_account_id),
+            )
             logger.info('dm_user_mapping_started entry_id=%s', ig_account_id)
             # Find which user owns this IG account — entry.id can be either the
             # Instagram Business account id OR the Facebook Page id depending on
@@ -16464,11 +16559,22 @@ async def _process_webhook(payload: dict):
                         mapping_via = 'single_tenant_instagram_account_fallback'
                         ig_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ig_account_id
             if not user_doc:
+                logger.warning(
+                    'account_resolution_failed event_type=webhook_entry entry_id=%s reason=no_matching_instagram_account',
+                    _safe_partial_identifier(entry.get('id')),
+                )
                 logger.warning('dm_user_mapping_failed entry_id=%s', entry.get('id'))
                 continue
             # Normalize so downstream code uses the real IG account id
             ig_account_id = user_doc.get('ig_user_id') or ig_account_id
             user_id = user_doc['id']
+            logger.info(
+                'account_resolution_finished event_type=webhook_entry entry_id=%s user_id=%s instagram_account_id=%s via=%s',
+                _safe_partial_identifier(entry.get('id')),
+                user_id,
+                _safe_partial_identifier(ig_account_id),
+                mapping_via,
+            )
             logger.info('dm_user_mapping_success entry_id=%s user_id=%s via=%s',
                         entry.get('id'), user_id, mapping_via)
 

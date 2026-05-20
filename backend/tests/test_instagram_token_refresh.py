@@ -142,8 +142,21 @@ class FakeCollection:
     def __init__(self, docs=None):
         self.docs = list(docs or [])
 
-    async def find_one(self, query):
-        return next((doc for doc in self.docs if _match(doc, query)), None)
+    async def find_one(self, query, projection=None, **projection_kw):
+        projection = projection if projection is not None else projection_kw.get('projection')
+        doc = next((doc for doc in self.docs if _match(doc, query)), None)
+        if doc is None or not isinstance(projection, dict) or not projection:
+            return doc
+        include_keys = {key for key, value in projection.items() if value}
+        exclude_keys = {key for key, value in projection.items() if not value}
+        if include_keys:
+            item = {key: doc[key] for key in include_keys if key in doc}
+            if '_id' in doc and projection.get('_id', 1):
+                item['_id'] = doc['_id']
+            return item
+        if exclude_keys:
+            return {key: value for key, value in doc.items() if key not in exclude_keys}
+        return doc
 
     def find(self, query=None, projection=None, **projection_kw):
         projection = projection if projection is not None else projection_kw.get('projection')
@@ -1006,7 +1019,8 @@ def test_final_dm_link_is_replaced_with_tracking_url(monkeypatch):
     monkeypatch.setattr(server, 'db', fake_db)
     sent = {}
 
-    async def fake_send_url_button(_token, _ig_id, _recipient, text, _button, url):
+    async def fake_send_url_button(_token, _ig_id, _recipient, text, _button, url,
+                                   **_kwargs):
         sent['text'] = text
         sent['url'] = url
         return {'ok': True, 'body': {'message_id': 'mid1'}}
@@ -1051,11 +1065,12 @@ def test_follow_gate_sends_custom_prompt_before_final_link(monkeypatch):
     monkeypatch.setattr(server, 'db', fake_db)
     sent = {'prompts': [], 'finals': []}
 
-    async def fake_quick_reply(_token, _ig_id, _recipient, text, title, payload):
+    async def fake_quick_reply(_token, _ig_id, _recipient, text, title, payload,
+                               **_kwargs):
         sent['prompts'].append({'text': text, 'title': title, 'payload': payload})
         return {'ok': True}
 
-    async def fake_send_url_button(*args):
+    async def fake_send_url_button(*args, **_kwargs):
         sent['finals'].append(args)
         return {'ok': True}
 

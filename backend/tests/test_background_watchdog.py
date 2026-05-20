@@ -195,15 +195,28 @@ def test_comment_poller_loop_survives_one_user_exception(monkeypatch):
     _reset_bg_state()
     monkeypatch.setattr(server, 'IG_POLL_INTERVAL_SECONDS', 0.05)
 
-    users = [{'id': 'u1', 'ig_user_id': 'a'}, {'id': 'u2', 'ig_user_id': 'b'}]
+    users = [{'id': 'u1'}, {'id': 'u2'}]
+    accounts = [
+        {'userId': 'u1', 'instagramAccountId': 'a', 'accessToken': 'tok-a',
+         'connectionValid': True},
+        {'userId': 'u2', 'instagramAccountId': 'b', 'accessToken': 'tok-b',
+         'connectionValid': True},
+    ]
 
     class _UserColl:
         def find(self, q):  # noqa: ARG002
             return _Cursor(users)
+        async def find_one(self, q):
+            return next((u for u in users if u['id'] == q.get('id')), None)
+
+    class _AccountColl:
+        def find(self, q):  # noqa: ARG002
+            return _Cursor(accounts)
 
     class _DB:
         def __init__(self):
             self.users = _UserColl()
+            self.instagram_accounts = _AccountColl()
 
     monkeypatch.setattr(server, 'db', _DB())
 
@@ -243,7 +256,7 @@ def test_comment_poller_loop_survives_db_failure(monkeypatch):
 
     cycles = []
 
-    class _BrokenUsers:
+    class _BrokenAccounts:
         def find(self, q):  # noqa: ARG002
             cycles.append(1)
             if len(cycles) <= 2:
@@ -251,7 +264,7 @@ def test_comment_poller_loop_survives_db_failure(monkeypatch):
             return _Cursor([])
 
     class _DB:
-        users = _BrokenUsers()
+        instagram_accounts = _BrokenAccounts()
 
     monkeypatch.setattr(server, 'db', _DB())
 

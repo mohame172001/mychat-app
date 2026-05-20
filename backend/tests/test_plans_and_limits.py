@@ -161,7 +161,7 @@ def test_c_current_plan_returns_full_summary(monkeypatch):
 def test_d_admin_assigns_plan(monkeypatch):
     fake_db = FakeDB(
         _account(id='accA', userId='admin_u', instagramAccountId='igA'),
-        _user(id='admin_u', email='admin@mychat.app'),
+        [_user(id='admin_u', email='admin@mychat.app'), _user(id='u_target')],
     )
     monkeypatch.setattr(server, 'db', fake_db)
     monkeypatch.setattr(server, 'ADMIN_EMAILS', {'admin@mychat.app'})
