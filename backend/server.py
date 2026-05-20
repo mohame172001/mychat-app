@@ -2818,6 +2818,13 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'automation_name': automation.get('name'),
         'comment_doc_id': (comment_context or {}).get('comment_doc_id'),
         'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
+        'source_comment_id': (comment_context or {}).get('source_comment_id')
+        or (comment_context or {}).get('ig_comment_id'),
+        'media_id': (comment_context or {}).get('media_id'),
+        'mediaId': (comment_context or {}).get('media_id'),
+        'commenter_id': (comment_context or {}).get('commenter_id') or recipient_ig_id,
+        'opening_dedupe_key': (comment_context or {}).get('opening_dedupe_key'),
+        'openingDedupeKey': (comment_context or {}).get('opening_dedupe_key'),
         'payload': payload,
         'status': 'pending',
         'stage': 'awaiting_user_action',
@@ -2844,6 +2851,17 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'updated': now,
     }
     await db.comment_dm_sessions.insert_one(session)
+    logger.info(
+        'comment_opening_flow_state_created user_id=%s instagram_account_id=%s '
+        'automation_id=%s media_id=%s commenter_id=%s dedupe_key=%s session_id=%s',
+        user_doc.get('id'),
+        _safe_partial_identifier(user_doc.get('ig_user_id')),
+        automation.get('id'),
+        _safe_partial_identifier((comment_context or {}).get('media_id')),
+        _safe_partial_identifier((comment_context or {}).get('commenter_id') or recipient_ig_id),
+        _safe_partial_identifier((comment_context or {}).get('opening_dedupe_key')),
+        session.get('id'),
+    )
     return session
 
 
@@ -2960,6 +2978,16 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
     import uuid as _uuid
     access_token = user_doc.get('meta_access_token', '')
     ig_user_id = user_doc.get('ig_user_id', '')
+    logger.info(
+        'comment_opening_flow_started user_id=%s instagram_account_id=%s '
+        'automation_id=%s media_id=%s commenter_id=%s dedupe_key=%s',
+        user_doc.get('id'),
+        _safe_partial_identifier(ig_user_id),
+        automation.get('id'),
+        _safe_partial_identifier((comment_context or {}).get('media_id')),
+        _safe_partial_identifier((comment_context or {}).get('commenter_id') or recipient_ig_id),
+        _safe_partial_identifier((comment_context or {}).get('opening_dedupe_key')),
+    )
     # Just-in-time webhook subscription health check. The opening DM is
     # the moment we start expecting a click webhook back; if this account
     # is missing the messages / messaging_postbacks subscriptions (the
@@ -3475,13 +3503,34 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
     return ok_all
 
 
+def _comment_flow_session_id_from_payload(payload: Optional[str]) -> Optional[str]:
+    if not payload or not str(payload).startswith('comment_flow:'):
+        return None
+    parts = str(payload).split(':')
+    if len(parts) >= 2 and parts[1]:
+        return parts[1]
+    return None
+
+
+def _comment_opening_dedupe_key(user_id: str, instagram_account_id: str,
+                                automation_id: str, media_id: str,
+                                commenter_id: str) -> Optional[str]:
+    if not all([user_id, instagram_account_id, automation_id, media_id, commenter_id]):
+        return None
+    basis = '|'.join([
+        str(user_id),
+        str(instagram_account_id),
+        str(automation_id),
+        str(media_id),
+        str(commenter_id),
+    ])
+    return hashlib.sha256(basis.encode('utf-8', errors='ignore')).hexdigest()
+
+
 async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
                                            payload: Optional[str] = None) -> Optional[dict]:
-    if not sender_id:
-        return None
     q = {
         'user_id': user_doc['id'],
-        'recipient_id': sender_id,
         'status': 'pending',
     }
     # Phase 2.19 re-enabled: with the comment poller now iterating
@@ -3494,11 +3543,48 @@ async def _find_pending_comment_dm_session(user_doc: dict, sender_id: str,
     ig_user_id = user_doc.get('ig_user_id')
     if ig_user_id:
         q['ig_user_id'] = ig_user_id
-    if payload and str(payload).startswith('comment_flow:'):
-        parts = str(payload).split(':')
-        if len(parts) >= 2 and parts[1]:
-            q['id'] = parts[1]
-    return await db.comment_dm_sessions.find_one(q, sort=[('created', -1)])
+    session_id = _comment_flow_session_id_from_payload(payload)
+    if session_id:
+        by_payload = {**q, 'id': session_id}
+        session = await db.comment_dm_sessions.find_one(by_payload, sort=[('created', -1)])
+        if session:
+            if sender_id and session.get('recipient_id') and str(session.get('recipient_id')) != str(sender_id):
+                logger.info(
+                    'postback_flow_sender_mismatch session_id=%s instagram_account_id=%s '
+                    'stored_recipient=%s webhook_sender=%s',
+                    session.get('id'),
+                    _safe_partial_identifier(ig_user_id),
+                    _safe_partial_identifier(session.get('recipient_id')),
+                    _safe_partial_identifier(sender_id),
+                )
+            logger.info(
+                'postback_flow_state_found session_id=%s instagram_account_id=%s '
+                'automation_id=%s recipient=%s lookup=payload',
+                session.get('id'),
+                _safe_partial_identifier(ig_user_id),
+                session.get('automation_id'),
+                _safe_partial_identifier(session.get('recipient_id')),
+            )
+            return session
+        logger.info(
+            'postback_flow_state_missing session_id=%s instagram_account_id=%s lookup=payload',
+            _safe_partial_identifier(session_id),
+            _safe_partial_identifier(ig_user_id),
+        )
+    if not sender_id:
+        return None
+    q['recipient_id'] = sender_id
+    session = await db.comment_dm_sessions.find_one(q, sort=[('created', -1)])
+    if session:
+        logger.info(
+            'comment_opening_flow_state_found session_id=%s instagram_account_id=%s '
+            'automation_id=%s recipient=%s lookup=recipient',
+            session.get('id'),
+            _safe_partial_identifier(ig_user_id),
+            session.get('automation_id'),
+            _safe_partial_identifier(sender_id),
+        )
+    return session
 
 
 # ---------------- Comment reply helper ----------------
@@ -15421,6 +15507,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
     rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
     matched = bool(matched_rule)
+    opening_dedupe_key = None
     if matched:
         logger.info('rule_matched source=%s ig_comment_id=%s rule_id=%s user=%s',
                     source, ig_comment_id, rule_id, user_doc.get('email'))
@@ -15436,6 +15523,62 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         if source in ('polling', 'manual_catchup'):
             logger.info('poller_comment_rule_matched comment_id=%s media_id=%s rule_id=%s source=%s',
                         ig_comment_id, media_id, rule_id, source)
+        if _comment_dm_flow_enabled(matched_rule):
+            opening_dedupe_key = _comment_opening_dedupe_key(
+                user_id,
+                ig_account_id,
+                rule_id,
+                media_id,
+                commenter_id,
+            )
+            if opening_dedupe_key and not retry_existing:
+                business_flow_query = {
+                    'user_id': user_id,
+                    'opening_dedupe_key': opening_dedupe_key,
+                    '$or': [
+                        {'instagramAccountId': ig_account_id},
+                        {'igUserId': ig_account_id},
+                    ],
+                }
+                existing_session = await db.comment_dm_sessions.find_one(business_flow_query)
+                existing_opening = await db.comments.find_one(business_flow_query)
+                existing_flow = existing_session or existing_opening
+                if existing_flow:
+                    flow_status = str(existing_flow.get('status') or existing_flow.get('action_status') or '').lower()
+                    flow_completed = flow_status in (
+                        'success', 'replied', 'completed', 'final_sent', 'partial_success'
+                    )
+                    reason = 'flow_already_completed' if flow_completed else 'flow_already_started'
+                    logger.info(
+                        'comment_opening_flow_duplicate_skipped reason=%s user_id=%s '
+                        'instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s '
+                        'dedupe_key=%s existing_comment_id=%s existing_session_id=%s',
+                        reason,
+                        user_id,
+                        _safe_partial_identifier(ig_account_id),
+                        rule_id,
+                        _safe_partial_identifier(media_id),
+                        _safe_partial_identifier(commenter_id),
+                        _safe_partial_identifier(opening_dedupe_key),
+                        _safe_partial_identifier(
+                            existing_flow.get('ig_comment_id') or existing_flow.get('source_comment_id')
+                        ),
+                        existing_flow.get('id') if existing_session else None,
+                    )
+                    logger.info(
+                        'automation_duplicate_opening_skipped reason=same_commenter_same_post_same_rule '
+                        'user_id=%s instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s',
+                        user_id,
+                        _safe_partial_identifier(ig_account_id),
+                        rule_id,
+                        _safe_partial_identifier(media_id),
+                        _safe_partial_identifier(commenter_id),
+                    )
+                    return {'processed': False, 'already_processed': True, 'matched': True,
+                            'action_status': 'skipped',
+                            'reason': reason,
+                            'classified_reason': 'same_commenter_same_post_same_rule',
+                            'rule_id': rule_id}
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
@@ -15482,6 +15625,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'media_id': media_id,
         'mediaId': media_id,
         'commenter_id': commenter_id,
+        'opening_dedupe_key': opening_dedupe_key,
+        'openingDedupeKey': opening_dedupe_key,
         'commenter_username': commenter_username,
         'text': comment_text,
         'replied': False if legacy_reply_repair else (
@@ -15668,6 +15813,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
                 source=source, received_monotonic=processing_started,
+                media_id=media_id, opening_dedupe_key=opening_dedupe_key,
             )
             if isinstance(ok, dict):
                 action_status = ok.get('action_status') or ('success' if ok.get('ok') else 'failed')
@@ -15727,7 +15873,9 @@ def _compute_action_status(flow_results: dict) -> str:
 async def _run_and_record_action(user_doc, automation, commenter_id, comment_text,
                                  comment_doc_id: str, ig_comment_id: str,
                                  source: str = 'webhook',
-                                 received_monotonic: Optional[float] = None):
+                                 received_monotonic: Optional[float] = None,
+                                 media_id: Optional[str] = None,
+                                 opening_dedupe_key: Optional[str] = None):
     """Wrap execute_flow so we record success/failure on the comment doc.
 
     Persists per-step outcomes (reply_status, dm_status, action_status,
@@ -15742,7 +15890,11 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
             user_doc, automation, commenter_id, comment_text,
             comment_context={
                 'ig_comment_id': ig_comment_id,
+                'source_comment_id': ig_comment_id,
                 'comment_doc_id': comment_doc_id,
+                'media_id': media_id,
+                'commenter_id': commenter_id,
+                'opening_dedupe_key': opening_dedupe_key,
                 'source': source,
                 'received_monotonic': received_monotonic,
             },
@@ -16326,6 +16478,59 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         await _persist(_mk_log('skipped', skip_reason='self_message'))
         return {'processed': False, 'status': 'skipped', 'reason': 'self_message',
                 'event_kind': event_kind}
+
+    comment_flow_payload = quick_reply_payload or postback_payload
+    if comment_flow_payload and str(comment_flow_payload).startswith('comment_flow:'):
+        logger.info(
+            'postback_received source=%s event_kind=%s instagram_account_id=%s '
+            'sender=%s payload_session=%s',
+            source,
+            event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(comment_flow_payload)),
+        )
+        session = await _find_pending_comment_dm_session(
+            user_doc, sender_id, payload=comment_flow_payload
+        )
+        if session:
+            logger.info(
+                'postback_account_resolved session_id=%s instagram_account_id=%s '
+                'automation_id=%s',
+                session.get('id'),
+                _safe_partial_identifier(ig_account_id),
+                session.get('automation_id'),
+            )
+            log_doc = _mk_log('matched')
+            log_doc['comment_flow_session_id'] = session.get('id')
+            if not await _persist(log_doc):
+                return {'processed': False, 'status': 'skipped', 'reason': 'race',
+                        'event_kind': event_kind}
+            if _comment_dm_follow_confirmation_matches(
+                session,
+                text=text or postback_title or '',
+                payload=comment_flow_payload,
+            ):
+                await _mark_comment_dm_follow_confirmed(session)
+                logger.info('follow_gate_confirmation_received session=%s via=quick_reply',
+                            session.get('id'))
+            ok = await _send_comment_dm_flow_completion(user_doc, session)
+            await db.dm_logs.update_one(
+                {'id': log_doc['id']},
+                {'$set': {'status': 'replied' if ok else 'failed',
+                          'skip_reason': None if ok else 'comment_flow_send_failed'}},
+            )
+            logger.info(
+                'postback_next_step_%s session_id=%s instagram_account_id=%s automation_id=%s',
+                'sent' if ok else 'failed',
+                session.get('id'),
+                _safe_partial_identifier(ig_account_id),
+                session.get('automation_id'),
+            )
+            return {'processed': True, 'matched': True,
+                    'status': 'replied' if ok else 'failed',
+                    'reason': 'comment_flow_response',
+                    'log_id': log_doc['id'], 'event_kind': event_kind}
     # Cross-account loop guard: if the sender is another linked IG
     # account on this same workspace, treat as self_message. Without
     # this, account A's bot receives a DM whose sender is account B's
@@ -20099,6 +20304,11 @@ async def _startup():
             name='comments_user_ig_created',
         )
         await db.comments.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
+            sparse=True,
+            name='comments_user_ig_opening_dedupe',
+        )
+        await db.comments.create_index(
             [('action_status', 1), ('next_retry_at', 1), ('queue_lock_until', 1)],
             name='comments_automation_queue_due',
         )
@@ -20117,6 +20327,11 @@ async def _startup():
         await db.comment_dm_sessions.create_index(
             [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
             name='comment_dm_sessions_user_ig_created',
+        )
+        await db.comment_dm_sessions.create_index(
+            [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
+            sparse=True,
+            name='comment_dm_sessions_user_ig_opening_dedupe',
         )
         await db.data_deletion_requests.create_index(
             [('created_at', -1)],

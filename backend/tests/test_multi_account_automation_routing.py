@@ -198,3 +198,172 @@ def test_account_a_comment_on_account_b_routes_only_to_b_rule_and_token(monkeypa
     assert dm_calls[0]['recipient_id'] == 'igA'
     assert dm_calls[0]['allow_workspace_recipient'] is True
     assert db.comments.docs[0]['instagramAccountId'] == 'igB'
+
+
+def test_same_commenter_same_post_rule_does_not_restart_opening_flow(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append((access_token, ig_user_id, recipient_id, message,
+                         allow_workspace_recipient))
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    first = _run(server._handle_new_comment(
+        owner,
+        {
+            'ig_comment_id': 'comment-b-1',
+            'media_id': 'mediaB',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    second = _run(server._handle_new_comment(
+        owner,
+        {
+            'ig_comment_id': 'comment-b-2',
+            'media_id': 'mediaB',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'test again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert first['matched'] is True
+    assert second['already_processed'] is True
+    assert second['classified_reason'] == 'same_commenter_same_post_same_rule'
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    assert len(db.comments.docs) == 1
+    assert db.comments.docs[0]['opening_dedupe_key']
+
+
+def test_same_commenter_different_account_is_not_cross_suppressed(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append((access_token, ig_user_id, recipient_id, message,
+                         allow_workspace_recipient))
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-b-1',
+            'media_id': 'shared-looking-media',
+            'commenter_id': 'external-user',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    result_a = _run(server._handle_new_comment(
+        owner_a,
+        {
+            'ig_comment_id': 'comment-a-1',
+            'media_id': 'shared-looking-media',
+            'commenter_id': 'external-user',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert result_a['matched'] is True
+    assert len(reply_calls) == 2
+    assert len(dm_calls) == 2
+    assert {doc['instagramAccountId'] for doc in db.comments.docs} == {'igA', 'igB'}
+
+
+def test_comment_flow_quick_reply_uses_payload_session_for_second_account(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-b',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'recipient_id': 'igsid-original',
+        'automation_id': 'ruleB',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-b:continue',
+        'created': now,
+        'updated': now,
+    })
+    completion_calls = []
+
+    async def completion_ok(user_doc, session):
+        completion_calls.append({
+            'ig_user_id': user_doc.get('ig_user_id'),
+            'token': user_doc.get('meta_access_token'),
+            'session_id': session.get('id'),
+        })
+        return True
+
+    monkeypatch.setattr(server, '_send_comment_dm_flow_completion', completion_ok)
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_b,
+        {
+            'sender': {'id': 'igA'},
+            'recipient': {'id': 'igB'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-quick-reply',
+                'text': 'Send me the link',
+                'quick_reply': {'payload': 'comment_flow:session-b:continue'},
+            },
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['status'] == 'replied'
+    assert completion_calls == [{
+        'ig_user_id': 'igB',
+        'token': 'token-b',
+        'session_id': 'session-b',
+    }]
+    assert db.dm_logs.docs[0]['comment_flow_session_id'] == 'session-b'
