@@ -1698,6 +1698,45 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
         return _detailed_send_result(
             False, None, error={'message': 'missing_access_token_or_ig_user_id'}
         )
+    # Cross-account contamination guard: refuse to DM a recipient that is
+    # itself one of OUR linked IG accounts. This is the failure mode where
+    # account A's automation processes an event whose sender_id happens to
+    # be account B's IG user id (e.g. an echo of B's own DM that leaked
+    # past the self-message check) and then A's bot DMs B — which IG
+    # accepts, and then B's webhook fires and B's bot replies, looping.
+    # The guard breaks the loop at the lowest level so it can never start.
+    if recipient_ig_id and recipient_ig_id != ig_user_id:
+        try:
+            same_workspace = await db.instagram_accounts.find_one(
+                {'$or': [
+                    {'instagramAccountId': str(recipient_ig_id)},
+                    {'igUserId': str(recipient_ig_id)},
+                ], 'isActive': {'$ne': False}},
+                {'instagramAccountId': 1, 'userId': 1, 'username': 1},
+            )
+            if same_workspace:
+                logger.warning(
+                    'send_ig_message_cross_account_recipient_blocked '
+                    'sender_ig=%s recipient_ig=%s recipient_username=%s — '
+                    'recipient is also a linked IG account on this workspace, '
+                    'refusing to send to prevent bot-vs-bot loop',
+                    ig_user_id, recipient_ig_id, same_workspace.get('username'),
+                )
+                _LAST_DM_FAILURE.set({
+                    'failure_reason': 'cross_account_recipient_blocked',
+                    'status_code': None,
+                })
+                return _detailed_send_result(
+                    False, None,
+                    error={'message': 'cross_account_recipient_blocked',
+                           'recipient_ig_id': recipient_ig_id},
+                )
+        except Exception as exc:
+            # Don't fail the send on a guard-lookup error — log and proceed.
+            logger.info(
+                'send_ig_message_cross_account_guard_lookup_failed err=%s',
+                type(exc).__name__,
+            )
     url = f'https://graph.instagram.com/{ig_user_id}/messages'
     payload = {
         'recipient': {'id': recipient_ig_id},
@@ -11302,6 +11341,21 @@ def _current_instagram_context(user_doc: dict) -> dict:
 
 
 def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
+    """Build a mongo filter that selects rows owned by `user_id` AND
+    scoped to a single Instagram account.
+
+    Phase 2.20 hardening: the previous implementation cross-matched
+    the row UUID against fields that should only hold the numeric IG
+    account id (``instagramAccountId`` / ``accountId``). For
+    multi-account users that produced false positives — a rule saved
+    against account A would also surface when querying for account B
+    if the row UUIDs collided with the *other* account's identifiers
+    in any field. Now we keep the field families strictly separate:
+      - Row UUID  → instagramAccountDbId / instagram_account_id
+      - IG numeric id → instagramAccountId / igUserId / ig_user_id
+    The ``accountId`` legacy field is kept on the IG-numeric side
+    only (that's the historical write path).
+    """
     query = {'user_id': user_id}
     if isinstance(account_or_ig_id, dict):
         account_id = str(
@@ -11319,8 +11373,6 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
         clauses.extend([
             {'instagramAccountDbId': account_id},
             {'instagram_account_id': account_id},
-            {'instagramAccountId': account_id},
-            {'accountId': account_id},
         ])
     if instagram_account_id:
         clauses.extend([
@@ -14792,6 +14844,36 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     ig_comment_id, user_doc.get('email'), source)
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'bot_own_reply'}
+    # Cross-account guard: if the commenter is ANOTHER linked IG account
+    # on this same workspace, skip. This stops the loop where bot A
+    # comments on bot B's post (or vice versa) and triggers infinite
+    # back-and-forth automations between the two accounts. Without this,
+    # a single comment-DM rule on each side would have the bots talking
+    # to each other forever.
+    try:
+        sibling_account = await db.instagram_accounts.find_one(
+            {
+                'userId': user_id,
+                '$or': [
+                    {'instagramAccountId': str(commenter_id)},
+                    {'igUserId': str(commenter_id)},
+                ],
+                'isActive': {'$ne': False},
+            },
+            {'instagramAccountId': 1, 'username': 1},
+        )
+    except Exception:
+        sibling_account = None
+    if sibling_account:
+        logger.info(
+            'comment_skipped_sibling_account_commenter ig_comment_id=%s '
+            'commenter_ig=%s sibling_username=%s source=%s — commenter is '
+            'another linked IG account on this workspace, refusing to fire '
+            'automations to prevent bot-vs-bot loops',
+            ig_comment_id, commenter_id, sibling_account.get('username'), source,
+        )
+        return {'processed': False, 'matched': False, 'action_status': 'skipped',
+                'reason': 'sibling_account_commenter'}
 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
@@ -16127,6 +16209,37 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         await _persist(_mk_log('skipped', skip_reason='self_message'))
         return {'processed': False, 'status': 'skipped', 'reason': 'self_message',
                 'event_kind': event_kind}
+    # Cross-account loop guard: if the sender is another linked IG
+    # account on this same workspace, treat as self_message. Without
+    # this, account A's bot receives a DM whose sender is account B's
+    # IG user id (e.g. an automation reply from B) and starts its own
+    # automation reply chain — the two bots talking to each other.
+    if sender_id and sender_id != ig_account_id:
+        try:
+            sibling = await db.instagram_accounts.find_one(
+                {
+                    'userId': user_id,
+                    '$or': [
+                        {'instagramAccountId': str(sender_id)},
+                        {'igUserId': str(sender_id)},
+                    ],
+                    'isActive': {'$ne': False},
+                },
+                {'instagramAccountId': 1, 'username': 1},
+            )
+        except Exception:
+            sibling = None
+        if sibling:
+            logger.info(
+                'dm_skipped_sibling_account_sender recipient_ig=%s sender_ig=%s '
+                'sibling_username=%s — sender is another linked IG account, '
+                'refusing to fire DM automations to prevent bot-vs-bot loops',
+                ig_account_id, sender_id, sibling.get('username'),
+            )
+            await _persist(_mk_log('skipped', skip_reason='sibling_account_sender'))
+            return {'processed': False, 'status': 'skipped',
+                    'reason': 'sibling_account_sender',
+                    'event_kind': event_kind}
     if not sender_id:
         await _persist(_mk_log('skipped', skip_reason='missing_sender'))
         return {'processed': False, 'status': 'skipped', 'reason': 'missing_sender',
