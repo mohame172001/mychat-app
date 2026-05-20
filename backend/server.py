@@ -3177,6 +3177,41 @@ async def _send_comment_dm_flow_completion(user_doc: dict, session: dict) -> boo
     recipient_id = session.get('recipient_id')
     if not recipient_id:
         return False
+    # Account-scope sanity check. If the caller passed us a user_doc that
+    # is bound to a DIFFERENT IG account than the one that owns this
+    # session, every Meta call below would use the wrong access token and
+    # the follow-gate verify would fail with permission_or_consent_required
+    # — the silent-stall bug that made the bot look like it stopped after
+    # the first DM. Auto-rescope from the matching instagram_accounts row
+    # rather than continuing with the wrong token.
+    session_ig_id = (
+        session.get('ig_user_id')
+        or session.get('instagramAccountId')
+        or session.get('igUserId')
+    )
+    if session_ig_id and ig_user_id and session_ig_id != ig_user_id:
+        logger.warning(
+            'comment_dm_completion_scope_mismatch session=%s session_ig=%s user_doc_ig=%s '
+            '— auto-rescoping to session account',
+            session.get('id'), session_ig_id, ig_user_id,
+        )
+        try:
+            account_doc = await db.instagram_accounts.find_one({
+                'userId': user_doc.get('id'),
+                '$or': [
+                    {'instagramAccountId': session_ig_id},
+                    {'igUserId': session_ig_id},
+                ],
+            })
+            if account_doc:
+                user_doc = _with_instagram_account_context(user_doc, account_doc)
+                access_token = user_doc.get('meta_access_token', '')
+                ig_user_id = user_doc.get('ig_user_id', '')
+        except Exception as exc:
+            logger.warning(
+                'comment_dm_completion_rescope_failed session=%s err=%s',
+                session.get('id'), type(exc).__name__,
+            )
 
     # Idempotency: never resend the final link if it has already been sent
     # for this session — even on duplicate webhook events. We check both the
@@ -7175,6 +7210,54 @@ async def admin_webhook_log_recent(
             ],
         })
     return {'count': len(out), 'items': out}
+
+
+@api.post('/admin/comment-dm-sessions/reset-stuck')
+async def admin_reset_stuck_comment_dm_sessions(
+    user_id: str = Depends(get_current_active_user_id),
+    instagram_account_id: Optional[str] = None,
+):
+    """Reset comment_dm_sessions that are stuck due to the multi-account
+    scoping regression: status in (verification_failed, failed) OR
+    stage=verification_failed within the last 24h. Sets them back to
+    status=pending / stage=awaiting_user_action so the next webhook
+    click can land correctly with the now-properly-scoped user_doc.
+
+    Scoped to the caller's own user_id (admins can pass
+    instagram_account_id to narrow further). Idempotent — running it
+    twice does nothing the second time because the affected sessions
+    have already moved out of the stuck statuses.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    q: Dict[str, Any] = {
+        'user_id': user_id,
+        'created': {'$gte': cutoff},
+        'finalDmSentAt': None,
+        '$or': [
+            {'status': {'$in': ['verification_failed', 'failed']}},
+            {'stage': 'verification_failed'},
+        ],
+    }
+    if instagram_account_id:
+        q['$and'] = [{'$or': [
+            {'ig_user_id': instagram_account_id},
+            {'instagramAccountId': instagram_account_id},
+        ]}]
+    result = await db.comment_dm_sessions.update_many(
+        q,
+        {'$set': {
+            'status': 'pending',
+            'stage': 'awaiting_user_action',
+            'follow_verification_attempts': 0,
+            'followLastCheckedAt': None,
+            'verificationFailedFallbackSentAt': None,
+            'lastFollowVerificationError': None,
+            'updated': datetime.utcnow(),
+        }},
+    )
+    logger.info('comment_dm_sessions_stuck_reset user_id=%s reset_count=%s',
+                user_id, result.modified_count)
+    return {'ok': True, 'reset_count': result.modified_count}
 
 
 @api.get('/admin/comment-dm-sessions/recent')
@@ -11472,12 +11555,35 @@ async def _find_user_doc_for_instagram_account_id(instagram_account_id: str) -> 
         if owner:
             return _with_instagram_account_context(owner, account_doc), 'instagram_accounts'
 
+    # users.ig_user_id / fb_page_id legacy fallback. Even on this path we
+    # MUST surface an account-scoped user_doc: if a matching
+    # instagram_accounts row exists for this user we apply the IG context
+    # so meta_access_token + ig_user_id line up with the account that
+    # received the webhook. Without this, multi-account users routed via
+    # the legacy fields silently sent the follow-gate verify call (and
+    # the final DM) using whichever account happens to be primary on
+    # users.ig_user_id — a no-op for sessions on other accounts and the
+    # root cause of "bot replies once then stops" reports.
     user_doc = await db.users.find_one({'$or': [
         {'ig_user_id': instagram_account_id},
         {'fb_page_id': instagram_account_id},
     ]})
     if user_doc:
-        return user_doc, 'users.ig_user_id'
+        scoped = user_doc
+        try:
+            matching_account = await db.instagram_accounts.find_one({
+                'userId': user_doc.get('id'),
+                '$or': [
+                    {'instagramAccountId': instagram_account_id},
+                    {'igUserId': instagram_account_id},
+                ],
+            })
+            if matching_account:
+                scoped = _with_instagram_account_context(user_doc, matching_account)
+        except Exception as exc:
+            logger.info('users_ig_user_id_fallback_scope_failed err=%s',
+                        type(exc).__name__)
+        return scoped, 'users.ig_user_id'
     return None, None
 
 
@@ -17412,6 +17518,36 @@ async def _follow_verifier_loop():
                     user_doc = await db.users.find_one({'id': sess.get('user_id')})
                     if not user_doc:
                         continue
+                    # Critical: scope the user_doc to the IG account that owns
+                    # this session. Without this, multi-account users send the
+                    # follow-gate verify call (and the final DM) using whichever
+                    # account is currently flagged users.ig_user_id, which is
+                    # the wrong access token + ig_user_id for any session whose
+                    # IG account isn't the "primary" one. Meta then returns
+                    # permission_or_consent_required and the session locks at
+                    # verification_failed — looking to the user like the bot
+                    # just stopped after the first DM.
+                    sess_ig_id = (
+                        sess.get('ig_user_id')
+                        or sess.get('instagramAccountId')
+                        or sess.get('igUserId')
+                    )
+                    if sess_ig_id:
+                        account_doc = await db.instagram_accounts.find_one({
+                            'userId': user_doc.get('id'),
+                            '$or': [
+                                {'instagramAccountId': sess_ig_id},
+                                {'igUserId': sess_ig_id},
+                            ],
+                        })
+                        if account_doc:
+                            user_doc = _with_instagram_account_context(user_doc, account_doc)
+                        else:
+                            logger.warning(
+                                'follow_verifier_account_doc_missing session=%s ig_user_id=%s '
+                                '— falling back to raw user_doc, follow-gate verify likely to fail',
+                                sess.get('id'), sess_ig_id,
+                            )
                     await _send_comment_dm_flow_completion(user_doc, sess)
                 except Exception:
                     logger.exception('follow_verifier_per_session_error session=%s',
