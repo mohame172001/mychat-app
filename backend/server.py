@@ -12899,6 +12899,77 @@ async def instagram_subscribe_webhook_all(user_id: str = Depends(get_current_act
     return {'count': len(results), 'accounts': results}
 
 
+@api.get('/admin/instagram/subscription-state-all')
+async def admin_ig_subscription_state_all(user_id: str = Depends(get_current_active_user_id)):
+    """Phase 2.19 ops diagnostic: for every linked IG account on the
+    calling user, ask Meta directly what fields are currently
+    subscribed. This is the ground-truth check that bypasses our local
+    state — if Meta says ``messages`` is missing from one account's
+    ``subscribed_fields`` then no quick_reply / button click will ever
+    arrive at our webhook for that account, even though comments still
+    do. We use this to explain the asymmetry between two linked IG
+    accounts where one responds to button clicks and the other doesn't.
+    """
+    me_doc = await db.users.find_one({'id': user_id}) or {}
+    is_admin = bool(me_doc.get('is_admin') or me_doc.get('email') in ADMIN_EMAILS)
+    cursor = db.instagram_accounts.find({'userId': user_id})
+    accounts = await cursor.to_list(20)
+    EXPECTED = {'comments', 'messages', 'messaging_postbacks',
+                'messaging_seen', 'message_reactions', 'live_comments'}
+    out = []
+    async with httpx.AsyncClient(timeout=15) as c:
+        for acc in accounts:
+            ig_user_id = acc.get('instagramAccountId') or acc.get('igUserId') or ''
+            token = acc.get('accessToken') or ''
+            row: Dict[str, Any] = {
+                'instagramAccountId': ig_user_id,
+                'username': acc.get('username'),
+                'isActive': acc.get('isActive', True),
+                'connectionValid': acc.get('connectionValid'),
+            }
+            if not (ig_user_id and token):
+                row['ok'] = False
+                row['reason'] = 'missing_id_or_token'
+                out.append(row)
+                continue
+            try:
+                gr = await c.get(
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                    params={'access_token': token},
+                )
+                row['status'] = gr.status_code
+                if gr.status_code == 200:
+                    fields_present: list = []
+                    for entry in (gr.json() or {}).get('data') or []:
+                        for f in entry.get('subscribed_fields') or []:
+                            fields_present.append(f)
+                    row['subscribed_fields'] = sorted(set(fields_present))
+                    row['missing'] = sorted(EXPECTED - set(fields_present))
+                    row['ok'] = not row['missing']
+                else:
+                    row['ok'] = False
+                    # only admins see raw graph body
+                    if is_admin:
+                        row['body'] = gr.text[:300]
+                # /me cross-check so we know the token resolves to the
+                # same id we just queried.
+                try:
+                    mr = await c.get('https://graph.instagram.com/me',
+                                     params={'fields': 'id,username',
+                                             'access_token': token})
+                    if mr.status_code == 200:
+                        body = mr.json() or {}
+                        row['graph_me_id'] = body.get('id')
+                        row['id_match'] = body.get('id') == ig_user_id
+                except Exception as exc:
+                    row['graph_me_error'] = type(exc).__name__
+            except Exception as exc:
+                row['ok'] = False
+                row['error'] = type(exc).__name__
+            out.append(row)
+    return {'count': len(out), 'accounts': out, 'expected_fields': sorted(EXPECTED)}
+
+
 @api.post('/instagram/subscribe-webhook')
 async def instagram_subscribe_webhook(user_id: str = Depends(get_current_active_user_id)):
     """Force-subscribe the user's connected IG user to webhook fields via
