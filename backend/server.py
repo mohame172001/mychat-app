@@ -12796,6 +12796,73 @@ async def instagram_profile(user_id: str = Depends(get_current_active_user_id)):
     return out
 
 
+async def _subscribe_instagram_account_to_webhooks(ig_user_id: str, access_token: str) -> Dict[str, Any]:
+    """Subscribe a single linked IG user to every webhook field this app
+    knows how to handle. Idempotent — Meta upserts the subscription on
+    each POST. Returns a small status dict the caller can log/return.
+    """
+    fields = 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'
+    if not ig_user_id or not access_token:
+        return {'ok': False, 'reason': 'missing_id_or_token'}
+    async with httpx.AsyncClient(timeout=20) as c:
+        try:
+            sub = await c.post(
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                params={'access_token': access_token, 'subscribed_fields': fields},
+            )
+            verify = await c.get(
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                params={'access_token': access_token},
+            )
+            subscribed_now = []
+            if verify.status_code == 200:
+                try:
+                    for entry in (verify.json().get('data') or []):
+                        for f in entry.get('subscribed_fields') or []:
+                            subscribed_now.append(f)
+                except Exception:
+                    pass
+            return {
+                'ok': sub.status_code == 200,
+                'subscribe_status': sub.status_code,
+                'verify_status': verify.status_code,
+                'subscribed_fields': subscribed_now,
+            }
+        except Exception as exc:
+            logger.warning('ig_subscribe_webhooks_failed ig_user_id=%s err=%s',
+                           ig_user_id, type(exc).__name__)
+            return {'ok': False, 'reason': type(exc).__name__}
+
+
+@api.post('/instagram/subscribe-webhook-all')
+async def instagram_subscribe_webhook_all(user_id: str = Depends(get_current_active_user_id)):
+    """Re-subscribe EVERY linked Instagram account on this user to the
+    full webhook field set. Phase 2.19 ops fix: live debugging found
+    cases where one of a user's linked accounts had a partial
+    subscription (e.g. comments arriving but messages/messaging_
+    postbacks silently missing) which silently breaks every comment-DM
+    flow on that account. This endpoint guarantees parity by calling
+    Meta's /subscribed_apps for every isActive + connectionValid row.
+    """
+    cursor = db.instagram_accounts.find({
+        'userId': user_id,
+        'isActive': {'$ne': False},
+        'connectionValid': True,
+    })
+    accounts = await cursor.to_list(20)
+    results = []
+    for acc in accounts:
+        ig_user_id = acc.get('instagramAccountId') or acc.get('igUserId') or ''
+        access_token = acc.get('accessToken') or ''
+        status = await _subscribe_instagram_account_to_webhooks(ig_user_id, access_token)
+        results.append({
+            'instagramAccountId': ig_user_id,
+            'username': acc.get('username'),
+            **status,
+        })
+    return {'count': len(results), 'accounts': results}
+
+
 @api.post('/instagram/subscribe-webhook')
 async def instagram_subscribe_webhook(user_id: str = Depends(get_current_active_user_id)):
     """Force-subscribe the user's connected IG user to webhook fields via
