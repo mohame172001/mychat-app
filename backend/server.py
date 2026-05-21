@@ -7957,6 +7957,190 @@ async def admin_reset_test_flow(
     }
 
 
+@api.get('/admin/instagram/recent-comment-events')
+async def admin_recent_comment_events(
+    user_id: str = Depends(get_current_active_user_id),
+    instagram_account_id: Optional[str] = None,
+    limit: int = 30,
+):
+    """Operator-friendly view of recent comments that reached the
+    backend, regardless of whether a comment-DM session was later
+    created. This is the panel that exposes the failure modes which
+    Recent test flows cannot — comments that:
+
+      - matched no rule (post_specific_rule_media_mismatch,
+        no_rule_match, historical_before_rule_activation, ...)
+      - were dedupe-skipped at the comment level (different from
+        the session-level opening_dedupe_key)
+      - failed the public reply / opening DM with a Meta error
+      - never produced a session because the flow path returned early
+
+    A row appearing here proves the webhook (or polling) did reach
+    _handle_new_comment. A NEW comment that does not appear in this
+    panel means the event never reached our backend at all (webhook
+    delivery / signature / account resolution issue, OR polling
+    hasn't run yet for that account).
+
+    Output is sanitized: external ids partial-redacted, no raw
+    comment text body — only length, hash, source, and decision
+    fields. Requires admin.users.view.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    safe_limit = max(1, min(int(limit or 30), 100))
+
+    accounts_q: Dict[str, Any] = {'userId': user_id}
+    if instagram_account_id:
+        accounts_q['$or'] = [
+            {'instagramAccountId': str(instagram_account_id)},
+            {'igUserId': str(instagram_account_id)},
+            {'id': str(instagram_account_id)},
+        ]
+    accounts = await db.instagram_accounts.find(accounts_q).to_list(20)
+    accounts_by_ig_id: Dict[str, dict] = {}
+    for a in accounts:
+        ig = a.get('instagramAccountId') or a.get('igUserId') or ''
+        if ig:
+            accounts_by_ig_id[ig] = a
+    ig_ids = list(accounts_by_ig_id.keys())
+
+    comment_q: Dict[str, Any] = {'user_id': user_id}
+    if ig_ids:
+        comment_q['$or'] = [
+            {'instagramAccountId': {'$in': ig_ids}},
+            {'igUserId': {'$in': ig_ids}},
+        ]
+    comments = await db.comments.find(comment_q).sort('created', -1).limit(safe_limit).to_list(safe_limit)
+
+    automation_ids = list({c.get('rule_id') or c.get('ruleId') for c in comments if (c.get('rule_id') or c.get('ruleId'))})
+    rules_by_id: Dict[str, dict] = {}
+    if automation_ids:
+        async for r in db.automations.find({'id': {'$in': automation_ids}}):
+            rules_by_id[r.get('id')] = r
+
+    # Check session existence per (account, automation, media, commenter)
+    # so the panel can flag "comment matched but no session created"
+    # — the diagnostic case the operator just hit.
+    session_keys: List[str] = []
+    for c in comments:
+        ig = c.get('instagramAccountId') or c.get('igUserId') or ''
+        rid = c.get('rule_id') or c.get('ruleId')
+        mid = c.get('media_id') or c.get('mediaId')
+        cid = c.get('commenter_id')
+        if ig and rid and mid and cid:
+            session_keys.append(_comment_opening_dedupe_key(user_id, ig, rid, mid, cid) or '')
+    sessions_by_dedupe: Dict[str, dict] = {}
+    if session_keys:
+        seen_keys = list({k for k in session_keys if k})
+        async for s in db.comment_dm_sessions.find({
+            'user_id': user_id,
+            'opening_dedupe_key': {'$in': seen_keys},
+        }):
+            k = s.get('opening_dedupe_key')
+            if k and k not in sessions_by_dedupe:
+                sessions_by_dedupe[k] = s
+
+    now = datetime.utcnow()
+    out_rows: List[Dict[str, Any]] = []
+    for c in comments:
+        ig = c.get('instagramAccountId') or c.get('igUserId') or ''
+        account_doc = accounts_by_ig_id.get(ig) or {}
+        rule_id = c.get('rule_id') or c.get('ruleId')
+        rule = rules_by_id.get(rule_id) or {}
+        media_id = c.get('media_id') or c.get('mediaId') or ''
+        commenter_id = c.get('commenter_id') or ''
+        dedupe_key = (
+            _comment_opening_dedupe_key(user_id, ig, rule_id, media_id, commenter_id)
+            if (ig and rule_id and media_id and commenter_id) else None
+        )
+        related_session = sessions_by_dedupe.get(dedupe_key) if dedupe_key else None
+        action_status = (c.get('action_status') or c.get('actionStatus') or '').lower()
+        reply_status = (c.get('reply_status') or c.get('replyStatus') or '').lower()
+        dm_status = (c.get('dm_status') or c.get('dmStatus') or '').lower()
+        skip_reason = c.get('skip_reason') or c.get('skipReason')
+        session_created = bool(related_session)
+        # Why no session was created — a single-string explanation the
+        # UI can render verbatim. The operator should never have to
+        # cross-reference multiple fields to understand the stop point.
+        no_session_reason: Optional[str] = None
+        if not session_created:
+            if action_status == 'skipped':
+                no_session_reason = f'comment_skipped:{skip_reason or "unknown"}'
+            elif not c.get('matched'):
+                no_session_reason = f'rule_not_matched:{skip_reason or "unknown"}'
+            elif reply_status == 'failed':
+                no_session_reason = f'public_reply_failed:{c.get("reply_failure_reason") or "unknown"}'
+            elif dm_status == 'failed':
+                no_session_reason = f'opening_dm_failed:{c.get("dm_failure_reason") or "unknown"}'
+            elif action_status in ('pending', 'processing'):
+                no_session_reason = 'queued_not_yet_run'
+            elif action_status == 'plan_limited':
+                no_session_reason = 'plan_limit_exceeded'
+            else:
+                # Comment-flow rule may not need a session (legacy
+                # straight-DM rule with no deferred step).
+                no_session_reason = 'rule_has_no_deferred_flow'
+        created = c.get('created') if isinstance(c.get('created'), datetime) else None
+        age_seconds = int((now - created).total_seconds()) if created else None
+        out_rows.append({
+            'comment_doc_id': c.get('id'),
+            'ig_comment_id_partial': _safe_partial_identifier(c.get('ig_comment_id')),
+            'instagram_account_id_partial': _safe_partial_identifier(ig),
+            'instagram_username': account_doc.get('username'),
+            'media_id_partial': _safe_partial_identifier(media_id),
+            'commenter_id_partial': _safe_partial_identifier(commenter_id),
+            'commenter_username': c.get('commenter_username'),
+            'source': c.get('source'),
+            'matched': bool(c.get('matched')),
+            'matched_rule_id': rule_id,
+            'matched_rule_name': rule.get('name'),
+            'matched_rule_scope': c.get('matched_rule_scope'),
+            'matched_rule_priority': c.get('matched_rule_priority'),
+            'action_status': c.get('action_status'),
+            'reply_status': c.get('reply_status'),
+            'dm_status': c.get('dm_status'),
+            'reply_failure_reason': c.get('reply_failure_reason'),
+            'dm_failure_reason': c.get('dm_failure_reason'),
+            'skip_reason': skip_reason,
+            'opening_dedupe_key_partial': _safe_partial_identifier(c.get('opening_dedupe_key')),
+            'text_length': len(c.get('text') or ''),
+            'created': created.isoformat() if created else None,
+            'updated': c.get('updated').isoformat() if isinstance(c.get('updated'), datetime) else None,
+            'age_seconds': age_seconds,
+            'session_created': session_created,
+            'related_session_id': (related_session or {}).get('id') if related_session else None,
+            'no_session_reason': no_session_reason,
+        })
+    # Per-account "last comment seen" summary — answers the question
+    # "did any comment from any source arrive on Account 2 in the last
+    # N seconds?" without scanning the full list.
+    last_seen_by_account: Dict[str, Optional[str]] = {}
+    for ig, account_doc in accounts_by_ig_id.items():
+        latest = next((r for r in out_rows
+                       if (r.get('instagram_account_id_partial')
+                           == _safe_partial_identifier(ig))), None)
+        last_seen_by_account[ig] = latest.get('created') if latest else None
+    await _record_admin_action(
+        caller,
+        action='instagram_recent_comment_events_view',
+        target_user_id=user_id,
+        metadata={'count': len(out_rows),
+                  'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id)},
+    )
+    return {
+        'ok': True,
+        'count': len(out_rows),
+        'accounts': [
+            {
+                'instagram_account_id_partial': _safe_partial_identifier(ig),
+                'instagram_username': accounts_by_ig_id[ig].get('username'),
+                'last_comment_event_at': last_seen_by_account.get(ig),
+            }
+            for ig in ig_ids
+        ],
+        'events': out_rows,
+    }
+
+
 @api.get('/admin/instagram/recent-flows')
 async def admin_recent_test_flows(
     user_id: str = Depends(get_current_active_user_id),

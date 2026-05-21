@@ -322,6 +322,181 @@ function FlowRow({ flow, onResetDone }) {
   );
 }
 
+/**
+ * Recent comment events — exposes the comments collection rows so
+ * the operator can see every comment that reached the backend, not
+ * just the ones that produced a session. This is the panel that
+ * answers "I commented but nothing happened — did it even arrive?".
+ */
+function RecentCommentEventsPanel() {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    try {
+      const r = await api.get('/admin/instagram/recent-comment-events?limit=30');
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const events = data?.events || [];
+  const accounts = data?.accounts || [];
+
+  return (
+    <section
+      className="bg-white rounded-2xl border border-slate-200 p-4 mb-4"
+      data-testid="diag-panel-recent_comment_events"
+    >
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <MessageSquare className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[180px]">
+          <div className="font-semibold text-slate-800">Recent comment events</div>
+          <div className="text-xs text-slate-500">
+            Newest comments that reached the backend, regardless of whether they produced a
+            session. If a fresh comment is NOT in this list, the webhook never arrived or
+            polling hasn't picked it up yet — check Subscription state and the raw webhook log.
+          </div>
+        </div>
+        {state === 'loading' && (
+          <Badge className="bg-slate-100 text-slate-600 border-0">
+            <RefreshCw className="w-3 h-3 me-1 animate-spin" /> Loading…
+          </Badge>
+        )}
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {data?.count ?? 0} events
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> Forbidden
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <XCircle className="w-3 h-3 me-1" /> Failed
+          </Badge>
+        )}
+        <Button size="sm" variant="outline" onClick={load} disabled={state === 'loading'}
+                data-testid="recent-comment-events-reload">
+          <RefreshCw className={`w-3 h-3 me-1 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          Reload
+        </Button>
+      </header>
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-2">
+          {error}
+        </div>
+      )}
+      {accounts.length > 0 && (
+        <div className="grid sm:grid-cols-2 gap-2 mb-3" data-testid="recent-comment-events-account-summary">
+          {accounts.map((a) => (
+            <div
+              key={a.instagram_account_id_partial}
+              className="text-xs border border-slate-100 rounded-md p-2 bg-slate-50"
+            >
+              <div className="font-semibold text-slate-700">@{a.instagram_username || a.instagram_account_id_partial}</div>
+              <div className="text-slate-500">
+                last comment seen:{' '}
+                {a.last_comment_event_at
+                  ? <span className="font-mono">{new Date(a.last_comment_event_at).toLocaleString()}</span>
+                  : <span className="text-rose-700 font-semibold">never (no comment has reached the backend)</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {state === 'success' && events.length === 0 && (
+        <div className="text-xs text-slate-500 py-4 text-center">
+          No recent comment events. If you just commented, wait ~15 seconds (poller) and reload.
+          If still empty: open the Recent raw webhook log panel below and check whether the
+          webhook arrived at all.
+        </div>
+      )}
+      {events.length > 0 && (
+        <div className="rounded-md border border-slate-100">
+          {events.map((ev) => {
+            const blocked = !ev.session_created;
+            const tone = ev.action_status === 'success'
+              ? 'bg-emerald-100 text-emerald-700'
+              : ev.action_status === 'partial_success'
+                ? 'bg-amber-100 text-amber-800'
+                : blocked
+                  ? 'bg-rose-100 text-rose-700'
+                  : 'bg-slate-100 text-slate-600';
+            const ageLabel = ev.age_seconds == null
+              ? '—'
+              : ev.age_seconds < 60 ? `${ev.age_seconds}s ago`
+              : ev.age_seconds < 3600 ? `${Math.round(ev.age_seconds / 60)}m ago`
+              : ev.age_seconds < 86400 ? `${Math.round(ev.age_seconds / 3600)}h ago`
+              : `${Math.round(ev.age_seconds / 86400)}d ago`;
+            return (
+              <div
+                key={ev.comment_doc_id}
+                className="border-t border-slate-100 px-3 py-3"
+                data-testid={`recent-comment-event-${ev.comment_doc_id}`}
+              >
+                <div className="flex flex-wrap items-start gap-3">
+                  <div className="flex-1 min-w-[260px]">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-semibold text-slate-800">@{ev.instagram_username || ev.instagram_account_id_partial}</span>
+                      <Badge className={`${tone} border-0`}>
+                        {ev.action_status || 'unknown'}
+                      </Badge>
+                      <span className="text-xs text-slate-500">{ageLabel}</span>
+                      <Badge className="bg-slate-100 text-slate-600 border-0 text-[10px]">
+                        source: {ev.source || 'unknown'}
+                      </Badge>
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {ev.matched_rule_name ? <><span className="font-semibold">{ev.matched_rule_name}</span> · </> : null}
+                      scope <span className="font-mono">{ev.matched_rule_scope || 'none'}</span> ·
+                      media <span className="font-mono">{ev.media_id_partial || '—'}</span> ·
+                      commenter <span className="font-mono">{ev.commenter_id_partial || '—'}</span>
+                      {ev.commenter_username ? <> (<span className="font-mono">{ev.commenter_username}</span>)</> : null}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      reply <span className="font-mono">{ev.reply_status || '—'}</span> ·
+                      DM <span className="font-mono">{ev.dm_status || '—'}</span>
+                      {ev.skip_reason ? <> · skip <span className="font-mono">{ev.skip_reason}</span></> : null}
+                      {ev.reply_failure_reason ? <> · reply_err <span className="font-mono">{ev.reply_failure_reason}</span></> : null}
+                      {ev.dm_failure_reason ? <> · dm_err <span className="font-mono">{ev.dm_failure_reason}</span></> : null}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      session_created:{' '}
+                      <span className={`font-mono ${ev.session_created ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {String(ev.session_created)}
+                      </span>
+                      {!ev.session_created && ev.no_session_reason && (
+                        <> · reason <span className="font-mono">{ev.no_session_reason}</span></>
+                      )}
+                      {ev.related_session_id && (
+                        <> · session <span className="font-mono">{ev.related_session_id}</span></>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+
 function RecentTestFlowsPanel() {
   const [state, setState] = useState('idle');
   const [data, setData] = useState(null);
@@ -402,8 +577,22 @@ function RecentTestFlowsPanel() {
         </div>
       )}
       {state === 'success' && flows.length === 0 && (
-        <div className="text-xs text-slate-500 py-4 text-center">
-          No recent comment-DM sessions for your linked Instagram accounts.
+        <div className="text-xs text-slate-700 py-4 px-3 bg-amber-50 border border-amber-200 rounded-md">
+          <div className="font-semibold mb-1">No comment-DM sessions found.</div>
+          <div className="text-slate-600">
+            This means no recent comment has reached the point where a session is created.
+            That can mean:
+            <ul className="list-disc list-inside mt-1 space-y-0.5">
+              <li>The webhook did not arrive (Meta delivery issue or signature failure)</li>
+              <li>The rule did not match (e.g. media_id mismatch on a post-specific rule)</li>
+              <li>The opening DM failed before session creation</li>
+            </ul>
+            <div className="mt-2">
+              Scroll to <span className="font-semibold">Recent comment events</span> below to see every
+              comment that did reach the backend, including failures and skip reasons — that
+              panel is the one to inspect when the flow list is empty.
+            </div>
+          </div>
         </div>
       )}
       {flows.length > 0 && (
@@ -707,6 +896,8 @@ export default function InstagramDiagnostics() {
       </div>
 
       <RecentTestFlowsPanel />
+
+      <RecentCommentEventsPanel />
 
       <ResetTestFlowPanel />
 

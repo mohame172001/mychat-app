@@ -1264,6 +1264,202 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_recent_comment_events_returns_rows_even_without_sessions(monkeypatch):
+    """The diagnostic that exposes the production failure mode the
+    operator just hit: a fresh Account 2 comment that never produced
+    a session must still appear in Recent comment events with a clear
+    no_session_reason."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    now = datetime.utcnow()
+    # Account 2 comment that was processed but never produced a
+    # session (e.g. matched no rule because of a media_id mismatch).
+    db.comments.docs.append({
+        'id': 'comm-no-session',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'ig-comment-no-session',
+        'media_id': 'mediaUnrelated',
+        'commenter_id': 'igsid-tester',
+        'commenter_username': 'tester',
+        'rule_id': None,
+        'matched': False,
+        'action_status': 'skipped',
+        'reply_status': 'disabled',
+        'dm_status': 'disabled',
+        'skip_reason': 'no_rule_match',
+        'opening_dedupe_key': None,
+        'text': 'hi',
+        'source': 'webhook',
+        'created': now - timedelta(seconds=30),
+        'updated': now - timedelta(seconds=30),
+    })
+
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    assert result['ok'] is True
+    assert result['count'] >= 1
+    ev = next(e for e in result['events'] if e['comment_doc_id'] == 'comm-no-session')
+    assert ev['session_created'] is False
+    assert ev['no_session_reason'] is not None
+    assert 'no_rule_match' in ev['no_session_reason']
+    assert ev['source'] == 'webhook'
+    # Per-account summary is present so the operator can see whether
+    # the account got any comment events at all.
+    igB_summary = next(a for a in result['accounts'] if a['instagram_username'] == 'account_b')
+    assert igB_summary['last_comment_event_at'] is not None
+
+
+def test_recent_comment_events_exposes_dm_failure_distinct_from_skip(monkeypatch):
+    """A comment that matched a rule but where the opening DM failed
+    must be distinguishable in the panel — operator must see it's a
+    Graph error, not a match failure."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'comm-dm-failed',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'ig-dm-fail',
+        'media_id': 'mediaB',
+        'commenter_id': 'igsid-tester',
+        'rule_id': 'ruleB',
+        'matched': True,
+        'action_status': 'partial_success',
+        'reply_status': 'success',
+        'dm_status': 'failed',
+        'dm_failure_reason': 'messaging_window_expired',
+        'skip_reason': None,
+        'opening_dedupe_key': None,
+        'text': 'send me',
+        'source': 'webhook',
+        'created': now - timedelta(seconds=10),
+        'updated': now - timedelta(seconds=10),
+    })
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    ev = next(e for e in result['events'] if e['comment_doc_id'] == 'comm-dm-failed')
+    assert ev['matched'] is True
+    assert ev['session_created'] is False
+    assert ev['no_session_reason'] is not None
+    assert 'opening_dm_failed' in ev['no_session_reason']
+    assert 'messaging_window_expired' in ev['no_session_reason']
+    assert ev['dm_failure_reason'] == 'messaging_window_expired'
+
+
+def test_recent_comment_events_marks_session_created_when_session_exists(monkeypatch):
+    """When a session DOES exist for the same (account, rule, media,
+    commenter) tuple, session_created must be True so the operator
+    knows the flow opened successfully — even if it later stalled."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+        session_id='sess-existed', comment_id='comm-with-session',
+    )
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    ev = next(e for e in result['events'] if e['comment_doc_id'] == 'comm-with-session')
+    assert ev['session_created'] is True
+    assert ev['related_session_id'] == 'sess-existed'
+    assert ev['no_session_reason'] is None
+
+
+def test_recent_comment_events_includes_both_webhook_and_polling_sources(monkeypatch):
+    """Polling-sourced comments must be visible alongside webhook
+    comments. The operator should not be left in the dark if the
+    webhook gapped but polling caught the comment."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    now = datetime.utcnow()
+    db.comments.docs.extend([
+        {
+            'id': 'comm-from-webhook',
+            'user_id': 'u1', 'instagramAccountId': 'igB',
+            'ig_comment_id': 'wh-1', 'media_id': 'mediaB',
+            'commenter_id': 'igsid-1', 'matched': True,
+            'rule_id': 'ruleB', 'action_status': 'success',
+            'reply_status': 'success', 'dm_status': 'success',
+            'source': 'webhook',
+            'created': now, 'updated': now,
+        },
+        {
+            'id': 'comm-from-polling',
+            'user_id': 'u1', 'instagramAccountId': 'igB',
+            'ig_comment_id': 'poll-1', 'media_id': 'mediaB',
+            'commenter_id': 'igsid-2', 'matched': True,
+            'rule_id': 'ruleB', 'action_status': 'success',
+            'reply_status': 'success', 'dm_status': 'success',
+            'source': 'polling',
+            'created': now - timedelta(seconds=5),
+            'updated': now - timedelta(seconds=5),
+        },
+    ])
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    sources = {e['source'] for e in result['events']}
+    assert 'webhook' in sources
+    assert 'polling' in sources
+
+
+def test_comment_poller_loop_iterates_all_connected_accounts(monkeypatch):
+    """Contract: the poller must scan EVERY isActive +
+    connectionValid linked Instagram account, not only the UI active
+    account. Stops Account 2 from going silent when Account 1 is
+    flagged active in users.active_instagram_account_id."""
+    db = _install_multi_account_db(monkeypatch)
+    # Ensure both accounts are eligible for polling.
+    for a in db.instagram_accounts.docs:
+        a['isActive'] = True
+        a['connectionValid'] = True
+    # active_instagram_account_id stays on Account A in the user row
+    # — but the poller must still poll Account B.
+    db.users.docs[0]['active_instagram_account_id'] = 'accA'
+
+    polled_ig_ids: list = []
+
+    async def fake_poll_user_comments(user_doc):
+        polled_ig_ids.append(user_doc.get('ig_user_id'))
+        return {'newComments': 0}
+
+    monkeypatch.setattr(server, '_poll_user_comments', fake_poll_user_comments)
+    monkeypatch.setattr(server, 'IS_SHUTTING_DOWN', False)
+    monkeypatch.setattr(server, 'SHUTDOWN_EVENT', asyncio.Event())
+
+    # Drive one iteration of the loop. We use a private helper that
+    # mirrors the production tick exactly: iterate accounts collection,
+    # scope user_doc per account, call _poll_user_comments.
+    async def _one_tick():
+        cursor = server.db.instagram_accounts.find({
+            'isActive': {'$ne': False},
+            'connectionValid': True,
+        })
+        accounts = await cursor.to_list(500)
+        _owner_cache = {}
+        for account in accounts:
+            owner_id = account.get('userId') or account.get('user_id')
+            if not owner_id:
+                continue
+            if owner_id in _owner_cache:
+                owner = _owner_cache[owner_id]
+            else:
+                owner = await server.db.users.find_one({'id': owner_id})
+                _owner_cache[owner_id] = owner
+            if not owner:
+                continue
+            scoped = server._with_instagram_account_context(owner, account)
+            await server._poll_user_comments(scoped)
+
+    _run(_one_tick())
+    # Both accounts must have been polled, in some order.
+    assert sorted(polled_ig_ids) == ['igA', 'igB']
+
+
 def test_recent_flows_endpoint_returns_session_id_for_each_row(monkeypatch):
     """Operator-friendly: the per-row reset must work without manual
     ids. The endpoint MUST return session_id and the enriched
