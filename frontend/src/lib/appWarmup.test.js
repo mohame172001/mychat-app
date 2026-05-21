@@ -2,26 +2,33 @@ const fs = require('fs');
 const path = require('path');
 
 const source = fs.readFileSync(path.join(__dirname, 'appWarmup.js'), 'utf8');
+const instagramApiSource = fs.readFileSync(path.join(__dirname, '..', 'api', 'instagramApi.js'), 'utf8');
+const automationsApiSource = fs.readFileSync(path.join(__dirname, '..', 'api', 'automationsApi.js'), 'utf8');
+const adminApiSource = fs.readFileSync(path.join(__dirname, '..', 'api', 'adminApi.js'), 'utf8');
 
 describe('app boot warmup wiring', () => {
   test('preloads core route chunks and not admin data by default', () => {
     expect(source).toContain("['Dashboard', 'Automations']");
     expect(source).toContain("'Admin'");
-    expect(source).not.toContain('/api/admin');
+    expect(source).not.toContain("api.get('/admin");
   });
 
   test('prefetches core page data with persistent safe snapshots', () => {
     expect(source).toContain('/dashboard/summary');
-    expect(source).toContain('/automations/summary');
-    expect(source).toContain('/instagram/accounts');
+    expect(source).toContain('automationsApi.summary');
+    expect(source).toContain('instagramApi.listAccounts');
+    expect(automationsApiSource).toContain('/automations/summary');
+    expect(instagramApiSource).toContain('/instagram/accounts');
     // Comments page was removed; comments must not be warmed up.
     expect(source).not.toContain('/comments');
     expect((source.match(/persist: true/g) || []).length).toBeGreaterThanOrEqual(3);
   });
 
   test('admin users also warm admin overview + admin members', () => {
-    expect(source).toContain('/admin/overview');
-    expect(source).toContain('/admin/members');
+    expect(source).toContain('adminApi.overview');
+    expect(source).toContain('adminApi.members');
+    expect(adminApiSource).toContain('/admin/overview');
+    expect(adminApiSource).toContain('/admin/members');
     expect(source).toContain('if (isAdmin)');
   });
 

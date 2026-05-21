@@ -6,6 +6,7 @@ import { Badge } from '../ui/badge';
 import { useAuth } from '../../context/AuthContext';
 import { useTranslation } from '../../lib/i18n';
 import LangSwitcher from '../LangSwitcher';
+import { ROUTES } from '../../constants/routes';
 
 // Phase 2.18S: Topbar cleanup.
 // Removed two dead UI elements that confused users in the live tester
@@ -62,7 +63,7 @@ const Topbar = () => {
           {instagramStatus.label}
         </Badge>
         <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl h-10" asChild>
-          <Link to="/app/automations">
+          <Link to={ROUTES.APP_AUTOMATIONS}>
             <Plus className="w-4 h-4 me-1.5" /> {t('topbar.newAutomation')}
           </Link>
         </Button>

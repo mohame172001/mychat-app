@@ -13,7 +13,8 @@ function LocaleAwareToaster() {
   return <Toaster position={lang === 'ar' ? 'top-left' : 'top-right'} dir={lang === 'ar' ? 'rtl' : 'ltr'} />;
 }
 import analytics from './lib/analytics';
-import { registerRoute, preloadAfterPaint } from './lib/routePreloader';
+import { registerRoute } from './lib/routePreloader';
+import { APP_CHILD_ROUTES, ROUTES } from './constants/routes';
 
 import DashboardLayout from './components/layout/DashboardLayout';
 import OfflineBanner from './components/OfflineBanner';
@@ -106,7 +107,7 @@ const ProtectedRoute = ({ children }) => {
       </div>
     );
   }
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to={ROUTES.LOGIN} replace />;
   return children;
 };
 
@@ -185,25 +186,25 @@ function App() {
           <PageViewTracker />
           <Suspense fallback={<PageLoading />}>
 <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/signup" element={<Signup />} />
-              <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route path="/reset-password" element={<ResetPassword />} />
-              <Route path="/privacy" element={<PrivacyPolicy />} />
-              <Route path="/terms" element={<Terms />} />
-              <Route path="/data-deletion" element={<DataDeletion />} />
-              <Route path="/status" element={<StatusPage />} />
-              <Route path="/app" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+              <Route path={ROUTES.HOME} element={<Landing />} />
+              <Route path={ROUTES.LOGIN} element={<Login />} />
+              <Route path={ROUTES.SIGNUP} element={<Signup />} />
+              <Route path={ROUTES.FORGOT_PASSWORD} element={<ForgotPassword />} />
+              <Route path={ROUTES.RESET_PASSWORD} element={<ResetPassword />} />
+              <Route path={ROUTES.PRIVACY} element={<PrivacyPolicy />} />
+              <Route path={ROUTES.TERMS} element={<Terms />} />
+              <Route path={ROUTES.DATA_DELETION} element={<DataDeletion />} />
+              <Route path={ROUTES.STATUS} element={<StatusPage />} />
+              <Route path={ROUTES.APP} element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
                 <Route index element={<Dashboard />} />
-                <Route path="automations" element={<Automations />} />
-                <Route path="automations/:id" element={<FlowBuilder />} />
-                <Route path="dm-automation" element={<DmAutomation />} />
-                <Route path="settings" element={<Settings />} />
-                <Route path="billing" element={<Billing />} />
-                <Route path="admin" element={<AdminConsole />} />
-                <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
-                <Route path="*" element={<Navigate to="/app" replace />} />
+                <Route path={APP_CHILD_ROUTES.AUTOMATIONS} element={<Automations />} />
+                <Route path={APP_CHILD_ROUTES.AUTOMATION_DETAIL} element={<FlowBuilder />} />
+                <Route path={APP_CHILD_ROUTES.DM_AUTOMATION} element={<DmAutomation />} />
+                <Route path={APP_CHILD_ROUTES.SETTINGS} element={<Settings />} />
+                <Route path={APP_CHILD_ROUTES.BILLING} element={<Billing />} />
+                <Route path={APP_CHILD_ROUTES.ADMIN} element={<AdminConsole />} />
+                <Route path={APP_CHILD_ROUTES.ADMIN_SPECIFIC_REPLY_DEBUG} element={<SpecificReplyDebug />} />
+                <Route path="*" element={<Navigate to={ROUTES.APP} replace />} />
               </Route>
               <Route path="*" element={<NotFound />} />
             </Routes>

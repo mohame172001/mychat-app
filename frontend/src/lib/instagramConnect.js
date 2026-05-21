@@ -1,4 +1,4 @@
-import api from './api';
+import { instagramApi } from '../api/instagramApi';
 
 export const instagramConnectUrlPath = ({ mode = 'connect', returnTo = '/app' } = {}) => {
   const params = new URLSearchParams({ mode, returnTo });
@@ -30,7 +30,7 @@ function isSafeOAuthRedirect(url) {
 }
 
 export const startInstagramConnect = async ({ mode = 'connect', returnTo = '/app' } = {}) => {
-  const { data } = await api.get(instagramConnectUrlPath({ mode, returnTo }));
+  const { data } = await instagramApi.authUrl(instagramConnectUrlPath({ mode, returnTo }));
   if (!data?.url) throw new Error('Instagram OAuth URL was not returned');
   if (!isSafeOAuthRedirect(data.url)) {
     throw new Error('refusing_unsafe_oauth_redirect');

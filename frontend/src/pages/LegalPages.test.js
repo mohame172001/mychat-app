@@ -6,10 +6,14 @@ const src = (...parts) => fs.readFileSync(path.join(__dirname, '..', ...parts), 
 describe('Meta review public legal pages', () => {
   test('App exposes privacy, terms, and data deletion public routes', () => {
     const app = src('App.js');
+    const routes = src('constants', 'routes.js');
 
-    expect(app).toContain("path=\"/privacy\"");
-    expect(app).toContain("path=\"/terms\"");
-    expect(app).toContain("path=\"/data-deletion\"");
+    expect(routes).toContain("PRIVACY: '/privacy'");
+    expect(routes).toContain("TERMS: '/terms'");
+    expect(routes).toContain("DATA_DELETION: '/data-deletion'");
+    expect(app).toContain('path={ROUTES.PRIVACY}');
+    expect(app).toContain('path={ROUTES.TERMS}');
+    expect(app).toContain('path={ROUTES.DATA_DELETION}');
     expect(app).toContain("import('./pages/DataDeletion')");
   });
 

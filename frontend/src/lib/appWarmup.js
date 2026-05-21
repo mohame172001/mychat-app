@@ -1,6 +1,9 @@
 import api from './api';
 import { cachedApiGetSWR } from './apiCache';
 import { preloadRoutes } from './routePreloader';
+import { adminApi } from '../api/adminApi';
+import { automationsApi } from '../api/automationsApi';
+import { instagramApi } from '../api/instagramApi';
 
 // Phase 2.18F: TTL = "how long stale data is shown without ANY refresh"
 // maxStale = "how long stale data is shown WHILE we refresh silently".
@@ -58,12 +61,12 @@ export function scheduleCoreAppWarmup(user, options = {}) {
         maxStaleMs: DASHBOARD_MAX_STALE_MS,
         persist: true,
       }),
-      cachedApiGetSWR(keys.automations, () => api.get('/automations/summary', { timeout: 8000 }), {
+      cachedApiGetSWR(keys.automations, () => automationsApi.summary({ timeout: 8000 }), {
         ttlMs: AUTOMATIONS_TTL_MS,
         maxStaleMs: AUTOMATIONS_MAX_STALE_MS,
         persist: true,
       }),
-      cachedApiGetSWR(keys.accounts, () => api.get('/instagram/accounts'), {
+      cachedApiGetSWR(keys.accounts, () => instagramApi.listAccounts(), {
         ttlMs: ACCOUNTS_TTL_MS,
         maxStaleMs: ACCOUNTS_MAX_STALE_MS,
         persist: true,
@@ -77,12 +80,12 @@ export function scheduleCoreAppWarmup(user, options = {}) {
       tasks.push(
         cachedApiGetSWR(
           `admin:overview:${user.id}`,
-          () => api.get('/admin/overview'),
+          () => adminApi.overview(),
           { ttlMs: ADMIN_TTL_MS, maxStaleMs: ADMIN_MAX_STALE_MS, persist: true },
         ),
         cachedApiGetSWR(
           `admin:members:${user.id}`,
-          () => api.get('/admin/members'),
+          () => adminApi.members(),
           { ttlMs: ADMIN_TTL_MS, maxStaleMs: ADMIN_MAX_STALE_MS, persist: true },
         ),
       );

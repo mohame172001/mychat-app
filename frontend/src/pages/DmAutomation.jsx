@@ -7,8 +7,8 @@ import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
 import { Inbox, Loader2, Trash2, RefreshCcw } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '../lib/api';
 import { useTranslation } from '../lib/i18n';
+import { instagramApi } from '../api/instagramApi';
 
 function matchModes(lang) {
   return [
@@ -44,9 +44,9 @@ const DmAutomation = () => {
   const loadAll = useCallback(async () => {
     try {
       const [r, l, d] = await Promise.all([
-        api.get('/instagram/dm/rules'),
-        api.get('/instagram/dm/logs?limit=50'),
-        api.get('/instagram/dm/diagnostics'),
+        instagramApi.dmRules(),
+        instagramApi.dmLogs(50),
+        instagramApi.dmDiagnostics(),
       ]);
       setRules(r.data.items || []);
       setLogs(l.data.items || []);
@@ -61,7 +61,7 @@ const DmAutomation = () => {
   const refreshDiag = async () => {
     setDiagLoading(true);
     try {
-      const { data } = await api.get('/instagram/dm/diagnostics');
+      const { data } = await instagramApi.dmDiagnostics();
       setDiag(data);
     } catch (e) {
       toast.error(e?.response?.data?.detail || (lang === 'ar' ? 'فشل التشخيص' : 'Diagnostics failed'));
@@ -77,7 +77,7 @@ const DmAutomation = () => {
     }
     setSaving(true);
     try {
-      await api.post('/instagram/dm/rules', form);
+      await instagramApi.createDmRule(form);
       toast.success(lang === 'ar' ? 'تمّ إنشاء القاعدة' : 'Rule created');
       setForm({ name: '', keyword: '', matchMode: 'contains', replyText: '', isActive: true });
       await loadAll();
@@ -90,7 +90,7 @@ const DmAutomation = () => {
 
   const toggleActive = async (rule) => {
     try {
-      await api.patch(`/instagram/dm/rules/${rule.id}`, { isActive: !rule.isActive });
+      await instagramApi.updateDmRule(rule.id, { isActive: !rule.isActive });
       await loadAll();
     } catch (e) {
       toast.error(lang === 'ar' ? 'تعذّر التبديل' : 'Failed to toggle');
@@ -100,7 +100,7 @@ const DmAutomation = () => {
   const deleteRule = async (rule) => {
     if (!window.confirm(lang === "ar" ? `حذف القاعدة "${rule.name}"؟` : `Delete rule "${rule.name}"?`)) return;
     try {
-      await api.delete(`/instagram/dm/rules/${rule.id}`);
+      await instagramApi.deleteDmRule(rule.id);
       toast.success(lang === 'ar' ? 'تمّ الحذف' : 'Deleted');
       await loadAll();
     } catch (e) {

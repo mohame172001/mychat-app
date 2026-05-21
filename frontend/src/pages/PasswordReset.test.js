@@ -5,11 +5,14 @@ const forgotSrc = fs.readFileSync(path.join(__dirname, 'ForgotPassword.jsx'), 'u
 const resetSrc = fs.readFileSync(path.join(__dirname, 'ResetPassword.jsx'), 'utf8');
 const loginSrc = fs.readFileSync(path.join(__dirname, 'Login.jsx'), 'utf8');
 const appSrc = fs.readFileSync(path.join(__dirname, '..', 'App.js'), 'utf8');
+const routesSrc = fs.readFileSync(path.join(__dirname, '..', 'constants', 'routes.js'), 'utf8');
 
 describe('Phase 2.14 account recovery — wiring', () => {
   test('App.js registers /forgot-password and /reset-password public routes', () => {
-    expect(appSrc).toContain('/forgot-password');
-    expect(appSrc).toContain('/reset-password');
+    expect(routesSrc).toContain("FORGOT_PASSWORD: '/forgot-password'");
+    expect(routesSrc).toContain("RESET_PASSWORD: '/reset-password'");
+    expect(appSrc).toContain('path={ROUTES.FORGOT_PASSWORD}');
+    expect(appSrc).toContain('path={ROUTES.RESET_PASSWORD}');
     expect(appSrc).toContain('forgotPasswordFn');
     expect(appSrc).toContain('resetPasswordFn');
   });

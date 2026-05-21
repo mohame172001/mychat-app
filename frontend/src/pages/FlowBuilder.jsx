@@ -4,9 +4,10 @@ import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { ArrowLeft, Pencil, Trash2, Loader2, Instagram } from 'lucide-react';
-import api from '../lib/api';
 import { toast } from 'sonner';
 import { useTranslation } from '../lib/i18n';
+import { automationsApi } from '../api/automationsApi';
+import { ROUTES } from '../constants/routes';
 
 const FlowBuilder = () => {
   const { id } = useParams();
@@ -19,25 +20,25 @@ const FlowBuilder = () => {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await api.get(`/automations/${id}`);
+        const { data } = await automationsApi.get(id);
         setAuto(data);
       } catch {
         toast.error(ar ? 'غير موجود' : 'Not found');
-        navigate('/app/automations');
+        navigate(ROUTES.APP_AUTOMATIONS);
       }
       setLoading(false);
     })();
   }, [id, navigate, ar]);
 
   const handleDelete = async () => {
-    try { await api.delete(`/automations/${id}`); toast.success(ar ? 'تم الحذف' : 'Deleted'); navigate('/app/automations'); }
+    try { await automationsApi.remove(id); toast.success(ar ? 'تم الحذف' : 'Deleted'); navigate(ROUTES.APP_AUTOMATIONS); }
     catch { toast.error(ar ? 'فشل العملية' : 'Failed'); }
   };
 
   const toggleStatus = async () => {
     const newStatus = auto.status === 'active' ? 'paused' : 'active';
     try {
-      const { data } = await api.patch(`/automations/${id}`, { status: newStatus });
+      const { data } = await automationsApi.update(id, { status: newStatus });
       setAuto(data);
     } catch { toast.error(ar ? 'فشل العملية' : 'Failed'); }
   };
@@ -63,7 +64,7 @@ const FlowBuilder = () => {
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-3xl mx-auto">
-      <Button variant="ghost" onClick={() => navigate('/app/automations')} className="mb-4">
+      <Button variant="ghost" onClick={() => navigate(ROUTES.APP_AUTOMATIONS)} className="mb-4">
         <ArrowLeft className="w-4 h-4 me-1.5" /> {ar ? 'رجوع' : 'Back'}
       </Button>
 
@@ -112,7 +113,7 @@ const FlowBuilder = () => {
         </div>
 
         <div className="mt-6 flex gap-2">
-          <Button onClick={() => navigate(`/app/automations?edit=${id}`)} className="rounded-xl bg-slate-900 text-white">
+          <Button onClick={() => navigate(`${ROUTES.APP_AUTOMATIONS}?edit=${id}`)} className="rounded-xl bg-slate-900 text-white">
             <Pencil className="w-4 h-4 me-1.5" /> {ar ? 'تعديل' : 'Edit'}
           </Button>
           <Button onClick={toggleStatus} variant="outline" className="rounded-xl">

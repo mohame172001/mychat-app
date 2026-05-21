@@ -15,9 +15,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
-import api from '../../lib/api';
 import { toast } from 'sonner';
 import { startInstagramConnect } from '../../lib/instagramConnect';
+import { instagramApi } from '../../api/instagramApi';
+import { ROUTES } from '../../constants/routes';
 import { useIsAdmin } from '../../lib/useIsAdmin';
 import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
 import { useTranslation } from '../../lib/i18n';
@@ -30,11 +31,11 @@ import { scheduleCoreAppWarmup } from '../../lib/appWarmup';
 // directly still work because the key falls back to the English
 // string via the i18n module's missing-key fallback path.
 export const navItems = [
-  { to: '/app', end: true, icon: LayoutDashboard, label: 'Dashboard', i18nKey: 'nav.dashboard' },
-  { to: '/app/automations', icon: Zap, label: 'Automations', i18nKey: 'nav.automations' },
-  { to: '/app/dm-automation', icon: Inbox, label: 'DM Automation', i18nKey: 'nav.dmAutomation' },
-  { to: '/app/billing', icon: CreditCard, label: 'Billing', i18nKey: 'nav.billing' },
-  { to: '/app/settings', icon: Settings, label: 'Settings', i18nKey: 'nav.settings' }
+  { to: ROUTES.APP_DASHBOARD, end: true, icon: LayoutDashboard, label: 'Dashboard', i18nKey: 'nav.dashboard' },
+  { to: ROUTES.APP_AUTOMATIONS, icon: Zap, label: 'Automations', i18nKey: 'nav.automations' },
+  { to: ROUTES.APP_DM_AUTOMATION, icon: Inbox, label: 'DM Automation', i18nKey: 'nav.dmAutomation' },
+  { to: ROUTES.APP_BILLING, icon: CreditCard, label: 'Billing', i18nKey: 'nav.billing' },
+  { to: ROUTES.APP_SETTINGS, icon: Settings, label: 'Settings', i18nKey: 'nav.settings' }
 ];
 
 const hiddenRefreshStates = new Set([
@@ -78,7 +79,7 @@ const Sidebar = () => {
       try {
         const result = await cachedApiGetSWR(
           accountsCacheKey,
-          () => api.get('/instagram/accounts'),
+          () => instagramApi.listAccounts(),
           {
             ttlMs: 180 * 1000,
             maxStaleMs: 10 * 60 * 1000,
@@ -152,7 +153,7 @@ const Sidebar = () => {
       isCurrent: a.id === account.id,
     })));
     try {
-      const { data } = await api.post(`/instagram/accounts/${account.id}/activate`);
+      const { data } = await instagramApi.activateAccount(account.id);
       // The activate endpoint already returns the authoritative new
       // active account. Use it directly so we don't need to wait on a
       // second /instagram/accounts round-trip.
@@ -175,7 +176,7 @@ const Sidebar = () => {
       toast.success(ar
         ? `تم التبديل إلى @${account.username || account.instagramAccountId}`
         : `Switched to @${account.username || account.instagramAccountId}`);
-      navigate(`/app?igAccount=${encodeURIComponent(account.id)}`);
+      navigate(`${ROUTES.APP}?igAccount=${encodeURIComponent(account.id)}`);
     } catch (e) {
       // Roll back the optimistic flip on failure so the dropdown
       // matches the server's view again.

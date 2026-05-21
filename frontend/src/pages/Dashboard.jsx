@@ -8,6 +8,7 @@ import {
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache';
+import { ROUTES } from '../constants/routes';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../lib/i18n';
 
@@ -194,7 +195,7 @@ const Dashboard = () => {
             <RefreshCw className={`w-4 h-4 me-1.5 ${refreshing ? 'animate-spin' : ''}`} />
             {t('common.refresh')}
           </Button>
-          <Link to="/app/automations">
+          <Link to={ROUTES.APP_AUTOMATIONS}>
             <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
               <Plus className="w-4 h-4 me-1.5" /> {t('common.newAutomation')}
             </Button>
@@ -247,7 +248,7 @@ const Dashboard = () => {
                   </Button>
                 </Link>
               ) : (
-                <Link to="/app/automations">
+                <Link to={ROUTES.APP_AUTOMATIONS}>
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
                     <Plus className="w-4 h-4 me-1.5" /> {t('dashboard.onboarding.createCta')}
                   </Button>
@@ -358,7 +359,7 @@ const Dashboard = () => {
         <Card className="p-6 rounded-2xl border-slate-100">
           <div className="flex items-center justify-between">
             <h3 className="font-display font-bold text-lg">{t('dashboard.topAutomations')}</h3>
-            <Link to="/app/automations" className="text-sm font-medium text-slate-600 hover:text-slate-900">{t('dashboard.viewAll')}</Link>
+            <Link to={ROUTES.APP_AUTOMATIONS} className="text-sm font-medium text-slate-600 hover:text-slate-900">{t('dashboard.viewAll')}</Link>
           </div>
           <div className="mt-4 space-y-3">
             {loading && !topAutomations.length && (
