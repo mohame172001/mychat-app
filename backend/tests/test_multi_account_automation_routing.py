@@ -1264,6 +1264,120 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_opening_dm_skips_inline_subscription_meta_call_when_cache_fresh(monkeypatch):
+    """Speed: when the self-heal loop recently verified the account's
+    webhook subscription (cache age within window and no critical
+    fields missing), the opening DM path MUST NOT make a synchronous
+    Meta /subscribed_apps call. That call adds 200-800ms to every
+    opening and is wasteful when the cache is fresh.
+    """
+    db = _install_multi_account_db(monkeypatch)
+    # Seed a fresh, healthy subscription cache on Account B.
+    db.instagram_accounts.docs[1].update({
+        'webhookSubscriptionLastCheckedAt': datetime.utcnow() - timedelta(seconds=60),
+        'webhookSubscriptionMissing': [],
+        'webhookSubscriptionFields': sorted(server.WEBHOOK_REQUIRED_FIELDS),
+    })
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-fast', 'mediaFast'),
+    ]
+
+    # If the hot path tries to open an httpx client (which would be
+    # the inline subscription verify), fail the test loudly. The
+    # opening DM dispatch itself goes through server.send_ig_message
+    # which we monkeypatch separately.
+    class _ForbiddenClient:
+        def __init__(self, *a, **kw):
+            raise AssertionError(
+                'opening DM hot path should NOT open an httpx client when '
+                'the subscription cache is fresh — that is the 200-800ms '
+                'overhead we just removed'
+            )
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _ForbiddenClient)
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-fast'}}
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    # Disable the fire-and-forget recheck task so the test doesn't spawn
+    # background work that could race with assertions. The test cares
+    # only about whether the inline Meta call was made.
+    def _no_track(coro, name):
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return None
+    monkeypatch.setattr(server, 'create_tracked_task', _no_track)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    automation = db.automations.docs[0]
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_b,
+        automation,
+        'igsid-tester',
+        {'media_id': 'mediaFast', 'commenter_id': 'igsid-tester',
+         'ig_comment_id': 'fast-1', 'comment_doc_id': 'doc-fast-1'},
+    ))
+    assert ok is True
+
+
+def test_opening_dm_schedules_background_recheck_when_cache_stale(monkeypatch):
+    """When the subscription cache is stale, the opening DM hot path
+    must NOT inline-verify (still fast) but MUST schedule a fire-and-
+    forget recheck so the cache is refreshed for the next opener."""
+    db = _install_multi_account_db(monkeypatch)
+    # Stale cache: last check >>15 min ago.
+    db.instagram_accounts.docs[1].update({
+        'webhookSubscriptionLastCheckedAt': datetime.utcnow() - timedelta(hours=2),
+        'webhookSubscriptionMissing': [],
+        'webhookSubscriptionFields': sorted(server.WEBHOOK_REQUIRED_FIELDS),
+    })
+    db.automations.docs = [
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-stale', 'mediaStale'),
+    ]
+
+    # Track whether the fire-and-forget recheck was scheduled.
+    scheduled = []
+
+    def _capture_track(coro, name):
+        scheduled.append(name)
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return None
+    monkeypatch.setattr(server, 'create_tracked_task', _capture_track)
+
+    # Inline Meta verify still must NOT happen on the hot path.
+    class _ForbiddenClient:
+        def __init__(self, *a, **kw):
+            raise AssertionError('inline Meta verify must never run on hot path')
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _ForbiddenClient)
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-stale'}}
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    automation = db.automations.docs[0]
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_b,
+        automation,
+        'igsid-stale',
+        {'media_id': 'mediaStale', 'commenter_id': 'igsid-stale',
+         'ig_comment_id': 'stale-1', 'comment_doc_id': 'doc-stale-1'},
+    ))
+    assert ok is True
+    assert 'comment_dm_subscription_recheck' in scheduled
+
+
 def test_after_reset_dedupe_still_blocks_immediate_repeat_on_same_new_comment(monkeypatch):
     """Post-reset, the SAME commenter immediately re-opening must hit
     the freshly created session/comment dedupe — the reset must not

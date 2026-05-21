@@ -2972,10 +2972,94 @@ async def _send_comment_dm_follow_gate_prompt(user_doc: dict, session: dict) -> 
     return prompt_sent
 
 
+async def _verify_and_heal_ig_subscription_async(ig_user_id: str, access_token: str) -> None:
+    """Fire-and-forget background variant of the JIT subscription check.
+
+    Scheduled AFTER the opening DM is dispatched so it never adds
+    latency to the hot path. Re-subscribes only if Meta reports
+    'messages' or 'messaging_postbacks' missing for this account.
+    Updates the cached state on instagram_accounts so the next
+    opener can short-circuit via the cache (see
+    _send_comment_dm_flow_entry).
+    """
+    if not (ig_user_id and access_token):
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            gr = await c.get(
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                params={'access_token': access_token},
+            )
+            present = set()
+            if gr.status_code == 200:
+                for entry in (gr.json() or {}).get('data') or []:
+                    for f in entry.get('subscribed_fields') or []:
+                        present.add(f)
+            missing = WEBHOOK_REQUIRED_FIELDS - present
+            try:
+                await db.instagram_accounts.update_many(
+                    {'$or': [
+                        {'instagramAccountId': ig_user_id},
+                        {'igUserId': ig_user_id},
+                    ]},
+                    {'$set': {
+                        'webhookSubscriptionLastCheckedAt': datetime.utcnow(),
+                        'webhookSubscriptionFields': sorted(present),
+                        'webhookSubscriptionMissing': sorted(missing),
+                    }},
+                )
+            except Exception:
+                # cache-update is best-effort; never fail the hot path
+                pass
+            critical = {'messages', 'messaging_postbacks'}
+            if critical - present:
+                logger.warning(
+                    'comment_dm_opening_subscription_partial ig_user_id=%s '
+                    'missing=%s — re-subscribing in background',
+                    ig_user_id, sorted(critical - present),
+                )
+                fields = ','.join(sorted(WEBHOOK_REQUIRED_FIELDS))
+                pr = await c.post(
+                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                    params={'access_token': access_token,
+                            'subscribed_fields': fields},
+                )
+                try:
+                    await db.instagram_accounts.update_many(
+                        {'$or': [
+                            {'instagramAccountId': ig_user_id},
+                            {'igUserId': ig_user_id},
+                        ]},
+                        {'$set': {
+                            'webhookSubscriptionLastHealedAt': datetime.utcnow(),
+                            'webhookSubscriptionLastHealStatus': pr.status_code,
+                        }},
+                    )
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.info(
+            'comment_dm_opening_subscription_check_failed ig_user_id=%s err=%s',
+            _safe_partial_identifier(ig_user_id), type(exc).__name__,
+        )
+
+
+# Cache-trust window for the subscription state written by the
+# self-heal loop. Within this window, _send_comment_dm_flow_entry
+# skips the synchronous Meta verify on the hot path. Outside the
+# window, the verify is fired in the background AFTER the opening
+# DM is sent — never blocking the send.
+_COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS = int(
+    os.environ.get('COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS', '900')
+)
+
+
 async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
                                       comment_context: Optional[dict] = None) -> bool:
     """Send the first DM only. The link step waits for the recipient response."""
     import uuid as _uuid
+    import time as _time
+    _entry_start = _time.monotonic()
     access_token = user_doc.get('meta_access_token', '')
     ig_user_id = user_doc.get('ig_user_id', '')
     logger.info(
@@ -2988,44 +3072,96 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
         _safe_partial_identifier((comment_context or {}).get('commenter_id') or recipient_ig_id),
         _safe_partial_identifier((comment_context or {}).get('opening_dedupe_key')),
     )
-    # Just-in-time webhook subscription health check. The opening DM is
-    # the moment we start expecting a click webhook back; if this account
-    # is missing the messages / messaging_postbacks subscriptions (the
-    # silent-breakage that took down @mogehad17's button clicks for
-    # days), nothing we do downstream matters because the click event
-    # never reaches our backend. Force a re-subscribe inline so the next
-    # 5-10 minutes of clicks land properly.
-    if ig_user_id and access_token:
+    # Webhook subscription health gating.
+    #
+    # Pre-2026-05-22 implementation made a SYNCHRONOUS Meta GET to
+    # /{ig_user_id}/subscribed_apps before every opening DM, costing
+    # 200-800ms on the user-visible critical path. The self-heal
+    # background loop (_webhook_subscription_heal_loop) already polls
+    # this every 30 min and writes webhookSubscriptionFields /
+    # webhookSubscriptionMissing / webhookSubscriptionLastCheckedAt
+    # onto the instagram_accounts row. If that cached state is fresh
+    # and shows no missing critical fields, we can skip the inline
+    # Meta call entirely and rely on the cache + a fire-and-forget
+    # background recheck after the DM is dispatched.
+    #
+    # Net effect on the hot path: one Mongo find_one (~5-30ms) instead
+    # of a Graph GET (~200-800ms).
+    subscription_cache_age_s: Optional[float] = None
+    needs_inline_verify = True
+    cache_doc: Dict[str, Any] = {}
+    if ig_user_id:
         try:
-            async with httpx.AsyncClient(timeout=8) as _c:
-                _gr = await _c.get(
-                    f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
-                    params={'access_token': access_token},
-                )
-                _present = set()
-                if _gr.status_code == 200:
-                    for _entry in (_gr.json() or {}).get('data') or []:
-                        for _f in _entry.get('subscribed_fields') or []:
-                            _present.add(_f)
-                _critical = {'messages', 'messaging_postbacks'}
-                if _critical - _present:
-                    logger.warning(
-                        'comment_dm_opening_subscription_partial ig_user_id=%s '
-                        'missing=%s — force-resubscribing before sending opening DM',
-                        ig_user_id, sorted(_critical - _present),
-                    )
-                    _fields = 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'
-                    await _c.post(
-                        f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
-                        params={'access_token': access_token,
-                                'subscribed_fields': _fields},
-                    )
-        except Exception as _exc:
-            logger.info(
-                'comment_dm_opening_subscription_check_failed ig_user_id=%s err=%s '
-                '— proceeding with opening DM anyway',
-                ig_user_id, type(_exc).__name__,
+            cache_doc = await db.instagram_accounts.find_one(
+                {'$or': [
+                    {'instagramAccountId': ig_user_id},
+                    {'igUserId': ig_user_id},
+                ]},
+                {
+                    'webhookSubscriptionLastCheckedAt': 1,
+                    'webhookSubscriptionMissing': 1,
+                    'webhookSubscriptionFields': 1,
+                },
+            ) or {}
+        except Exception:
+            cache_doc = {}
+    last_checked = cache_doc.get('webhookSubscriptionLastCheckedAt')
+    if isinstance(last_checked, datetime):
+        subscription_cache_age_s = (datetime.utcnow() - last_checked).total_seconds()
+    missing_cached = cache_doc.get('webhookSubscriptionMissing') or []
+    critical_required = {'messages', 'messaging_postbacks'}
+    critical_missing_in_cache = bool(critical_required.intersection(missing_cached or []))
+    if (
+        subscription_cache_age_s is not None
+        and subscription_cache_age_s <= _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS
+        and not critical_missing_in_cache
+    ):
+        # Cache is fresh AND shows the critical fields are subscribed —
+        # skip the inline Meta call. Hot path stays fast.
+        needs_inline_verify = False
+        logger.info(
+            'comment_dm_opening_subscription_cache_hit ig_user_id=%s age_s=%s missing_in_cache=%s',
+            _safe_partial_identifier(ig_user_id),
+            int(subscription_cache_age_s),
+            sorted(missing_cached or []),
+        )
+    if needs_inline_verify and ig_user_id and access_token:
+        # Cache is stale OR cache showed missing critical fields.
+        # Trigger the verify+heal in the background AFTER the send so
+        # we still don't add latency to THIS opening, but the cache is
+        # refreshed for the next opener. The OPENING DM we are about
+        # to send is best-effort — if the click webhook later silently
+        # fails because Meta really dropped the subscription, the
+        # next opening DM will hit a freshly-cached state and avoid
+        # the same outcome.
+        logger.info(
+            'comment_dm_opening_subscription_recheck_scheduled '
+            'ig_user_id=%s reason=%s',
+            _safe_partial_identifier(ig_user_id),
+            (
+                'cache_stale' if (subscription_cache_age_s is None
+                                  or subscription_cache_age_s > _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS)
+                else 'cache_missing_critical'
+            ),
+        )
+        try:
+            create_tracked_task(
+                _verify_and_heal_ig_subscription_async(ig_user_id, access_token),
+                'comment_dm_subscription_recheck',
             )
+        except Exception as exc:
+            logger.info(
+                'comment_dm_opening_subscription_recheck_schedule_failed err=%s',
+                type(exc).__name__,
+            )
+    _gate_ms = int((_time.monotonic() - _entry_start) * 1000)
+    if _gate_ms > 50:
+        logger.info(
+            'comment_dm_opening_subscription_gate_ms=%s ig_user_id=%s needs_inline_verify=%s',
+            _gate_ms,
+            _safe_partial_identifier(ig_user_id),
+            needs_inline_verify,
+        )
     opening_text = (automation.get('opening_dm_text') or automation.get('dm_text') or '').strip()
     button_text = (automation.get('opening_dm_button_text') or 'Send me the link').strip()
     has_deferred_step = any([
@@ -21232,6 +21368,18 @@ async def _startup():
         await db.instagram_accounts.create_index(
             [('userId', 1), ('isActive', 1)],
             name='instagram_accounts_user_active',
+        )
+        # Legacy igUserId field shows up in the OR-lookups the
+        # comment-DM opener and webhook resolver perform. Without this
+        # sparse index the second branch of those $or queries fell back
+        # to a collection scan whenever the canonical instagramAccountId
+        # index did not also match, adding measurable latency on the
+        # hot path. Sparse so we only index rows that actually carry
+        # the legacy field.
+        await db.instagram_accounts.create_index(
+            [('igUserId', 1)],
+            sparse=True,
+            name='instagram_accounts_ig_user_id_lookup',
         )
         await db.instagram_account_trial_claims.create_index(
             [('instagram_account_id', 1), ('plan_trial_identifier', 1)],
