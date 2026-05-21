@@ -3053,6 +3053,19 @@ _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS = int(
     os.environ.get('COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS', '900')
 )
 
+# Stale-pending reopen TTL. If a previous opening session for the same
+# (user, account, automation, media, commenter) tuple is still
+# ``status=pending`` and never delivered the final DM after this many
+# seconds, a brand new comment from the same commenter is allowed to
+# open a fresh flow. This keeps the strict anti-spam dedupe for the
+# realistic case (same commenter spamming the same post within seconds
+# / minutes) while preventing a long-abandoned stale session from
+# permanently blocking legitimate retries. Completed/replied flows
+# still block forever, as before.
+_COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS = int(
+    os.environ.get('COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS', '86400')
+)
+
 
 async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
                                       comment_context: Optional[dict] = None) -> bool:
@@ -7942,6 +7955,257 @@ async def admin_reset_test_flow(
         'matched_sessions': plan_sessions,
         'matched_comments': plan_comments,
     }
+
+
+@api.get('/admin/instagram/recent-flows')
+async def admin_recent_test_flows(
+    user_id: str = Depends(get_current_active_user_id),
+    instagram_account_id: Optional[str] = None,
+    limit: int = 20,
+):
+    """Operator-friendly recent comment-DM flows listing for the admin
+    diagnostics page. Returns one safe summary row per session with
+    every internal id the reset endpoint needs already embedded, so the
+    operator can click "reset" on a row without ever copying ids by
+    hand.
+
+    Each row includes a ``blocking_reason`` so the operator can see at
+    a glance WHY a future comment from the same commenter on the same
+    post + rule would be silently skipped (or — equally important —
+    why it would NOT be).
+
+    Optional ``instagram_account_id`` narrows the listing to a single
+    linked account. Output is sanitized via
+    ``_safe_partial_identifier`` for every external id.
+
+    Requires admin.users.view.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    safe_limit = max(1, min(int(limit or 20), 50))
+
+    accounts_q: Dict[str, Any] = {'userId': user_id}
+    if instagram_account_id:
+        accounts_q['$or'] = [
+            {'instagramAccountId': str(instagram_account_id)},
+            {'igUserId': str(instagram_account_id)},
+            {'id': str(instagram_account_id)},
+        ]
+    accounts = await db.instagram_accounts.find(accounts_q).to_list(20)
+    accounts_by_ig_id: Dict[str, dict] = {}
+    for a in accounts:
+        ig = a.get('instagramAccountId') or a.get('igUserId') or ''
+        if ig:
+            accounts_by_ig_id[ig] = a
+
+    # Bulk-load matching sessions, rules, and recent dm_logs in
+    # parallel; index-backed on (user_id, instagramAccountId, created).
+    if not accounts_by_ig_id:
+        return {'ok': True, 'flows': [], 'has_blocking_flows': False}
+    ig_ids = list(accounts_by_ig_id.keys())
+    session_q = {
+        'user_id': user_id,
+        '$or': [
+            {'instagramAccountId': {'$in': ig_ids}},
+            {'igUserId': {'$in': ig_ids}},
+            {'ig_user_id': {'$in': ig_ids}},
+        ],
+    }
+    sessions = await db.comment_dm_sessions.find(session_q).sort('created', -1).limit(safe_limit).to_list(safe_limit)
+
+    automation_ids = list({s.get('automation_id') for s in sessions if s.get('automation_id')})
+    rules_by_id: Dict[str, dict] = {}
+    if automation_ids:
+        async for r in db.automations.find({'id': {'$in': automation_ids}}):
+            rules_by_id[r.get('id')] = r
+
+    session_ids = [s.get('id') for s in sessions if s.get('id')]
+    dm_logs_by_session: Dict[str, list] = {}
+    if session_ids:
+        async for l in db.dm_logs.find(
+            {'user_id': user_id, 'comment_flow_session_id': {'$in': session_ids}},
+        ).sort('created', -1):
+            sid = l.get('comment_flow_session_id')
+            if sid:
+                dm_logs_by_session.setdefault(sid, []).append(l)
+
+    stale_ttl = _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS
+    now = datetime.utcnow()
+    out_flows: List[Dict[str, Any]] = []
+    blocking_count = 0
+    for s in sessions:
+        ig_id = (
+            s.get('instagramAccountId') or s.get('igUserId') or s.get('ig_user_id') or ''
+        )
+        account_doc = accounts_by_ig_id.get(ig_id) or {}
+        rule = rules_by_id.get(s.get('automation_id')) or {}
+        created = s.get('created') if isinstance(s.get('created'), datetime) else None
+        age_seconds = int((now - created).total_seconds()) if created else None
+        final_dm_sent = isinstance(s.get('finalDmSentAt'), datetime)
+        status = (s.get('status') or '').lower()
+        stage = (s.get('stage') or '').lower()
+
+        # Stop-reason / blocking-reason classification — derived
+        # entirely from the session + recent dm_logs, no Meta call.
+        related_logs = dm_logs_by_session.get(s.get('id') or '', [])
+        quick_reply_log = next(
+            (l for l in related_logs if (l.get('event_kind') in ('quick_reply', 'postback'))),
+            None,
+        )
+        if final_dm_sent:
+            blocking_reason = 'completed_recently'
+            stop_reason = 'flow_completed'
+        elif status == 'completed':
+            blocking_reason = 'completed_recently'
+            stop_reason = 'flow_completed'
+        elif status == 'pending' and stage == 'awaiting_user_action':
+            if age_seconds is not None and age_seconds > stale_ttl:
+                blocking_reason = 'stale_pending_auto_expires'
+                stop_reason = 'no_quick_reply_webhook_after_ttl'
+            elif quick_reply_log:
+                # Click arrived but didn't complete — surface why.
+                last = quick_reply_log
+                if last.get('status') == 'failed':
+                    blocking_reason = 'pending_blocks_reopen'
+                    stop_reason = f"graph_send_failed:{last.get('skip_reason') or 'unknown'}"
+                else:
+                    blocking_reason = 'pending_blocks_reopen'
+                    stop_reason = 'waiting_user_action_after_click'
+            else:
+                blocking_reason = 'pending_blocks_reopen'
+                stop_reason = 'waiting_user_action'
+        elif status == 'pending' and stage == 'awaiting_follow_confirmation':
+            blocking_reason = 'pending_blocks_reopen'
+            stop_reason = 'awaiting_follow_confirmation'
+        elif status in ('verification_failed', 'failed', 'expired'):
+            blocking_reason = 'pending_blocks_reopen'
+            stop_reason = status
+        else:
+            blocking_reason = 'pending_blocks_reopen'
+            stop_reason = status or stage or 'unknown_state'
+
+        is_blocking = blocking_reason not in ('stale_pending_auto_expires',)
+        if is_blocking and not final_dm_sent:
+            # Anti-spam: only count flows that are NOT stale-expired
+            # AND have not delivered the final DM as blocking. Completed
+            # flows are intentionally counted as blocking because that's
+            # the strict-dedupe contract.
+            blocking_count += 1
+
+        out_flows.append({
+            'session_id': s.get('id'),
+            'instagram_account_id_partial': _safe_partial_identifier(ig_id),
+            'instagram_username': account_doc.get('username'),
+            'automation_id': s.get('automation_id'),
+            'rule_name': rule.get('name'),
+            'rule_post_scope': rule.get('post_scope'),
+            'media_id_partial': _safe_partial_identifier(s.get('media_id')),
+            'commenter_id_partial': _safe_partial_identifier(
+                s.get('commenter_id') or s.get('recipient_id')
+            ),
+            'recipient_id_partial': _safe_partial_identifier(s.get('recipient_id')),
+            'opening_dedupe_key_partial': _safe_partial_identifier(s.get('opening_dedupe_key')),
+            'status': s.get('status'),
+            'stage': s.get('stage'),
+            'follow_request_enabled': bool(s.get('follow_request_enabled')),
+            'follow_confirmed': bool(s.get('follow_confirmed')),
+            'follow_verified': bool(s.get('follow_verified')),
+            'finalDmSentAt': s.get('finalDmSentAt').isoformat() if isinstance(s.get('finalDmSentAt'), datetime) else None,
+            'created': created.isoformat() if created else None,
+            'updated': s.get('updated').isoformat() if isinstance(s.get('updated'), datetime) else None,
+            'age_seconds': age_seconds,
+            'blocking_reason': blocking_reason,
+            'stop_reason': stop_reason,
+            'quick_reply_log': {
+                'event_kind': (quick_reply_log or {}).get('event_kind'),
+                'status': (quick_reply_log or {}).get('status'),
+                'skip_reason': (quick_reply_log or {}).get('skip_reason'),
+                'created': (quick_reply_log or {}).get('created').isoformat()
+                            if isinstance((quick_reply_log or {}).get('created'), datetime) else None,
+            } if quick_reply_log else None,
+        })
+    await _record_admin_action(
+        caller,
+        action='instagram_recent_flows_view',
+        target_user_id=user_id,
+        metadata={'count': len(out_flows),
+                  'instagram_account_id_partial': _safe_partial_identifier(instagram_account_id)},
+    )
+    return {
+        'ok': True,
+        'count': len(out_flows),
+        'has_blocking_flows': blocking_count > 0,
+        'blocking_count': blocking_count,
+        'stale_pending_ttl_seconds': stale_ttl,
+        'flows': out_flows,
+    }
+
+
+@api.post('/admin/instagram/reset-flow-by-session-id')
+async def admin_reset_flow_by_session_id(
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Operator-friendly reset variant: takes ONE ``session_id`` and
+    derives the (account, automation, media, commenter) tuple from
+    the session row itself, so the operator never has to copy ids by
+    hand. Equivalent to /admin/instagram/reset-test-flow with the
+    four scoping keys pulled from the session document.
+
+    Body:
+      - session_id (required)
+      - dry_run (default true)
+      - confirm (default false)
+
+    Refuses if the session is owned by a different user_id.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    payload = body or {}
+    session_id = str(payload.get('session_id') or '').strip()
+    if not session_id:
+        raise HTTPException(400, 'session_id is required.')
+    dry_run = bool(payload.get('dry_run', True))
+    confirm = bool(payload.get('confirm', False))
+
+    session = await db.comment_dm_sessions.find_one({'id': session_id})
+    if not session:
+        raise HTTPException(404, 'session_id not found.')
+    if session.get('user_id') != user_id:
+        # Owner-scoped — even an admin operator may only reset their
+        # OWN workspace flows from this UI. Cross-workspace reset is
+        # never desirable from a one-click button.
+        raise HTTPException(403, 'session does not belong to the caller workspace.')
+
+    ig = (
+        session.get('instagramAccountId')
+        or session.get('igUserId')
+        or session.get('ig_user_id')
+        or ''
+    )
+    if not ig:
+        raise HTTPException(400, 'session has no instagram account id — cannot resolve scope.')
+    automation_id = session.get('automation_id') or ''
+    media_id = session.get('media_id') or ''
+    commenter_id = session.get('commenter_id') or session.get('recipient_id') or ''
+    if not (automation_id and media_id and commenter_id):
+        raise HTTPException(
+            400,
+            'session is missing one of automation_id / media_id / commenter_id — '
+            'cannot derive a safe reset scope from it.',
+        )
+
+    # Delegate to the same reset implementation as the 4-key endpoint
+    # by calling it inline with the derived keys.
+    return await admin_reset_test_flow(
+        body={
+            'instagram_account_id': ig,
+            'automation_id': automation_id,
+            'media_id': media_id,
+            'commenter_id': commenter_id,
+            'dry_run': dry_run,
+            'confirm': confirm,
+        },
+        user_id=user_id,
+    )
 
 
 @api.get('/admin/comment-dm-sessions/recent')
@@ -16168,37 +16432,105 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     flow_completed = flow_status in (
                         'success', 'replied', 'completed', 'final_sent', 'partial_success'
                     )
-                    reason = 'flow_already_completed' if flow_completed else 'flow_already_started'
-                    logger.info(
-                        'comment_opening_flow_duplicate_skipped reason=%s user_id=%s '
-                        'instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s '
-                        'dedupe_key=%s existing_comment_id=%s existing_session_id=%s',
-                        reason,
-                        user_id,
-                        _safe_partial_identifier(ig_account_id),
-                        rule_id,
-                        _safe_partial_identifier(media_id),
-                        _safe_partial_identifier(commenter_id),
-                        _safe_partial_identifier(opening_dedupe_key),
-                        _safe_partial_identifier(
-                            existing_flow.get('ig_comment_id') or existing_flow.get('source_comment_id')
-                        ),
-                        existing_flow.get('id') if existing_session else None,
-                    )
-                    logger.info(
-                        'automation_duplicate_opening_skipped reason=same_commenter_same_post_same_rule '
-                        'user_id=%s instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s',
-                        user_id,
-                        _safe_partial_identifier(ig_account_id),
-                        rule_id,
-                        _safe_partial_identifier(media_id),
-                        _safe_partial_identifier(commenter_id),
-                    )
-                    return {'processed': False, 'already_processed': True, 'matched': True,
-                            'action_status': 'skipped',
-                            'reason': reason,
-                            'classified_reason': 'same_commenter_same_post_same_rule',
-                            'rule_id': rule_id}
+                    # Stale-pending reopen policy. The strict same-tuple
+                    # dedupe is correct anti-spam for the realistic case
+                    # (same commenter pinging the same post within
+                    # seconds / minutes). But a pending session that was
+                    # NEVER completed and is now older than
+                    # COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS (default
+                    # 24h) shouldn't block a legitimate retry forever —
+                    # otherwise a single failed test makes the flow look
+                    # permanently broken to the operator. Completed
+                    # flows still block as before. Stale-expired rows
+                    # get tagged so the diagnostic UI can surface them
+                    # and the opener proceeds to create a fresh session.
+                    is_stale_pending = False
+                    if not flow_completed:
+                        existing_created = existing_flow.get('created')
+                        if isinstance(existing_created, datetime):
+                            stale_age = (datetime.utcnow() - existing_created).total_seconds()
+                            if stale_age > _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS:
+                                is_stale_pending = True
+                    if is_stale_pending:
+                        # Tag the stale row so the next diagnostic /
+                        # reset round-trip can see it auto-expired,
+                        # and clear its opening_dedupe_key so future
+                        # find_one queries don't even hit it.
+                        if existing_session:
+                            try:
+                                await db.comment_dm_sessions.update_one(
+                                    {'id': existing_flow.get('id')},
+                                    {'$set': {
+                                        'status': 'stale_expired',
+                                        'stage': 'stale_expired',
+                                        'opening_dedupe_key': None,
+                                        'openingDedupeKey': None,
+                                        'updated': datetime.utcnow(),
+                                    }},
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                await db.comments.update_one(
+                                    {'id': existing_flow.get('id')},
+                                    {'$set': {
+                                        'opening_dedupe_key': None,
+                                        'openingDedupeKey': None,
+                                        'stale_expired_at': datetime.utcnow(),
+                                        'updated': datetime.utcnow(),
+                                    }},
+                                )
+                            except Exception:
+                                pass
+                        logger.info(
+                            'comment_opening_flow_stale_reopen_allowed user_id=%s '
+                            'instagram_account_id=%s automation_id=%s media_id=%s '
+                            'commenter_id=%s prior_session_id=%s age_seconds=%s ttl_seconds=%s',
+                            user_id,
+                            _safe_partial_identifier(ig_account_id),
+                            rule_id,
+                            _safe_partial_identifier(media_id),
+                            _safe_partial_identifier(commenter_id),
+                            existing_flow.get('id') if existing_session else None,
+                            int((datetime.utcnow() - existing_flow.get('created')).total_seconds())
+                                if isinstance(existing_flow.get('created'), datetime) else None,
+                            _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS,
+                        )
+                        # Fall through to the normal opening path —
+                        # do NOT skip.
+                    else:
+                        reason = 'flow_already_completed' if flow_completed else 'flow_already_started'
+                        logger.info(
+                            'comment_opening_flow_duplicate_skipped reason=%s user_id=%s '
+                            'instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s '
+                            'dedupe_key=%s existing_comment_id=%s existing_session_id=%s',
+                            reason,
+                            user_id,
+                            _safe_partial_identifier(ig_account_id),
+                            rule_id,
+                            _safe_partial_identifier(media_id),
+                            _safe_partial_identifier(commenter_id),
+                            _safe_partial_identifier(opening_dedupe_key),
+                            _safe_partial_identifier(
+                                existing_flow.get('ig_comment_id') or existing_flow.get('source_comment_id')
+                            ),
+                            existing_flow.get('id') if existing_session else None,
+                        )
+                        logger.info(
+                            'automation_duplicate_opening_skipped reason=same_commenter_same_post_same_rule '
+                            'user_id=%s instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s',
+                            user_id,
+                            _safe_partial_identifier(ig_account_id),
+                            rule_id,
+                            _safe_partial_identifier(media_id),
+                            _safe_partial_identifier(commenter_id),
+                        )
+                        return {'processed': False, 'already_processed': True, 'matched': True,
+                                'action_status': 'skipped',
+                                'reason': reason,
+                                'classified_reason': 'same_commenter_same_post_same_rule',
+                                'rule_id': rule_id}
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))

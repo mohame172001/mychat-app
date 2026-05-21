@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Badge } from '../../components/ui/badge';
@@ -170,6 +170,253 @@ function JsonPanel({ panel, snapshot, onLoad }) {
     </section>
   );
 }
+
+/**
+ * Recent test flows — operator-friendly view of recent comment-DM
+ * sessions with per-row reset buttons. The operator never has to copy
+ * or paste internal ids: each row owns its session_id and the reset
+ * call uses that id directly via
+ * POST /api/admin/instagram/reset-flow-by-session-id.
+ *
+ * Backed by GET /api/admin/instagram/recent-flows which returns
+ * sanitized rows + blocking_reason + stop_reason already classified.
+ */
+function statusToTone(blocking, completed) {
+  if (completed) return { bg: 'bg-slate-100 text-slate-600', label: 'Completed' };
+  if (blocking) return { bg: 'bg-amber-100 text-amber-800', label: 'Blocking' };
+  return { bg: 'bg-emerald-100 text-emerald-700', label: 'Stale (auto-expires)' };
+}
+
+function FlowRow({ flow, onResetDone }) {
+  const [dryRun, setDryRun] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const completed = !!flow.finalDmSentAt || (flow.status || '').toLowerCase() === 'completed';
+  const blocking = flow.blocking_reason && flow.blocking_reason !== 'stale_pending_auto_expires';
+  const tone = statusToTone(blocking, completed);
+
+  const runDryRun = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post('/admin/instagram/reset-flow-by-session-id', {
+        session_id: flow.session_id,
+        dry_run: true,
+        confirm: false,
+      });
+      setDryRun(r.data);
+      const sCount = (r.data?.would_delete_sessions || []).length;
+      const cCount = (r.data?.would_clear_opening_dedupe_on_comments || []).length;
+      toast.success(`Dry run: would delete ${sCount} session(s), clear ${cCount} dedupe key(s).`);
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      toast.error(typeof detail === 'string' ? detail : 'Dry run failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [flow.session_id]);
+
+  const runConfirm = useCallback(async () => {
+    if (!window.confirm(
+      'This will DELETE this comment-DM session and CLEAR opening_dedupe_key on the matching comment so the same commenter can reopen this flow. dm_logs are kept. Proceed?',
+    )) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post('/admin/instagram/reset-flow-by-session-id', {
+        session_id: flow.session_id,
+        dry_run: false,
+        confirm: true,
+      });
+      toast.success(`Reset applied: ${r.data?.sessions_deleted || 0} session(s) deleted, ${r.data?.comments_cleared || 0} dedupe key(s) cleared.`);
+      setDryRun({ ...r.data, _applied: true });
+      if (onResetDone) onResetDone();
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      toast.error(typeof detail === 'string' ? detail : 'Reset failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [flow.session_id, onResetDone]);
+
+  const ageLabel = flow.age_seconds == null
+    ? '—'
+    : flow.age_seconds < 60
+      ? `${flow.age_seconds}s ago`
+      : flow.age_seconds < 3600
+        ? `${Math.round(flow.age_seconds / 60)}m ago`
+        : flow.age_seconds < 86400
+          ? `${Math.round(flow.age_seconds / 3600)}h ago`
+          : `${Math.round(flow.age_seconds / 86400)}d ago`;
+
+  return (
+    <div
+      className="border-t border-slate-100 px-3 py-3"
+      data-testid={`recent-flow-row-${flow.session_id}`}
+    >
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex-1 min-w-[240px]">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="font-semibold text-slate-800">@{flow.instagram_username || flow.instagram_account_id_partial}</span>
+            <Badge className={`${tone.bg} border-0`}>{tone.label}</Badge>
+            <span className="text-xs text-slate-500">{ageLabel}</span>
+          </div>
+          <div className="text-xs text-slate-500">
+            {flow.rule_name ? <><span className="font-semibold">{flow.rule_name}</span> · </> : null}
+            {flow.rule_post_scope || 'unknown scope'} · media{' '}
+            <span className="font-mono">{flow.media_id_partial || '—'}</span> · commenter{' '}
+            <span className="font-mono">{flow.commenter_id_partial || '—'}</span>
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            stage: <span className="font-mono">{flow.stage || '—'}</span> ·
+            status: <span className="font-mono">{flow.status || '—'}</span> ·
+            stop_reason: <span className="font-mono">{flow.stop_reason || '—'}</span>
+          </div>
+          {flow.quick_reply_log && (
+            <div className="text-xs text-slate-500 mt-1">
+              last button event: <span className="font-mono">{flow.quick_reply_log.event_kind}</span> · <span className="font-mono">{flow.quick_reply_log.status}</span>
+              {flow.quick_reply_log.skip_reason ? <> · skip <span className="font-mono">{flow.quick_reply_log.skip_reason}</span></> : null}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={runDryRun}
+            disabled={busy}
+            data-testid={`recent-flow-dryrun-${flow.session_id}`}
+          >
+            <RefreshCw className={`w-3 h-3 me-1 ${busy ? 'animate-spin' : ''}`} />
+            Dry run reset
+          </Button>
+          <Button
+            size="sm"
+            onClick={runConfirm}
+            disabled={busy || !dryRun || dryRun._applied}
+            className="bg-rose-600 hover:bg-rose-700 text-white"
+            data-testid={`recent-flow-confirm-${flow.session_id}`}
+          >
+            <Eraser className="w-3 h-3 me-1" />
+            {dryRun?._applied ? 'Reset applied' : 'Confirm reset'}
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="mt-2 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2">
+          {error}
+        </div>
+      )}
+      {dryRun && !dryRun._applied && (
+        <div className="mt-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-md p-2">
+          Dry-run preview: would delete{' '}
+          <span className="font-mono">{(dryRun.would_delete_sessions || []).length}</span>{' '}
+          session(s), clear{' '}
+          <span className="font-mono">{(dryRun.would_clear_opening_dedupe_on_comments || []).length}</span>{' '}
+          comment dedupe key(s). Click Confirm reset to apply.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecentTestFlowsPanel() {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    try {
+      const r = await api.get('/admin/instagram/recent-flows?limit=20');
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const flows = data?.flows || [];
+  return (
+    <section
+      className="bg-white rounded-2xl border border-slate-200 p-4 mb-4"
+      data-testid="diag-panel-recent_test_flows"
+    >
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[180px]">
+          <div className="font-semibold text-slate-800">Recent test flows</div>
+          <div className="text-xs text-slate-500">
+            Newest comment-DM sessions per linked Instagram account. Each row shows whether it is
+            blocking new tests for the same commenter+post+rule, and why the flow stopped. Click
+            "Dry run reset" then "Confirm reset" on a single row to unblock retesting — no ids to
+            copy by hand.
+          </div>
+        </div>
+        {state === 'loading' && (
+          <Badge className="bg-slate-100 text-slate-600 border-0">
+            <RefreshCw className="w-3 h-3 me-1 animate-spin" /> Loading…
+          </Badge>
+        )}
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {data?.count ?? 0} loaded
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> Forbidden
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <XCircle className="w-3 h-3 me-1" /> Failed
+          </Badge>
+        )}
+        <Button size="sm" variant="outline" onClick={load} disabled={state === 'loading'} data-testid="recent-flows-reload">
+          <RefreshCw className={`w-3 h-3 me-1 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          Reload
+        </Button>
+      </header>
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-2">
+          {error}
+        </div>
+      )}
+      {data?.has_blocking_flows && (
+        <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {data.blocking_count} blocking flow{data.blocking_count === 1 ? '' : 's'} found.
+          The same commenter on the same post+rule cannot reopen these flows until they complete,
+          fail visibly, or auto-expire (TTL: {Math.round((data.stale_pending_ttl_seconds || 0) / 3600)}h).
+          Use the per-row reset below to unblock a single test without affecting other accounts or commenters.
+        </div>
+      )}
+      {state === 'success' && flows.length === 0 && (
+        <div className="text-xs text-slate-500 py-4 text-center">
+          No recent comment-DM sessions for your linked Instagram accounts.
+        </div>
+      )}
+      {flows.length > 0 && (
+        <div className="rounded-md border border-slate-100">
+          {flows.map((flow) => (
+            <FlowRow key={flow.session_id} flow={flow} onResetDone={load} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 
 /**
  * Targeted reset for a single (account, automation, media, commenter)
@@ -458,6 +705,8 @@ export default function InstagramDiagnostics() {
           </div>
         </div>
       </div>
+
+      <RecentTestFlowsPanel />
 
       <ResetTestFlowPanel />
 

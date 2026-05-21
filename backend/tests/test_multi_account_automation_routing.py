@@ -1264,6 +1264,342 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_recent_flows_endpoint_returns_session_id_for_each_row(monkeypatch):
+    """Operator-friendly: the per-row reset must work without manual
+    ids. The endpoint MUST return session_id and the enriched
+    blocking_reason / stop_reason so the UI can show why a flow blocks
+    new tests and reset that specific row by session_id."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    now = datetime.utcnow()
+    db.comment_dm_sessions.docs.extend([
+        {
+            'id': 'sess-pending-fresh',
+            'user_id': 'u1',
+            'instagramAccountId': 'igB',
+            'igUserId': 'igB',
+            'ig_user_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'recipient_id': 'igsid-tester',
+            'commenter_id': 'igsid-tester',
+            'opening_dedupe_key': server._comment_opening_dedupe_key(
+                'u1', 'igB', 'ruleB', 'mediaB', 'igsid-tester',
+            ),
+            'status': 'pending',
+            'stage': 'awaiting_user_action',
+            'finalDmSentAt': None,
+            'created': now - timedelta(minutes=10),
+            'updated': now - timedelta(minutes=10),
+        },
+        {
+            'id': 'sess-completed-recent',
+            'user_id': 'u1',
+            'instagramAccountId': 'igB',
+            'igUserId': 'igB',
+            'ig_user_id': 'igB',
+            'automation_id': 'ruleB',
+            'media_id': 'mediaB',
+            'recipient_id': 'igsid-other',
+            'commenter_id': 'igsid-other',
+            'opening_dedupe_key': server._comment_opening_dedupe_key(
+                'u1', 'igB', 'ruleB', 'mediaB', 'igsid-other',
+            ),
+            'status': 'completed',
+            'stage': 'final_sent',
+            'finalDmSentAt': now - timedelta(minutes=2),
+            'created': now - timedelta(minutes=20),
+            'updated': now - timedelta(minutes=2),
+        },
+    ])
+
+    result = _run(server.admin_recent_test_flows(user_id='u1'))
+    assert result['ok'] is True
+    flows = {f['session_id']: f for f in result['flows']}
+    # Every row carries enough internal id to reset directly by
+    # session_id — no manual paste required from the operator.
+    fresh = flows['sess-pending-fresh']
+    assert fresh['blocking_reason'] == 'pending_blocks_reopen'
+    assert fresh['stop_reason'] == 'waiting_user_action'
+    # Rule join populated — rule_post_scope is set even when the test
+    # rule has no display name. The frontend falls back to media_id
+    # partial when rule_name is empty, so we assert on rule_post_scope
+    # to prove the join landed.
+    assert fresh['rule_post_scope'] is not None
+    assert fresh['session_id'] == 'sess-pending-fresh'
+    assert fresh['media_id_partial']
+    assert fresh['commenter_id_partial']
+    completed = flows['sess-completed-recent']
+    assert completed['blocking_reason'] == 'completed_recently'
+    assert completed['finalDmSentAt'] is not None
+    # blocking_count should NOT include the stale-expired entries
+    assert result['has_blocking_flows'] is True
+
+
+def test_recent_flows_marks_stale_pending_as_auto_expires(monkeypatch):
+    """A pending session older than the stale TTL must surface as
+    blocking_reason=stale_pending_auto_expires so the UI can show the
+    operator they don't need to manually reset it — the next opener
+    will treat it as expired."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    very_old = datetime.utcnow() - timedelta(
+        seconds=server._COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS + 600,
+    )
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-very-old',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'automation_id': 'ruleB',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-old',
+        'commenter_id': 'igsid-old',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB', 'mediaB', 'igsid-old',
+        ),
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'finalDmSentAt': None,
+        'created': very_old,
+        'updated': very_old,
+    })
+    result = _run(server.admin_recent_test_flows(user_id='u1'))
+    row = next(f for f in result['flows'] if f['session_id'] == 'sess-very-old')
+    assert row['blocking_reason'] == 'stale_pending_auto_expires'
+    assert 'after_ttl' in row['stop_reason']
+
+
+def test_reset_flow_by_session_id_dry_run_uses_session_internal_ids(monkeypatch):
+    """Operator should be able to reset by clicking a session row
+    without pasting ids — endpoint derives the 4-tuple from the
+    session document and refuses to mutate without confirm."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-tester',
+        session_id='sess-by-id',
+    )
+    result = _run(server.admin_reset_flow_by_session_id(
+        body={'session_id': 'sess-by-id', 'dry_run': True, 'confirm': False},
+        user_id='u1',
+    ))
+    assert result['dry_run'] is True
+    assert result['confirm'] is False
+    assert len(result['would_delete_sessions']) == 1
+    # Nothing mutated.
+    assert any(s['id'] == 'sess-by-id' for s in db.comment_dm_sessions.docs)
+
+
+def test_reset_flow_by_session_id_confirm_deletes_only_that_session(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-keep',
+        session_id='sess-keep', comment_id='comm-keep',
+    )
+    _seed_dedupe_state(
+        db,
+        user_id='u1', ig_account_id='igB',
+        automation_id='ruleB', media_id='mediaB', commenter_id='igsid-target',
+        session_id='sess-target', comment_id='comm-target',
+    )
+    _run(server.admin_reset_flow_by_session_id(
+        body={'session_id': 'sess-target', 'dry_run': False, 'confirm': True},
+        user_id='u1',
+    ))
+    remaining = {s['id'] for s in db.comment_dm_sessions.docs}
+    assert remaining == {'sess-keep'}
+    keep_comment = next(c for c in db.comments.docs if c['id'] == 'comm-keep')
+    target_comment = next(c for c in db.comments.docs if c['id'] == 'comm-target')
+    assert keep_comment['opening_dedupe_key'] is not None
+    assert target_comment['opening_dedupe_key'] is None
+
+
+def test_reset_flow_by_session_id_refuses_unknown_session(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    try:
+        _run(server.admin_reset_flow_by_session_id(
+            body={'session_id': 'no-such-session', 'dry_run': True},
+            user_id='u1',
+        ))
+    except server.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError('expected HTTPException(404) for unknown session_id')
+
+
+def test_reset_flow_by_session_id_refuses_cross_workspace_session(monkeypatch):
+    """Even an admin operator may only reset their OWN workspace flows
+    via this one-click endpoint. A session owned by user_id=u-other
+    must not be resettable from u1's UI."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-cross',
+        'user_id': 'u-other',
+        'instagramAccountId': 'igX',
+        'ig_user_id': 'igX',
+        'automation_id': 'ruleX',
+        'media_id': 'mediaX',
+        'recipient_id': 'igsid-x',
+        'commenter_id': 'igsid-x',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'created': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    })
+    try:
+        _run(server.admin_reset_flow_by_session_id(
+            body={'session_id': 'sess-cross', 'dry_run': True},
+            user_id='u1',
+        ))
+    except server.HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError('expected HTTPException(403) for cross-workspace session')
+
+
+def test_stale_pending_session_does_not_permanently_block_reopen(monkeypatch):
+    """The production behavior fix. A pending session older than the
+    stale TTL must NOT block a brand-new comment from opening a fresh
+    flow on the same tuple. Completed flows still block as before."""
+    db = _install_multi_account_db(monkeypatch)
+    rule = _comment_rule('accB', 'igB', 'ruleB-stale-allow')
+    rule['activationStartedAt'] = datetime.utcnow() - timedelta(days=2)
+    db.automations.docs = [rule]
+    very_old = datetime.utcnow() - timedelta(
+        seconds=server._COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS + 600,
+    )
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-very-stale',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'automation_id': 'ruleB-stale-allow',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-retry',
+        'commenter_id': 'igsid-retry',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB-stale-allow', 'mediaB', 'igsid-retry',
+        ),
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'finalDmSentAt': None,
+        'created': very_old,
+        'updated': very_old,
+    })
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append({'access_token': access_token, 'ig_user_id': ig_user_id})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'fresh-after-stale',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-retry',
+            'commenter_username': 'retry-tester',
+            'text': 'send me',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    # The stale session must NOT have blocked — the new comment fires
+    # the rule and produces a public reply.
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-stale-allow'
+    assert any(c['access_token'] == 'token-b' for c in reply_calls)
+    # The stale session is marked expired so future find_one queries
+    # don't even hit it.
+    stale_row = next(s for s in db.comment_dm_sessions.docs if s['id'] == 'sess-very-stale')
+    assert stale_row['status'] == 'stale_expired'
+    assert stale_row['opening_dedupe_key'] is None
+
+
+def test_recent_completed_session_still_blocks_within_ttl(monkeypatch):
+    """The relaxation only fires for PENDING sessions. A completed
+    flow within the TTL window must still block — that's the
+    anti-spam contract."""
+    db = _install_multi_account_db(monkeypatch)
+    rule = _comment_rule('accB', 'igB', 'ruleB-completed-block')
+    rule['activationStartedAt'] = datetime.utcnow() - timedelta(days=2)
+    db.automations.docs = [rule]
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-completed',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'automation_id': 'ruleB-completed-block',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-spammer',
+        'commenter_id': 'igsid-spammer',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB-completed-block', 'mediaB', 'igsid-spammer',
+        ),
+        'status': 'completed',
+        'stage': 'final_sent',
+        'finalDmSentAt': datetime.utcnow() - timedelta(minutes=5),
+        'created': datetime.utcnow() - timedelta(minutes=10),
+        'updated': datetime.utcnow() - timedelta(minutes=5),
+    })
+
+    async def reply_ok(access_token, comment_id, text):
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'spam-after-completed',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-spammer',
+            'text': 'send me again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result.get('already_processed') is True
+    assert result.get('classified_reason') == 'same_commenter_same_post_same_rule'
+
+
 def test_opening_dm_skips_inline_subscription_meta_call_when_cache_fresh(monkeypatch):
     """Speed: when the self-heal loop recently verified the account's
     webhook subscription (cache age within window and no critical
