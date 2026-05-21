@@ -565,6 +565,44 @@ def test_instagram_account_activate_switches_active_account(monkeypatch):
     assert 'token-b' not in str(result)
 
 
+def test_instagram_account_activate_supports_legacy_user_id_owner(monkeypatch):
+    fake_db = _multi_account_db()
+    legacy = _run(fake_db.instagram_accounts.find_one({'id': 'accB'}))
+    legacy.pop('userId', None)
+    legacy['user_id'] = 'u1'
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.instagram_account_activate('accB', user_id='u1'))
+    user = _run(fake_db.users.find_one({'id': 'u1'}))
+    account_b = _run(fake_db.instagram_accounts.find_one({'id': 'accB'}))
+
+    assert result['account']['id'] == 'accB'
+    assert result['account']['active'] is True
+    assert user['active_instagram_account_id'] == 'accB'
+    assert user['ig_user_id'] == 'igB'
+    assert user['meta_access_token'] == 'token-b'
+    assert account_b['userId'] == 'u1'
+    assert account_b['user_id'] == 'u1'
+
+
+def test_get_active_instagram_account_supports_legacy_user_id_owner(monkeypatch):
+    fake_db = _multi_account_db()
+    legacy = _run(fake_db.instagram_accounts.find_one({'id': 'accB'}))
+    legacy.pop('userId', None)
+    legacy['user_id'] = 'u1'
+    user = _run(fake_db.users.find_one({'id': 'u1'}))
+    user['active_instagram_account_id'] = 'accB'
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    account = _run(server.getActiveInstagramAccount('u1'))
+    refreshed = _run(fake_db.instagram_accounts.find_one({'id': 'accB'}))
+
+    assert account['id'] == 'accB'
+    assert refreshed['isCurrent'] is True
+    assert refreshed['userId'] == 'u1'
+    assert refreshed['user_id'] == 'u1'
+
+
 def test_instagram_account_activate_rejects_other_user_account(monkeypatch):
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)

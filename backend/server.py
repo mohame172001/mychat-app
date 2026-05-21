@@ -13372,27 +13372,29 @@ async def getActiveInstagramAccount(user_id: str) -> dict:
     if active_id:
         account = await db.instagram_accounts.find_one({
             'id': active_id,
-            'userId': user_id,
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
             'isActive': {'$ne': False},
         })
     if not account:
         account = await db.instagram_accounts.find_one({
-            'userId': user_id,
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
             'isCurrent': True,
             'isActive': {'$ne': False},
         })
     if not account and user_doc.get('ig_user_id'):
         account = await db.instagram_accounts.find_one({
-            'userId': user_id,
-            '$or': [
-                {'instagramAccountId': str(user_doc.get('ig_user_id'))},
-                {'igUserId': str(user_doc.get('ig_user_id'))},
+            '$and': [
+                {'$or': [{'userId': user_id}, {'user_id': user_id}]},
+                {'$or': [
+                    {'instagramAccountId': str(user_doc.get('ig_user_id'))},
+                    {'igUserId': str(user_doc.get('ig_user_id'))},
+                ]},
             ],
             'isActive': {'$ne': False},
         })
     if not account:
         account = await db.instagram_accounts.find_one({
-            'userId': user_id,
+            '$or': [{'userId': user_id}, {'user_id': user_id}],
             'isActive': {'$ne': False},
         })
     if not account:
@@ -13402,12 +13404,12 @@ async def getActiveInstagramAccount(user_id: str) -> dict:
     token = account.get('accessToken') or ''
     now = datetime.utcnow()
     await db.instagram_accounts.update_many(
-        {'userId': user_id},
+        {'$or': [{'userId': user_id}, {'user_id': user_id}]},
         {'$set': {'isCurrent': False}},
     )
     await db.instagram_accounts.update_one(
-        {'id': account['id'], 'userId': user_id},
-        {'$set': {'isCurrent': True, 'updatedAt': now}},
+        {'id': account['id'], '$or': [{'userId': user_id}, {'user_id': user_id}]},
+        {'$set': {'userId': user_id, 'user_id': user_id, 'isCurrent': True, 'updatedAt': now}},
     )
     await db.users.update_one(
         {'id': user_id},
@@ -21698,7 +21700,10 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
     user_doc = await db.users.find_one({'id': user_id})
     if user_doc:
         await _sync_user_instagram_account_doc(user_doc)
-    account = await db.instagram_accounts.find_one({'id': account_id, 'userId': user_id})
+    account = await db.instagram_accounts.find_one({
+        'id': account_id,
+        '$or': [{'userId': user_id}, {'user_id': user_id}],
+    })
     if not account:
         raise HTTPException(404, 'Instagram account not found')
     token = account.get('accessToken') or ''
@@ -21709,12 +21714,18 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
         raise HTTPException(400, 'Instagram token expired. Reconnect this account.')
     now = datetime.utcnow()
     await db.instagram_accounts.update_many(
-        {'userId': user_id},
+        {'$or': [{'userId': user_id}, {'user_id': user_id}]},
         {'$set': {'isCurrent': False, 'updatedAt': now}},
     )
     await db.instagram_accounts.update_one(
-        {'id': account_id, 'userId': user_id},
-        {'$set': {'isCurrent': True, 'isActive': True, 'updatedAt': now}},
+        {'id': account_id, '$or': [{'userId': user_id}, {'user_id': user_id}]},
+        {'$set': {
+            'userId': user_id,
+            'user_id': user_id,
+            'isCurrent': True,
+            'isActive': True,
+            'updatedAt': now,
+        }},
     )
     await db.users.update_one(
         {'id': user_id},
