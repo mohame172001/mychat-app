@@ -31,6 +31,12 @@ def _reply_provider_ok():
 
 
 def _comment_rule(account_db_id, ig_id, rule_id, trigger='comment:any'):
+    """Fixture: a complete button-driven comment-DM rule. After the
+    server-side gate was unified, a rule with only opening_dm_text is
+    classified as a one-shot — to act as a button flow it needs
+    opening + button + a next-step. The fixture provides all three so
+    routing tests exercise the deferred-flow path by default. Tests
+    that need a one-shot can override fields explicitly."""
     now = datetime.utcnow() - timedelta(minutes=5)
     return {
         'id': rule_id,
@@ -49,7 +55,11 @@ def _comment_rule(account_db_id, ig_id, rule_id, trigger='comment:any'):
         'comment_reply': f'public reply from {ig_id}',
         'opening_dm_enabled': True,
         'opening_dm_text': f'dm from {ig_id}',
+        'opening_dm_button_text': 'send link',
         'dm_text': f'dm from {ig_id}',
+        'link_dm_text': f'here is the link from {ig_id}',
+        'link_button_text': 'open',
+        'link_url': f'https://example.com/{ig_id}',
         'nodes': [
             {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
             {
@@ -1264,6 +1274,201 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_gate_and_classification_agree_for_every_rule_shape():
+    """Production contradiction guarantee: _comment_dm_flow_enabled
+    (the gate used by execute_flow) and
+    _comment_dm_flow_classification(rule)['enabled'] (used by the
+    repair endpoint + diagnostics) must ALWAYS return the same value.
+    Anything else is a path-divergence bug like the one that produced
+    'rule_has_no_deferred_flow' in recent comment events while the
+    repair endpoint refused with 'already qualifies'.
+    """
+    rules = [
+        # 1. Full button-flow rule
+        {
+            'mode': 'reply_and_dm',
+            'opening_dm_text': 'hello',
+            'opening_dm_button_text': 'send link',
+            'link_url': 'https://example.com',
+            'link_dm_text': 'here',
+        },
+        # 2. Legacy one-shot (dm_text only)
+        {
+            'mode': 'reply_and_dm',
+            'dm_text': 'Thanks',
+            'opening_dm_text': '',
+        },
+        # 3. opening_dm_text only, no next-step  ← the production case
+        {
+            'mode': 'reply_and_dm',
+            'opening_dm_text': 'hello',
+            'opening_dm_button_text': 'send',
+            'link_url': '',
+            'link_dm_text': '',
+            'follow_request_enabled': False,
+            'follow_up_enabled': False,
+            'follow_up_text': '',
+        },
+        # 4. Nested in nodes[].data
+        {
+            'mode': 'reply_and_dm',
+            'opening_dm_text': '',
+            'nodes': [{
+                'id': 'n_dm', 'type': 'message',
+                'data': {
+                    'opening_dm_text': 'hello',
+                    'opening_dm_button_text': 'click',
+                    'link_url': 'https://example.com/x',
+                    'link_dm_text': 'here',
+                },
+            }],
+        },
+        # 5. opening + follow_request_enabled (follow-only next-step)
+        {
+            'mode': 'reply_and_dm',
+            'opening_dm_text': 'follow me',
+            'opening_dm_button_text': 'i followed',
+            'follow_request_enabled': True,
+        },
+        # 6. opening + follow_up_enabled WITHOUT follow_up_text
+        {
+            'mode': 'reply_and_dm',
+            'opening_dm_text': 'x',
+            'opening_dm_button_text': 'y',
+            'follow_up_enabled': True,
+            'follow_up_text': '',
+        },
+        # 7. Wrong mode
+        {
+            'mode': 'reply_only',
+            'opening_dm_text': 'x',
+            'opening_dm_button_text': 'y',
+            'link_url': 'https://example.com',
+        },
+    ]
+    for rule in rules:
+        gate_result = server._comment_dm_flow_enabled(rule)
+        cls = server._comment_dm_flow_classification(rule)
+        assert gate_result == cls['enabled'], (
+            f'gate vs classification mismatch on {rule!r}: '
+            f'gate={gate_result} classification.enabled={cls["enabled"]}'
+        )
+        # Under the unified definition, enabled == button_flow_ready —
+        # they describe the same thing now.
+        assert cls['enabled'] == cls['button_flow_ready'], (
+            f'enabled vs button_flow_ready mismatch on {rule!r}'
+        )
+
+
+def test_post_specific_rule_with_only_opening_and_button_is_one_shot(monkeypatch):
+    """The exact production shape that produced the contradiction:
+    rule has opening_dm_text and opening_dm_button_text but NO
+    link/follow-up/follow-gate next-step. Under the unified
+    definition this is NOT a button flow — the button can't lead
+    anywhere — so:
+      - the gate returns False (no session creation attempt)
+      - the classifier returns enabled=False (consistent)
+      - the repair endpoint accepts the repair (no 409 'already qualifies')
+    """
+    incomplete_button_rule = {
+        'id': 'rule-incomplete',
+        'user_id': 'u1',
+        'mode': 'reply_and_dm',
+        'opening_dm_text': 'hello — want the link?',
+        'opening_dm_button_text': 'yes',
+        # next-step fields all empty:
+        'link_url': '',
+        'link_dm_text': '',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+    }
+    cls = server._comment_dm_flow_classification(incomplete_button_rule)
+    assert cls['enabled'] is False
+    assert cls['button_flow_ready'] is False
+    assert cls['one_shot_dm_only'] is True
+    assert server._comment_dm_flow_enabled(incomplete_button_rule) is False
+    # Repair endpoint must ACCEPT this rule (not refuse with 409).
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    db.automations.docs = [incomplete_button_rule]
+    result = _run(server.admin_repair_rule_to_button_flow(
+        body={'rule_id': 'rule-incomplete', 'dry_run': True, 'confirm': False},
+        user_id='u1',
+    ))
+    assert result['dry_run'] is True
+    assert result['before']['enabled'] is False
+    assert result['after']['enabled'] is True
+
+
+def test_no_session_reason_distinguishes_historical_from_current_one_shot(monkeypatch):
+    """When a historical comment row has no session but the CURRENT
+    rule IS button_flow_ready, the row's no_session_reason must
+    surface as 'session_missing_for_current_deferred_flow' so the
+    operator understands the rule was repaired since this event.
+    The literal 'rule_has_no_deferred_flow' must only appear when
+    the rule is CURRENTLY one-shot."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    now = datetime.utcnow()
+    repaired_rule = _comment_rule('accB', 'igB', 'rule-repaired')
+    repaired_rule.update({
+        'opening_dm_text': 'hello',
+        'opening_dm_button_text': 'send link',
+        'link_url': 'https://example.com',
+        'link_dm_text': 'here',
+    })
+    one_shot_rule = _comment_rule('accB', 'igB', 'rule-one-shot')
+    one_shot_rule.update({
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_url': '',
+        'link_dm_text': '',
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+        # Strip nodes[].data so classification can't recover.
+        'nodes': [],
+    })
+    db.automations.docs = [repaired_rule, one_shot_rule]
+    db.comments.docs.extend([
+        {
+            'id': 'comm-historical-repaired',
+            'user_id': 'u1', 'instagramAccountId': 'igB',
+            'ig_comment_id': 'h-1', 'media_id': 'mediaB',
+            'commenter_id': 'igsid-1', 'matched': True,
+            'rule_id': 'rule-repaired',
+            'action_status': 'success', 'reply_status': 'success', 'dm_status': 'success',
+            'opening_dedupe_key': None,
+            'created': now - timedelta(hours=2),
+            'updated': now - timedelta(hours=2),
+        },
+        {
+            'id': 'comm-current-one-shot',
+            'user_id': 'u1', 'instagramAccountId': 'igB',
+            'ig_comment_id': 'h-2', 'media_id': 'mediaB',
+            'commenter_id': 'igsid-2', 'matched': True,
+            'rule_id': 'rule-one-shot',
+            'action_status': 'success', 'reply_status': 'success', 'dm_status': 'success',
+            'opening_dedupe_key': None,
+            'created': now - timedelta(minutes=10),
+            'updated': now - timedelta(minutes=10),
+        },
+    ])
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    by_id = {e['comment_doc_id']: e for e in result['events']}
+    historical = by_id['comm-historical-repaired']
+    assert historical['session_created'] is False
+    assert historical['no_session_reason'] == 'session_missing_for_current_deferred_flow'
+    current = by_id['comm-current-one-shot']
+    assert current['session_created'] is False
+    assert current['no_session_reason'] == 'rule_has_no_deferred_flow'
+
+
 def test_comment_dm_flow_enabled_also_reads_nested_node_data():
     """A rule whose deferred-flow fields are only inside
     ``nodes[].data`` (legacy save shape) must still be classified as
@@ -1618,7 +1823,7 @@ def test_comment_dm_flow_classification_flags_legacy_one_shot_rule():
     assert cls['one_shot_dm_only'] is True
     assert cls['button_flow_ready'] is False
     assert 'opening_dm_text' in cls['button_flow_missing']
-    assert 'opening_dm_button_text' in cls['button_flow_missing']
+    assert any(item.startswith('opening_dm_button_text') for item in cls['button_flow_missing'])
     # No deferred-flow fields populated.
     assert cls['present_deferred_fields'] == []
 
@@ -1747,7 +1952,7 @@ def test_recent_comment_events_attaches_rule_deferred_flow_for_one_shot_rule(mon
     assert cls['one_shot_dm_only'] is True
     assert cls['button_flow_ready'] is False
     assert 'opening_dm_text' in cls['button_flow_missing']
-    assert 'opening_dm_button_text' in cls['button_flow_missing']
+    assert any(item.startswith('opening_dm_button_text') for item in cls['button_flow_missing'])
 
 
 def test_recent_comment_events_marks_old_no_session_row_when_current_rule_is_ready(monkeypatch):

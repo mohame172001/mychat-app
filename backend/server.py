@@ -2777,20 +2777,40 @@ def normalize_comment_dm_rule(automation: dict) -> Dict[str, Any]:
         or email_request_enabled
         or (follow_up_enabled and follow_up_text)
     )
-    button_flow_ready = mode_ok and has_opening_dm and has_button and has_next_step
-    enabled = mode_ok and (has_opening_dm or has_button or has_next_step)
+    # Single canonical definition of "creates a comment-DM session".
+    # Must match exactly what _send_comment_dm_flow_entry can actually
+    # use to produce a button-driven session:
+    #   * mode == reply_and_dm
+    #   * has opening_dm_text (or legacy dm_text that we promote above)
+    #   * has at least one next-step field
+    # opening_dm_button_text has a server-side default ('Send me the
+    # link' / 'ابعتلي اللينك') so its absence is a UX warning, not a
+    # blocker — the button still sends with the default label.
+    #
+    # Previously ``enabled`` used OR over the three predicates, which
+    # let the gate signal "deferred flow" for rules whose actual
+    # session-creation path inside _send_comment_dm_flow_entry then
+    # silently fell back to a plain text DM. That produced the
+    # production contradiction (reply+DM success, no session, AND
+    # "already qualifies" from the repair tool). Unifying eliminates
+    # the split.
+    button_flow_ready = mode_ok and has_opening_dm and has_next_step
+    enabled = button_flow_ready
 
     missing_fields: List[str] = []
     if not mode_ok:
         missing_fields.append('mode != reply_and_dm')
     if not has_opening_dm:
         missing_fields.append('opening_dm_text')
-    if not has_button:
-        missing_fields.append('opening_dm_button_text')
     if not has_next_step:
         missing_fields.append(
             f'at least one of: {", ".join(_BUTTON_FLOW_NEXT_STEP_FIELDS)}'
         )
+    # opening_dm_button_text is no longer a hard requirement (has a
+    # default) but we still surface it as a UX hint so the operator
+    # can customize the button label.
+    if not has_button:
+        missing_fields.append('opening_dm_button_text (optional — defaults to a sensible label)')
 
     return {
         'rule_id': automation.get('id'),
