@@ -1264,6 +1264,259 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_comment_dm_flow_enabled_also_reads_nested_node_data():
+    """A rule whose deferred-flow fields are only inside
+    ``nodes[].data`` (legacy save shape) must still be classified as
+    a deferred flow. Previously the gate only looked at the top-level
+    document, which silently treated such rules as one-shot."""
+    nested_only_rule = {
+        'mode': 'reply_and_dm',
+        # Top-level deferred fields empty:
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_url': '',
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+        'dm_text': 'Thanks',
+        'nodes': [
+            {'id': 'n_trigger', 'type': 'trigger', 'data': {}},
+            {
+                'id': 'n_dm', 'type': 'message',
+                'data': {
+                    'text': 'Thanks',
+                    'opening_dm_text': 'Hello — want the link?',
+                    'opening_dm_button_text': 'Yes, send link',
+                    'link_url': 'https://example.com/asset',
+                    'link_dm_text': 'Here you go',
+                },
+            },
+        ],
+    }
+    assert server._comment_dm_flow_enabled(nested_only_rule) is True
+    cls = server._comment_dm_flow_classification(nested_only_rule)
+    assert cls['enabled'] is True
+    assert cls['button_flow_ready'] is True
+    # Present fields list reflects the nested values.
+    assert 'opening_dm_text' in cls['present_deferred_fields']
+    assert 'opening_dm_button_text' in cls['present_deferred_fields']
+    assert 'link_url' in cls['present_deferred_fields']
+
+
+def test_repair_rule_to_button_flow_dry_run_does_not_mutate(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    one_shot_rule = {
+        'id': 'rule-one-shot',
+        'user_id': 'u1',
+        'status': 'active',
+        'mode': 'reply_and_dm',
+        'dm_text': 'Thanks for your comment.',
+        'reply_under_post': True,
+        'comment_reply': 'public reply',
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+    }
+    db.automations.docs = [one_shot_rule]
+    result = _run(server.admin_repair_rule_to_button_flow(
+        body={'rule_id': 'rule-one-shot', 'dry_run': True, 'confirm': False},
+        user_id='u1',
+    ))
+    assert result['dry_run'] is True
+    assert result['confirm'] is False
+    assert result['before']['enabled'] is False
+    assert result['after']['enabled'] is True
+    assert result['after']['button_flow_ready'] is True
+    # No mutation.
+    persisted = db.automations.docs[0]
+    assert persisted['opening_dm_text'] == ''
+    assert persisted['follow_up_enabled'] is False
+
+
+def test_repair_rule_to_button_flow_confirm_promotes_one_shot_rule(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    one_shot_rule = {
+        'id': 'rule-arabic-one-shot',
+        'user_id': 'u1',
+        'status': 'active',
+        'mode': 'reply_and_dm',
+        'dm_text': 'أهلاً 👋 شوفت تعليقك، حابب أبعتلك اللينك؟',
+        'reply_under_post': True,
+        'comment_reply': 'مرحبا',
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+    }
+    db.automations.docs = [one_shot_rule]
+    result = _run(server.admin_repair_rule_to_button_flow(
+        body={'rule_id': 'rule-arabic-one-shot', 'dry_run': False, 'confirm': True},
+        user_id='u1',
+    ))
+    assert result['confirm'] is True
+    assert result['after']['enabled'] is True
+    persisted = db.automations.docs[0]
+    # dm_text preserved.
+    assert persisted['dm_text'] == 'أهلاً 👋 شوفت تعليقك، حابب أبعتلك اللينك؟'
+    # opening_dm_text was filled from dm_text.
+    assert persisted['opening_dm_text'] == 'أهلاً 👋 شوفت تعليقك، حابب أبعتلك اللينك؟'
+    # Arabic default for the button label.
+    assert persisted['opening_dm_button_text'] == 'ابعتلي اللينك'
+    # follow_up enabled + non-empty default text.
+    assert persisted['follow_up_enabled'] is True
+    assert persisted['follow_up_text']
+    # Classification flips to enabled.
+    assert server._comment_dm_flow_enabled(persisted) is True
+
+
+def test_repair_rule_to_button_flow_refuses_already_enabled_rule(monkeypatch):
+    """Safety: a rule that already qualifies as a deferred flow
+    must NOT be overwritten by the repair tool."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    already_button_flow = {
+        'id': 'rule-already-flow',
+        'user_id': 'u1',
+        'status': 'active',
+        'mode': 'reply_and_dm',
+        'opening_dm_text': 'Hello',
+        'opening_dm_button_text': 'Send link',
+        'link_url': 'https://example.com',
+        'link_dm_text': 'Here',
+    }
+    db.automations.docs = [already_button_flow]
+    try:
+        _run(server.admin_repair_rule_to_button_flow(
+            body={'rule_id': 'rule-already-flow', 'dry_run': True, 'confirm': False},
+            user_id='u1',
+        ))
+    except server.HTTPException as exc:
+        assert exc.status_code == 409
+    else:
+        raise AssertionError('expected HTTPException(409) for an already-enabled rule')
+
+
+def test_repair_rule_to_button_flow_refuses_cross_workspace_rule(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    other_workspace_rule = {
+        'id': 'rule-cross-workspace',
+        'user_id': 'u-other',
+        'status': 'active',
+        'mode': 'reply_and_dm',
+        'dm_text': 'hi',
+    }
+    db.automations.docs = [other_workspace_rule]
+    try:
+        _run(server.admin_repair_rule_to_button_flow(
+            body={'rule_id': 'rule-cross-workspace', 'dry_run': True},
+            user_id='u1',
+        ))
+    except server.HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError('expected HTTPException(403) for cross-workspace rule')
+
+
+def test_repair_rule_to_button_flow_refuses_unknown_rule(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    try:
+        _run(server.admin_repair_rule_to_button_flow(
+            body={'rule_id': 'rule-does-not-exist', 'dry_run': True},
+            user_id='u1',
+        ))
+    except server.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError('expected HTTPException(404) for unknown rule_id')
+
+
+def test_after_repair_handle_new_comment_creates_session_for_post_specific_rule(monkeypatch):
+    """End-to-end safety: after running the repair, a fresh comment
+    on Account 2's post-specific rule must now produce a session
+    (the production fix the operator asked for)."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    # Start from the standard post-specific rule shape (with a proper
+    # flow-graph) then strip the deferred-flow fields so it looks
+    # exactly like the Account 2 production one-shot rule before
+    # repair. activationStartedAt is backdated so the comment isn't
+    # treated as historical.
+    rule = _comment_rule('accB', 'igB', 'rule-post-specific-shot', trigger='comment:mediaB')
+    rule.update({
+        'post_scope': 'specific',
+        'media_id': 'mediaB',
+        'trigger_media_id': 'mediaB',
+        'activationStartedAt': datetime.utcnow() - timedelta(days=1),
+        # All deferred fields explicitly empty — the production shape.
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_url': '',
+        'link_dm_text': '',
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+    })
+    db.automations.docs = [rule]
+    # Apply the repair.
+    _run(server.admin_repair_rule_to_button_flow(
+        body={'rule_id': rule['id'], 'dry_run': False, 'confirm': True},
+        user_id='u1',
+    ))
+
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append({'access_token': access_token, 'ig_user_id': ig_user_id,
+                           'message': message})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-after-repair'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-after-repair',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-tester',
+            'commenter_username': 'tester',
+            'text': 'send me',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is True
+    assert result['rule_id'] == 'rule-post-specific-shot'
+    # Session was created — the production fix.
+    assert len(db.comment_dm_sessions.docs) == 1
+    session = db.comment_dm_sessions.docs[0]
+    assert session['automation_id'] == 'rule-post-specific-shot'
+    assert session['media_id'] == 'mediaB'
+    assert session['payload'].startswith('comment_flow:')
+    # Quick reply was sent (the button-flow opening DM, not a plain text DM).
+    assert any('quick_replies' in (c.get('message') or {}) for c in send_calls)
+
+
 def test_comment_dm_flow_classification_flags_legacy_one_shot_rule():
     """The Account 2 production case: a rule saved with only the
     legacy dm_text field (one-shot reply + DM) must be classified as

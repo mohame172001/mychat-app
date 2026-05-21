@@ -2590,17 +2590,44 @@ async def verify_instagram_user_follows_business(access_token: str,
     }
 
 
+def _deferred_flow_field(automation: dict, field: str) -> Any:
+    """Read a deferred-flow field from the rule, looking at BOTH the
+    top-level document AND any ``nodes[].type == 'message'`` data
+    blob. Some legacy rules were saved with the deferred fields only
+    inside the flow-graph node and an empty top-level mirror, which
+    used to incorrectly classify them as one-shot rules. This helper
+    accepts either shape so the read side never misses a real
+    deferred-flow configuration.
+    """
+    value = automation.get(field)
+    if value:
+        return value
+    nodes = automation.get('nodes') if isinstance(automation.get('nodes'), list) else []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if node.get('type') != 'message':
+            continue
+        data = node.get('data') if isinstance(node.get('data'), dict) else {}
+        nested = data.get(field)
+        if nested:
+            return nested
+    return value
+
+
 def _comment_dm_flow_enabled(automation: dict) -> bool:
     if (automation.get('mode') or '') != 'reply_and_dm':
         return False
+    follow_up_enabled = _deferred_flow_field(automation, 'follow_up_enabled')
+    follow_up_text = _deferred_flow_field(automation, 'follow_up_text')
     return any([
-        automation.get('opening_dm_text'),
-        automation.get('opening_dm_button_text'),
-        automation.get('link_dm_text'),
-        automation.get('link_url'),
-        automation.get('follow_request_enabled'),
-        automation.get('email_request_enabled'),
-        automation.get('follow_up_enabled') and automation.get('follow_up_text'),
+        _deferred_flow_field(automation, 'opening_dm_text'),
+        _deferred_flow_field(automation, 'opening_dm_button_text'),
+        _deferred_flow_field(automation, 'link_dm_text'),
+        _deferred_flow_field(automation, 'link_url'),
+        _deferred_flow_field(automation, 'follow_request_enabled'),
+        _deferred_flow_field(automation, 'email_request_enabled'),
+        follow_up_enabled and follow_up_text,
     ])
 
 
@@ -2646,17 +2673,20 @@ def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
     no_session_reason='rule_has_no_deferred_flow' — typically a rule
     saved with only the legacy single-DM ``dm_text`` field and none
     of the button/link/follow-up fields a button-driven flow needs.
+
+    Reads via ``_deferred_flow_field`` so a rule storing values inside
+    ``nodes[].data`` instead of at the top level is recognized too.
     """
     mode = (automation.get('mode') or '') or 'unset'
     mode_ok = mode == 'reply_and_dm'
     present: List[str] = []
     missing: List[str] = []
     for f in _DEFERRED_FLOW_FIELDS:
-        value = automation.get(f)
+        value = _deferred_flow_field(automation, f)
         # follow_up_text is only meaningful with follow_up_enabled; the
         # gate treats them as a pair.
         if f == 'follow_up_enabled':
-            paired = bool(value) and bool(automation.get('follow_up_text'))
+            paired = bool(value) and bool(_deferred_flow_field(automation, 'follow_up_text'))
             if paired:
                 present.append('follow_up_enabled+text')
             else:
@@ -2671,10 +2701,10 @@ def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
             missing.append(f)
     enabled = _comment_dm_flow_enabled(automation)
     # Button-flow readiness — stricter than _comment_dm_flow_enabled.
-    has_opening = bool(automation.get('opening_dm_text'))
-    has_button_label = bool(automation.get('opening_dm_button_text'))
+    has_opening = bool(_deferred_flow_field(automation, 'opening_dm_text'))
+    has_button_label = bool(_deferred_flow_field(automation, 'opening_dm_button_text'))
     has_next_step = any(
-        automation.get(f) for f in _BUTTON_FLOW_NEXT_STEP_FIELDS
+        _deferred_flow_field(automation, f) for f in _BUTTON_FLOW_NEXT_STEP_FIELDS
     )
     button_flow_ready = mode_ok and has_opening and has_button_label and has_next_step
     button_flow_missing: List[str] = []
@@ -8435,6 +8465,197 @@ async def admin_recent_test_flows(
         'blocking_count': blocking_count,
         'stale_pending_ttl_seconds': stale_ttl,
         'flows': out_flows,
+    }
+
+
+@api.post('/admin/instagram/repair-rule-to-button-flow')
+async def admin_repair_rule_to_button_flow(
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Promote a one-shot reply+DM rule into a button-driven deferred
+    flow so it creates comment-DM sessions like the general rules
+    already do.
+
+    The Account 2 production failure mode: a post-specific rule was
+    saved with ``mode=reply_and_dm`` + ``dm_text`` only. Reply + DM
+    both succeed, but no session is ever created because the gate
+    sees no opening/button/next-step fields. This endpoint fills those
+    fields with safe defaults DERIVED FROM the rule's existing data,
+    so the operator can opt into a button flow with one click and then
+    customize the next step in the normal automation editor.
+
+    Body:
+      - rule_id (required)
+      - dry_run (default true)
+      - confirm (default false)
+      - opening_dm_button_text (optional override; defaults to a
+        sensible Arabic / English label based on the rule's text)
+      - follow_up_text (optional override; defaults to a placeholder
+        thank-you message in the rule's detected language)
+
+    Behavior on confirm:
+      - opening_dm_text  ← existing opening_dm_text OR dm_text
+      - opening_dm_button_text ← override OR existing OR detected default
+      - follow_up_enabled ← True
+      - follow_up_text   ← override OR existing OR detected placeholder
+      - dm_text  ← preserved unchanged
+      - All other fields untouched.
+
+    Refuses if the rule already meets _comment_dm_flow_enabled — no
+    accidental overwrite of a working flow.
+
+    RBAC: admin.plans.assign.
+    """
+    caller, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
+    payload = body or {}
+    rule_id = str(payload.get('rule_id') or '').strip()
+    if not rule_id:
+        raise HTTPException(400, 'rule_id is required.')
+    dry_run = bool(payload.get('dry_run', True))
+    confirm = bool(payload.get('confirm', False))
+    button_text_override = str(payload.get('opening_dm_button_text') or '').strip()
+    follow_up_override = str(payload.get('follow_up_text') or '').strip()
+
+    rule = await db.automations.find_one({'id': rule_id})
+    if not rule:
+        raise HTTPException(404, 'rule_id not found.')
+    if rule.get('user_id') != user_id:
+        raise HTTPException(403, 'rule does not belong to the caller workspace.')
+
+    before_cls = _comment_dm_flow_classification(rule)
+    if before_cls['enabled']:
+        raise HTTPException(
+            409,
+            'rule already qualifies as a deferred flow; refusing to '
+            'overwrite a working configuration. Edit it via the normal '
+            'automation editor instead.',
+        )
+
+    # Detect the rule's text language for sensible defaults. Cheap
+    # Arabic check on the existing opening / dm copy.
+    existing_opening = str(rule.get('opening_dm_text') or '').strip()
+    existing_dm = str(rule.get('dm_text') or '').strip()
+    seed_text = existing_opening or existing_dm
+    looks_arabic = any('؀' <= ch <= 'ۿ' for ch in seed_text or '')
+    default_button = 'ابعتلي اللينك' if looks_arabic else 'Continue'
+    default_follow_up = (
+        'تمام، شكراً ليك 🙌'
+        if looks_arabic else
+        'Thanks — we have you down for the link. We will follow up shortly.'
+    )
+
+    proposed_opening_dm_text = existing_opening or existing_dm
+    if not proposed_opening_dm_text:
+        raise HTTPException(
+            400,
+            'rule has no opening_dm_text and no dm_text to derive one from. '
+            'Edit it directly in the automation editor.',
+        )
+    proposed_button_text = (
+        button_text_override
+        or str(rule.get('opening_dm_button_text') or '').strip()
+        or default_button
+    )
+    proposed_follow_up_text = (
+        follow_up_override
+        or str(rule.get('follow_up_text') or '').strip()
+        or default_follow_up
+    )
+
+    proposed_patch = {
+        'mode': 'reply_and_dm',
+        'opening_dm_enabled': True,
+        'opening_dm_text': proposed_opening_dm_text,
+        'opening_dm_button_text': proposed_button_text,
+        'follow_up_enabled': True,
+        'follow_up_text': proposed_follow_up_text,
+    }
+    # Project the after-state through the classifier so the dry-run
+    # response shows the operator exactly what will change.
+    after_rule = {**rule, **proposed_patch}
+    after_cls = _comment_dm_flow_classification(after_rule)
+
+    safe_inputs = {
+        'rule_id': rule_id,
+        'opening_dm_text_length': len(proposed_opening_dm_text),
+        'opening_dm_button_text': proposed_button_text,
+        'follow_up_text_length': len(proposed_follow_up_text),
+        'looks_arabic': looks_arabic,
+    }
+
+    if dry_run or not confirm:
+        return {
+            'ok': True,
+            'dry_run': True,
+            'confirm': confirm,
+            'before': {
+                'enabled': before_cls['enabled'],
+                'button_flow_ready': before_cls['button_flow_ready'],
+                'present_deferred_fields': before_cls['present_deferred_fields'],
+                'missing_deferred_fields': before_cls['missing_deferred_fields'],
+                'one_shot_dm_only': before_cls['one_shot_dm_only'],
+            },
+            'after': {
+                'enabled': after_cls['enabled'],
+                'button_flow_ready': after_cls['button_flow_ready'],
+                'present_deferred_fields': after_cls['present_deferred_fields'],
+                'missing_deferred_fields': after_cls['missing_deferred_fields'],
+                'one_shot_dm_only': after_cls['one_shot_dm_only'],
+            },
+            'proposed_patch_summary': safe_inputs,
+            'note': (
+                'Set dry_run=false AND confirm=true to apply. The patch '
+                'preserves dm_text and only fills in opening_dm_text, '
+                'opening_dm_button_text, follow_up_enabled, and '
+                'follow_up_text. You can fine-tune the new fields in '
+                'the normal automation editor afterwards.'
+            ),
+        }
+
+    now = datetime.utcnow()
+    upd_result = await db.automations.update_one(
+        {'id': rule_id, 'user_id': user_id},
+        {'$set': {
+            **proposed_patch,
+            'updatedAt': now,
+            'updated': now,
+            'repaired_by_admin_at': now,
+            'repaired_by_admin_caller_id': caller.get('id'),
+        }},
+    )
+    await _record_admin_action(
+        caller,
+        action='instagram_repair_rule_to_button_flow',
+        target_user_id=user_id,
+        metadata={
+            'rule_id': rule_id,
+            'opening_dm_text_length': safe_inputs['opening_dm_text_length'],
+            'follow_up_text_length': safe_inputs['follow_up_text_length'],
+            'looks_arabic': looks_arabic,
+        },
+    )
+    logger.info(
+        'instagram_rule_button_flow_repair_applied user_id=%s rule_id=%s '
+        'modified=%s opening_len=%s follow_up_len=%s',
+        user_id, rule_id, upd_result.modified_count or 0,
+        safe_inputs['opening_dm_text_length'],
+        safe_inputs['follow_up_text_length'],
+    )
+    return {
+        'ok': True,
+        'dry_run': False,
+        'confirm': True,
+        'modified_count': upd_result.modified_count or 0,
+        'before': {
+            'enabled': before_cls['enabled'],
+            'button_flow_ready': before_cls['button_flow_ready'],
+        },
+        'after': {
+            'enabled': after_cls['enabled'],
+            'button_flow_ready': after_cls['button_flow_ready'],
+        },
+        'proposed_patch_summary': safe_inputs,
     }
 
 

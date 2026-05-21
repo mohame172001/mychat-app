@@ -323,6 +323,165 @@ function FlowRow({ flow, onResetDone }) {
 }
 
 /**
+ * Inline hint card rendered under a Recent comment events row when
+ * the matched rule is a one-shot reply+DM rule (no button flow). The
+ * card explains the gap, offers the rule editor, and offers a one-
+ * click "repair" that promotes the rule into a button flow with
+ * sensible defaults derived from the rule's own copy.
+ */
+function RuleHasNoDeferredFlowHint({ ev }) {
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [applied, setApplied] = useState(false);
+  const [error, setError] = useState(null);
+
+  const runDryRun = useCallback(async () => {
+    if (!ev.matched_rule_id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post('/admin/instagram/repair-rule-to-button-flow', {
+        rule_id: ev.matched_rule_id,
+        dry_run: true,
+        confirm: false,
+      });
+      setPreview(r.data);
+      toast.success('Repair preview ready — review before confirming.');
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      toast.error(typeof detail === 'string' ? detail : 'Dry run failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [ev.matched_rule_id]);
+
+  const runConfirm = useCallback(async () => {
+    if (!ev.matched_rule_id || !preview) return;
+    if (!window.confirm(
+      'This will set opening_dm_text + opening_dm_button_text + follow_up_enabled + follow_up_text on this rule using defaults derived from your existing copy. dm_text is preserved. You can fine-tune the new fields in the normal rule editor afterwards. Proceed?',
+    )) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.post('/admin/instagram/repair-rule-to-button-flow', {
+        rule_id: ev.matched_rule_id,
+        dry_run: false,
+        confirm: true,
+      });
+      setApplied(true);
+      setPreview({ ...r.data, _applied: true });
+      toast.success('Rule repaired — next comment will create a session.');
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      toast.error(typeof detail === 'string' ? detail : 'Repair failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [ev.matched_rule_id, preview]);
+
+  const cls = ev.rule_deferred_flow || {};
+  return (
+    <div
+      className="mt-2 text-xs bg-amber-50 border border-amber-200 rounded-md p-2 text-amber-900"
+      data-testid={`rule-deferred-flow-hint-${ev.comment_doc_id}`}
+    >
+      <div className="font-semibold mb-1">
+        This rule is configured as a one-shot reply + DM, not a button-driven flow.
+      </div>
+      <div className="text-amber-800">
+        The reply and opening DM did send successfully. The system does not create a session
+        because the rule is missing the button + next-step fields a button-driven flow needs.
+        The recipient cannot continue past the opening DM because there is no button on it.
+      </div>
+      <div className="mt-2">
+        <div className="font-semibold mb-0.5">Fields present:</div>
+        <div className="font-mono">
+          {(cls.present_deferred_fields || []).length
+            ? cls.present_deferred_fields.join(', ')
+            : '(none of the deferred-flow fields are populated)'}
+        </div>
+      </div>
+      <div className="mt-2">
+        <div className="font-semibold mb-0.5">Add these to enable the button flow:</div>
+        <div className="font-mono">
+          {(cls.button_flow_missing || []).join(', ') || '(none)'}
+        </div>
+      </div>
+      {cls.one_shot_dm_only && (
+        <div className="mt-2 text-amber-800">
+          Detected legacy one-shot <span className="font-mono">dm_text</span>: the rule keeps
+          sending a single DM and never opens a session until it gets an opening DM with a button
+          and a next step.
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={runDryRun}
+          disabled={busy || applied || !ev.matched_rule_id}
+          data-testid={`repair-dryrun-${ev.matched_rule_id}`}
+        >
+          <RefreshCw className={`w-3 h-3 me-1 ${busy ? 'animate-spin' : ''}`} />
+          Preview repair
+        </Button>
+        <Button
+          size="sm"
+          onClick={runConfirm}
+          disabled={busy || applied || !preview || preview?._applied}
+          className="bg-emerald-600 hover:bg-emerald-700 text-white"
+          data-testid={`repair-confirm-${ev.matched_rule_id}`}
+        >
+          <CheckCircle2 className="w-3 h-3 me-1" />
+          {applied ? 'Repaired' : 'Apply repair'}
+        </Button>
+        {ev.matched_rule_id && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => window.open(`/app/automations/${encodeURIComponent(ev.matched_rule_id)}`, '_blank')}
+            data-testid={`open-rule-${ev.matched_rule_id}`}
+          >
+            Open rule editor
+          </Button>
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-2 text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2">
+          {error}
+        </div>
+      )}
+      {preview && !preview._applied && (
+        <div className="mt-2 bg-white border border-amber-200 rounded-md p-2 text-amber-900">
+          <div className="font-semibold mb-1">Preview (dry-run, no changes saved yet)</div>
+          <div>
+            after: <span className="font-mono">enabled={String(preview.after?.enabled)}</span>{' '}
+            · <span className="font-mono">button_flow_ready={String(preview.after?.button_flow_ready)}</span>
+          </div>
+          <div className="mt-1 text-amber-800">
+            Will populate: opening_dm_text (from your dm_text), opening_dm_button_text, follow_up_enabled, follow_up_text.
+            Your existing dm_text is preserved unchanged.
+          </div>
+        </div>
+      )}
+      {applied && (
+        <div className="mt-2 bg-emerald-50 border border-emerald-200 rounded-md p-2 text-emerald-800">
+          <div className="font-semibold mb-1">Rule repaired.</div>
+          The next comment that matches this rule will create a comment-DM session and
+          deliver a button. You can fine-tune the button label, the follow-up text, or
+          switch to a link/follow-gate next step in the normal automation editor.
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/**
  * Recent comment events — exposes the comments collection rows so
  * the operator can see every comment that reached the backend, not
  * just the ones that produced a session. This is the panel that
@@ -486,54 +645,7 @@ function RecentCommentEventsPanel() {
                       )}
                     </div>
                     {ev.no_session_reason === 'rule_has_no_deferred_flow' && ev.rule_deferred_flow && (
-                      <div className="mt-2 text-xs bg-amber-50 border border-amber-200 rounded-md p-2 text-amber-900"
-                           data-testid={`rule-deferred-flow-hint-${ev.comment_doc_id}`}>
-                        <div className="font-semibold mb-1">
-                          This rule is configured as a one-shot reply + DM, not a button-driven flow.
-                        </div>
-                        <div className="text-amber-800">
-                          The reply and opening DM did send successfully. The system does not create
-                          a session because the rule is missing the button + next-step fields a
-                          button-driven flow needs. The recipient cannot continue past the opening
-                          DM because there is no button on it.
-                        </div>
-                        <div className="mt-2">
-                          <div className="font-semibold mb-0.5">Fields present:</div>
-                          <div className="font-mono">
-                            {(ev.rule_deferred_flow.present_deferred_fields || []).length
-                              ? ev.rule_deferred_flow.present_deferred_fields.join(', ')
-                              : '(none of the deferred-flow fields are populated)'}
-                          </div>
-                        </div>
-                        <div className="mt-2">
-                          <div className="font-semibold mb-0.5">
-                            Add these to enable the button flow:
-                          </div>
-                          <div className="font-mono">
-                            {(ev.rule_deferred_flow.button_flow_missing || []).join(', ') || '(none)'}
-                          </div>
-                        </div>
-                        {ev.rule_deferred_flow.one_shot_dm_only && (
-                          <div className="mt-2 text-amber-800">
-                            Detected legacy one-shot <span className="font-mono">dm_text</span>: the
-                            rule will keep sending a single DM and never open a session until you
-                            edit it to add an opening DM with a button + a next step (link, follow-up,
-                            or follow-gate).
-                          </div>
-                        )}
-                        {ev.matched_rule_id && (
-                          <div className="mt-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => window.open(`/app/automations/${encodeURIComponent(ev.matched_rule_id)}`, '_blank')}
-                              data-testid={`open-rule-${ev.matched_rule_id}`}
-                            >
-                              Open rule editor
-                            </Button>
-                          </div>
-                        )}
-                      </div>
+                      <RuleHasNoDeferredFlowHint ev={ev} />
                     )}
                   </div>
                 </div>
