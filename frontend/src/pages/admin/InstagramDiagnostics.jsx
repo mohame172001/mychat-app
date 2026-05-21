@@ -485,6 +485,56 @@ function RecentCommentEventsPanel() {
                         <> · session <span className="font-mono">{ev.related_session_id}</span></>
                       )}
                     </div>
+                    {ev.no_session_reason === 'rule_has_no_deferred_flow' && ev.rule_deferred_flow && (
+                      <div className="mt-2 text-xs bg-amber-50 border border-amber-200 rounded-md p-2 text-amber-900"
+                           data-testid={`rule-deferred-flow-hint-${ev.comment_doc_id}`}>
+                        <div className="font-semibold mb-1">
+                          This rule is configured as a one-shot reply + DM, not a button-driven flow.
+                        </div>
+                        <div className="text-amber-800">
+                          The reply and opening DM did send successfully. The system does not create
+                          a session because the rule is missing the button + next-step fields a
+                          button-driven flow needs. The recipient cannot continue past the opening
+                          DM because there is no button on it.
+                        </div>
+                        <div className="mt-2">
+                          <div className="font-semibold mb-0.5">Fields present:</div>
+                          <div className="font-mono">
+                            {(ev.rule_deferred_flow.present_deferred_fields || []).length
+                              ? ev.rule_deferred_flow.present_deferred_fields.join(', ')
+                              : '(none of the deferred-flow fields are populated)'}
+                          </div>
+                        </div>
+                        <div className="mt-2">
+                          <div className="font-semibold mb-0.5">
+                            Add these to enable the button flow:
+                          </div>
+                          <div className="font-mono">
+                            {(ev.rule_deferred_flow.button_flow_missing || []).join(', ') || '(none)'}
+                          </div>
+                        </div>
+                        {ev.rule_deferred_flow.one_shot_dm_only && (
+                          <div className="mt-2 text-amber-800">
+                            Detected legacy one-shot <span className="font-mono">dm_text</span>: the
+                            rule will keep sending a single DM and never open a session until you
+                            edit it to add an opening DM with a button + a next step (link, follow-up,
+                            or follow-gate).
+                          </div>
+                        )}
+                        {ev.matched_rule_id && (
+                          <div className="mt-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => window.open(`/app/automations/${encodeURIComponent(ev.matched_rule_id)}`, '_blank')}
+                              data-testid={`open-rule-${ev.matched_rule_id}`}
+                            >
+                              Open rule editor
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

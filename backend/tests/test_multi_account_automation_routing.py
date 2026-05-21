@@ -1264,6 +1264,166 @@ def test_after_reset_same_commenter_post_rule_can_start_a_new_flow(monkeypatch):
     assert any(c['ig_user_id'] == 'igB' for c in send_calls)
 
 
+def test_comment_dm_flow_classification_flags_legacy_one_shot_rule():
+    """The Account 2 production case: a rule saved with only the
+    legacy dm_text field (one-shot reply + DM) must be classified as
+    NOT enabled for the deferred flow, with one_shot_dm_only=True and
+    button_flow_missing listing every field the operator needs to
+    add."""
+    one_shot_rule = {
+        'mode': 'reply_and_dm',
+        'dm_text': 'Thanks for your comment.',
+        'reply_under_post': True,
+        'comment_reply': 'public reply',
+        # All deferred-flow fields explicitly empty.
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_dm_text': '',
+        'link_url': '',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+    }
+    cls = server._comment_dm_flow_classification(one_shot_rule)
+    assert cls['enabled'] is False
+    assert cls['mode_ok'] is True
+    assert cls['has_legacy_dm_text'] is True
+    assert cls['one_shot_dm_only'] is True
+    assert cls['button_flow_ready'] is False
+    assert 'opening_dm_text' in cls['button_flow_missing']
+    assert 'opening_dm_button_text' in cls['button_flow_missing']
+    # No deferred-flow fields populated.
+    assert cls['present_deferred_fields'] == []
+
+
+def test_comment_dm_flow_classification_recognizes_full_button_flow_rule():
+    """A rule with opening text + button + link is button-flow ready
+    and the classification must surface that cleanly."""
+    full_rule = {
+        'mode': 'reply_and_dm',
+        'opening_dm_text': 'hello',
+        'opening_dm_button_text': 'send link',
+        'link_dm_text': 'here',
+        'link_url': 'https://example.com',
+        'link_button_text': 'open',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+    }
+    cls = server._comment_dm_flow_classification(full_rule)
+    assert cls['enabled'] is True
+    assert cls['button_flow_ready'] is True
+    assert cls['button_flow_missing'] == []
+    assert 'opening_dm_text' in cls['present_deferred_fields']
+    assert 'opening_dm_button_text' in cls['present_deferred_fields']
+    assert 'link_url' in cls['present_deferred_fields']
+    assert cls['one_shot_dm_only'] is False
+
+
+def test_comment_dm_flow_classification_follow_up_pair_handled_atomically():
+    """follow_up_enabled without follow_up_text must NOT count as
+    present — the gate treats them as a pair."""
+    half_followup = {
+        'mode': 'reply_and_dm',
+        'opening_dm_text': 'x',
+        'opening_dm_button_text': 'click',
+        'follow_up_enabled': True,
+        'follow_up_text': '',
+    }
+    cls = server._comment_dm_flow_classification(half_followup)
+    assert 'follow_up_enabled+text' in cls['missing_deferred_fields']
+    full_followup = dict(half_followup)
+    full_followup['follow_up_text'] = 'second message'
+    cls2 = server._comment_dm_flow_classification(full_followup)
+    assert 'follow_up_enabled+text' in cls2['present_deferred_fields']
+
+
+def test_comment_dm_flow_classification_rejects_wrong_mode():
+    """Even with full fields, a rule whose mode is not 'reply_and_dm'
+    is not button-flow-ready."""
+    wrong_mode = {
+        'mode': 'reply_only',
+        'opening_dm_text': 'x',
+        'opening_dm_button_text': 'click',
+        'link_url': 'https://example.com',
+    }
+    cls = server._comment_dm_flow_classification(wrong_mode)
+    assert cls['mode_ok'] is False
+    assert cls['enabled'] is False
+    assert cls['button_flow_ready'] is False
+    assert 'mode != reply_and_dm' in cls['button_flow_missing']
+
+
+def test_recent_comment_events_attaches_rule_deferred_flow_for_one_shot_rule(monkeypatch):
+    """When a row has no_session_reason='rule_has_no_deferred_flow',
+    the response MUST include rule_deferred_flow so the UI can render
+    the operator-friendly hint without needing a second round-trip
+    to inspect the rule."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    # Replace Account B's rule with a legacy one-shot DM rule.
+    one_shot_rule = {
+        'id': 'ruleB-one-shot',
+        'user_id': 'u1',
+        'status': 'active',
+        'trigger': 'comment:mediaB',
+        'match': 'any',
+        'mode': 'reply_and_dm',
+        'post_scope': 'specific',
+        'instagramAccountId': 'igB',
+        'instagramAccountDbId': 'accB',
+        'media_id': 'mediaB',
+        'dm_text': 'Thanks for your comment.',
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_dm_text': '',
+        'link_url': '',
+        'follow_request_enabled': False,
+        'email_request_enabled': False,
+        'follow_up_enabled': False,
+        'follow_up_text': '',
+        'reply_under_post': True,
+        'comment_reply': 'public reply',
+    }
+    db.automations.docs = [one_shot_rule]
+    # Comment that matched the one-shot rule and successfully sent
+    # reply + DM, but produced no session (the Account 2 case).
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'comm-one-shot-success',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'ig-one-shot',
+        'media_id': 'mediaB',
+        'commenter_id': 'igsid-tester',
+        'rule_id': 'ruleB-one-shot',
+        'matched': True,
+        'matched_rule_scope': 'specific_post_exact',
+        'action_status': 'success',
+        'reply_status': 'success',
+        'dm_status': 'success',
+        'source': 'polling',
+        'opening_dedupe_key': None,
+        'created': now - timedelta(seconds=20),
+        'updated': now - timedelta(seconds=20),
+    })
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    ev = next(e for e in result['events'] if e['comment_doc_id'] == 'comm-one-shot-success')
+    assert ev['session_created'] is False
+    assert ev['no_session_reason'] == 'rule_has_no_deferred_flow'
+    cls = ev.get('rule_deferred_flow')
+    assert cls is not None
+    assert cls['enabled'] is False
+    assert cls['one_shot_dm_only'] is True
+    assert cls['button_flow_ready'] is False
+    assert 'opening_dm_text' in cls['button_flow_missing']
+    assert 'opening_dm_button_text' in cls['button_flow_missing']
+
+
 def test_recent_comment_events_returns_rows_even_without_sessions(monkeypatch):
     """The diagnostic that exposes the production failure mode the
     operator just hit: a fresh Account 2 comment that never produced

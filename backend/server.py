@@ -2604,6 +2604,110 @@ def _comment_dm_flow_enabled(automation: dict) -> bool:
     ])
 
 
+# Fields the operator-facing diagnostic should report on. Order matches
+# the UI sentence ("Your rule has X but is missing Y").
+_DEFERRED_FLOW_FIELDS = (
+    'opening_dm_text',
+    'opening_dm_button_text',
+    'link_dm_text',
+    'link_url',
+    'follow_request_enabled',
+    'email_request_enabled',
+    'follow_up_enabled',
+    'follow_up_text',
+)
+# The minimum set required for a button-driven flow that actually
+# creates a comment-DM session and lets the recipient click a button.
+# A rule may be classified as deferred without meeting this stricter
+# definition (e.g. follow_request_enabled alone), but in practice the
+# operator-facing button-flow needs both an opening message AND a
+# button label AND somewhere to go next.
+_BUTTON_FLOW_REQUIRED_FIELDS = (
+    'opening_dm_text',
+    'opening_dm_button_text',
+)
+# At least ONE of these "next-step" fields must be present for the
+# button click to have somewhere to land.
+_BUTTON_FLOW_NEXT_STEP_FIELDS = (
+    'link_url',
+    'link_dm_text',
+    'follow_up_enabled',
+    'follow_request_enabled',
+)
+
+
+def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
+    """Operator-facing diagnostic for why a rule does / does not create
+    a comment-DM session. Returns a structured explanation so the
+    admin UI can show "your rule has X but is missing Y" without
+    requiring the operator to read code.
+
+    Used by the recent-comment-events panel to explain rows with
+    no_session_reason='rule_has_no_deferred_flow' — typically a rule
+    saved with only the legacy single-DM ``dm_text`` field and none
+    of the button/link/follow-up fields a button-driven flow needs.
+    """
+    mode = (automation.get('mode') or '') or 'unset'
+    mode_ok = mode == 'reply_and_dm'
+    present: List[str] = []
+    missing: List[str] = []
+    for f in _DEFERRED_FLOW_FIELDS:
+        value = automation.get(f)
+        # follow_up_text is only meaningful with follow_up_enabled; the
+        # gate treats them as a pair.
+        if f == 'follow_up_enabled':
+            paired = bool(value) and bool(automation.get('follow_up_text'))
+            if paired:
+                present.append('follow_up_enabled+text')
+            else:
+                missing.append('follow_up_enabled+text')
+            continue
+        if f == 'follow_up_text':
+            # Reported alongside follow_up_enabled above.
+            continue
+        if value:
+            present.append(f)
+        else:
+            missing.append(f)
+    enabled = _comment_dm_flow_enabled(automation)
+    # Button-flow readiness — stricter than _comment_dm_flow_enabled.
+    has_opening = bool(automation.get('opening_dm_text'))
+    has_button_label = bool(automation.get('opening_dm_button_text'))
+    has_next_step = any(
+        automation.get(f) for f in _BUTTON_FLOW_NEXT_STEP_FIELDS
+    )
+    button_flow_ready = mode_ok and has_opening and has_button_label and has_next_step
+    button_flow_missing: List[str] = []
+    if not mode_ok:
+        button_flow_missing.append('mode != reply_and_dm')
+    if not has_opening:
+        button_flow_missing.append('opening_dm_text')
+    if not has_button_label:
+        button_flow_missing.append('opening_dm_button_text')
+    if not has_next_step:
+        button_flow_missing.append(
+            f'at least one of: {", ".join(_BUTTON_FLOW_NEXT_STEP_FIELDS)}'
+        )
+    # One-shot DM detection: the rule HAS a generic DM text (legacy
+    # dm_text only) but lacks any deferred fields. This is the
+    # production failure mode for Account 2 — rule sends a single DM,
+    # never creates a session, button click can never continue
+    # because there is no button.
+    has_legacy_dm_text = bool(automation.get('dm_text'))
+    one_shot_dm_only = mode_ok and has_legacy_dm_text and not enabled
+    return {
+        'enabled': bool(enabled),
+        'mode': mode,
+        'mode_ok': mode_ok,
+        'present_deferred_fields': present,
+        'missing_deferred_fields': missing,
+        'button_flow_ready': button_flow_ready,
+        'button_flow_missing': button_flow_missing,
+        'has_legacy_dm_text': has_legacy_dm_text,
+        'one_shot_dm_only': one_shot_dm_only,
+    }
+
+
 def _normalize_comment_text(value: Any) -> str:
     if value is None:
         return ''
@@ -8081,6 +8185,15 @@ async def admin_recent_comment_events(
                 no_session_reason = 'rule_has_no_deferred_flow'
         created = c.get('created') if isinstance(c.get('created'), datetime) else None
         age_seconds = int((now - created).total_seconds()) if created else None
+        # Always embed the deferred-flow classification when we have a
+        # matched rule. This is the data the operator needs to see WHY
+        # session_created is false for a row whose reply + DM both
+        # succeeded — the rule itself never had button-flow fields
+        # filled in, so the system intentionally never opened a
+        # session. Shown verbatim in the UI as a structured hint.
+        rule_classification: Optional[Dict[str, Any]] = None
+        if rule:
+            rule_classification = _comment_dm_flow_classification(rule)
         out_rows.append({
             'comment_doc_id': c.get('id'),
             'ig_comment_id_partial': _safe_partial_identifier(c.get('ig_comment_id')),
@@ -8109,6 +8222,7 @@ async def admin_recent_comment_events(
             'session_created': session_created,
             'related_session_id': (related_session or {}).get('id') if related_session else None,
             'no_session_reason': no_session_reason,
+            'rule_deferred_flow': rule_classification,
         })
     # Per-account "last comment seen" summary — answers the question
     # "did any comment from any source arrive on Account 2 in the last
@@ -8561,6 +8675,7 @@ async def admin_automation_trace(
                     r.get('activationStartedAt').isoformat()
                     if isinstance(r.get('activationStartedAt'), datetime) else r.get('activationStartedAt')
                 ),
+                'deferred_flow': _comment_dm_flow_classification(r),
             })
         out_accounts.append({
             'instagram_account_id': _safe_partial_identifier(ig_id),
