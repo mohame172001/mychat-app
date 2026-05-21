@@ -46,6 +46,12 @@ from app.services.instagram.rule_normalizer import (
     _comment_dm_backfill_patch,
     _ensure_comment_dm_rule_normalized as _ensure_comment_dm_rule_normalized_impl,
 )
+from app.services.instagram.comment_dm_flow import (
+    _comment_dm_flow_enabled,
+    _comment_dm_flow_classification,
+    _create_comment_dm_session as _create_comment_dm_session_impl,
+    _send_comment_dm_flow_entry as _send_comment_dm_flow_entry_impl,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -2624,110 +2630,6 @@ def _deferred_flow_field(automation: dict, field: str) -> Any:
 async def _ensure_comment_dm_rule_normalized(automation: dict) -> dict:
     return await _ensure_comment_dm_rule_normalized_impl(automation, db=db, logger=logger)
 
-def _comment_dm_flow_enabled(automation: dict) -> bool:
-    return bool(normalize_comment_dm_rule(automation).get('enabled'))
-
-
-# Fields the operator-facing diagnostic should report on. Order matches
-# the UI sentence ("Your rule has X but is missing Y").
-_DEFERRED_FLOW_FIELDS = (
-    'opening_dm_text',
-    'opening_dm_button_text',
-    'link_dm_text',
-    'link_url',
-    'follow_request_enabled',
-    'email_request_enabled',
-    'follow_up_enabled',
-    'follow_up_text',
-)
-# The minimum set required for a button-driven flow that actually
-# creates a comment-DM session and lets the recipient click a button.
-# A rule may be classified as deferred without meeting this stricter
-# definition (e.g. follow_request_enabled alone), but in practice the
-# operator-facing button-flow needs both an opening message AND a
-# button label AND somewhere to go next.
-_BUTTON_FLOW_REQUIRED_FIELDS = (
-    'opening_dm_text',
-    'opening_dm_button_text',
-)
-# At least ONE of these "next-step" fields must be present for the
-# button click to have somewhere to land.
-_BUTTON_FLOW_NEXT_STEP_FIELDS = (
-    'link_url',
-    'link_dm_text',
-    'follow_up_enabled',
-    'follow_request_enabled',
-)
-
-
-def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
-    """Operator-facing diagnostic for why a rule does / does not create
-    a comment-DM session. Returns a structured explanation so the
-    admin UI can show "your rule has X but is missing Y" without
-    requiring the operator to read code.
-
-    Used by the recent-comment-events panel to explain rows with
-    no_session_reason='rule_has_no_deferred_flow' — typically a rule
-    saved with only the legacy single-DM ``dm_text`` field and none
-    of the button/link/follow-up fields a button-driven flow needs.
-
-    Reads via ``_deferred_flow_field`` so a rule storing values inside
-    ``nodes[].data`` instead of at the top level is recognized too.
-    """
-    normalized = normalize_comment_dm_rule(automation)
-    mode = normalized['mode']
-    mode_ok = normalized['mode_ok']
-    present: List[str] = []
-    missing: List[str] = []
-    for f in _DEFERRED_FLOW_FIELDS:
-        value = normalized.get(f)
-        # follow_up_text is only meaningful with follow_up_enabled; the
-        # gate treats them as a pair.
-        if f == 'follow_up_enabled':
-            paired = bool(value) and bool(normalized.get('follow_up_text'))
-            if paired:
-                present.append('follow_up_enabled+text')
-            else:
-                missing.append('follow_up_enabled+text')
-            continue
-        if f == 'follow_up_text':
-            # Reported alongside follow_up_enabled above.
-            continue
-        if value:
-            present.append(f)
-        else:
-            missing.append(f)
-    enabled = bool(normalized['enabled'])
-    # Button-flow readiness — stricter than _comment_dm_flow_enabled.
-    has_opening = bool(normalized.get('has_opening_dm'))
-    has_button_label = bool(normalized.get('has_button'))
-    has_next_step = bool(normalized.get('has_next_step'))
-    button_flow_ready = bool(normalized['button_flow_ready'])
-    button_flow_missing: List[str] = list(normalized['missing_fields'])
-    # One-shot DM detection: the rule HAS a generic DM text (legacy
-    # dm_text only) but lacks any deferred fields. This is the
-    # production failure mode for Account 2 — rule sends a single DM,
-    # never creates a session, button click can never continue
-    # because there is no button.
-    has_legacy_dm_text = bool(automation.get('dm_text') or automation.get('dmText'))
-    one_shot_dm_only = bool(normalized['one_shot_dm_only'])
-    return {
-        'enabled': bool(enabled),
-        'mode': mode,
-        'mode_ok': mode_ok,
-        'present_deferred_fields': present,
-        'missing_deferred_fields': missing,
-        'button_flow_ready': button_flow_ready,
-        'button_flow_missing': button_flow_missing,
-        'has_legacy_dm_text': has_legacy_dm_text,
-        'one_shot_dm_only': one_shot_dm_only,
-        'has_opening_dm': has_opening,
-        'has_button': has_button_label,
-        'has_next_step': has_next_step,
-        'source_fields_used': normalized.get('source_fields_used') or {},
-    }
-
-
 def _normalize_comment_text(value: Any) -> str:
     if value is None:
         return ''
@@ -2929,67 +2831,19 @@ async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, te
 
 async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient_ig_id: str,
                                      comment_context: Optional[dict], payload: str) -> dict:
-    import uuid as _uuid
-    now = datetime.utcnow()
-    automation = _materialize_comment_dm_rule(automation)
-    follow_gate = _normalize_follow_gate_config(automation)
-    link_url = (automation.get('link_url') or '').strip()
-    session = {
-        'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
-        'user_id': user_doc['id'],
-        **_current_instagram_context(user_doc),
-        'ig_user_id': user_doc.get('ig_user_id') or '',
-        'recipient_id': recipient_ig_id,
-        'automation_id': automation.get('id'),
-        'automation_name': automation.get('name'),
-        'comment_doc_id': (comment_context or {}).get('comment_doc_id'),
-        'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
-        'source_comment_id': (comment_context or {}).get('source_comment_id')
-        or (comment_context or {}).get('ig_comment_id'),
-        'media_id': (comment_context or {}).get('media_id'),
-        'mediaId': (comment_context or {}).get('media_id'),
-        'commenter_id': (comment_context or {}).get('commenter_id') or recipient_ig_id,
-        'opening_dedupe_key': (comment_context or {}).get('opening_dedupe_key'),
-        'openingDedupeKey': (comment_context or {}).get('opening_dedupe_key'),
-        'payload': payload,
-        'status': 'pending',
-        'stage': 'awaiting_user_action',
-        'link_dm_text': (automation.get('link_dm_text') or '').strip(),
-        'link_button_text': (automation.get('link_button_text') or '').strip(),
-        'link_url': link_url,
-        'conversionTrackingEnabled': _conversion_tracking_enabled(
-            automation, link_url
-        ),
-        **follow_gate,
-        'follow_confirmed': False,
-        'follow_confirmation_attempts': 0,
-        'follow_verified': False,
-        'follow_verification_attempts': 0,
-        'followLastCheckedAt': None,
-        'followReminderCount': 0,
-        'lastFollowVerificationError': None,
-        'finalDmSentAt': None,
-        'expiresAt': now + timedelta(minutes=follow_gate['follow_gate_expires_after_minutes']),
-        'email_request_enabled': bool(automation.get('email_request_enabled')),
-        'follow_up_enabled': bool(automation.get('follow_up_enabled')),
-        'follow_up_text': (automation.get('follow_up_text') or '').strip(),
-        'created': now,
-        'updated': now,
-    }
-    await db.comment_dm_sessions.insert_one(session)
-    logger.info(
-        'comment_opening_flow_state_created user_id=%s instagram_account_id=%s '
-        'automation_id=%s media_id=%s commenter_id=%s dedupe_key=%s session_id=%s',
-        user_doc.get('id'),
-        _safe_partial_identifier(user_doc.get('ig_user_id')),
-        automation.get('id'),
-        _safe_partial_identifier((comment_context or {}).get('media_id')),
-        _safe_partial_identifier((comment_context or {}).get('commenter_id') or recipient_ig_id),
-        _safe_partial_identifier((comment_context or {}).get('opening_dedupe_key')),
-        session.get('id'),
+    return await _create_comment_dm_session_impl(
+        user_doc,
+        automation,
+        recipient_ig_id,
+        comment_context,
+        payload,
+        db=db,
+        logger=logger,
+        normalize_follow_gate_config=_normalize_follow_gate_config,
+        current_instagram_context=_current_instagram_context,
+        conversion_tracking_enabled=_conversion_tracking_enabled,
+        safe_partial_identifier=_safe_partial_identifier,
     )
-    return session
-
 
 def _comment_dm_follow_confirmation_matches(session: dict, text: str = '',
                                             payload: Optional[str] = None) -> bool:
@@ -3195,190 +3049,26 @@ _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS = int(
 
 async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
                                       comment_context: Optional[dict] = None) -> bool:
-    """Send the first DM only. The link step waits for the recipient response."""
-    import uuid as _uuid
-    import time as _time
-    _entry_start = _time.monotonic()
-    access_token = user_doc.get('meta_access_token', '')
-    ig_user_id = user_doc.get('ig_user_id', '')
-    logger.info(
-        'comment_opening_flow_started user_id=%s instagram_account_id=%s '
-        'automation_id=%s media_id=%s commenter_id=%s dedupe_key=%s',
-        user_doc.get('id'),
-        _safe_partial_identifier(ig_user_id),
-        automation.get('id'),
-        _safe_partial_identifier((comment_context or {}).get('media_id')),
-        _safe_partial_identifier((comment_context or {}).get('commenter_id') or recipient_ig_id),
-        _safe_partial_identifier((comment_context or {}).get('opening_dedupe_key')),
-    )
-    # Webhook subscription health gating.
-    #
-    # Pre-2026-05-22 implementation made a SYNCHRONOUS Meta GET to
-    # /{ig_user_id}/subscribed_apps before every opening DM, costing
-    # 200-800ms on the user-visible critical path. The self-heal
-    # background loop (_webhook_subscription_heal_loop) already polls
-    # this every 30 min and writes webhookSubscriptionFields /
-    # webhookSubscriptionMissing / webhookSubscriptionLastCheckedAt
-    # onto the instagram_accounts row. If that cached state is fresh
-    # and shows no missing critical fields, we can skip the inline
-    # Meta call entirely and rely on the cache + a fire-and-forget
-    # background recheck after the DM is dispatched.
-    #
-    # Net effect on the hot path: one Mongo find_one (~5-30ms) instead
-    # of a Graph GET (~200-800ms).
-    subscription_cache_age_s: Optional[float] = None
-    needs_inline_verify = True
-    cache_doc: Dict[str, Any] = {}
-    if ig_user_id:
-        try:
-            cache_doc = await db.instagram_accounts.find_one(
-                {'$or': [
-                    {'instagramAccountId': ig_user_id},
-                    {'igUserId': ig_user_id},
-                ]},
-                {
-                    'webhookSubscriptionLastCheckedAt': 1,
-                    'webhookSubscriptionMissing': 1,
-                    'webhookSubscriptionFields': 1,
-                },
-            ) or {}
-        except Exception:
-            cache_doc = {}
-    last_checked = cache_doc.get('webhookSubscriptionLastCheckedAt')
-    if isinstance(last_checked, datetime):
-        subscription_cache_age_s = (datetime.utcnow() - last_checked).total_seconds()
-    missing_cached = cache_doc.get('webhookSubscriptionMissing') or []
-    critical_required = {'messages', 'messaging_postbacks'}
-    critical_missing_in_cache = bool(critical_required.intersection(missing_cached or []))
-    if (
-        subscription_cache_age_s is not None
-        and subscription_cache_age_s <= _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS
-        and not critical_missing_in_cache
-    ):
-        # Cache is fresh AND shows the critical fields are subscribed —
-        # skip the inline Meta call. Hot path stays fast.
-        needs_inline_verify = False
-        logger.info(
-            'comment_dm_opening_subscription_cache_hit ig_user_id=%s age_s=%s missing_in_cache=%s',
-            _safe_partial_identifier(ig_user_id),
-            int(subscription_cache_age_s),
-            sorted(missing_cached or []),
-        )
-    if needs_inline_verify and ig_user_id and access_token:
-        # Cache is stale OR cache showed missing critical fields.
-        # Trigger the verify+heal in the background AFTER the send so
-        # we still don't add latency to THIS opening, but the cache is
-        # refreshed for the next opener. The OPENING DM we are about
-        # to send is best-effort — if the click webhook later silently
-        # fails because Meta really dropped the subscription, the
-        # next opening DM will hit a freshly-cached state and avoid
-        # the same outcome.
-        logger.info(
-            'comment_dm_opening_subscription_recheck_scheduled '
-            'ig_user_id=%s reason=%s',
-            _safe_partial_identifier(ig_user_id),
-            (
-                'cache_stale' if (subscription_cache_age_s is None
-                                  or subscription_cache_age_s > _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS)
-                else 'cache_missing_critical'
-            ),
-        )
-        try:
-            create_tracked_task(
-                _verify_and_heal_ig_subscription_async(ig_user_id, access_token),
-                'comment_dm_subscription_recheck',
-            )
-        except Exception as exc:
-            logger.info(
-                'comment_dm_opening_subscription_recheck_schedule_failed err=%s',
-                type(exc).__name__,
-            )
-    _gate_ms = int((_time.monotonic() - _entry_start) * 1000)
-    if _gate_ms > 50:
-        logger.info(
-            'comment_dm_opening_subscription_gate_ms=%s ig_user_id=%s needs_inline_verify=%s',
-            _gate_ms,
-            _safe_partial_identifier(ig_user_id),
-            needs_inline_verify,
-        )
-    automation = _materialize_comment_dm_rule(automation)
-    normalized_rule = normalize_comment_dm_rule(automation)
-    opening_text = normalized_rule['opening_dm_text'] or str(
-        automation.get('dm_text') or automation.get('dmText') or ''
-    ).strip()
-    button_text = (normalized_rule['opening_dm_button_text'] or 'Send me the link').strip()
-    has_deferred_step = bool(normalized_rule['has_next_step'])
-
-    if opening_text and has_deferred_step:
-        payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
-        await _create_comment_dm_session(user_doc, automation, recipient_ig_id, comment_context, payload)
-        result = await send_ig_quick_reply(
-            access_token, ig_user_id, recipient_ig_id,
-            opening_text, button_text, payload,
-            allow_workspace_recipient=True,
-        )
-        if result.get('ok'):
-            logger.info('comment_dm_opening_quick_reply_sent rule_id=%s recipient=%s',
-                        automation.get('id'), recipient_ig_id)
-            return True
-        logger.warning('comment_dm_quick_reply_failed rule_id=%s err=%s; falling back to text',
-                       automation.get('id'), result.get('error'))
-        # Keep the pending session active. If quick replies are not accepted by
-        # Meta for this account, the user can still type any response to continue.
-        return await send_ig_dm(
-            access_token,
-            ig_user_id,
-            recipient_ig_id,
-            opening_text,
-            allow_workspace_recipient=True,
-        )
-
-    if opening_text:
-        return await _send_text_dm_with_optional_tracking(
-            user_doc,
-            {
-                'user_id': user_doc['id'],
-                **_current_instagram_context(user_doc),
-                'recipient_id': recipient_ig_id,
-                'automation_id': automation.get('id'),
-                'ig_comment_id': (comment_context or {}).get('ig_comment_id'),
-                'comment_doc_id': (comment_context or {}).get('comment_doc_id'),
-                'conversionTrackingEnabled': _conversion_tracking_enabled(
-                    automation, _extract_first_url(opening_text)
-                ),
-            },
-            opening_text,
-            allow_workspace_recipient=True,
-        )
-
-    if has_deferred_step:
-        payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
-        session = await _create_comment_dm_session(
-            user_doc, automation, recipient_ig_id, comment_context, payload
-        )
-        return await _send_comment_dm_flow_completion(user_doc, session)
-
-    return await _send_comment_dm_flow_completion(
+    return await _send_comment_dm_flow_entry_impl(
         user_doc,
-        {
-            'user_id': user_doc['id'],
-            'ig_user_id': ig_user_id,
-            'recipient_id': recipient_ig_id,
-            'automation_id': automation.get('id'),
-            'link_dm_text': normalized_rule['link_dm_text'],
-            'link_button_text': normalized_rule['link_button_text'],
-            'link_url': normalized_rule['link_url'],
-            'conversionTrackingEnabled': _conversion_tracking_enabled(
-                automation, normalized_rule['link_url']
-            ),
-            'follow_request_enabled': bool(normalized_rule['follow_request_enabled']),
-            'follow_verified': False,
-            'email_request_enabled': bool(normalized_rule['email_request_enabled']),
-            'follow_up_enabled': bool(normalized_rule['follow_up_enabled']),
-            'follow_up_text': normalized_rule['follow_up_text'],
-        },
+        automation,
+        recipient_ig_id,
+        comment_context,
+        db=db,
+        logger=logger,
+        safe_partial_identifier=_safe_partial_identifier,
+        create_tracked_task=create_tracked_task,
+        verify_and_heal_ig_subscription_async=_verify_and_heal_ig_subscription_async,
+        comment_dm_subscription_cache_max_age_seconds=_COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS,
+        create_comment_dm_session=_create_comment_dm_session,
+        send_ig_quick_reply=send_ig_quick_reply,
+        send_ig_dm=send_ig_dm,
+        send_text_dm_with_optional_tracking=_send_text_dm_with_optional_tracking,
+        send_comment_dm_flow_completion=_send_comment_dm_flow_completion,
+        current_instagram_context=_current_instagram_context,
+        conversion_tracking_enabled=_conversion_tracking_enabled,
+        extract_first_url=_extract_first_url,
     )
-
 
 async def _send_follow_reminder(user_doc: dict, session: dict, message: str,
                                 stage: str) -> bool:
