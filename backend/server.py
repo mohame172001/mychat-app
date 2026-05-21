@@ -2615,20 +2615,323 @@ def _deferred_flow_field(automation: dict, field: str) -> Any:
     return value
 
 
+_COMMENT_DM_FIELD_ALIASES: Dict[str, tuple] = {
+    'opening_dm_text': (
+        'opening_dm_text', 'openingDmText', 'opening_dm_message',
+        'openingDmMessage',
+    ),
+    'opening_dm_button_text': (
+        'opening_dm_button_text', 'openingDmButtonText',
+        'button_text', 'buttonText', 'quick_reply_text',
+        'quickReplyText', 'cta_text', 'ctaText',
+    ),
+    'link_dm_text': (
+        'link_dm_text', 'linkDmText', 'link_message',
+        'linkMessage', 'final_dm_text', 'finalDmText',
+    ),
+    'link_button_text': (
+        'link_button_text', 'linkButtonText', 'link_cta_text',
+        'linkCtaText',
+    ),
+    'link_url': (
+        'link_url', 'linkUrl', 'url', 'final_url', 'finalUrl',
+    ),
+    'follow_request_enabled': (
+        'follow_request_enabled', 'followRequestEnabled',
+        'followGateEnabled',
+    ),
+    'follow_request_message': (
+        'follow_request_message', 'followRequestMessage',
+        'follow_gate_message', 'followGateMessage',
+    ),
+    'follow_request_button_text': (
+        'follow_request_button_text', 'followRequestButtonText',
+        'follow_gate_button_text', 'followGateButtonText',
+    ),
+    'follow_confirmation_keywords': (
+        'follow_confirmation_keywords', 'followConfirmationKeywords',
+        'followGateConfirmationKeywords',
+    ),
+    'follow_gate_fallback_message': (
+        'follow_gate_fallback_message', 'followGateFallbackMessage',
+    ),
+    'verify_actual_follow': ('verify_actual_follow', 'verifyActualFollow'),
+    'follow_not_detected_message': (
+        'follow_not_detected_message', 'followNotDetectedMessage',
+    ),
+    'follow_verification_failed_message': (
+        'follow_verification_failed_message', 'followVerificationFailedMessage',
+    ),
+    'follow_retry_button_text': (
+        'follow_retry_button_text', 'followRetryButtonText',
+    ),
+    'follow_cooldown_message': (
+        'follow_cooldown_message', 'followCooldownMessage',
+    ),
+    'max_follow_verification_attempts': (
+        'max_follow_verification_attempts', 'maxFollowVerificationAttempts',
+    ),
+    'email_request_enabled': (
+        'email_request_enabled', 'emailRequestEnabled',
+    ),
+    'follow_up_enabled': (
+        'follow_up_enabled', 'followUpEnabled',
+    ),
+    'follow_up_text': (
+        'follow_up_text', 'followUpText',
+    ),
+}
+
+
+def _comment_dm_node_data(automation: dict) -> List[dict]:
+    nodes = automation.get('nodes') if isinstance(automation.get('nodes'), list) else []
+    data_rows: List[dict] = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get('type') != 'message':
+            continue
+        data = node.get('data') if isinstance(node.get('data'), dict) else {}
+        if data:
+            data_rows.append(data)
+    return data_rows
+
+
+def _first_rule_value(automation: dict, field: str) -> tuple:
+    aliases = _COMMENT_DM_FIELD_ALIASES.get(field, (field,))
+    for key in aliases:
+        value = automation.get(key)
+        if value not in (None, '', [], {}):
+            return value, f'top_level.{key}'
+    for data in _comment_dm_node_data(automation):
+        for key in aliases:
+            value = data.get(key)
+            if value not in (None, '', [], {}):
+                return value, f'nodes[].data.{key}'
+        # Legacy graph-only save shapes usually stored the first/opening
+        # message as data.text/data.message without mirroring
+        # opening_dm_text at the top level.
+        if field == 'opening_dm_text':
+            value = data.get('text') or data.get('message')
+            if value not in (None, '', [], {}):
+                return value, 'nodes[].data.text'
+        if field == 'link_dm_text':
+            value = data.get('link_text') or data.get('linkText')
+            if value not in (None, '', [], {}):
+                return value, 'nodes[].data.linkText'
+    return None, ''
+
+
+def _comment_dm_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('', '0', 'false', 'no', 'off', 'none', 'null')
+    return bool(value)
+
+
+def normalize_comment_dm_rule(automation: dict) -> Dict[str, Any]:
+    """Canonical comment-to-DM flow interpretation.
+
+    Every path that decides whether a rule creates a comment_dm_session
+    must use this normalizer. It accepts the known storage shapes:
+    top-level snake_case, camelCase, legacy ``dm_text`` aliases, and
+    message-node ``nodes[].data`` mirrors used by older post-specific
+    rules.
+    """
+    automation = automation or {}
+    mode = str(automation.get('mode') or '').strip() or 'unset'
+    mode_ok = mode == 'reply_and_dm'
+    source_fields: Dict[str, str] = {}
+
+    def field(name: str, default: Any = '') -> Any:
+        value, source = _first_rule_value(automation, name)
+        if source:
+            source_fields[name] = source
+        return default if value is None else value
+
+    legacy_dm_text = str(automation.get('dm_text') or automation.get('dmText') or '').strip()
+    opening_dm_text = str(field('opening_dm_text') or '').strip()
+    opening_dm_button_text = str(field('opening_dm_button_text') or '').strip()
+    link_dm_text = str(field('link_dm_text') or '').strip()
+    link_button_text = str(field('link_button_text') or '').strip()
+    link_url = str(field('link_url') or '').strip()
+    follow_request_enabled = _comment_dm_bool(field('follow_request_enabled', False))
+    email_request_enabled = _comment_dm_bool(field('email_request_enabled', False))
+    follow_up_enabled = _comment_dm_bool(field('follow_up_enabled', False))
+    follow_up_text = str(field('follow_up_text') or '').strip()
+    if not opening_dm_text and legacy_dm_text and (
+        opening_dm_button_text or link_dm_text or link_url
+        or follow_request_enabled or email_request_enabled
+        or (follow_up_enabled and follow_up_text)
+    ):
+        opening_dm_text = legacy_dm_text
+        source_fields['opening_dm_text'] = 'top_level.dm_text'
+
+    has_opening_dm = bool(opening_dm_text)
+    has_button = bool(opening_dm_button_text)
+    has_next_step = bool(
+        link_dm_text
+        or link_url
+        or follow_request_enabled
+        or email_request_enabled
+        or (follow_up_enabled and follow_up_text)
+    )
+    button_flow_ready = mode_ok and has_opening_dm and has_button and has_next_step
+    enabled = mode_ok and (has_opening_dm or has_button or has_next_step)
+
+    missing_fields: List[str] = []
+    if not mode_ok:
+        missing_fields.append('mode != reply_and_dm')
+    if not has_opening_dm:
+        missing_fields.append('opening_dm_text')
+    if not has_button:
+        missing_fields.append('opening_dm_button_text')
+    if not has_next_step:
+        missing_fields.append(
+            f'at least one of: {", ".join(_BUTTON_FLOW_NEXT_STEP_FIELDS)}'
+        )
+
+    return {
+        'rule_id': automation.get('id'),
+        'account_id': (
+            automation.get('instagram_account_id')
+            or automation.get('instagramAccountDbId')
+            or automation.get('account_id')
+            or automation.get('accountId')
+        ),
+        'instagram_account_id': (
+            automation.get('instagramAccountId')
+            or automation.get('igUserId')
+            or automation.get('ig_user_id')
+        ),
+        'trigger': automation.get('trigger'),
+        'scope': automation.get('post_scope') or automation.get('scope'),
+        'selected_media_id': (
+            automation.get('media_id')
+            or automation.get('mediaId')
+            or automation.get('trigger_media_id')
+            or automation.get('triggerMediaId')
+        ),
+        'mode': mode,
+        'mode_ok': mode_ok,
+        'reply_under_post': automation.get('reply_under_post') is not False,
+        'public_reply_text': (automation.get('comment_reply') or ''),
+        'opening_dm_text': opening_dm_text,
+        'opening_dm_button_text': opening_dm_button_text,
+        'link_dm_text': link_dm_text,
+        'link_button_text': link_button_text,
+        'link_url': link_url,
+        'follow_request_enabled': follow_request_enabled,
+        'follow_request_message': str(field('follow_request_message') or '').strip(),
+        'follow_request_button_text': str(field('follow_request_button_text') or '').strip(),
+        'follow_confirmation_keywords': field('follow_confirmation_keywords', None),
+        'follow_gate_fallback_message': str(field('follow_gate_fallback_message') or '').strip(),
+        'verify_actual_follow': field('verify_actual_follow', None),
+        'follow_not_detected_message': str(field('follow_not_detected_message') or '').strip(),
+        'follow_verification_failed_message': str(field('follow_verification_failed_message') or '').strip(),
+        'follow_retry_button_text': str(field('follow_retry_button_text') or '').strip(),
+        'follow_cooldown_message': str(field('follow_cooldown_message') or '').strip(),
+        'max_follow_verification_attempts': field('max_follow_verification_attempts', None),
+        'email_request_enabled': email_request_enabled,
+        'follow_up_enabled': follow_up_enabled,
+        'follow_up_text': follow_up_text,
+        'has_opening_dm': has_opening_dm,
+        'has_button': has_button,
+        'has_next_step': has_next_step,
+        'button_flow_ready': button_flow_ready,
+        'enabled': enabled,
+        'one_shot_dm_only': mode_ok and bool(opening_dm_text or legacy_dm_text) and not button_flow_ready,
+        'missing_fields': missing_fields,
+        'source_fields_used': source_fields,
+    }
+
+
+def _materialize_comment_dm_rule(automation: dict) -> dict:
+    normalized = normalize_comment_dm_rule(automation)
+    materialized = dict(automation or {})
+    for key in (
+        'opening_dm_text', 'opening_dm_button_text', 'link_dm_text',
+        'link_button_text', 'link_url', 'follow_up_text',
+        'follow_request_message', 'follow_request_button_text',
+        'follow_gate_fallback_message', 'follow_not_detected_message',
+        'follow_verification_failed_message', 'follow_retry_button_text',
+        'follow_cooldown_message',
+    ):
+        if normalized.get(key):
+            materialized[key] = normalized[key]
+    for key in (
+        'follow_request_enabled', 'email_request_enabled',
+        'follow_up_enabled',
+    ):
+        materialized[key] = bool(normalized.get(key))
+    for key in ('follow_confirmation_keywords', 'verify_actual_follow', 'max_follow_verification_attempts'):
+        if normalized.get(key) is not None:
+            materialized[key] = normalized[key]
+    materialized.setdefault('mode', 'reply_and_dm')
+    if normalized.get('has_opening_dm'):
+        materialized['opening_dm_enabled'] = True
+    return materialized
+
+
+def _comment_dm_backfill_patch(automation: dict) -> Dict[str, Any]:
+    normalized = normalize_comment_dm_rule(automation)
+    if not normalized.get('button_flow_ready'):
+        return {}
+    materialized = _materialize_comment_dm_rule(automation)
+    patch: Dict[str, Any] = {}
+    for key in (
+        'mode', 'opening_dm_enabled', 'opening_dm_text',
+        'opening_dm_button_text', 'link_dm_text', 'link_button_text',
+        'link_url', 'follow_request_enabled', 'follow_request_message',
+        'follow_request_button_text', 'follow_confirmation_keywords',
+        'follow_gate_fallback_message', 'verify_actual_follow',
+        'follow_not_detected_message',
+        'follow_verification_failed_message', 'follow_retry_button_text',
+        'follow_cooldown_message', 'max_follow_verification_attempts',
+        'email_request_enabled', 'follow_up_enabled', 'follow_up_text',
+    ):
+        if key in materialized and automation.get(key) in (None, '', [], {}):
+            patch[key] = materialized[key]
+    if patch:
+        now = datetime.utcnow()
+        patch['deferred_flow_normalized_at'] = now
+        patch['updated'] = now
+        patch['updatedAt'] = now
+    return patch
+
+
+async def _ensure_comment_dm_rule_normalized(automation: dict) -> dict:
+    patch = _comment_dm_backfill_patch(automation)
+    if not patch:
+        return automation
+    rule_id = automation.get('id')
+    user_id = automation.get('user_id')
+    if not (rule_id and user_id):
+        return {**automation, **patch}
+    try:
+        await db.automations.update_one(
+            {'id': rule_id, 'user_id': user_id},
+            {'$set': patch},
+        )
+        logger.info(
+            'comment_dm_rule_auto_normalized user_id=%s rule_id=%s fields=%s',
+            user_id,
+            rule_id,
+            ','.join(sorted(k for k in patch.keys() if k not in ('updated', 'updatedAt'))),
+        )
+    except Exception as exc:
+        logger.warning(
+            'comment_dm_rule_auto_normalize_failed user_id=%s rule_id=%s exception=%s',
+            user_id,
+            rule_id,
+            type(exc).__name__,
+        )
+    return {**automation, **patch}
+
+
 def _comment_dm_flow_enabled(automation: dict) -> bool:
-    if (automation.get('mode') or '') != 'reply_and_dm':
-        return False
-    follow_up_enabled = _deferred_flow_field(automation, 'follow_up_enabled')
-    follow_up_text = _deferred_flow_field(automation, 'follow_up_text')
-    return any([
-        _deferred_flow_field(automation, 'opening_dm_text'),
-        _deferred_flow_field(automation, 'opening_dm_button_text'),
-        _deferred_flow_field(automation, 'link_dm_text'),
-        _deferred_flow_field(automation, 'link_url'),
-        _deferred_flow_field(automation, 'follow_request_enabled'),
-        _deferred_flow_field(automation, 'email_request_enabled'),
-        follow_up_enabled and follow_up_text,
-    ])
+    return bool(normalize_comment_dm_rule(automation).get('enabled'))
 
 
 # Fields the operator-facing diagnostic should report on. Order matches
@@ -2677,16 +2980,17 @@ def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
     Reads via ``_deferred_flow_field`` so a rule storing values inside
     ``nodes[].data`` instead of at the top level is recognized too.
     """
-    mode = (automation.get('mode') or '') or 'unset'
-    mode_ok = mode == 'reply_and_dm'
+    normalized = normalize_comment_dm_rule(automation)
+    mode = normalized['mode']
+    mode_ok = normalized['mode_ok']
     present: List[str] = []
     missing: List[str] = []
     for f in _DEFERRED_FLOW_FIELDS:
-        value = _deferred_flow_field(automation, f)
+        value = normalized.get(f)
         # follow_up_text is only meaningful with follow_up_enabled; the
         # gate treats them as a pair.
         if f == 'follow_up_enabled':
-            paired = bool(value) and bool(_deferred_flow_field(automation, 'follow_up_text'))
+            paired = bool(value) and bool(normalized.get('follow_up_text'))
             if paired:
                 present.append('follow_up_enabled+text')
             else:
@@ -2699,32 +3003,20 @@ def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
             present.append(f)
         else:
             missing.append(f)
-    enabled = _comment_dm_flow_enabled(automation)
+    enabled = bool(normalized['enabled'])
     # Button-flow readiness — stricter than _comment_dm_flow_enabled.
-    has_opening = bool(_deferred_flow_field(automation, 'opening_dm_text'))
-    has_button_label = bool(_deferred_flow_field(automation, 'opening_dm_button_text'))
-    has_next_step = any(
-        _deferred_flow_field(automation, f) for f in _BUTTON_FLOW_NEXT_STEP_FIELDS
-    )
-    button_flow_ready = mode_ok and has_opening and has_button_label and has_next_step
-    button_flow_missing: List[str] = []
-    if not mode_ok:
-        button_flow_missing.append('mode != reply_and_dm')
-    if not has_opening:
-        button_flow_missing.append('opening_dm_text')
-    if not has_button_label:
-        button_flow_missing.append('opening_dm_button_text')
-    if not has_next_step:
-        button_flow_missing.append(
-            f'at least one of: {", ".join(_BUTTON_FLOW_NEXT_STEP_FIELDS)}'
-        )
+    has_opening = bool(normalized.get('has_opening_dm'))
+    has_button_label = bool(normalized.get('has_button'))
+    has_next_step = bool(normalized.get('has_next_step'))
+    button_flow_ready = bool(normalized['button_flow_ready'])
+    button_flow_missing: List[str] = list(normalized['missing_fields'])
     # One-shot DM detection: the rule HAS a generic DM text (legacy
     # dm_text only) but lacks any deferred fields. This is the
     # production failure mode for Account 2 — rule sends a single DM,
     # never creates a session, button click can never continue
     # because there is no button.
-    has_legacy_dm_text = bool(automation.get('dm_text'))
-    one_shot_dm_only = mode_ok and has_legacy_dm_text and not enabled
+    has_legacy_dm_text = bool(automation.get('dm_text') or automation.get('dmText'))
+    one_shot_dm_only = bool(normalized['one_shot_dm_only'])
     return {
         'enabled': bool(enabled),
         'mode': mode,
@@ -2735,6 +3027,10 @@ def _comment_dm_flow_classification(automation: dict) -> Dict[str, Any]:
         'button_flow_missing': button_flow_missing,
         'has_legacy_dm_text': has_legacy_dm_text,
         'one_shot_dm_only': one_shot_dm_only,
+        'has_opening_dm': has_opening,
+        'has_button': has_button_label,
+        'has_next_step': has_next_step,
+        'source_fields_used': normalized.get('source_fields_used') or {},
     }
 
 
@@ -2941,7 +3237,9 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
                                      comment_context: Optional[dict], payload: str) -> dict:
     import uuid as _uuid
     now = datetime.utcnow()
+    automation = _materialize_comment_dm_rule(automation)
     follow_gate = _normalize_follow_gate_config(automation)
+    link_url = (automation.get('link_url') or '').strip()
     session = {
         'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
         'user_id': user_doc['id'],
@@ -2964,9 +3262,9 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
         'stage': 'awaiting_user_action',
         'link_dm_text': (automation.get('link_dm_text') or '').strip(),
         'link_button_text': (automation.get('link_button_text') or '').strip(),
-        'link_url': (automation.get('link_url') or '').strip(),
+        'link_url': link_url,
         'conversionTrackingEnabled': _conversion_tracking_enabled(
-            automation, (automation.get('link_url') or '').strip()
+            automation, link_url
         ),
         **follow_gate,
         'follow_confirmed': False,
@@ -3309,15 +3607,13 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
             _safe_partial_identifier(ig_user_id),
             needs_inline_verify,
         )
-    opening_text = (automation.get('opening_dm_text') or automation.get('dm_text') or '').strip()
-    button_text = (automation.get('opening_dm_button_text') or 'Send me the link').strip()
-    has_deferred_step = any([
-        automation.get('link_dm_text'),
-        automation.get('link_url'),
-        automation.get('follow_request_enabled'),
-        automation.get('email_request_enabled'),
-        automation.get('follow_up_enabled') and automation.get('follow_up_text'),
-    ])
+    automation = _materialize_comment_dm_rule(automation)
+    normalized_rule = normalize_comment_dm_rule(automation)
+    opening_text = normalized_rule['opening_dm_text'] or str(
+        automation.get('dm_text') or automation.get('dmText') or ''
+    ).strip()
+    button_text = (normalized_rule['opening_dm_button_text'] or 'Send me the link').strip()
+    has_deferred_step = bool(normalized_rule['has_next_step'])
 
     if opening_text and has_deferred_step:
         payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
@@ -3375,17 +3671,17 @@ async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipien
             'ig_user_id': ig_user_id,
             'recipient_id': recipient_ig_id,
             'automation_id': automation.get('id'),
-            'link_dm_text': (automation.get('link_dm_text') or '').strip(),
-            'link_button_text': (automation.get('link_button_text') or '').strip(),
-            'link_url': (automation.get('link_url') or '').strip(),
+            'link_dm_text': normalized_rule['link_dm_text'],
+            'link_button_text': normalized_rule['link_button_text'],
+            'link_url': normalized_rule['link_url'],
             'conversionTrackingEnabled': _conversion_tracking_enabled(
-                automation, (automation.get('link_url') or '').strip()
+                automation, normalized_rule['link_url']
             ),
-            'follow_request_enabled': bool(automation.get('follow_request_enabled')),
+            'follow_request_enabled': bool(normalized_rule['follow_request_enabled']),
             'follow_verified': False,
-            'email_request_enabled': bool(automation.get('email_request_enabled')),
-            'follow_up_enabled': bool(automation.get('follow_up_enabled')),
-            'follow_up_text': (automation.get('follow_up_text') or '').strip(),
+            'email_request_enabled': bool(normalized_rule['email_request_enabled']),
+            'follow_up_enabled': bool(normalized_rule['follow_up_enabled']),
+            'follow_up_text': normalized_rule['follow_up_text'],
         },
     )
 
@@ -8192,10 +8488,14 @@ async def admin_recent_comment_events(
         dm_status = (c.get('dm_status') or c.get('dmStatus') or '').lower()
         skip_reason = c.get('skip_reason') or c.get('skipReason')
         session_created = bool(related_session)
+        rule_classification: Optional[Dict[str, Any]] = (
+            _comment_dm_flow_classification(rule) if rule else None
+        )
         # Why no session was created — a single-string explanation the
         # UI can render verbatim. The operator should never have to
         # cross-reference multiple fields to understand the stop point.
         no_session_reason: Optional[str] = None
+        current_rule_ready_without_session = False
         if not session_created:
             if action_status == 'skipped':
                 no_session_reason = f'comment_skipped:{skip_reason or "unknown"}'
@@ -8212,7 +8512,11 @@ async def admin_recent_comment_events(
             else:
                 # Comment-flow rule may not need a session (legacy
                 # straight-DM rule with no deferred step).
-                no_session_reason = 'rule_has_no_deferred_flow'
+                if rule_classification and rule_classification.get('button_flow_ready'):
+                    no_session_reason = 'session_missing_for_current_deferred_flow'
+                    current_rule_ready_without_session = True
+                else:
+                    no_session_reason = 'rule_has_no_deferred_flow'
         created = c.get('created') if isinstance(c.get('created'), datetime) else None
         age_seconds = int((now - created).total_seconds()) if created else None
         # Always embed the deferred-flow classification when we have a
@@ -8221,9 +8525,6 @@ async def admin_recent_comment_events(
         # succeeded — the rule itself never had button-flow fields
         # filled in, so the system intentionally never opened a
         # session. Shown verbatim in the UI as a structured hint.
-        rule_classification: Optional[Dict[str, Any]] = None
-        if rule:
-            rule_classification = _comment_dm_flow_classification(rule)
         out_rows.append({
             'comment_doc_id': c.get('id'),
             'ig_comment_id_partial': _safe_partial_identifier(c.get('ig_comment_id')),
@@ -8253,6 +8554,12 @@ async def admin_recent_comment_events(
             'related_session_id': (related_session or {}).get('id') if related_session else None,
             'no_session_reason': no_session_reason,
             'rule_deferred_flow': rule_classification,
+            'current_rule_deferred_flow': rule_classification,
+            'stale_rule_diagnostic': current_rule_ready_without_session,
+            'stale_rule_diagnostic_reason': (
+                'current_rule_now_qualifies_but_this_event_has_no_session'
+                if current_rule_ready_without_session else None
+            ),
         })
     # Per-account "last comment seen" summary — answers the question
     # "did any comment from any source arrive on Account 2 in the last
@@ -8524,18 +8831,19 @@ async def admin_repair_rule_to_button_flow(
         raise HTTPException(403, 'rule does not belong to the caller workspace.')
 
     before_cls = _comment_dm_flow_classification(rule)
-    if before_cls['enabled']:
+    before_norm = normalize_comment_dm_rule(rule)
+    if before_cls['button_flow_ready']:
         raise HTTPException(
             409,
-            'rule already qualifies as a deferred flow; refusing to '
+            'rule already qualifies as a button-driven deferred flow; refusing to '
             'overwrite a working configuration. Edit it via the normal '
             'automation editor instead.',
         )
 
     # Detect the rule's text language for sensible defaults. Cheap
     # Arabic check on the existing opening / dm copy.
-    existing_opening = str(rule.get('opening_dm_text') or '').strip()
-    existing_dm = str(rule.get('dm_text') or '').strip()
+    existing_opening = str(before_norm.get('opening_dm_text') or '').strip()
+    existing_dm = str(rule.get('dm_text') or rule.get('dmText') or '').strip()
     seed_text = existing_opening or existing_dm
     looks_arabic = any('؀' <= ch <= 'ۿ' for ch in seed_text or '')
     default_button = 'ابعتلي اللينك' if looks_arabic else 'Continue'
@@ -8554,12 +8862,12 @@ async def admin_repair_rule_to_button_flow(
         )
     proposed_button_text = (
         button_text_override
-        or str(rule.get('opening_dm_button_text') or '').strip()
+        or str(before_norm.get('opening_dm_button_text') or '').strip()
         or default_button
     )
     proposed_follow_up_text = (
         follow_up_override
-        or str(rule.get('follow_up_text') or '').strip()
+        or str(before_norm.get('follow_up_text') or '').strip()
         or default_follow_up
     )
 
@@ -16927,6 +17235,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         if source in ('polling', 'manual_catchup'):
             logger.info('poller_comment_rule_matched comment_id=%s media_id=%s rule_id=%s source=%s',
                         ig_comment_id, media_id, rule_id, source)
+        matched_rule = await _ensure_comment_dm_rule_normalized(matched_rule)
         if _comment_dm_flow_enabled(matched_rule):
             opening_dedupe_key = _comment_opening_dedupe_key(
                 user_id,

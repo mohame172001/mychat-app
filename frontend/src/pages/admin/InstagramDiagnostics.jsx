@@ -644,6 +644,12 @@ function RecentCommentEventsPanel() {
                         <> · session <span className="font-mono">{ev.related_session_id}</span></>
                       )}
                     </div>
+                    {ev.stale_rule_diagnostic && (
+                      <div className="mt-2 text-xs bg-sky-50 border border-sky-200 rounded-md p-2 text-sky-900">
+                        This event has no session, but the current rule now qualifies as a button-driven flow.
+                        Retest with a fresh comment; old event rows are not reprocessed retroactively.
+                      </div>
+                    )}
                     {ev.no_session_reason === 'rule_has_no_deferred_flow' && ev.rule_deferred_flow && (
                       <RuleHasNoDeferredFlowHint ev={ev} />
                     )}

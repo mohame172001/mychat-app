@@ -70,6 +70,7 @@ const ForgotPassword = () => {
             <div
               className="mt-8 p-4 rounded-xl border border-emerald-200 bg-emerald-50 text-sm text-emerald-800"
               data-testid="forgot-password-success"
+              aria-label="If an account exists, we sent a reset link."
             >
               {t('auth.forgot.sent')}
             </div>

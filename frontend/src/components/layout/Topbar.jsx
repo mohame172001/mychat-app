@@ -22,6 +22,7 @@ import LangSwitcher from '../LangSwitcher';
 const Topbar = () => {
   const { user } = useAuth();
   const { t, lang } = useTranslation();
+  const notConnectedLabel = t('topbar.notConnected') || 'Not connected';
   const instagramConnected = Boolean(user?.instagramConnected && user?.instagramConnectionValid);
   const hasKnownInstagramIdentity = Boolean(
     user?.instagramHandle
@@ -45,7 +46,7 @@ const Topbar = () => {
           className: 'bg-amber-50 text-amber-700 border-amber-100',
         }
       : {
-          label: t('topbar.notConnected'),
+          label: notConnectedLabel,
           className: 'bg-slate-50 text-slate-600 border-slate-200',
         };
 

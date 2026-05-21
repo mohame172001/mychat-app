@@ -107,6 +107,7 @@ const Login = () => {
                   to="/forgot-password"
                   className="hover:text-slate-900 underline"
                   data-testid="login-forgot-password-link"
+                  aria-label="Forgot password?"
                 >
                   {t('auth.login.forgot')}
                 </Link>

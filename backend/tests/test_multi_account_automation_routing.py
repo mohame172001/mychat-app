@@ -1302,6 +1302,79 @@ def test_comment_dm_flow_enabled_also_reads_nested_node_data():
     assert 'link_url' in cls['present_deferred_fields']
 
 
+def test_post_specific_nested_rule_creates_session_and_backfills_aliases(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    nested_rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-nested-flow', 'mediaB')
+    nested_rule.update({
+        'opening_dm_text': '',
+        'opening_dm_button_text': '',
+        'link_dm_text': '',
+        'link_button_text': '',
+        'link_url': '',
+    })
+    nested_rule['nodes'][2]['data'].update({
+        'opening_dm_text': 'Hello from nested node',
+        'opening_dm_button_text': 'Send it',
+        'link_dm_text': 'Here is the link',
+        'link_button_text': 'Open',
+        'link_url': 'https://example.com/nested',
+    })
+    db.automations.docs = [nested_rule]
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+            'allow_workspace_recipient': allow_workspace_recipient,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'nested-flow-comment',
+            'media_id': 'mediaB',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'send me',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-nested-flow'
+    assert len(db.comment_dm_sessions.docs) == 1
+    session = db.comment_dm_sessions.docs[0]
+    assert session['instagramAccountId'] == 'igB'
+    assert session['automation_id'] == 'ruleB-nested-flow'
+    assert session['link_url'] == 'https://example.com/nested'
+    quick_reply_message = next(call['message'] for call in dm_calls if isinstance(call['message'], dict))
+    assert quick_reply_message['text'] == 'Hello from nested node'
+    assert quick_reply_message['quick_replies'][0]['title'] == 'Send it'
+    assert quick_reply_message['quick_replies'][0]['payload'] == session['payload']
+    persisted = db.automations.docs[0]
+    assert persisted['opening_dm_text'] == 'Hello from nested node'
+    assert persisted['opening_dm_button_text'] == 'Send it'
+    assert persisted['link_url'] == 'https://example.com/nested'
+    assert persisted.get('deferred_flow_normalized_at') is not None
+
+
 def test_repair_rule_to_button_flow_dry_run_does_not_mutate(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _patch_admin_gate(monkeypatch)
@@ -1675,6 +1748,43 @@ def test_recent_comment_events_attaches_rule_deferred_flow_for_one_shot_rule(mon
     assert cls['button_flow_ready'] is False
     assert 'opening_dm_text' in cls['button_flow_missing']
     assert 'opening_dm_button_text' in cls['button_flow_missing']
+
+
+def test_recent_comment_events_marks_old_no_session_row_when_current_rule_is_ready(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    monkeypatch.setattr(server, '_record_admin_action', _record_action_noop)
+    ready_rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-ready', 'mediaB')
+    db.automations.docs = [ready_rule]
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'comm-old-no-session',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'old-comment',
+        'media_id': 'mediaB',
+        'commenter_id': 'igA',
+        'rule_id': 'ruleB-ready',
+        'matched': True,
+        'matched_rule_scope': 'specific_post_exact',
+        'action_status': 'success',
+        'reply_status': 'success',
+        'dm_status': 'success',
+        'source': 'polling',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB-ready', 'mediaB', 'igA',
+        ),
+        'created': now - timedelta(minutes=10),
+        'updated': now - timedelta(minutes=10),
+    })
+
+    result = _run(server.admin_recent_comment_events(user_id='u1'))
+    ev = next(e for e in result['events'] if e['comment_doc_id'] == 'comm-old-no-session')
+    assert ev['session_created'] is False
+    assert ev['no_session_reason'] == 'session_missing_for_current_deferred_flow'
+    assert ev['stale_rule_diagnostic'] is True
+    assert ev['current_rule_deferred_flow']['button_flow_ready'] is True
 
 
 def test_recent_comment_events_returns_rows_even_without_sessions(monkeypatch):

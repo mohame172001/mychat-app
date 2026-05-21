@@ -9,13 +9,13 @@ const AUTH_MESSAGES = {
     generic: 'Could not sign in. Please try again.',
   },
   ar: {
-    account_suspended: 'تم إيقاف حسابك مؤقّتاً. تواصل مع الدعم.',
+    account_suspended: 'تم إيقاف حسابك مؤقتًا. تواصل مع الدعم.',
     account_deleted: 'تم حذف الحساب أو تعطيله. تواصل مع الدعم.',
     invalid_credentials: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
     email_verification_required: 'يرجى توثيق بريدك الإلكتروني قبل المتابعة.',
     email_verification_not_configured: 'توثيق البريد الإلكتروني غير مُهيّأ. تواصل مع الدعم.',
     session_revoked: 'انتهت صلاحية الجلسة. يرجى تسجيل الدخول من جديد.',
-    generic: 'تعذّر تسجيل الدخول. حاول مرة أخرى.',
+    generic: 'تعذر تسجيل الدخول. حاول مرة أخرى.',
   },
 };
 
