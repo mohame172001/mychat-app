@@ -126,7 +126,7 @@ const Dashboard = () => {
     return () => {
       alive = false;
     };
-  }, [cacheKey, userInstagramConnected, userInstagramConnectionValid]);
+  }, [cacheKey, m, userInstagramConnected, userInstagramConnectionValid]);
 
   const refreshDashboard = async () => {
     setRefreshing(true);

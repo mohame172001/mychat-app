@@ -12,7 +12,7 @@ test.describe('unauthenticated auth smoke', () => {
 
     await expect(page.getByRole('heading', { name: /welcome back/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /continue with google/i })).toBeVisible();
-    await expect(page.getByText(/google sign-in is not configured/i)).toBeVisible();
+    await expect(page.getByText(/google sign-in is unavailable right now/i)).toBeVisible();
     await expect(page.getByRole('link', { name: /data deletion/i })).toBeVisible();
     await expect(page.getByLabel(/username/i)).toBeVisible();
     await expect(page.locator('#password')).toBeVisible();
@@ -28,7 +28,7 @@ test.describe('unauthenticated auth smoke', () => {
 
     await page.getByLabel(/username/i).fill('missing-user');
     await page.locator('#password').fill('wrong-password');
-    await page.getByRole('button', { name: /sign in/i }).click();
+    await page.getByRole('button', { name: /log in|sign in/i }).click();
 
     await expect(page.getByText(/invalid email or password/i)).toBeVisible();
     await expect(page.locator('body')).not.toContainText('account_suspended');
@@ -38,7 +38,7 @@ test.describe('unauthenticated auth smoke', () => {
   test('signup page renders without hiding email/password signup', async ({ page }) => {
     await page.goto('/signup');
 
-    await expect(page.getByRole('heading', { name: /create your account/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /create your mychat account/i })).toBeVisible();
     await expect(page.getByRole('button', { name: /continue with google/i })).toBeVisible();
     await expect(page.getByLabel(/username/i)).toBeVisible();
     await expect(page.getByLabel(/email/i)).toBeVisible();

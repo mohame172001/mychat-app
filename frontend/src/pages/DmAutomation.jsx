@@ -54,7 +54,7 @@ const DmAutomation = () => {
     } catch (e) {
       toast.error(e?.response?.data?.detail || (lang === 'ar' ? 'تعذّر تحميل بيانات الرسائل' : 'Failed to load DM data'));
     }
-  }, []);
+  }, [lang]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 

@@ -33,7 +33,6 @@ const statusPageFn = () => import('./pages/StatusPage');
 const billingFn = () => import('./pages/Billing');
 const adminFn = () => import('./pages/admin/AdminConsole');
 const specificReplyDebugFn = () => import('./pages/admin/SpecificReplyDebug');
-const instagramDiagnosticsFn = () => import('./pages/admin/InstagramDiagnostics');
 const notFoundFn = () => import('./pages/NotFound');
 const forgotPasswordFn = () => import('./pages/ForgotPassword');
 const resetPasswordFn = () => import('./pages/ResetPassword');
@@ -53,7 +52,6 @@ const StatusPage = lazy(statusPageFn);
 const Billing = lazy(billingFn);
 const AdminConsole = lazy(adminFn);
 const SpecificReplyDebug = lazy(specificReplyDebugFn);
-const InstagramDiagnostics = lazy(instagramDiagnosticsFn);
 const NotFound = lazy(notFoundFn);
 const ForgotPassword = lazy(forgotPasswordFn);
 const ResetPassword = lazy(resetPasswordFn);
@@ -66,7 +64,6 @@ registerRoute('Settings', settingsFn);
 registerRoute('Billing', billingFn);
 registerRoute('Admin', adminFn);
 registerRoute('SpecificReplyDebug', specificReplyDebugFn);
-registerRoute('InstagramDiagnostics', instagramDiagnosticsFn);
 
 function PageViewTracker() {
   const location = useLocation();
@@ -206,7 +203,6 @@ function App() {
                 <Route path="billing" element={<Billing />} />
                 <Route path="admin" element={<AdminConsole />} />
                 <Route path="admin/specific-reply-debug" element={<SpecificReplyDebug />} />
-                <Route path="admin/instagram-diagnostics" element={<InstagramDiagnostics />} />
                 <Route path="*" element={<Navigate to="/app" replace />} />
               </Route>
               <Route path="*" element={<NotFound />} />

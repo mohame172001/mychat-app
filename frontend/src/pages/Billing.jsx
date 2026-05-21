@@ -188,7 +188,7 @@ export default function Billing() {
     } finally {
       setLoading(false);
     }
-  }, [billingCacheKey, plansCacheKey]);
+  }, [billingCacheKey, lang, plansCacheKey]);
 
   useEffect(() => {
     load();

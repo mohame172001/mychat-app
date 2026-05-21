@@ -439,7 +439,7 @@ const Automations = () => {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [cacheKey]);
+  }, [ar, cacheKey]);
 
   useEffect(() => { refresh(); }, [refresh]);
 

@@ -1566,7 +1566,7 @@ export default function AdminConsole() {
     } finally {
       setOverviewLoading(false);
     }
-  }, [user?.id]);
+  }, [ar, user?.id]);
 
   useEffect(() => {
     if (me?.is_admin && tab === 'overview' && !overview) loadOverview();

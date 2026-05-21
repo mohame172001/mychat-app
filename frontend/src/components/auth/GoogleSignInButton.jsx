@@ -74,7 +74,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
       }
     })();
     return () => { cancelled = true; };
-  }, [configStatus, loginWithGoogle, navigate, onComplete, redirectTo]);
+  }, [ar, configStatus, loginWithGoogle, navigate, onComplete, redirectTo]);
 
   if (configStatus !== 'enabled') {
     const diagnostics = {
