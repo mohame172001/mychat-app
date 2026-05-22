@@ -156,10 +156,16 @@ def _webhook_signature_secret_candidates():
         ('META_APP_SECRET', META_APP_SECRET),
     ):
         secret = str(value or '').strip()
-        if not secret or secret in seen:
-            continue
-        seen.add(secret)
-        candidates.append((source, secret))
+        variants = [(source, secret)]
+        if len(secret) >= 2 and secret[0] == secret[-1] and secret[0] in {'"', "'"}:
+            unquoted = secret[1:-1].strip()
+            if unquoted and unquoted != secret:
+                variants.append((f'{source}:unquoted', unquoted))
+        for variant_source, variant_secret in variants:
+            if not variant_secret or variant_secret in seen:
+                continue
+            seen.add(variant_secret)
+            candidates.append((variant_source, variant_secret))
     return candidates
 
 
@@ -16039,49 +16045,84 @@ async def instagram_webhook_verify(request: Request):
     raise HTTPException(403, 'Verification failed')
 
 
-def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dict:
-    """Verify the X-Hub-Signature-256 header from Meta.
-    Returns {valid, reason, signature_present, computed_prefix, received_prefix}.
+def _parse_meta_signature_header(signature_header: str) -> tuple:
+    header = str(signature_header or '').strip()
+    if not header or '=' not in header:
+        return None, None
+    algorithm, value = header.split('=', 1)
+    algorithm = algorithm.strip().lower()
+    value = value.strip()
+    if algorithm == 'sha256':
+        return 'sha256', value
+    if algorithm == 'sha1':
+        return 'sha1', value
+    return algorithm or None, value or None
+
+
+def _verify_webhook_signature(
+    request_body: bytes,
+    signature_header: str,
+    legacy_signature_header: str = '',
+) -> dict:
+    """Verify Meta webhook HMAC signatures without accepting unsigned input.
+
+    Meta's current header is X-Hub-Signature-256 (sha256=...), but older
+    webhook deliveries and some dashboard tests can still include
+    X-Hub-Signature (sha1=...). Supporting both HMAC formats keeps strict
+    signature enforcement while avoiding a false 403 when Meta uses the
+    legacy signed header.
     """
     secret_candidates = _webhook_signature_secret_candidates()
     out = {
         'valid': False,
         'reason': None,
-        'signature_present': bool(signature_header),
+        'signature_present': bool(signature_header or legacy_signature_header),
         'secret_configured': bool(secret_candidates),
         'computed_prefix': None,
         'received_prefix': None,
         'matched_secret_source': None,
+        'signature_algorithm': None,
+        'signature_header': None,
         'candidate_sources': [source for source, _secret in secret_candidates],
     }
     if not secret_candidates:
         out['reason'] = 'no_secret_configured'
         return out
-    if not signature_header:
+    signature_headers = []
+    if signature_header:
+        signature_headers.append(('x-hub-signature-256', signature_header))
+    if legacy_signature_header:
+        signature_headers.append(('x-hub-signature', legacy_signature_header))
+    if not signature_headers:
         out['reason'] = 'no_signature_header'
         return out
-    # Header format: "sha256=<hex>"
-    if not signature_header.startswith('sha256='):
-        out['reason'] = 'bad_signature_format'
-        out['received_prefix'] = signature_header[:20]
-        return out
-    received_sig = signature_header[7:]  # strip "sha256="
-    out['received_prefix'] = received_sig[:8]
-    for source, secret in secret_candidates:
-        computed_sig = hmac.new(
-            secret.encode('utf-8'),
-            request_body,
-            hashlib.sha256,
-        ).hexdigest()
-        if out['computed_prefix'] is None:
-            out['computed_prefix'] = computed_sig[:8]
-        if hmac.compare_digest(computed_sig, received_sig):
-            out['valid'] = True
-            out['reason'] = 'signature_valid'
-            out['matched_secret_source'] = source
-            out['computed_prefix'] = computed_sig[:8]
-            return out
-    out['reason'] = 'signature_mismatch'
+    saw_supported = False
+    for header_name, header_value in signature_headers:
+        algorithm, received_sig = _parse_meta_signature_header(header_value)
+        if algorithm not in {'sha256', 'sha1'} or not received_sig:
+            if out['received_prefix'] is None:
+                out['received_prefix'] = str(header_value or '')[:20]
+            continue
+        saw_supported = True
+        out['signature_algorithm'] = algorithm
+        out['signature_header'] = header_name
+        out['received_prefix'] = received_sig[:8]
+        digestmod = hashlib.sha256 if algorithm == 'sha256' else hashlib.sha1
+        for source, secret in secret_candidates:
+            computed_sig = hmac.new(
+                secret.encode('utf-8'),
+                request_body,
+                digestmod,
+            ).hexdigest()
+            if out['computed_prefix'] is None:
+                out['computed_prefix'] = computed_sig[:8]
+            if hmac.compare_digest(computed_sig, received_sig):
+                out['valid'] = True
+                out['reason'] = 'signature_valid'
+                out['matched_secret_source'] = source
+                out['computed_prefix'] = computed_sig[:8]
+                return out
+    out['reason'] = 'signature_mismatch' if saw_supported else 'bad_signature_format'
     return out
 
 
@@ -16126,13 +16167,16 @@ async def instagram_webhook(request: Request):
     ack_start = _time.monotonic()
     raw_body = await request.body()
     sig_header = request.headers.get('x-hub-signature-256') or ''
-    sig_result = _verify_webhook_signature(raw_body, sig_header)
+    legacy_sig_header = request.headers.get('x-hub-signature') or ''
+    sig_result = _verify_webhook_signature(raw_body, sig_header, legacy_sig_header)
     if not sig_result['valid']:
         logger.warning('webhook_signature_check reason=%s received_prefix=%s '
-                       'computed_prefix=%s enforce=%s',
+                       'computed_prefix=%s algorithm=%s header=%s enforce=%s',
                        sig_result['reason'],
                        sig_result.get('received_prefix'),
                        sig_result.get('computed_prefix'),
+                       sig_result.get('signature_algorithm'),
+                       sig_result.get('signature_header'),
                        META_WEBHOOK_HMAC_ENFORCE)
         if META_WEBHOOK_HMAC_ENFORCE:
             # Reject bad/missing signatures regardless of whether a secret
@@ -16149,13 +16193,20 @@ async def instagram_webhook(request: Request):
         else:
             logger.warning('webhook_hmac_not_enforced reason=%s', sig_result['reason'])
     else:
-        logger.info('webhook_signature_valid prefix=%s source=%s',
+        logger.info('webhook_signature_valid prefix=%s source=%s algorithm=%s header=%s',
                     sig_result['computed_prefix'],
-                    sig_result.get('matched_secret_source'))
+                    sig_result.get('matched_secret_source'),
+                    sig_result.get('signature_algorithm'),
+                    sig_result.get('signature_header'))
         await _record_instagram_automation_event(
             'webhook_signature_ok',
             source='webhook',
-            extra={'entries_count': None},
+            extra={
+                'entries_count': None,
+                'signature_algorithm': sig_result.get('signature_algorithm'),
+                'signature_header': sig_result.get('signature_header'),
+                'matched_secret_source': sig_result.get('matched_secret_source'),
+            },
         )
     import json as _json
     try:

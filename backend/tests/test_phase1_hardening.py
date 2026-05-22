@@ -83,7 +83,7 @@ def test_webhook_invalid_json_returns_400_no_task(monkeypatch, caplog):
 
     monkeypatch.setattr(server, 'create_tracked_task', fake_create_tracked_task)
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda body, sig: {'valid': True, 'reason': 'ok',
+                        lambda body, sig, legacy_sig="": {'valid': True, 'reason': 'ok',
                                            'computed_prefix': 'sha256=AB',
                                            'received_prefix': 'sha256=AB',
                                            'secret_configured': True})
@@ -110,7 +110,7 @@ def test_webhook_non_object_json_also_400(monkeypatch):
 
     monkeypatch.setattr(server, 'create_tracked_task', fake_task)
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda b, s: {'valid': True, 'reason': 'ok',
+                        lambda b, s, legacy_s="": {'valid': True, 'reason': 'ok',
                                       'secret_configured': True,
                                       'computed_prefix': '', 'received_prefix': ''})
     req = _FakeRequest(body=b'"just a string"')
@@ -131,7 +131,7 @@ def test_webhook_valid_json_does_spawn_tasks(monkeypatch):
 
     monkeypatch.setattr(server, 'create_tracked_task', fake_task)
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda b, s: {'valid': True, 'reason': 'ok',
+                        lambda b, s, legacy_s="": {'valid': True, 'reason': 'ok',
                                       'secret_configured': True,
                                       'computed_prefix': '', 'received_prefix': ''})
     req = _FakeRequest(body=b'{"object":"instagram","entry":[]}')
@@ -146,7 +146,7 @@ def test_webhook_valid_json_does_spawn_tasks(monkeypatch):
 def test_webhook_hmac_enforce_rejects_bad_signature(monkeypatch):
     monkeypatch.setattr(server, 'META_WEBHOOK_HMAC_ENFORCE', True)
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda b, s: {'valid': False, 'reason': 'mismatch',
+                        lambda b, s, legacy_s="": {'valid': False, 'reason': 'mismatch',
                                       'secret_configured': True,
                                       'computed_prefix': 'sha256=AB',
                                       'received_prefix': 'sha256=ZZ'})
@@ -161,7 +161,7 @@ def test_webhook_hmac_enforce_rejects_missing_signature(monkeypatch):
     # Even with secret_configured=False we still must reject when
     # enforcement is on — that's the whole point of "enforce".
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda b, s: {'valid': False, 'reason': 'no_signature',
+                        lambda b, s, legacy_s="": {'valid': False, 'reason': 'no_signature',
                                       'secret_configured': False,
                                       'computed_prefix': '', 'received_prefix': ''})
     req = _FakeRequest(body=b'{}')
@@ -172,7 +172,7 @@ def test_webhook_hmac_enforce_rejects_missing_signature(monkeypatch):
 def test_webhook_hmac_warn_mode_logs_marker(monkeypatch, caplog):
     monkeypatch.setattr(server, 'META_WEBHOOK_HMAC_ENFORCE', False)
     monkeypatch.setattr(server, '_verify_webhook_signature',
-                        lambda b, s: {'valid': False, 'reason': 'mismatch',
+                        lambda b, s, legacy_s="": {'valid': False, 'reason': 'mismatch',
                                       'secret_configured': True,
                                       'computed_prefix': '', 'received_prefix': ''})
 
@@ -248,7 +248,54 @@ def test_webhook_hmac_rejects_when_no_configured_app_secret_matches(monkeypatch)
 
     assert bad['valid'] is False
     assert bad['reason'] == 'signature_mismatch'
-    assert bad['matched_secret_source'] is None
+
+
+def test_webhook_hmac_accepts_legacy_sha1_signature_header(monkeypatch):
+    raw_body = b'{"object":"instagram","entry":[{"id":"ig","time":1}]}'
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', 'webhook-secret')
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET_SOURCE', 'META_WEBHOOK_APP_SECRET')
+    monkeypatch.setattr(server, 'INSTAGRAM_APP_SECRET', '')
+    monkeypatch.setattr(server, 'META_APP_SECRET', '')
+    signature = hmac.new(b'webhook-secret', raw_body, hashlib.sha1).hexdigest()
+
+    ok = server._verify_webhook_signature(raw_body, '', f'sha1={signature}')
+
+    assert ok['valid'] is True
+    assert ok['reason'] == 'signature_valid'
+    assert ok['signature_algorithm'] == 'sha1'
+    assert ok['signature_header'] == 'x-hub-signature'
+
+
+def test_webhook_hmac_tries_legacy_header_when_sha256_mismatches(monkeypatch):
+    raw_body = b'{"object":"instagram","entry":[{"id":"ig","time":1}]}'
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', 'webhook-secret')
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET_SOURCE', 'META_WEBHOOK_APP_SECRET')
+    monkeypatch.setattr(server, 'INSTAGRAM_APP_SECRET', '')
+    monkeypatch.setattr(server, 'META_APP_SECRET', '')
+    good_sha1 = hmac.new(b'webhook-secret', raw_body, hashlib.sha1).hexdigest()
+
+    ok = server._verify_webhook_signature(
+        raw_body,
+        'sha256=deadbeef',
+        f'sha1={good_sha1}',
+    )
+
+    assert ok['valid'] is True
+    assert ok['signature_algorithm'] == 'sha1'
+
+
+def test_webhook_hmac_accepts_unquoted_secret_variant(monkeypatch):
+    raw_body = b'{"object":"instagram","entry":[{"id":"ig","time":1}]}'
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', '"webhook-secret"')
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET_SOURCE', 'META_WEBHOOK_APP_SECRET')
+    monkeypatch.setattr(server, 'INSTAGRAM_APP_SECRET', '')
+    monkeypatch.setattr(server, 'META_APP_SECRET', '')
+    signature = hmac.new(b'webhook-secret', raw_body, hashlib.sha256).hexdigest()
+
+    ok = server._verify_webhook_signature(raw_body, f'sha256={signature}')
+
+    assert ok['valid'] is True
+    assert ok['matched_secret_source'] == 'META_WEBHOOK_APP_SECRET:unquoted'
 
 
 class _FakeWebhookLogColl:
