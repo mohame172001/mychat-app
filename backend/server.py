@@ -17747,7 +17747,9 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
 async def _process_webhook(payload: dict):
     """Process Instagram webhook events asynchronously."""
     try:
+        import time as _time
         for entry in payload.get('entry', []):
+            entry_started = _time.monotonic()
             ig_account_id = entry.get('id')
             logger.info(
                 'account_resolution_started event_type=webhook_entry entry_id=%s',
@@ -17973,7 +17975,8 @@ async def _process_webhook(payload: dict):
                             else 'none'
                         ),
                     )
-                    await _handle_new_comment(user_doc, {
+                    comment_started = _time.monotonic()
+                    comment_result = await _handle_new_comment(user_doc, {
                         'ig_comment_id': value.get('comment_id') or value.get('id'),
                         'media_id': media_id_resolved,
                         'commenter_id': commenter.get('id'),
@@ -17987,6 +17990,20 @@ async def _process_webhook(payload: dict):
                         # Only used when timestamp is absent and source='webhook'.
                         'entry_time': entry_time_iso,
                     }, source='webhook')
+                    comment_duration_ms = int((_time.monotonic() - comment_started) * 1000)
+                    logger.info(
+                        'webhook_comment_processed user_id=%s instagram_account_id=%s '
+                        'comment_id=%s media_id=%s matched=%s action_status=%s '
+                        'rule_id=%s duration_ms=%s',
+                        user_id,
+                        _safe_partial_identifier(ig_account_id),
+                        _safe_partial_identifier(value.get('comment_id') or value.get('id')),
+                        _safe_partial_identifier(media_id_resolved),
+                        bool((comment_result or {}).get('matched')),
+                        (comment_result or {}).get('action_status'),
+                        (comment_result or {}).get('rule_id'),
+                        comment_duration_ms,
+                    )
                 elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
@@ -17995,6 +18012,12 @@ async def _process_webhook(payload: dict):
                         ).to_list(20)
                         for auto in automations:
                             create_tracked_task(execute_flow(user_doc, auto, replier_id, ''), 'execute_flow')
+            logger.info(
+                'webhook_entry_processed entry_id=%s instagram_account_id=%s duration_ms=%s',
+                _safe_partial_identifier(entry.get('id')),
+                _safe_partial_identifier(ig_account_id),
+                int((_time.monotonic() - entry_started) * 1000),
+            )
     except Exception:
         logger.exception('Webhook processing error')
 
@@ -18085,6 +18108,26 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     if not token or not ig_id:
         stats['errors'].append('missing_token_or_ig_id')
         return stats
+    try:
+        await db.instagram_accounts.update_one(
+            {
+                '$and': [
+                    {'$or': [{'userId': user_id}, {'user_id': user_id}]},
+                    {'$or': [
+                        {'instagramAccountId': ig_id},
+                        {'igUserId': ig_id},
+                        {'ig_user_id': ig_id},
+                    ]},
+                ],
+            },
+            {'$set': {'lastCommentPollAt': datetime.utcnow()}},
+        )
+    except Exception:
+        logger.info(
+            'comment_poller_last_scan_mark_failed user_id=%s ig_user_id=%s',
+            user_id,
+            _safe_partial_identifier(ig_id),
+        )
 
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, _current_instagram_context(user_doc)), 'status': 'active'}
@@ -19324,6 +19367,140 @@ async def instagram_automation_health(user_id: str = Depends(get_current_active_
             'follow_verifier_interval_seconds': FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS,
             'watchdog_interval_seconds': _WATCHDOG_INTERVAL_SECONDS,
         },
+    }
+
+
+@api.get('/admin/instagram/multi-account-health')
+async def admin_instagram_multi_account_health(
+    limit: int = 100,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Sanitized admin support view for multi-account automation readiness.
+
+    This intentionally has no production frontend page. It exists so support
+    can verify every linked Instagram account is eligible for instant webhook
+    processing without exposing access tokens, full webhook payloads, comment
+    text, or DM bodies.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        return dt.isoformat() if isinstance(dt, datetime) else None
+
+    limit = max(1, min(int(limit or 100), 500))
+    accounts = await db.instagram_accounts.find({
+        'isActive': {'$ne': False},
+    }).limit(limit).to_list(limit)
+    items = []
+    owner_cache: Dict[str, Optional[dict]] = {}
+
+    for account in accounts:
+        owner_id = str(account.get('userId') or account.get('user_id') or '')
+        owner = None
+        if owner_id:
+            if owner_id not in owner_cache:
+                owner_cache[owner_id] = await db.users.find_one({'id': owner_id})
+            owner = owner_cache.get(owner_id)
+        ig_id = str(account.get('instagramAccountId') or account.get('igUserId') or '')
+        account_query = _account_scoped_query(owner_id, account) if owner_id else {}
+        active_rule_count = 0
+        last_comment = None
+        last_dm_log = None
+        try:
+            if owner_id:
+                active_rule_count = await db.automations.count_documents({
+                    **account_query,
+                    'status': 'active',
+                })
+                last_comments = await db.comments.find(account_query, {
+                    'created': 1,
+                    'source': 1,
+                    'reply_status': 1,
+                    'dm_status': 1,
+                    'session_created': 1,
+                    'skip_reason': 1,
+                    'action_status': 1,
+                    'ig_comment_id': 1,
+                }).sort('created', -1).limit(1).to_list(1)
+                last_comment = last_comments[0] if last_comments else None
+                last_logs = await db.dm_logs.find(account_query, {
+                    'created': 1,
+                    'status': 1,
+                    'skip_reason': 1,
+                    'event_kind': 1,
+                }).sort('created', -1).limit(1).to_list(1)
+                last_dm_log = last_logs[0] if last_logs else None
+        except Exception as exc:
+            logger.info(
+                'multi_account_health_per_account_error account=%s err=%s',
+                _safe_partial_identifier(ig_id or account.get('id')),
+                type(exc).__name__,
+            )
+
+        subscription_fields = account.get('webhookSubscriptionFields') or []
+        subscription_missing = account.get('webhookSubscriptionMissing') or []
+        issues = []
+        if not owner_id or not owner:
+            issues.append('missing_owner')
+        if owner and owner.get('status') in ('deleted', 'suspended'):
+            issues.append(f"owner_{owner.get('status')}")
+        if not account.get('connectionValid'):
+            issues.append('connection_invalid')
+        if not account.get('accessToken'):
+            issues.append('missing_access_token')
+        if not ig_id:
+            issues.append('missing_instagram_account_id')
+        if subscription_missing:
+            issues.append('webhook_subscription_missing_fields')
+        if active_rule_count <= 0:
+            issues.append('no_active_comment_automations')
+
+        items.append({
+            'account_id_partial': _safe_partial_identifier(account.get('id')),
+            'instagram_account_id_partial': _safe_partial_identifier(ig_id),
+            'username': account.get('username'),
+            'owner_user_id_partial': _safe_partial_identifier(owner_id),
+            'connection_valid': bool(account.get('connectionValid')),
+            'token_present': bool(account.get('accessToken')),
+            'token_health': account.get('refreshStatus') or 'unknown',
+            'webhook_subscription_fields': sorted(subscription_fields)
+                if isinstance(subscription_fields, list) else [],
+            'webhook_subscription_missing': sorted(subscription_missing)
+                if isinstance(subscription_missing, list) else [],
+            'webhook_subscription_last_checked_at': _iso(account.get('webhookSubscriptionLastCheckedAt')),
+            'polling_last_scan_at': _iso(account.get('lastCommentPollAt')),
+            'last_processed_comment_at': _iso((last_comment or {}).get('created')),
+            'last_comment_source': (last_comment or {}).get('source'),
+            'last_send_result': {
+                'reply_status': (last_comment or {}).get('reply_status'),
+                'dm_status': (last_comment or {}).get('dm_status'),
+                'action_status': (last_comment or {}).get('action_status'),
+                'session_created': (last_comment or {}).get('session_created'),
+                'skip_reason': (last_comment or {}).get('skip_reason'),
+                'dm_log_status': (last_dm_log or {}).get('status'),
+                'dm_log_skip_reason': (last_dm_log or {}).get('skip_reason'),
+                'dm_log_event_kind': (last_dm_log or {}).get('event_kind'),
+            },
+            'active_automation_count': active_rule_count,
+            'instant_webhook_eligible': bool(
+                owner_id and owner and owner.get('status') not in ('deleted', 'suspended')
+                and account.get('connectionValid') and account.get('accessToken') and ig_id
+            ),
+            'issues': issues,
+        })
+
+    return {
+        'ok': True,
+        'count': len(items),
+        'webhook': {
+            'last_received_at': _iso(WEBHOOK_LAST_RECEIVED_AT),
+            'last_processed_at': _iso(WEBHOOK_LAST_PROCESSED_AT),
+        },
+        'polling': {
+            'enabled': IG_POLL_ENABLED,
+            'interval_seconds': IG_POLL_INTERVAL_SECONDS,
+        },
+        'accounts': items,
     }
 
 

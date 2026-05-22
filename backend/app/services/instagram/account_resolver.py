@@ -2,9 +2,80 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+INSTAGRAM_ACCOUNT_IDENTITY_FIELDS = (
+    'id',
+    'instagramAccountId',
+    'igUserId',
+    'ig_user_id',
+    'accountId',
+    'instagram_account_id',
+    'instagramAccountDbId',
+    'graphMeId',
+    'graph_me_id',
+    'graph_me_user_id',
+    'instagram_graph_me_id',
+    'instagram_graph_me_user_id',
+    'pageId',
+    'page_id',
+    'fb_page_id',
+    'businessAccountId',
+    'instagram_business_account_id',
+)
+
+
+def _clean_identity(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _instagram_account_identity_values(account_doc: Optional[dict]) -> list:
+    """Return every safe account identity alias stored on an IG account row.
+
+    Production has accumulated several field names across OAuth, token
+    refresh, webhook diagnostics, and legacy user mirroring. Webhook routing
+    must be account-first and alias-tolerant, otherwise later connected
+    accounts can fall through to polling or fail to resolve entirely.
+    """
+    values = []
+    if not isinstance(account_doc, dict):
+        return values
+    for field in INSTAGRAM_ACCOUNT_IDENTITY_FIELDS:
+        value = _clean_identity(account_doc.get(field))
+        if value and value not in values:
+            values.append(value)
+    metadata = account_doc.get('metadata') if isinstance(account_doc.get('metadata'), dict) else {}
+    for field in INSTAGRAM_ACCOUNT_IDENTITY_FIELDS:
+        value = _clean_identity(metadata.get(field))
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _instagram_account_identity_clauses(identity: Any) -> list:
+    value = _clean_identity(identity)
+    if not value:
+        return []
+    return [{field: value} for field in INSTAGRAM_ACCOUNT_IDENTITY_FIELDS]
+
+
+def _instagram_account_identity_query(identity: Any, *, active_only: bool = True) -> dict:
+    clauses = _instagram_account_identity_clauses(identity)
+    if not clauses:
+        return {'_id': '__no_instagram_identity__'}
+    query = {'$or': clauses}
+    if active_only:
+        query['isActive'] = {'$ne': False}
+    return query
+
+
 def _instagram_context_from_account(account_doc: Optional[dict]) -> dict:
     account_doc = account_doc or {}
-    instagram_account_id = str(account_doc.get('instagramAccountId') or account_doc.get('igUserId') or '')
+    instagram_account_id = str(
+        account_doc.get('instagramAccountId')
+        or account_doc.get('igUserId')
+        or account_doc.get('ig_user_id')
+        or account_doc.get('accountId')
+        or ''
+    )
     username = (account_doc.get('username') or '').replace('@', '')
     return {
         'instagramAccountDbId': account_doc.get('id') or '',
@@ -34,7 +105,13 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
             account_or_ig_id.get('instagram_account_id') or
             ''
         )
-        instagram_account_id = str(account_or_ig_id.get('instagramAccountId') or account_or_ig_id.get('igUserId') or '')
+        instagram_account_id = str(
+            account_or_ig_id.get('instagramAccountId')
+            or account_or_ig_id.get('igUserId')
+            or account_or_ig_id.get('ig_user_id')
+            or account_or_ig_id.get('accountId')
+            or ''
+        )
     else:
         account_id = ''
         instagram_account_id = str(account_or_ig_id or '')
@@ -50,6 +127,12 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
             {'igUserId': instagram_account_id},
             {'ig_user_id': instagram_account_id},
             {'accountId': instagram_account_id},
+            {'graphMeId': instagram_account_id},
+            {'graph_me_id': instagram_account_id},
+            {'instagram_graph_me_id': instagram_account_id},
+            {'pageId': instagram_account_id},
+            {'page_id': instagram_account_id},
+            {'fb_page_id': instagram_account_id},
         ])
     if clauses:
         query['$or'] = [
@@ -62,7 +145,13 @@ def _account_scoped_query(user_id: str, account_or_ig_id: Any) -> dict:
 def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict]) -> dict:
     if not account_doc:
         return user_doc
-    instagram_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ''
+    instagram_account_id = (
+        account_doc.get('instagramAccountId')
+        or account_doc.get('igUserId')
+        or account_doc.get('ig_user_id')
+        or account_doc.get('accountId')
+        or ''
+    )
     merged = {**user_doc}
     merged.update({
         'active_instagram_account_id': account_doc.get('id') or user_doc.get('active_instagram_account_id'),
@@ -168,10 +257,9 @@ async def _find_user_doc_for_instagram_account_id(
 ) -> tuple:
     if not instagram_account_id:
         return None, None
-    account_doc = await db.instagram_accounts.find_one({'$or': [
-        {'instagramAccountId': instagram_account_id},
-        {'igUserId': instagram_account_id},
-    ], 'isActive': {'$ne': False}})
+    account_doc = await db.instagram_accounts.find_one(
+        _instagram_account_identity_query(instagram_account_id)
+    )
     if account_doc:
         owner = await db.users.find_one({'id': account_doc.get('userId') or account_doc.get('user_id')})
         if owner:
@@ -180,16 +268,22 @@ async def _find_user_doc_for_instagram_account_id(
     user_doc = await db.users.find_one({'$or': [
         {'ig_user_id': instagram_account_id},
         {'fb_page_id': instagram_account_id},
+        {'instagram_graph_me_id': instagram_account_id},
+        {'instagram_graph_me_user_id': instagram_account_id},
     ]})
     if user_doc:
         scoped = user_doc
         try:
+            account_identity = _instagram_account_identity_clauses(instagram_account_id)
             matching_account = await db.instagram_accounts.find_one({
-                'userId': user_doc.get('id'),
-                '$or': [
-                    {'instagramAccountId': instagram_account_id},
-                    {'igUserId': instagram_account_id},
+                '$and': [
+                    {'$or': [
+                        {'userId': user_doc.get('id')},
+                        {'user_id': user_doc.get('id')},
+                    ]},
+                    {'$or': account_identity},
                 ],
+                'isActive': {'$ne': False},
             })
             if matching_account:
                 scoped = _with_instagram_account_context(user_doc, matching_account)
@@ -210,8 +304,7 @@ async def _active_instagram_account_owner(
     if not canonical:
         return None
     account = await db.instagram_accounts.find_one({
-        'instagramAccountId': canonical,
-        'isActive': {'$ne': False},
+        **_instagram_account_identity_query(canonical),
         'connectionValid': True,
     })
     if not account:

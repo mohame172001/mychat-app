@@ -243,6 +243,129 @@ def test_account_a_comment_on_account_b_routes_only_to_b_rule_and_token(monkeypa
     assert db.comments.docs[0]['instagramAccountId'] == 'igB'
 
 
+def test_webhook_resolver_accepts_account_aliases_not_active_ui_account(monkeypatch):
+    """Later connected accounts can arrive with a Page/Graph alias in
+    webhook entry.id. The resolver must choose that account, not the
+    user's currently selected dashboard account."""
+    accounts = [
+        _account(id='accA', userId='u1', user_id='u1',
+                 instagramAccountId='igA', igUserId='igA',
+                 username='account_a', accessToken='token-a'),
+        _account(id='accB', userId='u1', user_id='u1',
+                 instagramAccountId='igB', igUserId='igB',
+                 pageId='pageB', graphMeId='graphB',
+                 username='account_b', accessToken='token-b'),
+        _account(id='accC', userId='u1', user_id='u1',
+                 instagramAccountId='igC', igUserId='igC',
+                 fb_page_id='pageC', instagram_graph_me_id='graphC',
+                 username='account_c', accessToken='token-c'),
+    ]
+    user = _user(id='u1', active_instagram_account_id='accA',
+                 ig_user_id='igA', meta_access_token='token-a')
+    db = FakeDB(accounts, user)
+    monkeypatch.setattr(server, 'db', db)
+
+    resolved_b, via_b = _run(server._find_user_doc_for_instagram_account_id('pageB'))
+    resolved_c, via_c = _run(server._find_user_doc_for_instagram_account_id('graphC'))
+
+    assert via_b == 'instagram_accounts'
+    assert resolved_b['active_instagram_account_id'] == 'accB'
+    assert resolved_b['ig_user_id'] == 'igB'
+    assert resolved_b['meta_access_token'] == 'token-b'
+    assert via_c == 'instagram_accounts'
+    assert resolved_c['active_instagram_account_id'] == 'accC'
+    assert resolved_c['ig_user_id'] == 'igC'
+    assert resolved_c['meta_access_token'] == 'token-c'
+
+
+def test_webhook_comment_for_third_account_uses_alias_resolved_account(monkeypatch):
+    """A comment webhook for Account 3 must not fall back to Account 1
+    when entry.id is an alias such as the Page id."""
+    accounts = [
+        _account(id='accA', userId='u1', user_id='u1',
+                 instagramAccountId='igA', igUserId='igA',
+                 username='account_a', accessToken='token-a'),
+        _account(id='accB', userId='u1', user_id='u1',
+                 instagramAccountId='igB', igUserId='igB',
+                 username='account_b', accessToken='token-b'),
+        _account(id='accC', userId='u1', user_id='u1',
+                 instagramAccountId='igC', igUserId='igC',
+                 pageId='pageC',
+                 username='account_c', accessToken='token-c'),
+    ]
+    user = _user(id='u1', active_instagram_account_id='accA',
+                 ig_user_id='igA', meta_access_token='token-a')
+    db = FakeDB(
+        accounts,
+        user,
+        automations=[
+            _comment_rule('accA', 'igA', 'ruleA'),
+            _comment_rule('accB', 'igB', 'ruleB'),
+            _comment_rule('accC', 'igC', 'ruleC'),
+        ],
+    )
+    monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(
+        server,
+        'ws_manager',
+        SimpleNamespace(send=lambda *_args, **_kwargs: asyncio.sleep(0)),
+    )
+    monkeypatch.setattr(
+        server,
+        'reserve_usage_limit',
+        lambda *a, **kw: asyncio.sleep(
+            0,
+            result={'allowed': True, 'exceeded': False, 'fail_open': False},
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        'confirm_usage_reservation',
+        lambda *a, **kw: asyncio.sleep(0, result=True),
+    )
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append((access_token, ig_user_id, recipient_id, message,
+                         allow_workspace_recipient))
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-c'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            'id': 'pageC',
+            'time': int(datetime.utcnow().timestamp()),
+            'changes': [{
+                'field': 'comments',
+                'value': {
+                    'id': 'comment-c-1',
+                    'media': {'id': 'mediaC'},
+                    'from': {'id': 'external-user', 'username': 'tester'},
+                    'text': 'hello',
+                    'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                },
+            }],
+        }],
+    }))
+
+    assert reply_calls == [('token-c', 'comment-c-1', 'public reply from igC')]
+    assert len(dm_calls) == 1
+    assert dm_calls[0][0] == 'token-c'
+    assert dm_calls[0][1] == 'igC'
+    assert dm_calls[0][2] == 'external-user'
+    assert db.comments.docs[0]['instagramAccountId'] == 'igC'
+    assert db.comments.docs[0]['rule_id'] == 'ruleC'
+
+
 def test_same_commenter_same_post_rule_does_not_restart_opening_flow(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     reply_calls = []
