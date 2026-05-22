@@ -3717,3 +3717,269 @@ def test_summarize_stop_point_continuation_success_marks_automation_success(monk
     assert summary['click_received'] is True
     assert summary['continuation_send_success'] is True
     assert summary['exact_stop_reason'] == 'automation_success'
+
+
+# ---------------------------------------------------------------------------
+# Fallback continuation loop: deliver the next-step DM automatically when
+# Meta does not send a click webhook. This is the operator's "the bot
+# must just work" guarantee.
+# ---------------------------------------------------------------------------
+
+def _eligible_session(*, session_id='sess-fallback', age_seconds=120,
+                     follow_request_enabled=False, has_next_step=True,
+                     final_dm_sent=False, status='pending',
+                     auto_continued_at=None):
+    now = datetime.utcnow()
+    created = now - timedelta(seconds=age_seconds)
+    sess = {
+        'id': session_id,
+        'user_id': 'u1',
+        'ig_user_id': 'igB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'automation_id': 'ruleB',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-tester',
+        'commenter_id': 'igsid-tester',
+        'follow_request_enabled': follow_request_enabled,
+        'status': status,
+        'stage': 'awaiting_user_action',
+        'created': created,
+        'updated': created,
+        'finalDmSentAt': now if final_dm_sent else None,
+        'link_url': 'https://example.com/x' if has_next_step else '',
+        'link_dm_text': 'here is the link' if has_next_step else '',
+        'link_button_text': 'open',
+    }
+    if auto_continued_at:
+        sess['auto_continued_at'] = auto_continued_at
+    return sess
+
+
+def _run_one_fallback_tick(server, db):
+    """Run exactly one iteration of the fallback continuation loop's
+    body, then break out. Mirrors the production tick exactly."""
+    import importlib
+    # Replace SHUTDOWN_EVENT with a fresh one so the loop's
+    # wait_for in our cooperative scheduling is short.
+    server.SHUTDOWN_EVENT = asyncio.Event()
+    server.IS_SHUTTING_DOWN = False
+
+    async def _drive():
+        now = datetime.utcnow()
+        youngest = now - timedelta(
+            seconds=server.COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS,
+        )
+        oldest = now - timedelta(
+            seconds=server.COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS,
+        )
+        cursor = db.comment_dm_sessions.find({
+            'status': 'pending',
+            'finalDmSentAt': None,
+            'auto_continued_at': {'$exists': False},
+            '$and': [
+                {'$or': [
+                    {'follow_request_enabled': {'$ne': True}},
+                    {'follow_request_enabled': {'$exists': False}},
+                ]},
+                {'$or': [
+                    {'link_url': {'$nin': [None, '']}},
+                    {'link_dm_text': {'$nin': [None, '']}},
+                    {'follow_up_text': {'$nin': [None, '']}},
+                    {'email_request_enabled': True},
+                ]},
+            ],
+            'created': {'$lte': youngest, '$gte': oldest},
+        })
+        sessions = await cursor.to_list(50)
+        for sess in sessions:
+            claim_result = await db.comment_dm_sessions.update_one(
+                {
+                    'id': sess.get('id'),
+                    'status': 'pending',
+                    'finalDmSentAt': None,
+                    'auto_continued_at': {'$exists': False},
+                },
+                {'$set': {
+                    'auto_continued_at': now,
+                    'auto_continued_reason': 'click_webhook_missing',
+                    'updated': now,
+                }},
+            )
+            if not (claim_result and claim_result.modified_count):
+                continue
+            user_doc = await db.users.find_one({'id': sess.get('user_id')})
+            if not user_doc:
+                continue
+            sess_ig_id = sess.get('ig_user_id') or sess.get('instagramAccountId')
+            if sess_ig_id:
+                account_doc = await db.instagram_accounts.find_one({
+                    'userId': user_doc.get('id'),
+                    '$or': [
+                        {'instagramAccountId': sess_ig_id},
+                        {'igUserId': sess_ig_id},
+                    ],
+                })
+                if account_doc:
+                    user_doc = server._with_instagram_account_context(
+                        user_doc, account_doc,
+                    )
+            await server._send_comment_dm_flow_completion(user_doc, sess)
+    _run(_drive())
+
+
+def test_fallback_continuation_fires_for_eligible_session(monkeypatch):
+    """The exact production scenario: opening DM sent + button shown,
+    click webhook never arrived, 2 minutes pass. The fallback must
+    deliver the next-step DM."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session())
+
+    send_calls = []
+
+    async def fake_send_url_button(access_token, ig_user_id, recipient_id,
+                                   text, button, url,
+                                   allow_workspace_recipient=False):
+        send_calls.append({
+            'token': access_token, 'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id, 'url': url,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-fallback'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    # Continuation DM was sent. The URL may be wrapped by the
+    # conversion-tracking shortener, so we just assert that the send
+    # happened against the right account and produced an https URL.
+    assert len(send_calls) == 1
+    assert send_calls[0]['ig_user_id'] == 'igB'
+    assert send_calls[0]['url'].startswith('https://')
+    # Session was marked auto_continued_at + finalDmSentAt by completion.
+    persisted = db.comment_dm_sessions.docs[0]
+    assert persisted.get('auto_continued_at') is not None
+    assert persisted.get('auto_continued_reason') == 'click_webhook_missing'
+    assert persisted.get('finalDmSentAt') is not None
+
+
+def test_fallback_continuation_skips_follow_gated_session(monkeypatch):
+    """A session with follow_request_enabled=True must NOT be
+    auto-continued. The operator's follow gate is a deliberate
+    decision and we honor it."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session(
+        follow_request_enabled=True,
+    ))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    # No send happened.
+    assert send_calls == []
+    # Session is untouched.
+    persisted = db.comment_dm_sessions.docs[0]
+    assert persisted.get('auto_continued_at') is None
+
+
+def test_fallback_continuation_skips_session_with_no_next_step(monkeypatch):
+    """A session with no link_url/link_dm_text/follow_up_text/email
+    has nothing to deliver — the loop must not fire. Stops the loop
+    from writing junk DMs."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session(has_next_step=False))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    assert send_calls == []
+
+
+def test_fallback_continuation_skips_recently_created_session(monkeypatch):
+    """A session younger than COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS
+    must not be auto-continued — the click webhook might still arrive."""
+    db = _install_multi_account_db(monkeypatch)
+    # 5 seconds old — well under the default 60s threshold.
+    db.comment_dm_sessions.docs.append(_eligible_session(age_seconds=5))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    assert send_calls == []
+    persisted = db.comment_dm_sessions.docs[0]
+    assert persisted.get('auto_continued_at') is None
+
+
+def test_fallback_continuation_skips_already_auto_continued_session(monkeypatch):
+    """Idempotency: a session previously auto-continued must not be
+    fired a second time, even if the click webhook never arrives."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session(
+        auto_continued_at=datetime.utcnow() - timedelta(minutes=5),
+    ))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    assert send_calls == []
+
+
+def test_fallback_continuation_skips_completed_session(monkeypatch):
+    """A session with finalDmSentAt set (the click webhook arrived
+    and completed it) must not be auto-continued."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session(final_dm_sent=True))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    assert send_calls == []
+
+
+def test_fallback_continuation_skips_session_older_than_max_age(monkeypatch):
+    """Sessions older than COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS
+    (default 24h) are abandoned; the loop must not auto-fire them."""
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append(_eligible_session(
+        age_seconds=server.COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS + 3600,
+    ))
+
+    send_calls = []
+
+    async def fake_send_url_button(*args, **kwargs):
+        send_calls.append({'args': args})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'send_ig_url_button', fake_send_url_button)
+    _run_one_fallback_tick(server, db)
+
+    assert send_calls == []

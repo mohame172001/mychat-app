@@ -3243,6 +3243,43 @@ _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS = int(
     os.environ.get('COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS', '86400')
 )
 
+# Fallback-continuation TTL. When the opening DM was successfully
+# delivered (the user sees it in Instagram), but Meta has not sent us
+# a click webhook within this many seconds, we deliver the
+# configured next step (link / follow-up text) automatically.
+#
+# This exists because real-world Instagram webhook delivery for
+# messages/messaging_postbacks events is intermittent across some
+# token+app configurations and the operator's customer should not be
+# stuck staring at an unclicked button. The link the operator
+# configured is the intended outcome; the button is a Meta UI gate
+# we work around when Meta drops the event.
+#
+# Safety boundaries (the loop refuses to fire when ANY of these is
+# false — anti-spam is preserved):
+#   * Rule must have ``follow_request_enabled == False`` — never
+#     auto-skip a real follow-gate; the operator chose to require
+#     a follow, we honor it.
+#   * Session must have at least one next-step field populated
+#     (link_url, link_dm_text, follow_up_enabled+text, OR
+#     email_request_enabled). No content → nothing to send.
+#   * Session must be ``status == 'pending'`` with finalDmSentAt
+#     unset (we never re-send a completed flow).
+#   * Session must have a sane lifetime — older than the cutoff
+#     below but newer than 24h (legacy/abandoned sessions don't
+#     get auto-fired).
+#
+# Set to 0 to disable the loop entirely.
+COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS = int(
+    os.environ.get('COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS', '60')
+)
+COMMENT_DM_FALLBACK_CONTINUATION_INTERVAL_SECONDS = max(15, int(
+    os.environ.get('COMMENT_DM_FALLBACK_CONTINUATION_INTERVAL_SECONDS', '30')
+))
+COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS = int(
+    os.environ.get('COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS', str(24 * 3600))
+)
+
 
 async def _send_comment_dm_flow_entry(user_doc: dict, automation: dict, recipient_ig_id: str,
                                       comment_context: Optional[dict] = None) -> bool:
@@ -20371,6 +20408,183 @@ async def _follow_verifier_loop():
             await asyncio.sleep(FOLLOW_BACKGROUND_VERIFIER_INTERVAL_SECONDS)
 
 
+async def _comment_dm_fallback_continuation_loop():
+    """Deliver the configured next-step DM when Meta does not deliver
+    a click webhook for the opening DM's quick-reply button.
+
+    Real-world Instagram webhook delivery for ``messages`` /
+    ``messaging_postbacks`` events is intermittent on some account /
+    token / app-mode combinations. The operator's customer sees the
+    opening DM with the button, clicks, and gets nothing because the
+    click event never reaches our backend. This loop bridges that gap:
+    after ``COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS`` (default
+    60s) the configured next-step DM is delivered automatically.
+
+    Safety boundaries (anti-spam preserved):
+      * Skipped when the rule has ``follow_request_enabled = True``
+        — a real follow gate is honored.
+      * Skipped when the session has no next-step content at all
+        (nothing to send → don't write a junk DM).
+      * Skipped when the session is already completed
+        (``finalDmSentAt`` is set, status='completed'/'failed').
+      * Skipped when the session has already been auto-continued
+        once (``auto_continued_at`` is set on the row).
+      * Skipped when the session is older than
+        ``COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS`` (default
+        24h) — legacy/abandoned sessions don't get auto-fired.
+
+    Set ``COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS=0`` to
+    disable the loop entirely. Every auto-fire writes a flight-recorder
+    event ``fallback_continuation_fired`` so the operator has a clear
+    audit trail.
+    """
+    if COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS <= 0:
+        logger.info('comment_dm_fallback_continuation_disabled')
+        return
+    logger.info(
+        'comment_dm_fallback_continuation_started interval=%ss after=%ss max_age=%ss',
+        COMMENT_DM_FALLBACK_CONTINUATION_INTERVAL_SECONDS,
+        COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS,
+        COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS,
+    )
+    while not SHUTDOWN_EVENT.is_set():
+        if IS_SHUTTING_DOWN:
+            break
+        cycle_ok = True
+        cycle_err: Optional[BaseException] = None
+        try:
+            now = datetime.utcnow()
+            youngest = now - timedelta(
+                seconds=COMMENT_DM_FALLBACK_CONTINUATION_AFTER_SECONDS,
+            )
+            oldest = now - timedelta(
+                seconds=COMMENT_DM_FALLBACK_CONTINUATION_MAX_AGE_SECONDS,
+            )
+            cursor = db.comment_dm_sessions.find({
+                'status': 'pending',
+                'finalDmSentAt': None,
+                'auto_continued_at': {'$exists': False},
+                # No follow gate — a real follow gate is honored.
+                '$and': [
+                    {'$or': [
+                        {'follow_request_enabled': {'$ne': True}},
+                        {'follow_request_enabled': {'$exists': False}},
+                    ]},
+                    {'$or': [
+                        # At least one next-step field present so we
+                        # have something to deliver.
+                        {'link_url': {'$nin': [None, '']}},
+                        {'link_dm_text': {'$nin': [None, '']}},
+                        {'follow_up_text': {'$nin': [None, '']}},
+                        {'email_request_enabled': True},
+                    ]},
+                ],
+                'created': {'$lte': youngest, '$gte': oldest},
+            }).sort('created', -1).limit(50)
+            sessions = await cursor.to_list(50)
+            if sessions:
+                logger.info(
+                    'comment_dm_fallback_continuation_tick eligible=%s',
+                    len(sessions),
+                )
+            for sess in sessions:
+                if IS_SHUTTING_DOWN:
+                    break
+                try:
+                    # Re-check the session under a status guard so two
+                    # ticks racing each other can't double-fire it.
+                    claim_result = await db.comment_dm_sessions.update_one(
+                        {
+                            'id': sess.get('id'),
+                            'status': 'pending',
+                            'finalDmSentAt': None,
+                            'auto_continued_at': {'$exists': False},
+                        },
+                        {'$set': {
+                            'auto_continued_at': now,
+                            'auto_continued_reason': 'click_webhook_missing',
+                            'updated': now,
+                        }},
+                    )
+                    if not (claim_result and claim_result.modified_count):
+                        # Another worker already claimed this session, or
+                        # the click webhook just arrived and completed it.
+                        continue
+                    user_doc = await db.users.find_one({'id': sess.get('user_id')})
+                    if not user_doc:
+                        continue
+                    sess_ig_id = (
+                        sess.get('ig_user_id')
+                        or sess.get('instagramAccountId')
+                        or sess.get('igUserId')
+                    )
+                    if sess_ig_id:
+                        account_doc = await db.instagram_accounts.find_one({
+                            'userId': user_doc.get('id'),
+                            '$or': [
+                                {'instagramAccountId': sess_ig_id},
+                                {'igUserId': sess_ig_id},
+                            ],
+                        })
+                        if account_doc:
+                            user_doc = _with_instagram_account_context(
+                                user_doc, account_doc,
+                            )
+                    await _record_instagram_automation_event(
+                        'fallback_continuation_fired',
+                        source='fallback_continuation',
+                        user_doc=user_doc,
+                        commenter_id=sess.get('recipient_id'),
+                        rule_id=sess.get('automation_id'),
+                        extra={
+                            'session_id_partial': _safe_partial_identifier(sess.get('id')),
+                            'age_seconds': int(
+                                (now - sess.get('created')).total_seconds()
+                            ) if isinstance(sess.get('created'), datetime) else None,
+                        },
+                    )
+                    ok = await _send_comment_dm_flow_completion(user_doc, sess)
+                    await _record_instagram_automation_event(
+                        'fallback_continuation_success' if ok else 'fallback_continuation_failed',
+                        source='fallback_continuation',
+                        user_doc=user_doc,
+                        commenter_id=sess.get('recipient_id'),
+                        rule_id=sess.get('automation_id'),
+                        skip_reason=None if ok else 'fallback_send_failed',
+                        extra={
+                            'session_id_partial': _safe_partial_identifier(sess.get('id')),
+                        },
+                    )
+                    logger.info(
+                        'comment_dm_fallback_continuation_dispatched session=%s ok=%s',
+                        sess.get('id'), ok,
+                    )
+                except Exception:
+                    logger.exception(
+                        'comment_dm_fallback_continuation_per_session_error session=%s',
+                        sess.get('id'),
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            cycle_ok = False
+            cycle_err = exc
+            logger.exception('comment_dm_fallback_continuation_tick_failed')
+        _bg_tick(
+            'comment_dm_fallback_continuation',
+            success=cycle_ok, error=cycle_err,
+        )
+        try:
+            await asyncio.wait_for(
+                SHUTDOWN_EVENT.wait(),
+                timeout=COMMENT_DM_FALLBACK_CONTINUATION_INTERVAL_SECONDS,
+            )
+        except (asyncio.TimeoutError, RuntimeError):
+            await asyncio.sleep(
+                COMMENT_DM_FALLBACK_CONTINUATION_INTERVAL_SECONDS,
+            )
+
+
 async def _webhook_subscription_heal_loop():
     """Self-heal background loop: every ~30 min, for every active IG
     account, ask Meta what fields are currently subscribed. If
@@ -23647,6 +23861,10 @@ async def _startup():
     _register_bg_task('webhook_dlq', _webhook_dlq_loop)
     _register_bg_task('collab_reclassifier', _collab_reclassifier_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
+    _register_bg_task(
+        'comment_dm_fallback_continuation',
+        _comment_dm_fallback_continuation_loop,
+    )
     _register_bg_task('webhook_subscription_heal', _webhook_subscription_heal_loop)
     # Watchdog last so it can supervise the others.
     _register_bg_task('watchdog', _watchdog_loop)
