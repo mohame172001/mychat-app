@@ -20622,6 +20622,54 @@ def _latest_event(events: list, stages: set) -> Optional[dict]:
     return None
 
 
+def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> str:
+    """Map an exact stop_reason into a single operator-facing next-step
+    string. Used by /api/admin/instagram/automation-stop-point so the
+    operator never has to interpret raw event names.
+    """
+    reason = (stop_reason or '').strip().lower()
+    source = (summary or {}).get('source')
+    rule_matched = bool((summary or {}).get('rule_matched'))
+    rules_count = (summary or {}).get('rules_loaded_count')
+    reached = bool((summary or {}).get('last_comment_reached_backend'))
+
+    if reason in {'no_comment_seen'} and not reached:
+        return 'Webhook did not arrive and polling did not scan — check Meta subscription state and account connection validity.'
+    if reason == 'account_resolution_failed' or 'account_resolution' in reason:
+        return 'Account could not be resolved from the webhook entry — verify the Instagram account is linked and active.'
+    if reason in {'no_active_rules_loaded'} or (rules_count == 0):
+        return 'This Instagram account has no active automations — create or enable a comment automation for it.'
+    if reason in {'rule_not_matched', 'no_rule_match'}:
+        return 'Comment was on a post not covered by any rule (most likely an uncovered post or a post-specific rule whose selected media did not match).'
+    if 'selected_media' in reason or reason in {'post_specific_rule_media_mismatch', 'media_match_failed'}:
+        return 'Post-specific rule did not fire because the commented post id did not match selected_media_id — comment on the rule\'s selected post or add a general any-post rule.'
+    if reason in {'historical_before_rule_activation'}:
+        return 'Comment timestamp predates the rule\'s activation — only comments newer than activationStartedAt fire.'
+    if reason in {'dedupe_skipped', 'flow_already_completed', 'flow_already_started', 'same_commenter_same_post_same_rule'}:
+        return 'The same commenter already had an opening flow on this post + rule — duplicate prevention skipped a repeat. Reset the flow from the diagnostics endpoint or test from a brand-new commenter.'
+    if reason in {'public_reply_failed'} or 'reply_failed' in reason:
+        return 'Meta refused the public reply — check the safe error message and confirm the IG account token + permissions are healthy.'
+    if reason in {'opening_dm_failed'} or 'dm_failed' in reason:
+        return 'Meta refused the opening DM — most often messaging_window_expired or recipient_unavailable. Confirm token + 24h messaging window.'
+    if reason in {'session_create_failed'}:
+        return 'Session could not be created after a successful reply + DM — inspect the latest session_create_failed event for the sanitized cause.'
+    if reason in {'plan_limit_exceeded', 'skipped_plan_limit'}:
+        return 'Monthly plan limit reached — upgrade the plan or wait for the next billing month reset.'
+    if reason == 'matched_but_reply_not_attempted':
+        return 'Rule matched but the public reply step never started — check the action queue health and rate limiter.'
+    if reason == 'reply_attempted_dm_not_attempted':
+        return 'Reply went out but the opening DM step never started — most often a per-account DM rate-limit pause or a missing dm step on the rule.'
+    if reason == 'dm_attempted_session_not_attempted':
+        return 'Opening DM went out but no session was created — the rule is missing next-step fields (link / follow-up / follow-gate). Edit the rule or run the repair tool.'
+    if reason == 'automation_success':
+        return 'Automation completed successfully for this comment. No action needed.'
+    if reason == 'account_resolution_not_recorded' and source == 'webhook':
+        return 'Webhook arrived but no account resolution event was recorded — verify backend deployment is current and instagram_automation_events writes are succeeding.'
+    if not reached:
+        return 'No comment event reached the backend — check Meta webhook delivery and the polling fallback for this account.'
+    return 'No specific recommendation — inspect the latest events for this username via automation-flight-recorder.'
+
+
 async def summarize_account_automation_stop_point(username: str, limit: int = 100) -> dict:
     events = await _automation_flight_events_for_username(username, limit=limit)
     comment_event = _latest_event(events, {'webhook_comment_detected', 'poller_comment_seen'})
@@ -20674,7 +20722,30 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
     else:
         stop_reason = 'in_progress_or_unknown'
 
-    return {
+    # Selected-media-match is reported separately so the operator can see
+    # "rule matched but only because the comment was on a different post"
+    # versus "rule matched on the correct selected post". The flight
+    # recorder writes selected_media_id_partial + media_id_partial inside
+    # the rule_match_success event extras when available.
+    selected_media_matched: Optional[bool] = None
+    if rule_match:
+        extras = (rule_match.get('extra') or {}) if isinstance(rule_match, dict) else {}
+        selected_partial = extras.get('selected_media_id_partial')
+        incoming_partial = extras.get('media_id_partial')
+        if selected_partial or incoming_partial:
+            selected_media_matched = bool(
+                selected_partial and incoming_partial and selected_partial == incoming_partial
+            )
+    # Last sanitized Meta error if there was a send failure.
+    last_send_error: Optional[Dict[str, Any]] = None
+    if failure and failure.get('stage') in {'public_reply_failed', 'opening_dm_failed', 'session_create_failed', 'automation_failed'}:
+        last_send_error = {
+            'stage': failure.get('stage'),
+            'reason': failure.get('skip_reason'),
+            'error_code': failure.get('error_code'),
+            'error_message': failure.get('error_message'),
+        }
+    summary = {
         'username': _automation_flight_username_key(username),
         'last_comment_reached_backend': bool(comment_event),
         'source': (comment_event or {}).get('source') if comment_event else 'none',
@@ -20684,13 +20755,17 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'rules_loaded_count': rules_count,
         'rule_matched': bool(rule_match),
         'media_matched': bool(rule_match),
+        'selected_media_matched': selected_media_matched,
         'reply_attempted': bool(reply_attempt),
         'dm_attempted': bool(dm_attempt),
         'session_attempted': bool(session_attempt),
         'exact_stop_reason': stop_reason,
+        'last_send_error': last_send_error,
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
             if events and isinstance(events[0].get('created_at'), datetime) else None,
     }
+    summary['next_recommended_action'] = _recommend_next_action_for_stop_reason(stop_reason, summary)
+    return summary
 
 
 @api.get('/admin/instagram/multi-account-health')
@@ -20902,6 +20977,61 @@ async def admin_instagram_automation_flight_recorder(
         'username': username_key,
         'summary': await summarize_account_automation_stop_point(username_key, limit=max(limit, 100)),
         'events': [_serialize_automation_flight_event(event) for event in events],
+    }
+
+
+@api.get('/admin/instagram/automation-stop-point')
+async def admin_instagram_automation_stop_point(
+    username: Optional[str] = None,
+    limit: int = 20,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Operator-friendly plain summary of the latest automation stop
+    point for one Instagram username (or every linked account if
+    username is omitted). Returns a one-line ``next_recommended_action``
+    string so the operator never has to read individual event names or
+    decide between webhook / polling / rule / media / dedupe causes.
+
+    Backed by the same flight-recorder that the rest of the backend
+    already writes to. No frontend diagnostics page is reintroduced —
+    this is admin-protected only. Response is sanitized: partial ids
+    only, no tokens, no full payloads, no full message text.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    safe_limit = max(1, min(int(limit or 20), 100))
+
+    if username:
+        username_key = _automation_flight_username_key(username)
+        summary = await summarize_account_automation_stop_point(
+            username_key, limit=max(safe_limit, 50),
+        )
+        return {
+            'ok': True,
+            'username': username_key,
+            'summary': summary,
+        }
+
+    # No username — return one summary per linked Instagram account
+    # for the caller's user_id.
+    accounts = await db.instagram_accounts.find(
+        {'userId': user_id},
+    ).limit(50).to_list(50)
+    summaries: List[Dict[str, Any]] = []
+    for account in accounts:
+        username_key = _automation_flight_username_key(account.get('username'))
+        if not username_key:
+            continue
+        summary = await summarize_account_automation_stop_point(
+            username_key, limit=max(safe_limit, 50),
+        )
+        summary['instagram_account_id_partial'] = _safe_partial_identifier(
+            account.get('instagramAccountId') or account.get('igUserId')
+        )
+        summaries.append(summary)
+    return {
+        'ok': True,
+        'count': len(summaries),
+        'summaries': summaries,
     }
 
 

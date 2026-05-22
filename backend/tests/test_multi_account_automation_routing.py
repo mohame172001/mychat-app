@@ -3400,3 +3400,202 @@ def test_after_reset_dedupe_still_blocks_immediate_repeat_on_same_new_comment(mo
     ))
     assert second.get('already_processed') is True
     assert second.get('classified_reason') == 'same_commenter_same_post_same_rule'
+
+
+# ---------------------------------------------------------------------------
+# Automation stop-point classifier (the operator-facing self-explaining
+# summary). Backed by the existing _record_instagram_automation_event
+# flight recorder and the summarize_account_automation_stop_point reducer.
+# ---------------------------------------------------------------------------
+
+def _seed_flight_event(db, *, stage, username='account_b', source='webhook',
+                       skip_reason=None, error_code=None, error_message=None,
+                       extra=None, created_at=None):
+    db.instagram_automation_events.docs.append({
+        'created_at': created_at or datetime.utcnow(),
+        'source': source,
+        'stage': stage,
+        'username': username,
+        'username_key': username,
+        'skip_reason': skip_reason,
+        'error_code': error_code,
+        'error_message': error_message,
+        'extra': extra or {},
+    })
+
+
+def _patch_no_admin_audit(monkeypatch):
+    async def noop(*args, **kwargs):
+        return None
+    monkeypatch.setattr(server, '_record_admin_action', noop)
+
+
+def test_recommend_next_action_for_each_known_stop_reason():
+    """Every classifier output yields a stable, human-readable next-step
+    string — the operator never sees a raw token without an explanation.
+    Each case passes a summary state that matches the reason."""
+    cases = [
+        ('no_comment_seen',                 'webhook did not arrive', {'last_comment_reached_backend': False, 'source': 'none'}),
+        ('account_resolution_failed',       'account could not be resolved', {'last_comment_reached_backend': True}),
+        ('no_active_rules_loaded',          'no active automations', {'last_comment_reached_backend': True, 'rules_loaded_count': 0}),
+        ('rule_not_matched',                'not covered by any rule', {'last_comment_reached_backend': True}),
+        ('post_specific_rule_media_mismatch','post-specific rule did not fire', {'last_comment_reached_backend': True}),
+        ('media_match_failed',              'post-specific rule did not fire', {'last_comment_reached_backend': True}),
+        ('historical_before_rule_activation','comment timestamp predates', {'last_comment_reached_backend': True}),
+        ('dedupe_skipped',                  'duplicate prevention', {'last_comment_reached_backend': True}),
+        ('flow_already_completed',          'duplicate prevention', {'last_comment_reached_backend': True}),
+        ('same_commenter_same_post_same_rule','duplicate prevention', {'last_comment_reached_backend': True}),
+        ('public_reply_failed',             'public reply', {'last_comment_reached_backend': True}),
+        ('opening_dm_failed',               'opening dm', {'last_comment_reached_backend': True}),
+        ('session_create_failed',           'session could not be created', {'last_comment_reached_backend': True}),
+        ('plan_limit_exceeded',             'monthly plan limit', {'last_comment_reached_backend': True}),
+        ('matched_but_reply_not_attempted', 'public reply step never started', {'last_comment_reached_backend': True, 'rule_matched': True}),
+        ('reply_attempted_dm_not_attempted','opening dm step never started', {'last_comment_reached_backend': True, 'rule_matched': True}),
+        ('dm_attempted_session_not_attempted','no session was created', {'last_comment_reached_backend': True, 'rule_matched': True}),
+        ('automation_success',              'completed successfully', {'last_comment_reached_backend': True, 'rule_matched': True}),
+    ]
+    for reason, expected_substr, summary_state in cases:
+        summary = {'source': 'webhook', 'rule_matched': False, 'rules_loaded_count': 1}
+        summary.update(summary_state)
+        recommendation = server._recommend_next_action_for_stop_reason(reason, summary)
+        assert expected_substr in recommendation.lower(), (
+            f'reason={reason!r} expected hint {expected_substr!r} not in {recommendation!r}'
+        )
+
+
+def test_summarize_stop_point_no_comment_seen_reports_missing_event(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['last_comment_reached_backend'] is False
+    assert summary['source'] == 'none'
+    assert summary['exact_stop_reason'] in {'no_comment_seen', 'rule_not_matched'}
+    assert summary['next_recommended_action']
+
+
+def test_summarize_stop_point_no_active_rules_yields_create_automation_hint(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook')
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook',
+        extra={'rules_count': 0},
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['last_comment_reached_backend'] is True
+    assert summary['source'] == 'webhook'
+    assert summary['account_resolved'] is True
+    assert summary['rules_loaded'] is True
+    assert summary['rules_loaded_count'] == 0
+    assert summary['exact_stop_reason'] == 'no_active_rules_loaded'
+    assert 'automation' in summary['next_recommended_action'].lower()
+
+
+def test_summarize_stop_point_post_specific_media_mismatch(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook')
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook',
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(
+        db, stage='rule_match_failed', source='webhook',
+        skip_reason='selected_media_no_match',
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['last_comment_reached_backend'] is True
+    assert summary['exact_stop_reason'] == 'selected_media_no_match'
+
+
+def test_summarize_stop_point_dedupe_skip_is_visible(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook')
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook',
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(db, stage='rule_match_success', source='webhook')
+    _seed_flight_event(
+        db, stage='dedupe_skipped', source='webhook',
+        skip_reason='same_commenter_same_post_same_rule',
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['rule_matched'] is True
+    assert summary['exact_stop_reason'] in {
+        'same_commenter_same_post_same_rule', 'dedupe_skipped',
+    }
+
+
+def test_summarize_stop_point_meta_send_failure_surfaces_error(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook')
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook',
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(db, stage='rule_match_success', source='webhook')
+    _seed_flight_event(db, stage='public_reply_attempted', source='webhook')
+    _seed_flight_event(
+        db, stage='opening_dm_failed', source='webhook',
+        skip_reason='messaging_window_expired',
+        error_code='10', error_message='User cannot receive messages',
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['exact_stop_reason'] == 'messaging_window_expired'
+    err = summary['last_send_error']
+    assert err is not None
+    assert err['stage'] == 'opening_dm_failed'
+    assert err['reason'] == 'messaging_window_expired'
+    assert err['error_code'] == '10'
+
+
+def test_summarize_stop_point_polling_source_visible_when_only_poller_ran(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_account_scan_started', source='polling')
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling')
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['last_comment_reached_backend'] is True
+    assert summary['source'] == 'polling'
+    assert summary['polling_scanned_account'] is True
+
+
+def test_admin_automation_stop_point_endpoint_returns_summary(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook')
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook',
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(db, stage='rule_match_success', source='webhook')
+    _seed_flight_event(db, stage='automation_success', source='webhook')
+    result = _run(server.admin_instagram_automation_stop_point(
+        username='account_b', user_id='u1',
+    ))
+    assert result['ok'] is True
+    assert result['username'] == 'account_b'
+    summary = result['summary']
+    assert summary['last_comment_reached_backend'] is True
+    assert summary['exact_stop_reason'] == 'automation_success'
+    assert 'completed successfully' in summary['next_recommended_action'].lower()
+
+
+def test_admin_automation_stop_point_endpoint_lists_all_accounts_when_no_username(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook',
+                       username='account_a')
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook',
+                       username='account_b')
+    result = _run(server.admin_instagram_automation_stop_point(user_id='u1'))
+    assert result['ok'] is True
+    usernames = {s['username'] for s in result['summaries']}
+    assert {'account_a', 'account_b'}.issubset(usernames)
+    for s in result['summaries']:
+        assert s['next_recommended_action']
+        assert 'instagram_account_id_partial' in s
