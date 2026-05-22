@@ -273,6 +273,7 @@ class FakeDB:
         self.admin_members = FakeCollection(collections.get('admin_members', []))
         self.user_limit_overrides = FakeCollection(collections.get('user_limit_overrides', []))
         self.instagram_account_trial_claims = FakeCollection(collections.get('instagram_account_trial_claims', []))
+        self.instagram_automation_events = FakeCollection(collections.get('instagram_automation_events', []))
 
 
 def _account(**overrides):

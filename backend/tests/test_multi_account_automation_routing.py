@@ -25,6 +25,7 @@ def _reply_provider_ok():
         'status_code': 200,
         'body': {'id': 'reply_provider_id'},
         'provider_comment_id': 'reply_provider_id',
+        'provider_response_ok': True,
         'failure_reason': None,
         'retryable': False,
     }
@@ -241,6 +242,164 @@ def test_account_a_comment_on_account_b_routes_only_to_b_rule_and_token(monkeypa
     assert dm_calls[0]['recipient_id'] == 'igA'
     assert dm_calls[0]['allow_workspace_recipient'] is True
     assert db.comments.docs[0]['instagramAccountId'] == 'igB'
+
+
+def test_flight_recorder_writes_comment_pipeline_stages(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+
+    async def reply_ok(*_args, **_kwargs):
+        return _reply_provider_ok()
+
+    async def send_message_ok(*_args, **_kwargs):
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner = server._with_instagram_account_context(db.users.docs[0], db.instagram_accounts.docs[1])
+    result = _run(server._handle_new_comment(
+        owner,
+        {
+            'ig_comment_id': 'flight-comment-b',
+            'media_id': 'mediaB',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'webhook_comment_detected' in stages
+    assert 'rule_loading_started' in stages
+    assert 'rule_loading_finished' in stages
+    assert 'rule_match_success' in stages
+    assert 'automation_execution_started' in stages
+    assert 'public_reply_success' in stages
+    assert 'opening_dm_success' in stages
+    assert 'session_create_success' in stages
+    assert 'automation_success' in stages
+    assert not any('token' in str(event).lower() for event in db.instagram_automation_events.docs)
+
+
+def test_flight_recorder_records_account_b_media_mismatch(monkeypatch):
+    accounts = [_account(id='accB', userId='u1', instagramAccountId='igB',
+                         igUserId='igB', username='mogehad17', accessToken='token-b')]
+    user = _user(id='u1', active_instagram_account_id='accA',
+                 ig_user_id='igA', meta_access_token='token-a')
+    db = FakeDB(accounts, user, automations=[
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'selected-media-b')
+    ])
+    monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_a, **_kw: asyncio.sleep(0)))
+    owner = server._with_instagram_account_context(user, accounts[0])
+
+    result = _run(server._handle_new_comment(
+        owner,
+        {
+            'ig_comment_id': 'mismatch-comment-b',
+            'media_id': 'other-media-b',
+            'commenter_id': 'igA',
+            'commenter_username': 'account_a',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is False
+    mismatch_events = [
+        event for event in db.instagram_automation_events.docs
+        if event.get('stage') == 'rule_match_failed'
+    ]
+    assert mismatch_events
+    assert mismatch_events[-1]['skip_reason'] == 'selected_media_no_match'
+
+
+def test_flight_recorder_records_polling_stages_for_selected_media(monkeypatch):
+    accounts = [_account(id='accB', userId='u1', instagramAccountId='igB',
+                         igUserId='igB', username='mogehad17', accessToken='token-b')]
+    user = _user(id='u1', active_instagram_account_id='accA',
+                 ig_user_id='igA', meta_access_token='token-a')
+    db = FakeDB(accounts, user, automations=[
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'selected-media-b')
+    ])
+    monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(server, 'ws_manager', SimpleNamespace(send=lambda *_a, **_kw: asyncio.sleep(0)))
+    monkeypatch.setattr(server, 'reserve_usage_limit',
+                        lambda *a, **kw: asyncio.sleep(0, result={'allowed': True, 'exceeded': False, 'fail_open': False}))
+    monkeypatch.setattr(server, 'confirm_usage_reservation',
+                        lambda *a, **kw: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed',
+                        lambda *a, **kw: asyncio.sleep(0, result=_reply_provider_ok()))
+    monkeypatch.setattr(server, 'send_ig_message',
+                        lambda *a, **kw: asyncio.sleep(0, result={'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}))
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse(200, {
+                'data': [{
+                    'id': 'poll-comment-b',
+                    'text': 'hello',
+                    'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                    'from': {'id': 'igA', 'username': 'account_a'},
+                }]
+            })
+
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+    owner = server._with_instagram_account_context(user, accounts[0])
+    stats = _run(server._poll_user_comments(owner))
+
+    assert stats['mediaChecked'] == 1
+    assert stats['matched'] == 1
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'poller_account_scan_started' in stages
+    assert 'poller_media_scan_started' in stages
+    assert 'poller_comment_seen' in stages
+    assert 'automation_success' in stages
+
+
+def test_multi_account_health_exposes_sanitized_stop_point(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    db.instagram_automation_events.docs.extend([
+        {
+            'created_at': now,
+            'username': 'account_b',
+            'username_key': 'account_b',
+            'stage': 'poller_account_scan_started',
+            'source': 'polling',
+        },
+        {
+            'created_at': now + timedelta(seconds=1),
+            'username': 'account_b',
+            'username_key': 'account_b',
+            'stage': 'rule_match_failed',
+            'source': 'polling',
+            'skip_reason': 'selected_media_no_match',
+        },
+    ])
+    monkeypatch.setattr(server, '_require_admin_permission',
+                        lambda *_a, **_kw: asyncio.sleep(0))
+
+    result = _run(server.admin_instagram_multi_account_health(user_id='admin-user'))
+    account_b = next(item for item in result['accounts'] if item['username'] == 'account_b')
+
+    assert account_b['last_polling_scan_time']
+    assert account_b['last_skip_reason'] == 'selected_media_no_match'
+    assert account_b['stop_point_summary']['exact_stop_reason'] == 'selected_media_no_match'
+    assert 'accessToken' not in str(result)
 
 
 def test_webhook_resolver_accepts_account_aliases_not_active_ui_account(monkeypatch):

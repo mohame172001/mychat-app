@@ -534,6 +534,139 @@ def _safe_partial_identifier(value: Any) -> str:
     return f"{raw[:3]}...{raw[-3:]}"
 
 
+def _automation_flight_safe_text(value: Any, max_len: int = 180) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    sensitive_markers = (
+        'access_token',
+        'authorization',
+        'bearer ',
+        'password',
+        'reset_token',
+        'client_secret',
+    )
+    lowered = text.lower()
+    if any(marker in lowered for marker in sensitive_markers):
+        return '[redacted]'
+    return text[:max_len]
+
+
+def _automation_flight_username_key(value: Any) -> str:
+    return str(value or '').strip().lstrip('@').lower()
+
+
+def _automation_flight_account_username(user_doc: Optional[dict] = None,
+                                        account_doc: Optional[dict] = None,
+                                        username: Optional[str] = None) -> str:
+    if username:
+        return _automation_flight_username_key(username)
+    if isinstance(account_doc, dict):
+        for key in ('username', 'instagramUsername', 'handle', 'instagramHandle'):
+            if account_doc.get(key):
+                return _automation_flight_username_key(account_doc.get(key))
+    if isinstance(user_doc, dict):
+        for key in ('instagramHandle', 'instagramUsername', 'username'):
+            if user_doc.get(key):
+                return _automation_flight_username_key(user_doc.get(key))
+    return ''
+
+
+def _automation_flight_rule_type(rule: Optional[dict]) -> str:
+    if not isinstance(rule, dict) or not rule:
+        return 'unknown'
+    try:
+        return 'post_specific' if _selected_specific_media_id(rule) else 'general'
+    except Exception:
+        return 'unknown'
+
+
+async def _record_instagram_automation_event(
+    stage: str,
+    *,
+    source: Optional[str] = None,
+    user_doc: Optional[dict] = None,
+    account_doc: Optional[dict] = None,
+    username: Optional[str] = None,
+    user_id: Optional[str] = None,
+    instagram_account_id: Optional[str] = None,
+    media_id: Optional[str] = None,
+    selected_media_id: Optional[str] = None,
+    comment_id: Optional[str] = None,
+    commenter_id: Optional[str] = None,
+    rule_id: Optional[str] = None,
+    rule_type: Optional[str] = None,
+    matched: Optional[bool] = None,
+    skip_reason: Optional[str] = None,
+    error_code: Optional[Any] = None,
+    error_message: Optional[Any] = None,
+    elapsed_ms: Optional[Any] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    """Persist a sanitized backend-only flight-recorder event.
+
+    This collection is intentionally safe for admin support views: it stores
+    partial identifiers and decision metadata only. It never stores tokens,
+    raw webhook payloads, comment text, or DM bodies.
+    """
+    if not stage:
+        return
+    try:
+        resolved_user_id = user_id or (user_doc or {}).get('id') or (account_doc or {}).get('userId') or (account_doc or {}).get('user_id')
+        resolved_account_id = (
+            instagram_account_id
+            or (user_doc or {}).get('ig_user_id')
+            or (account_doc or {}).get('instagramAccountId')
+            or (account_doc or {}).get('igUserId')
+            or (account_doc or {}).get('ig_user_id')
+        )
+        username_key = _automation_flight_account_username(user_doc, account_doc, username)
+        doc = {
+            'created_at': datetime.utcnow(),
+            'source': _automation_flight_safe_text(source, 40),
+            'stage': _automation_flight_safe_text(stage, 80),
+            'username': username_key or None,
+            'username_key': username_key or None,
+            'instagram_account_id_partial': _safe_partial_identifier(resolved_account_id),
+            'owner_user_id_partial': _safe_partial_identifier(resolved_user_id),
+            'media_id_partial': _safe_partial_identifier(media_id),
+            'selected_media_id_partial': _safe_partial_identifier(selected_media_id),
+            'comment_id_partial': _safe_partial_identifier(comment_id),
+            'commenter_id_partial': _safe_partial_identifier(commenter_id),
+            'rule_id_partial': _safe_partial_identifier(rule_id),
+            'rule_type': _automation_flight_safe_text(rule_type or 'unknown', 40),
+            'matched': matched if matched is None else bool(matched),
+            'skip_reason': _automation_flight_safe_text(skip_reason),
+            'error_code': _automation_flight_safe_text(error_code, 80),
+            'error_message': _automation_flight_safe_text(error_message),
+        }
+        if elapsed_ms is not None:
+            try:
+                doc['elapsed_ms'] = int(float(elapsed_ms))
+            except (TypeError, ValueError):
+                doc['elapsed_ms'] = None
+        if isinstance(extra, dict):
+            safe_extra = {}
+            for key, value in extra.items():
+                key_s = str(key)[:80]
+                if key_s.lower() in {'access_token', 'authorization', 'password', 'raw_payload', 'message_text', 'comment_text'}:
+                    continue
+                if isinstance(value, (int, float, bool)) or value is None:
+                    safe_extra[key_s] = value
+                elif isinstance(value, datetime):
+                    safe_extra[key_s] = value.isoformat()
+                else:
+                    safe_extra[key_s] = _automation_flight_safe_text(value)
+            if safe_extra:
+                doc['extra'] = safe_extra
+        await db.instagram_automation_events.insert_one(doc)
+    except Exception as exc:
+        logger.info('instagram_automation_flight_record_failed stage=%s err=%s',
+                    stage, type(exc).__name__)
+
+
 def _sanitize_usage_metadata(metadata: Optional[dict]) -> dict:
     """Keep usage metadata useful without storing tokens or message content."""
     if not isinstance(metadata, dict):
@@ -2840,19 +2973,58 @@ async def _send_text_dm_with_optional_tracking(user_doc: dict, session: dict, te
 
 async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient_ig_id: str,
                                      comment_context: Optional[dict], payload: str) -> dict:
-    return await _create_comment_dm_session_impl(
-        user_doc,
-        automation,
-        recipient_ig_id,
-        comment_context,
-        payload,
-        db=db,
-        logger=logger,
-        normalize_follow_gate_config=_normalize_follow_gate_config,
-        current_instagram_context=_current_instagram_context,
-        conversion_tracking_enabled=_conversion_tracking_enabled,
-        safe_partial_identifier=_safe_partial_identifier,
+    media_id = (comment_context or {}).get('media_id')
+    comment_id = (comment_context or {}).get('ig_comment_id') or (comment_context or {}).get('source_comment_id')
+    await _record_instagram_automation_event(
+        'session_create_attempted',
+        source=(comment_context or {}).get('source'),
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=comment_id,
+        commenter_id=recipient_ig_id,
+        rule_id=automation.get('id'),
+        rule_type=_automation_flight_rule_type(automation),
     )
+    try:
+        session = await _create_comment_dm_session_impl(
+            user_doc,
+            automation,
+            recipient_ig_id,
+            comment_context,
+            payload,
+            db=db,
+            logger=logger,
+            normalize_follow_gate_config=_normalize_follow_gate_config,
+            current_instagram_context=_current_instagram_context,
+            conversion_tracking_enabled=_conversion_tracking_enabled,
+            safe_partial_identifier=_safe_partial_identifier,
+        )
+        await _record_instagram_automation_event(
+            'session_create_success' if session else 'session_create_failed',
+            source=(comment_context or {}).get('source'),
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=comment_id,
+            commenter_id=recipient_ig_id,
+            rule_id=automation.get('id'),
+            rule_type=_automation_flight_rule_type(automation),
+            skip_reason=None if session else 'session_not_created',
+        )
+        return session
+    except Exception as exc:
+        await _record_instagram_automation_event(
+            'session_create_failed',
+            source=(comment_context or {}).get('source'),
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=comment_id,
+            commenter_id=recipient_ig_id,
+            rule_id=automation.get('id'),
+            rule_type=_automation_flight_rule_type(automation),
+            error_code=type(exc).__name__,
+            error_message='session_create_exception',
+        )
+        raise
 
 def _comment_dm_follow_confirmation_matches(session: dict, text: str = '',
                                             payload: Optional[str] = None) -> bool:
@@ -15729,6 +15901,11 @@ async def instagram_webhook(request: Request):
             logger.warning('webhook_hmac_not_enforced reason=%s', sig_result['reason'])
     else:
         logger.info('webhook_signature_valid prefix=%s', sig_result['computed_prefix'])
+        await _record_instagram_automation_event(
+            'webhook_signature_ok',
+            source='webhook',
+            extra={'entries_count': None},
+        )
     import json as _json
     try:
         payload = _json.loads(raw_body)
@@ -15747,6 +15924,11 @@ async def instagram_webhook(request: Request):
         )
     logger.info('ig_webhook_payload_received object=%s entries=%s',
                 payload.get('object'), len(payload.get('entry') or []))
+    await _record_instagram_automation_event(
+        'webhook_received',
+        source='webhook',
+        extra={'object': payload.get('object'), 'entries_count': len(payload.get('entry') or [])},
+    )
     # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
     # the webhook ACK well under the 5-second Meta retry threshold.
     global WEBHOOK_LAST_RECEIVED_AT
@@ -15976,13 +16158,39 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     ig_comment_id, media_id, user_id, ig_account_id, source)
     logger.info('comment_text_classified comment_id=%s source=%s text_length=%s non_empty=%s',
                 ig_comment_id, source, len(comment_text or ''), bool(comment_text))
+    await _record_instagram_automation_event(
+        'webhook_comment_detected' if source == 'webhook' else 'poller_comment_seen',
+        source=source,
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=ig_comment_id,
+        commenter_id=commenter_id,
+    )
 
     if not ig_comment_id or not commenter_id:
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source=source,
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=ig_comment_id,
+            commenter_id=commenter_id,
+            skip_reason='missing_id',
+        )
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'missing_id'}
     if commenter_id == ig_account_id:
         logger.info('comment_skipped_bot_own_reply ig_comment_id=%s user=%s source=%s',
                     ig_comment_id, user_doc.get('email'), source)
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source=source,
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=ig_comment_id,
+            commenter_id=commenter_id,
+            skip_reason='bot_own_reply',
+        )
         return {'processed': False, 'matched': False, 'action_status': 'skipped',
                 'reason': 'bot_own_reply'}
     # NOTE: we INTENTIONALLY do not skip when commenter_id is a sibling
@@ -16026,6 +16234,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     existing_created = None
 
     # Dedupe
+    await _record_instagram_automation_event(
+        'dedupe_checked',
+        source=source,
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=ig_comment_id,
+        commenter_id=commenter_id,
+        extra={'namespace': 'comment_event'},
+    )
     existing = await db.comments.find_one({
         'user_id': user_id, 'ig_comment_id': ig_comment_id,
         '$or': [
@@ -16277,9 +16494,26 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     if source in ('polling', 'manual_catchup'):
         logger.info('poller_comment_rule_matching_started comment_id=%s media_id=%s source=%s',
                     ig_comment_id, media_id, source)
+    await _record_instagram_automation_event(
+        'rule_loading_started',
+        source=source,
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=ig_comment_id,
+        commenter_id=commenter_id,
+    )
     automations = await db.automations.find(
         {**_account_scoped_query(user_id, ig_account_id), 'status': 'active'}
     ).to_list(100)
+    await _record_instagram_automation_event(
+        'rule_loading_finished',
+        source=source,
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=ig_comment_id,
+        commenter_id=commenter_id,
+        extra={'rules_count': len(automations)},
+    )
     logger.info(
         'automation_rules_loaded event_type=comment user_id=%s instagram_account_id=%s count=%s',
         user_id,
@@ -16307,6 +16541,20 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     for auto in automations:
         rule_priority = _comment_rule_priority(auto, media_id)
         rule_scope = _comment_rule_scope(auto, media_id)
+        selected_media_for_event = _selected_specific_media_id(auto)
+        await _record_instagram_automation_event(
+            'rule_candidate_evaluated',
+            source=source,
+            user_doc=user_doc,
+            media_id=media_id,
+            selected_media_id=selected_media_for_event,
+            comment_id=ig_comment_id,
+            commenter_id=commenter_id,
+            rule_id=auto.get('id'),
+            rule_type=_automation_flight_rule_type(auto),
+            matched=False,
+            extra={'rule_scope': rule_scope, 'priority': rule_priority},
+        )
         logger.info(
             'rule_candidate_evaluated comment_id=%s media_id=%s rule_id=%s rule_scope=%s priority=%s',
             ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
@@ -16375,7 +16623,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
 
         if trigger.startswith('keyword:'):
             if not _comment_rule_media_matches(auto, media_id):
-                cutoff_skip_reason = 'selected_media_no_match'
+                await _record_instagram_automation_event(
+                    'rule_match_failed',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    selected_media_id=selected_media_for_event,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    rule_id=auto.get('id'),
+                    rule_type=_automation_flight_rule_type(auto),
+                    matched=False,
+                    skip_reason='selected_media_no_match',
+                )
                 continue
             cutoff_skip_reason = apply_activation_cutoff()
             if cutoff_skip_reason:
@@ -16389,6 +16649,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             fire = bool(match_result.get('matches'))
             if not fire:
                 cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
+                await _record_instagram_automation_event(
+                    'rule_match_failed',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    selected_media_id=selected_media_for_event,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    rule_id=auto.get('id'),
+                    rule_type=_automation_flight_rule_type(auto),
+                    matched=False,
+                    skip_reason=cutoff_skip_reason,
+                )
         elif trigger.startswith('comment:') or _selected_specific_media_id(auto):
             target = raw_trigger.split(':', 1)[1].strip() if trigger.startswith('comment:') else ''
             latest_media_for_match = None
@@ -16413,6 +16686,33 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 fire = bool(match_result.get('matches'))
                 if not fire:
                     cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
+                    await _record_instagram_automation_event(
+                        'rule_match_failed',
+                        source=source,
+                        user_doc=user_doc,
+                        media_id=media_id,
+                        selected_media_id=selected_media_for_event,
+                        comment_id=ig_comment_id,
+                        commenter_id=commenter_id,
+                        rule_id=auto.get('id'),
+                        rule_type=_automation_flight_rule_type(auto),
+                        matched=False,
+                        skip_reason=cutoff_skip_reason,
+                    )
+            else:
+                await _record_instagram_automation_event(
+                    'rule_match_failed',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    selected_media_id=selected_media_for_event,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    rule_id=auto.get('id'),
+                    rule_type=_automation_flight_rule_type(auto),
+                    matched=False,
+                    skip_reason='selected_media_no_match',
+                )
         if fire:
             matched_rule = auto
             matched_rule_priority = rule_priority
@@ -16438,6 +16738,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             logger.info(
                 'rule_evaluation_stopped_after_match comment_id=%s media_id=%s selected_rule_id=%s rule_scope=%s priority=%s',
                 ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
+            )
+            await _record_instagram_automation_event(
+                'rule_match_success',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                selected_media_id=selected_media_for_event,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=auto.get('id'),
+                rule_type=_automation_flight_rule_type(auto),
+                matched=True,
+                extra={'rule_scope': rule_scope, 'priority': rule_priority},
             )
             break
 
@@ -16469,6 +16782,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 commenter_id,
             )
             if opening_dedupe_key and not retry_existing:
+                await _record_instagram_automation_event(
+                    'dedupe_checked',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    rule_id=rule_id,
+                    rule_type=_automation_flight_rule_type(matched_rule),
+                    extra={'namespace': 'opening_flow', 'dedupe_key_partial': _safe_partial_identifier(opening_dedupe_key)},
+                )
                 business_flow_query = {
                     'user_id': user_id,
                     'opening_dedupe_key': opening_dedupe_key,
@@ -16579,6 +16903,18 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                             _safe_partial_identifier(media_id),
                             _safe_partial_identifier(commenter_id),
                         )
+                        await _record_instagram_automation_event(
+                            'dedupe_skipped',
+                            source=source,
+                            user_doc=user_doc,
+                            media_id=media_id,
+                            comment_id=ig_comment_id,
+                            commenter_id=commenter_id,
+                            rule_id=rule_id,
+                            rule_type=_automation_flight_rule_type(matched_rule),
+                            skip_reason=reason,
+                            extra={'dedupe_reason': 'same_commenter_same_post_same_rule'},
+                        )
                         return {'processed': False, 'already_processed': True, 'matched': True,
                                 'action_status': 'skipped',
                                 'reason': reason,
@@ -16587,6 +16923,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source=source,
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=ig_comment_id,
+            commenter_id=commenter_id,
+            rule_id=rule_id,
+            rule_type=_automation_flight_rule_type(cutoff_rule),
+            skip_reason=cutoff_skip_reason,
+        )
     else:
         cutoff_skip_reason = 'no_rule_match'
         logger.info(
@@ -16598,6 +16945,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         )
         logger.info('rule_not_matched ig_comment_id=%s user=%s',
                     ig_comment_id, user_doc.get('email'))
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source=source,
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=ig_comment_id,
+            commenter_id=commenter_id,
+            skip_reason=cutoff_skip_reason,
+        )
 
     rule_activation_started_at = (
         cutoff_rule.get('activationStartedAt') if cutoff_rule else
@@ -16743,6 +17099,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         ig_comment_id, rule_id)
             logger.info('comment_processing_immediate comment_id=%s media_id=%s source=%s rule_id=%s user_id=%s instagramAccountId=%s',
                         ig_comment_id, media_id, source, rule_id, user_id, ig_account_id)
+            await _record_instagram_automation_event(
+                'automation_execution_started',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=rule_id,
+                rule_type=_automation_flight_rule_type(matched_rule),
+                matched=True,
+            )
             # Phase 2.2 plan enforcement: stop the action chain BEFORE
             # any Meta call when the monthly comment-processed limit is
             # exceeded. The comment doc stays so we don't lose it; the
@@ -16833,6 +17200,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 log_name = 'comment_processing_failed_permanent'
             logger.info('%s comment_id=%s media_id=%s source=%s rule_id=%s action_status=%s',
                         log_name, ig_comment_id, media_id, source, rule_id, action_status)
+            await _record_instagram_automation_event(
+                'automation_success' if action_status in ('success', 'partial_success') else 'automation_failed',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=rule_id,
+                rule_type=_automation_flight_rule_type(matched_rule),
+                matched=True,
+                skip_reason=None if action_status in ('success', 'partial_success') else action_status,
+                elapsed_ms=int((_time.monotonic() - processing_started) * 1000),
+            )
         except Exception as e:
             logger.exception('action_execution_failed ig_comment_id=%s err=%s',
                              ig_comment_id, e)
@@ -16842,6 +17222,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                           'error': str(e)[:500]}}
             )
             action_status = 'failed'
+            await _record_instagram_automation_event(
+                'automation_failed',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=rule_id,
+                rule_type=_automation_flight_rule_type(matched_rule),
+                error_code=type(e).__name__,
+                error_message='action_execution_exception',
+                elapsed_ms=int((_time.monotonic() - processing_started) * 1000),
+            )
 
     return {'processed': True, 'reprocessed': retry_existing,
             'matched': matched, 'action_status': action_status,
@@ -16908,6 +17301,52 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
         saved = await db.comments.find_one({'id': comment_doc_id}) or {}
         reply_status = saved.get('reply_status') or saved.get('replyStatus') or 'disabled'
         dm_status = saved.get('dm_status') or saved.get('dmStatus') or 'disabled'
+        if not _status_is_disabled(reply_status):
+            await _record_instagram_automation_event(
+                'public_reply_attempted',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=automation.get('id'),
+                rule_type=_automation_flight_rule_type(automation),
+            )
+            await _record_instagram_automation_event(
+                'public_reply_success' if _status_is_success(reply_status) else 'public_reply_failed',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=automation.get('id'),
+                rule_type=_automation_flight_rule_type(automation),
+                skip_reason=None if _status_is_success(reply_status) else reply_status,
+                error_message=saved.get('reply_failure_reason'),
+            )
+        if not _status_is_disabled(dm_status):
+            await _record_instagram_automation_event(
+                'opening_dm_attempted',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=automation.get('id'),
+                rule_type=_automation_flight_rule_type(automation),
+            )
+            await _record_instagram_automation_event(
+                'opening_dm_success' if _status_is_success(dm_status) else 'opening_dm_failed',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=automation.get('id'),
+                rule_type=_automation_flight_rule_type(automation),
+                skip_reason=None if _status_is_success(dm_status) else dm_status,
+                error_message=saved.get('dm_failure_reason'),
+            )
         # Hard invariant: if the matched rule is configured with a public
         # reply, an unattempted public reply is illegal. Convert
         # reply_status='disabled' -> 'failed_retryable' so the queue can
@@ -17794,6 +18233,11 @@ async def _process_webhook(payload: dict):
                 'account_resolution_started event_type=webhook_entry entry_id=%s',
                 _safe_partial_identifier(ig_account_id),
             )
+            await _record_instagram_automation_event(
+                'account_resolution_started',
+                source='webhook',
+                instagram_account_id=ig_account_id,
+            )
             logger.info('dm_user_mapping_started entry_id=%s', ig_account_id)
             # Find which user owns this IG account — entry.id can be either the
             # Instagram Business account id OR the Facebook Page id depending on
@@ -17832,6 +18276,12 @@ async def _process_webhook(payload: dict):
                     'account_resolution_failed event_type=webhook_entry entry_id=%s reason=no_matching_instagram_account',
                     _safe_partial_identifier(entry.get('id')),
                 )
+                await _record_instagram_automation_event(
+                    'account_resolution_failed',
+                    source='webhook',
+                    instagram_account_id=entry.get('id'),
+                    skip_reason='no_matching_instagram_account',
+                )
                 logger.warning('dm_user_mapping_failed entry_id=%s', entry.get('id'))
                 continue
             # Normalize so downstream code uses the real IG account id
@@ -17843,6 +18293,13 @@ async def _process_webhook(payload: dict):
                 user_id,
                 _safe_partial_identifier(ig_account_id),
                 mapping_via,
+            )
+            await _record_instagram_automation_event(
+                'account_resolution_success',
+                source='webhook',
+                user_doc=user_doc,
+                instagram_account_id=ig_account_id,
+                extra={'via': mapping_via},
             )
             logger.info('dm_user_mapping_success entry_id=%s user_id=%s via=%s',
                         entry.get('id'), user_id, mapping_via)
@@ -18014,6 +18471,25 @@ async def _process_webhook(payload: dict):
                             else 'none'
                         ),
                     )
+                    await _record_instagram_automation_event(
+                        'webhook_comment_detected',
+                        source='webhook',
+                        user_doc=user_doc,
+                        instagram_account_id=ig_account_id,
+                        media_id=media_id_resolved,
+                        comment_id=value.get('comment_id') or value.get('id'),
+                        commenter_id=commenter.get('id'),
+                        extra={'media_id_source': (
+                            'media.id' if media_obj.get('id')
+                            else 'media.media_id' if media_obj.get('media_id')
+                            else 'value.media_id' if value.get('media_id')
+                            else 'value.post_id' if value.get('post_id')
+                            else 'value.postId' if value.get('postId')
+                            else 'value.mediaId' if value.get('mediaId')
+                            else 'value.ig_media_id' if value.get('ig_media_id')
+                            else 'none'
+                        )},
+                    )
                     comment_started = _time.monotonic()
                     comment_result = await _handle_new_comment(user_doc, {
                         'ig_comment_id': value.get('comment_id') or value.get('id'),
@@ -18151,6 +18627,11 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     user_id = user_doc['id']
     token = user_doc.get('meta_access_token', '')
     ig_id = user_doc.get('ig_user_id', '')
+    await _record_instagram_automation_event(
+        'poller_account_scan_started',
+        source='polling',
+        user_doc=user_doc,
+    )
     stats: dict = {
         'user_id': user_id,
         'mediaChecked': 0,
@@ -18166,6 +18647,12 @@ async def _poll_user_comments(user_doc: dict) -> dict:
 
     if not token or not ig_id:
         stats['errors'].append('missing_token_or_ig_id')
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source='polling',
+            user_doc=user_doc,
+            skip_reason='missing_token_or_ig_id',
+        )
         return stats
     try:
         await db.instagram_accounts.update_one(
@@ -18192,10 +18679,24 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         {**_account_scoped_query(user_id, _current_instagram_context(user_doc)), 'status': 'active'}
     ).to_list(200)
     if not automations:
+        await _record_instagram_automation_event(
+            'rule_loading_finished',
+            source='polling',
+            user_doc=user_doc,
+            skip_reason='no_active_rules',
+            extra={'rules_count': 0},
+        )
         return stats
 
     media_ids = await _collect_target_media_ids(user_doc, automations)
     if not media_ids:
+        await _record_instagram_automation_event(
+            'automation_skipped',
+            source='polling',
+            user_doc=user_doc,
+            skip_reason='no_target_media_ids',
+            extra={'rules_count': len(automations)},
+        )
         return stats
 
     reply_attempts = 0
@@ -18209,6 +18710,12 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             stats['mediaChecked'] += 1
             logger.info('media_comments_fetch_started user=%s media_id=%s',
                         user_doc.get('email'), mid)
+            await _record_instagram_automation_event(
+                'poller_media_scan_started',
+                source='polling',
+                user_doc=user_doc,
+                media_id=mid,
+            )
             try:
                 r = await c.get(
                     f'https://graph.instagram.com/{mid}/comments',
@@ -18242,6 +18749,14 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     )
                     if not commenter_id and commenter_username:
                         commenter_id = f'u:{commenter_username}'
+                    await _record_instagram_automation_event(
+                        'poller_comment_seen',
+                        source='polling',
+                        user_doc=user_doc,
+                        media_id=mid,
+                        comment_id=ig_comment_id,
+                        commenter_id=commenter_id,
+                    )
                     res = await _handle_new_comment(user_doc, {
                         'ig_comment_id': ig_comment_id,
                         'media_id': mid,
@@ -19429,6 +19944,128 @@ async def instagram_automation_health(user_id: str = Depends(get_current_active_
     }
 
 
+async def _automation_flight_events_for_username(username: str, limit: int = 100) -> list:
+    username_key = _automation_flight_username_key(username)
+    if not username_key:
+        return []
+    limit = max(1, min(int(limit or 100), 500))
+    try:
+        rows = await db.instagram_automation_events.find(
+            {'username_key': username_key},
+            {'_id': 0},
+        ).sort('created_at', -1).limit(limit).to_list(limit)
+    except Exception:
+        rows = []
+    rows = sorted(
+        rows,
+        key=lambda item: item.get('created_at') if isinstance(item.get('created_at'), datetime) else datetime.min,
+        reverse=True,
+    )
+    return rows[:limit]
+
+
+def _serialize_automation_flight_event(event: dict) -> dict:
+    safe = {}
+    for key, value in (event or {}).items():
+        if key == '_id':
+            continue
+        if isinstance(value, datetime):
+            safe[key] = value.isoformat()
+        elif isinstance(value, dict):
+            safe[key] = {
+                str(k)[:80]: (v.isoformat() if isinstance(v, datetime) else v)
+                for k, v in value.items()
+            }
+        else:
+            safe[key] = value
+    return safe
+
+
+def _latest_event_time(events: list, stages: set) -> Optional[datetime]:
+    for event in events:
+        if event.get('stage') in stages and isinstance(event.get('created_at'), datetime):
+            return event.get('created_at')
+    return None
+
+
+def _latest_event(events: list, stages: set) -> Optional[dict]:
+    for event in events:
+        if event.get('stage') in stages:
+            return event
+    return None
+
+
+async def summarize_account_automation_stop_point(username: str, limit: int = 100) -> dict:
+    events = await _automation_flight_events_for_username(username, limit=limit)
+    comment_event = _latest_event(events, {'webhook_comment_detected', 'poller_comment_seen'})
+    account_failed = _latest_event(events, {'account_resolution_failed'})
+    account_success = _latest_event(events, {'account_resolution_success'})
+    rules_loaded = _latest_event(events, {'rule_loading_finished'})
+    rule_match = _latest_event(events, {'rule_match_success'})
+    rule_miss = _latest_event(events, {'rule_match_failed', 'automation_skipped'})
+    reply_attempt = _latest_event(events, {'public_reply_attempted'})
+    dm_attempt = _latest_event(events, {'opening_dm_attempted'})
+    session_attempt = _latest_event(events, {'session_create_attempted'})
+    failure = _latest_event(events, {
+        'public_reply_failed',
+        'opening_dm_failed',
+        'session_create_failed',
+        'automation_failed',
+        'dedupe_skipped',
+    })
+    success = _latest_event(events, {'automation_success'})
+    poll_scan = _latest_event(events, {'poller_account_scan_started'})
+
+    rules_count = None
+    if rules_loaded:
+        extra = rules_loaded.get('extra') or {}
+        rules_count = extra.get('rules_count')
+
+    stop_reason = 'no_comment_seen'
+    if account_failed and (not comment_event or account_failed.get('created_at') >= comment_event.get('created_at')):
+        stop_reason = account_failed.get('skip_reason') or 'account_resolution_failed'
+    elif not comment_event and rule_miss:
+        stop_reason = rule_miss.get('skip_reason') or 'rule_not_matched'
+    elif not comment_event:
+        stop_reason = 'no_comment_seen'
+    elif not account_success and comment_event.get('source') == 'webhook':
+        stop_reason = 'account_resolution_not_recorded'
+    elif rules_loaded and rules_count == 0:
+        stop_reason = 'no_active_rules_loaded'
+    elif not rule_match:
+        stop_reason = (rule_miss or {}).get('skip_reason') or 'rule_not_matched'
+    elif failure:
+        stop_reason = failure.get('skip_reason') or failure.get('error_code') or failure.get('stage')
+    elif success:
+        stop_reason = 'automation_success'
+    elif rule_match and not reply_attempt:
+        stop_reason = 'matched_but_reply_not_attempted'
+    elif reply_attempt and not dm_attempt:
+        stop_reason = 'reply_attempted_dm_not_attempted'
+    elif dm_attempt and not session_attempt:
+        stop_reason = 'dm_attempted_session_not_attempted'
+    else:
+        stop_reason = 'in_progress_or_unknown'
+
+    return {
+        'username': _automation_flight_username_key(username),
+        'last_comment_reached_backend': bool(comment_event),
+        'source': (comment_event or {}).get('source') if comment_event else 'none',
+        'account_resolved': bool(account_success),
+        'polling_scanned_account': bool(poll_scan),
+        'rules_loaded': bool(rules_loaded),
+        'rules_loaded_count': rules_count,
+        'rule_matched': bool(rule_match),
+        'media_matched': bool(rule_match),
+        'reply_attempted': bool(reply_attempt),
+        'dm_attempted': bool(dm_attempt),
+        'session_attempted': bool(session_attempt),
+        'exact_stop_reason': stop_reason,
+        'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
+            if events and isinstance(events[0].get('created_at'), datetime) else None,
+    }
+
+
 @api.get('/admin/instagram/multi-account-health')
 async def admin_instagram_multi_account_health(
     limit: int = 100,
@@ -19468,6 +20105,13 @@ async def admin_instagram_multi_account_health(
         selected_media_configured = 0
         last_comment = None
         last_dm_log = None
+        username_key = _automation_flight_username_key(account.get('username'))
+        flight_events = await _automation_flight_events_for_username(username_key, limit=100) if username_key else []
+        stop_summary = await summarize_account_automation_stop_point(username_key) if username_key else {
+            'last_comment_reached_backend': False,
+            'source': 'none',
+            'exact_stop_reason': 'missing_username',
+        }
         try:
             if owner_id:
                 active_rules = await db.automations.find({
@@ -19527,6 +20171,16 @@ async def admin_instagram_multi_account_health(
             issues.append('no_active_comment_automations')
         if post_specific_rule_count and selected_media_configured < post_specific_rule_count:
             issues.append('post_specific_rule_missing_selected_media')
+        latest_error_event = _latest_event(flight_events, {
+            'account_resolution_failed',
+            'rule_match_failed',
+            'public_reply_failed',
+            'opening_dm_failed',
+            'session_create_failed',
+            'automation_failed',
+            'dedupe_skipped',
+            'automation_skipped',
+        })
 
         items.append({
             'account_id_partial': _safe_partial_identifier(account.get('id')),
@@ -19541,9 +20195,24 @@ async def admin_instagram_multi_account_health(
             'webhook_subscription_missing': sorted(subscription_missing)
                 if isinstance(subscription_missing, list) else [],
             'webhook_subscription_last_checked_at': _iso(account.get('webhookSubscriptionLastCheckedAt')),
+            'last_webhook_event_time': _iso(_latest_event_time(flight_events, {'webhook_comment_detected'})),
+            'last_polling_scan_time': _iso(_latest_event_time(flight_events, {'poller_account_scan_started'})),
+            'last_comment_seen_time': _iso(_latest_event_time(flight_events, {'webhook_comment_detected', 'poller_comment_seen'})),
+            'last_rule_match_time': _iso(_latest_event_time(flight_events, {'rule_match_success'})),
+            'last_automation_success_time': _iso(_latest_event_time(flight_events, {'automation_success'})),
             'polling_last_scan_at': _iso(account.get('lastCommentPollAt')),
             'last_processed_comment_at': _iso((last_comment or {}).get('created')),
             'last_comment_source': (last_comment or {}).get('source'),
+            'last_skip_reason': (
+                (latest_error_event or {}).get('skip_reason')
+                or (last_comment or {}).get('skip_reason')
+            ),
+            'last_error_summary': {
+                'stage': (latest_error_event or {}).get('stage'),
+                'reason': (latest_error_event or {}).get('skip_reason'),
+                'error_code': (latest_error_event or {}).get('error_code'),
+                'error_message': (latest_error_event or {}).get('error_message'),
+            } if latest_error_event else None,
             'last_send_result': {
                 'reply_status': (last_comment or {}).get('reply_status'),
                 'dm_status': (last_comment or {}).get('dm_status'),
@@ -19567,6 +20236,7 @@ async def admin_instagram_multi_account_health(
                 owner_id and owner and owner.get('status') not in ('deleted', 'suspended')
                 and account.get('connectionValid') and account.get('accessToken') and ig_id
             ),
+            'stop_point_summary': stop_summary,
             'issues': issues,
         })
 
@@ -19582,6 +20252,29 @@ async def admin_instagram_multi_account_health(
             'interval_seconds': IG_POLL_INTERVAL_SECONDS,
         },
         'accounts': items,
+    }
+
+
+@api.get('/admin/instagram/automation-flight-recorder')
+async def admin_instagram_automation_flight_recorder(
+    username: str,
+    limit: int = 50,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Return sanitized backend-only automation stop-point events.
+
+    No frontend diagnostics route links to this endpoint. It is protected by
+    admin auth and deliberately returns only partial identifiers and safe
+    stage metadata.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    username_key = _automation_flight_username_key(username)
+    events = await _automation_flight_events_for_username(username_key, limit=limit)
+    return {
+        'ok': True,
+        'username': username_key,
+        'summary': await summarize_account_automation_stop_point(username_key, limit=max(limit, 100)),
+        'events': [_serialize_automation_flight_event(event) for event in events],
     }
 
 
@@ -21817,6 +22510,18 @@ async def _startup():
         await db.dashboard_summaries.create_index(
             [('expires_at', 1)],
             name='dashboard_summaries_expires_at',
+        )
+        await db.instagram_automation_events.create_index(
+            [('username_key', 1), ('created_at', -1)],
+            name='instagram_automation_events_username_created',
+        )
+        await db.instagram_automation_events.create_index(
+            [('stage', 1), ('created_at', -1)],
+            name='instagram_automation_events_stage_created',
+        )
+        await db.instagram_automation_events.create_index(
+            [('created_at', -1)],
+            name='instagram_automation_events_created',
         )
         try:
             await db.monthly_usage.drop_index('monthly_usage_user_month_unique')
