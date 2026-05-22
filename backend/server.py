@@ -20663,6 +20663,44 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
         return 'Opening DM went out but no session was created — the rule is missing next-step fields (link / follow-up / follow-gate). Edit the rule or run the repair tool.'
     if reason == 'automation_success':
         return 'Automation completed successfully for this comment. No action needed.'
+    if reason == 'opening_dm_sent_click_not_received':
+        return (
+            'Opening DM was sent successfully, but Meta has not delivered a button click webhook yet. '
+            'If the user has clicked, your webhook subscription is most likely missing "messages" or '
+            '"messaging_postbacks" for this account — re-subscribe via POST /api/instagram/subscribe-webhook-all. '
+            'If the user has not clicked yet, this is the expected state.'
+        )
+    if reason == 'click_received_session_missing':
+        return (
+            'The user clicked the button and Meta delivered the event, but the session lookup '
+            'missed. Most often the session was already completed, expired, or reset. Test with a '
+            'brand-new comment from the same commenter to start a fresh session.'
+        )
+    if reason in {'continuation_send_failed'} or 'continuation' in reason and 'failed' in reason:
+        return (
+            'The button click was received and the session was found, but Meta refused the '
+            'continuation send. Check last_send_error for the Meta code/message — typically '
+            'messaging_window_expired, recipient_unavailable, or token-related.'
+        )
+    # Meta-specific skip_reasons that can appear at any send stage.
+    # These are written by the flight recorder as the exact skip_reason
+    # on opening_dm_failed / continuation_send_failed events.
+    if reason in {'messaging_window_expired', 'messaging_window_outside_24h'}:
+        return (
+            'Meta returned messaging_window_expired — the recipient has not sent a message '
+            'to this Instagram account in the last 24h, so we cannot DM them. After the user '
+            'starts a fresh conversation (or comments + clicks), the window reopens.'
+        )
+    if reason in {'recipient_unavailable', 'recipient_cannot_be_messaged'}:
+        return (
+            'Meta refused the send: the recipient cannot receive messages from this Instagram '
+            'account (blocked, deactivated, or messaging disabled).'
+        )
+    if reason in {'instagram_invalid_token', 'invalid_access_token', 'token_expired'}:
+        return (
+            'Meta refused the send: the stored access token is invalid or expired. Reconnect '
+            'the Instagram account from Settings.'
+        )
     if reason == 'account_resolution_not_recorded' and source == 'webhook':
         return 'Webhook arrived but no account resolution event was recorded — verify backend deployment is current and instagram_automation_events writes are succeeding.'
     if not reached:
@@ -20681,6 +20719,33 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
     reply_attempt = _latest_event(events, {'public_reply_attempted'})
     dm_attempt = _latest_event(events, {'opening_dm_attempted'})
     session_attempt = _latest_event(events, {'session_create_attempted'})
+    session_created = _latest_event(events, {'session_create_success', 'opening_dm_quick_reply_payload_created'})
+    opening_sent = _latest_event(events, {'opening_dm_success'})
+    # Post-opening-DM signals: did the user's click webhook arrive,
+    # did session lookup succeed, did continuation send go through?
+    click_received = _latest_event(events, {
+        'quick_reply_click_received',
+        'quick_reply_payload_detected',
+        'postback_payload_detected',
+        'comment_flow_payload_detected',
+    })
+    session_lookup_success = _latest_event(events, {
+        'session_lookup_by_payload_success',
+        'session_lookup_success',
+        'session_lookup_by_external_sender_success',
+    })
+    continuation_send_success = _latest_event(events, {
+        'continuation_send_success',
+        'continuation_message_success',
+    })
+    continuation_send_failed = _latest_event(events, {
+        'continuation_send_failed',
+        'continuation_message_failed',
+    })
+    session_lookup_failed = _latest_event(events, {
+        'session_lookup_by_payload_failed',
+        'session_lookup_failed',
+    })
     failure = _latest_event(events, {
         'public_reply_failed',
         'opening_dm_failed',
@@ -20719,6 +20784,33 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         stop_reason = 'reply_attempted_dm_not_attempted'
     elif dm_attempt and not session_attempt:
         stop_reason = 'dm_attempted_session_not_attempted'
+    # Post-opening-DM continuation classification. These three states
+    # are what the operator actually needs to see for the "opening DM
+    # sent but the button click did not continue" reports — until now
+    # they all collapsed to 'in_progress_or_unknown' which the operator
+    # could not act on.
+    elif opening_sent and continuation_send_success:
+        stop_reason = 'automation_success'
+    elif opening_sent and continuation_send_failed:
+        # Click received, session found, but the continuation send to
+        # Meta failed (token, messaging window, recipient unavailable).
+        stop_reason = (
+            continuation_send_failed.get('skip_reason')
+            or continuation_send_failed.get('error_code')
+            or 'continuation_send_failed'
+        )
+    elif opening_sent and click_received and session_lookup_failed and not session_lookup_success:
+        # Click arrived but session lookup missed — payload session id
+        # didn't resolve. Most often: opening DM session was deleted/
+        # replaced or the session id in the payload no longer exists.
+        stop_reason = 'click_received_session_missing'
+    elif opening_sent and not click_received:
+        # The single most common state for "opening DM sent but no
+        # continuation": Meta has not delivered a click webhook for
+        # this opening yet. Either the user has not clicked, or the
+        # webhook subscription is missing messages/messaging_postbacks
+        # for this account, or Meta is dropping delivery.
+        stop_reason = 'opening_dm_sent_click_not_received'
     else:
         stop_reason = 'in_progress_or_unknown'
 
@@ -20736,14 +20828,29 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             selected_media_matched = bool(
                 selected_partial and incoming_partial and selected_partial == incoming_partial
             )
-    # Last sanitized Meta error if there was a send failure.
+    # Last sanitized Meta error if there was a send failure. Includes
+    # continuation_send_failed (post-click) so the operator sees the
+    # Meta code/message for "button clicked but next-step send broke".
     last_send_error: Optional[Dict[str, Any]] = None
-    if failure and failure.get('stage') in {'public_reply_failed', 'opening_dm_failed', 'session_create_failed', 'automation_failed'}:
+    candidate_error_events = [
+        e for e in (continuation_send_failed, failure)
+        if e and e.get('stage') in {
+            'public_reply_failed', 'opening_dm_failed',
+            'session_create_failed', 'automation_failed',
+            'continuation_send_failed', 'continuation_message_failed',
+        }
+    ]
+    if candidate_error_events:
+        # Whichever happened more recently wins.
+        candidate_error_events.sort(
+            key=lambda e: e.get('created_at') or datetime.min, reverse=True,
+        )
+        latest = candidate_error_events[0]
         last_send_error = {
-            'stage': failure.get('stage'),
-            'reason': failure.get('skip_reason'),
-            'error_code': failure.get('error_code'),
-            'error_message': failure.get('error_message'),
+            'stage': latest.get('stage'),
+            'reason': latest.get('skip_reason'),
+            'error_code': latest.get('error_code'),
+            'error_message': latest.get('error_message'),
         }
     summary = {
         'username': _automation_flight_username_key(username),
@@ -20759,6 +20866,14 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'reply_attempted': bool(reply_attempt),
         'dm_attempted': bool(dm_attempt),
         'session_attempted': bool(session_attempt),
+        # Post-opening-DM signals. These three flags answer the operator's
+        # exact question for "opening DM sent but flow stopped":
+        #   - opening_dm_sent: did the bot actually deliver the opening DM?
+        #   - click_received: did Meta deliver a button-click webhook back?
+        #   - continuation_send_success: did the next-step DM go out OK?
+        'opening_dm_sent': bool(opening_sent),
+        'click_received': bool(click_received),
+        'continuation_send_success': bool(continuation_send_success),
         'exact_stop_reason': stop_reason,
         'last_send_error': last_send_error,
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()

@@ -1708,6 +1708,18 @@ function AutomationStopPointCard({ summary }) {
           <span className="font-mono">dm={String(!!summary.dm_attempted)}</span>
         </div>
         <div className="sm:col-span-2">
+          {ar ? 'بعد رسالة الافتتاح:' : 'Post opening DM:'}{' '}
+          <span className="font-mono">opening_dm_sent={String(!!summary.opening_dm_sent)}</span>
+          {' · '}
+          <span className={`font-mono ${summary.click_received ? 'text-emerald-700' : 'text-rose-700'}`}>
+            click_received={String(!!summary.click_received)}
+          </span>
+          {' · '}
+          <span className={`font-mono ${summary.continuation_send_success ? 'text-emerald-700' : ''}`}>
+            continuation_send_success={String(!!summary.continuation_send_success)}
+          </span>
+        </div>
+        <div className="sm:col-span-2">
           {ar ? 'السبب الدقيق:' : 'Exact stop reason:'}{' '}
           <span className="font-mono">{reason || '-'}</span>
         </div>

@@ -3599,3 +3599,121 @@ def test_admin_automation_stop_point_endpoint_lists_all_accounts_when_no_usernam
     for s in result['summaries']:
         assert s['next_recommended_action']
         assert 'instagram_account_id_partial' in s
+
+
+# ---------------------------------------------------------------------------
+# Post-opening-DM classifier: the exact state the operator hit on
+# muhammad_gehad's account. The summary must distinguish between
+#   1. opening DM sent, click webhook NOT received (Meta delivery / subscription)
+#   2. opening DM sent, click received, session lookup MISSED
+#   3. opening DM sent, click received, session found, continuation SEND FAILED
+#   4. opening DM sent, click received, continuation succeeded (automation_success)
+# Before this commit all four collapsed to in_progress_or_unknown, leaving
+# the operator without a usable label.
+# ---------------------------------------------------------------------------
+
+def _seed_full_opening_dm_sent_state(db, *, username='account_b'):
+    """Common preamble: comment seen, rule matched, opening DM sent OK,
+    session created. Everything works up to the moment the click webhook
+    is expected to arrive."""
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook', username=username)
+    _seed_flight_event(db, stage='account_resolution_success', source='webhook', username=username)
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='webhook', username=username,
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(db, stage='rule_match_success', source='webhook', username=username)
+    _seed_flight_event(db, stage='public_reply_attempted', source='webhook', username=username)
+    _seed_flight_event(db, stage='public_reply_success', source='webhook', username=username)
+    _seed_flight_event(db, stage='opening_dm_attempted', source='webhook', username=username)
+    _seed_flight_event(db, stage='opening_dm_success', source='webhook', username=username)
+    _seed_flight_event(db, stage='session_create_attempted', source='webhook', username=username)
+    _seed_flight_event(db, stage='session_create_success', source='webhook', username=username)
+
+
+def test_summarize_stop_point_opening_dm_sent_click_not_received(monkeypatch):
+    """The exact state from the muhammad_gehad screenshot: opening DM
+    was sent, button is showing, no click webhook arrived yet.
+    Before this commit this collapsed to 'in_progress_or_unknown'. Now
+    it must surface a distinct label + a recommendation that names
+    the messages/messaging_postbacks subscription as the likely cause."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_full_opening_dm_sent_state(db)
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['opening_dm_sent'] is True
+    assert summary['click_received'] is False
+    assert summary['continuation_send_success'] is False
+    assert summary['exact_stop_reason'] == 'opening_dm_sent_click_not_received'
+    rec = summary['next_recommended_action'].lower()
+    assert 'opening dm was sent' in rec
+    assert 'subscribe-webhook-all' in rec or 'messages' in rec
+    assert summary['last_send_error'] is None
+
+
+def test_summarize_stop_point_click_received_session_missing(monkeypatch):
+    """Click webhook arrived but the session_lookup_by_payload failed
+    (session_id from payload no longer in DB). Must surface a distinct
+    label."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_full_opening_dm_sent_state(db)
+    _seed_flight_event(db, stage='quick_reply_click_received', source='dm_webhook')
+    _seed_flight_event(db, stage='session_lookup_by_payload_started', source='dm_webhook')
+    _seed_flight_event(
+        db, stage='session_lookup_by_payload_failed', source='dm_webhook',
+        skip_reason='comment_flow_session_missing',
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['opening_dm_sent'] is True
+    assert summary['click_received'] is True
+    assert summary['continuation_send_success'] is False
+    assert summary['exact_stop_reason'] == 'click_received_session_missing'
+    assert 'session lookup missed' in summary['next_recommended_action'].lower()
+
+
+def test_summarize_stop_point_continuation_send_failed_surfaces_error(monkeypatch):
+    """Click arrived, session found, but the continuation Meta call
+    failed (e.g. messaging_window_expired). Must surface as
+    continuation_send_failed (or the specific Meta reason) AND fill
+    last_send_error with the sanitized code/message."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_full_opening_dm_sent_state(db)
+    _seed_flight_event(db, stage='quick_reply_click_received', source='dm_webhook')
+    _seed_flight_event(db, stage='session_lookup_by_payload_success', source='dm_webhook')
+    _seed_flight_event(db, stage='continuation_send_attempted', source='dm_webhook')
+    _seed_flight_event(
+        db, stage='continuation_send_failed', source='dm_webhook',
+        skip_reason='messaging_window_expired',
+        error_code='10',
+        error_message='User cannot receive messages',
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['opening_dm_sent'] is True
+    assert summary['click_received'] is True
+    assert summary['continuation_send_success'] is False
+    # The classifier prefers the specific skip_reason from the event
+    # over the generic continuation_send_failed label.
+    assert summary['exact_stop_reason'] == 'messaging_window_expired'
+    err = summary['last_send_error']
+    assert err is not None
+    assert err['stage'] == 'continuation_send_failed'
+    assert err['error_code'] == '10'
+    assert 'opening dm' in summary['next_recommended_action'].lower() \
+        or 'messaging_window_expired' in summary['next_recommended_action'].lower()
+
+
+def test_summarize_stop_point_continuation_success_marks_automation_success(monkeypatch):
+    """Click arrived, session found, continuation succeeded — the
+    classifier must report automation_success even when no explicit
+    'automation_success' event was recorded (just the chain of
+    success events leading up to it)."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_full_opening_dm_sent_state(db)
+    _seed_flight_event(db, stage='quick_reply_click_received', source='dm_webhook')
+    _seed_flight_event(db, stage='session_lookup_by_payload_success', source='dm_webhook')
+    _seed_flight_event(db, stage='continuation_send_attempted', source='dm_webhook')
+    _seed_flight_event(db, stage='continuation_send_success', source='dm_webhook')
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['opening_dm_sent'] is True
+    assert summary['click_received'] is True
+    assert summary['continuation_send_success'] is True
+    assert summary['exact_stop_reason'] == 'automation_success'
