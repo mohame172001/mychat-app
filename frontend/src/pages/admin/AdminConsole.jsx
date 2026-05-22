@@ -1528,6 +1528,222 @@ function WebhookDlqTab() {
 }
 
 
+/**
+ * Operator-facing summary of where the latest comment-to-DM automation
+ * stopped, per linked Instagram account. Backed by the protected
+ * /api/admin/instagram/automation-stop-point endpoint (RBAC: admin.users.view).
+ *
+ * Lives ONLY inside this admin console — there is no public diagnostics
+ * page. The endpoint is not advertised in the sidebar; an operator who
+ * is not signed in as admin cannot reach this tab.
+ *
+ * Privacy: every external id we render is partial-redacted by the
+ * backend. We never render tokens, full webhook payloads, or full
+ * comment/DM text. The "Last send error" line includes only a short
+ * sanitized Meta error code + message that the backend already capped.
+ */
+function AutomationStopPointTab() {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    try {
+      const r = await api.get('/admin/instagram/automation-stop-point');
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const summaries = data?.summaries || (data?.summary ? [data.summary] : []);
+  const ar = isAr();
+
+  return (
+    <section data-testid="admin-automation-stop-point">
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[200px]">
+          <div className="font-semibold text-slate-800">
+            {ar ? 'نقطة توقّف الأتمتة' : 'Automation Stop Point'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {ar
+              ? 'ملخّص آخر تعليق ولماذا لم يكتمل التدفّق — لكل حساب انستجرام مربوط. الأرقام والمعرّفات مُغطّاة جزئياً.'
+              : 'Latest comment + why the flow did not complete, per linked Instagram account. External ids are partial-redacted.'}
+          </div>
+        </div>
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {summaries.length} {ar ? 'حساب' : 'accounts'}
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> {ar ? 'غير مصرّح' : 'Forbidden'}
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <AlertTriangle className="w-3 h-3 me-1" /> {ar ? 'فشل' : 'Failed'}
+          </Badge>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={load}
+          disabled={state === 'loading'}
+          data-testid="automation-stop-point-reload"
+        >
+          <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          {ar ? 'تحديث' : 'Reload'}
+        </Button>
+      </header>
+
+      {state === 'loading' && <AdminSkeleton rows={3} />}
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3">
+          {error}
+        </div>
+      )}
+      {state === 'forbidden' && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {ar
+            ? 'حسابك لا يملك صلاحية admin.users.view المطلوبة.'
+            : 'Your account does not have the required admin.users.view permission.'}
+        </div>
+      )}
+
+      {state === 'success' && summaries.length === 0 && (
+        <div className="text-xs text-slate-500 py-6 text-center">
+          {ar
+            ? 'لا توجد حسابات Instagram مربوطة على workspace الخاص بك.'
+            : 'No linked Instagram accounts on this workspace.'}
+        </div>
+      )}
+
+      {summaries.length > 0 && (
+        <div className="space-y-3">
+          {summaries.map((s) => (
+            <AutomationStopPointCard key={s.username || s.instagram_account_id_partial} summary={s} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AutomationStopPointCard({ summary }) {
+  const ar = isAr();
+  const reached = !!summary.last_comment_reached_backend;
+  const matched = !!summary.rule_matched;
+  const reason = summary.exact_stop_reason || '';
+  const successCase = reason === 'automation_success';
+  const toneBg = successCase
+    ? 'bg-emerald-50 border-emerald-200'
+    : reached
+      ? 'bg-amber-50 border-amber-200'
+      : 'bg-rose-50 border-rose-200';
+
+  return (
+    <div
+      className={`rounded-2xl border p-4 ${toneBg}`}
+      data-testid={`stop-point-card-${summary.username || summary.instagram_account_id_partial || 'unknown'}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <div className="font-semibold text-slate-800">
+          @{summary.username || summary.instagram_account_id_partial || '-'}
+        </div>
+        {summary.instagram_account_id_partial && (
+          <span className="text-xs text-slate-500 font-mono">{summary.instagram_account_id_partial}</span>
+        )}
+        <Badge className={
+          successCase
+            ? 'bg-emerald-100 text-emerald-700 border-0'
+            : reached
+              ? 'bg-amber-100 text-amber-800 border-0'
+              : 'bg-rose-100 text-rose-700 border-0'
+        }>
+          {successCase
+            ? (ar ? 'نجح' : 'Success')
+            : reached
+              ? (ar ? 'وصل التعليق' : 'Comment reached')
+              : (ar ? 'لم يصل التعليق' : 'No comment')}
+        </Badge>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-700 mb-3">
+        <div>
+          {ar ? 'وصل التعليق:' : 'Comment reached:'}{' '}
+          <span className="font-mono">{String(reached)}</span>
+          {' · '}
+          <span className="font-mono">source={summary.source || '-'}</span>
+        </div>
+        <div>
+          {ar ? 'القواعد المحمَّلة:' : 'Rules loaded:'}{' '}
+          <span className="font-mono">{summary.rules_loaded_count ?? '-'}</span>
+        </div>
+        <div>
+          {ar ? 'مطابقة:' : 'Rule matched:'} <span className="font-mono">{String(matched)}</span>
+          {summary.selected_media_matched != null && (
+            <>
+              {' · '}
+              {ar ? 'المنشور المختار:' : 'Selected media:'}{' '}
+              <span className="font-mono">{String(summary.selected_media_matched)}</span>
+            </>
+          )}
+        </div>
+        <div>
+          {ar ? 'محاولات:' : 'Attempts:'}{' '}
+          <span className="font-mono">reply={String(!!summary.reply_attempted)}</span>
+          {' · '}
+          <span className="font-mono">dm={String(!!summary.dm_attempted)}</span>
+        </div>
+        <div className="sm:col-span-2">
+          {ar ? 'السبب الدقيق:' : 'Exact stop reason:'}{' '}
+          <span className="font-mono">{reason || '-'}</span>
+        </div>
+        {summary.last_send_error && (
+          <div className="sm:col-span-2 text-rose-700">
+            {ar ? 'آخر خطأ Meta:' : 'Last send error:'}{' '}
+            <span className="font-mono">{summary.last_send_error.stage}</span>
+            {' · '}
+            <span className="font-mono">{summary.last_send_error.reason || '-'}</span>
+            {summary.last_send_error.error_code && (
+              <>
+                {' · '}
+                <span className="font-mono">code={summary.last_send_error.error_code}</span>
+              </>
+            )}
+            {summary.last_send_error.error_message && (
+              <>
+                {' · '}
+                <span className="font-mono">{summary.last_send_error.error_message}</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="text-sm text-slate-800 bg-white border border-slate-200 rounded-md p-3">
+        <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1">
+          {ar ? 'الإجراء المُوصى به' : 'Next recommended action'}
+        </div>
+        <div>{summary.next_recommended_action || '-'}</div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const { lang } = useTranslation();
@@ -1682,6 +1898,16 @@ export default function AdminConsole() {
             <Inbox className="w-4 h-4 me-2" /> {ar ? 'طابور الأخطاء' : 'Webhook DLQ'}
           </Button>
         )}
+        {canViewUsers && (
+          <Button
+            variant={tab === 'automation-stop-point' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('automation-stop-point'); setSelectedUserId(null); }}
+            data-testid="admin-tab-automation-stop-point"
+          >
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'نقطة توقّف الأتمتة' : 'Automation Stop Point'}
+          </Button>
+        )}
         <div className="ms-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -1714,6 +1940,11 @@ export default function AdminConsole() {
       {tab === 'webhook-dlq' && canViewDlq && (
         <AdminSectionErrorBoundary name="webhook-dlq" resetKey="webhook-dlq">
           <WebhookDlqTab />
+        </AdminSectionErrorBoundary>
+      )}
+      {tab === 'automation-stop-point' && canViewUsers && (
+        <AdminSectionErrorBoundary name="automation-stop-point" resetKey="automation-stop-point">
+          <AutomationStopPointTab />
         </AdminSectionErrorBoundary>
       )}
     </div>
