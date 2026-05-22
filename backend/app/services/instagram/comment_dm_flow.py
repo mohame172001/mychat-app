@@ -76,8 +76,23 @@ async def _create_comment_dm_session(
 
     now = datetime.utcnow()
     automation = _materialize_comment_dm_rule(automation)
+    normalized_rule = normalize_comment_dm_rule(automation)
     follow_gate = normalize_follow_gate_config(automation)
     link_url = (automation.get('link_url') or '').strip()
+    opening_dm_text = (
+        normalized_rule.get('opening_dm_text')
+        or automation.get('opening_dm_text')
+        or automation.get('openingDmText')
+        or automation.get('dm_text')
+        or automation.get('dmText')
+        or ''
+    ).strip()
+    opening_button_text = (
+        normalized_rule.get('opening_dm_button_text')
+        or automation.get('opening_dm_button_text')
+        or automation.get('openingDmButtonText')
+        or 'Send me the link'
+    ).strip()
     session = {
         'id': payload.split(':')[1] if ':' in payload else str(_uuid.uuid4()),
         'user_id': user_doc['id'],
@@ -93,6 +108,13 @@ async def _create_comment_dm_session(
         'media_id': (comment_context or {}).get('media_id'),
         'mediaId': (comment_context or {}).get('media_id'),
         'commenter_id': (comment_context or {}).get('commenter_id') or recipient_ig_id,
+        'commenter_id_from_comment': (comment_context or {}).get('commenter_id') or recipient_ig_id,
+        'messaging_recipient_id': None,
+        'opening_message_id': None,
+        'opening_dm_text': opening_dm_text,
+        'opening_dm_button_text': opening_button_text,
+        'openingDmButtonText': opening_button_text,
+        'button_text': opening_button_text,
         'opening_dedupe_key': (comment_context or {}).get('opening_dedupe_key'),
         'openingDedupeKey': (comment_context or {}).get('opening_dedupe_key'),
         'payload': payload,
@@ -247,13 +269,36 @@ async def _send_comment_dm_flow_entry(
 
     if opening_text and has_deferred_step:
         payload = f'comment_flow:{str(_uuid.uuid4())}:continue'
-        await create_comment_dm_session(user_doc, automation, recipient_ig_id, comment_context, payload)
+        session = await create_comment_dm_session(
+            user_doc, automation, recipient_ig_id, comment_context, payload
+        )
         result = await send_ig_quick_reply(
             access_token, ig_user_id, recipient_ig_id,
             opening_text, button_text, payload,
             allow_workspace_recipient=True,
         )
         if result.get('ok'):
+            body = result.get('body') if isinstance(result.get('body'), dict) else {}
+            opening_message_id = (
+                body.get('message_id')
+                or body.get('mid')
+                or body.get('id')
+            )
+            if opening_message_id:
+                try:
+                    await db.comment_dm_sessions.update_one(
+                        {'id': session.get('id'), 'user_id': session.get('user_id')},
+                        {'$set': {
+                            'opening_message_id': str(opening_message_id),
+                            'updated': datetime.utcnow(),
+                        }},
+                    )
+                except Exception as exc:
+                    logger.info(
+                        'comment_dm_opening_message_id_store_failed session_id=%s exception=%s',
+                        session.get('id'),
+                        type(exc).__name__,
+                    )
             logger.info('comment_dm_opening_quick_reply_sent rule_id=%s recipient=%s',
                         automation.get('id'), recipient_ig_id)
             return True

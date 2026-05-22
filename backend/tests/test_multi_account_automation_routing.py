@@ -793,6 +793,217 @@ def test_account_b_post_specific_quick_reply_routes_by_recipient_not_entry(monke
     assert db.dm_logs.docs[0]['comment_flow_session_id'] == session_id
 
 
+def test_external_commenter_quick_reply_updates_session_recipient(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [_comment_rule('accA', 'igA', 'ruleA')]
+    reply_calls = []
+    message_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+            'allow_workspace_recipient': allow_workspace_recipient,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': f'mid-{len(message_calls)}'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    start = _run(server._handle_new_comment(
+        owner_a,
+        {
+            'ig_comment_id': 'comment-from-normal-user',
+            'media_id': 'media-normal',
+            'commenter_id': 'comment-author-scoped-id',
+            'commenter_username': 'normal_user',
+            'text': 'please',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert start['matched'] is True
+    assert reply_calls == [{'access_token': 'token-a', 'comment_id': 'comment-from-normal-user'}]
+    assert len(message_calls) == 1
+    opening = message_calls[0]
+    assert opening['recipient_id'] == 'comment-author-scoped-id'
+    payload = opening['message']['quick_replies'][0]['payload']
+    session = db.comment_dm_sessions.docs[0]
+    assert session['recipient_id'] == 'comment-author-scoped-id'
+
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            'id': 'igA',
+            'time': int(datetime.utcnow().timestamp()),
+            'messaging': [{
+                'sender': {'id': 'external-dm-sender-id'},
+                'recipient': {'id': 'igA'},
+                'timestamp': int(datetime.utcnow().timestamp() * 1000),
+                'message': {
+                    'mid': 'mid-external-click',
+                    'text': 'send link',
+                    'quick_reply': {'payload': payload},
+                },
+            }],
+        }],
+    }))
+
+    assert len(message_calls) == 2
+    next_step = message_calls[1]
+    assert next_step['access_token'] == 'token-a'
+    assert next_step['ig_user_id'] == 'igA'
+    assert next_step['recipient_id'] == 'external-dm-sender-id'
+    assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-id'
+    assert db.comment_dm_sessions.docs[0]['commenter_id_from_comment'] == 'comment-author-scoped-id'
+    assert db.comment_dm_sessions.docs[0]['messaging_recipient_id'] == 'external-dm-sender-id'
+
+
+def test_account_b_external_commenter_quick_reply_uses_account_b_namespace(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _comment_rule('accA', 'igA', 'ruleA'),
+        _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'mediaB'),
+    ]
+    message_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+            'allow_workspace_recipient': allow_workspace_recipient,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': f'mid-b-{len(message_calls)}'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-b-normal',
+            'media_id': 'mediaB',
+            'commenter_id': 'comment-author-b-scoped',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert len(message_calls) == 1
+    payload = message_calls[0]['message']['quick_replies'][0]['payload']
+    assert db.comment_dm_sessions.docs[0]['instagramAccountId'] == 'igB'
+
+    _run(server._process_webhook({
+        'object': 'instagram',
+        'entry': [{
+            # Account resolution must use recipient.id, not the UI active
+            # account or first connected account.
+            'id': 'igA',
+            'time': int(datetime.utcnow().timestamp()),
+            'messaging': [{
+                'sender': {'id': 'external-dm-sender-b'},
+                'recipient': {'id': 'igB'},
+                'timestamp': int(datetime.utcnow().timestamp() * 1000),
+                'message': {
+                    'mid': 'mid-external-click-b',
+                    'text': 'Ø§Ø¨Ø¹Øª',
+                    'quick_reply': {'payload': payload},
+                },
+            }],
+        }],
+    }))
+
+    assert len(message_calls) == 2
+    next_step = message_calls[1]
+    assert next_step['access_token'] == 'token-b'
+    assert next_step['ig_user_id'] == 'igB'
+    assert next_step['recipient_id'] == 'external-dm-sender-b'
+    assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-b'
+
+
+def test_external_quick_reply_text_fallback_finds_unique_button_session(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-text-fallback',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_user_id': 'igA',
+        'recipient_id': 'comment-author-id-only',
+        'automation_id': 'ruleA',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-text-fallback:continue',
+        'opening_dm_button_text': 'send link',
+        'link_dm_text': 'here is the link',
+        'link_button_text': 'open',
+        'link_url': 'https://example.com/fallback',
+        'created': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    })
+    message_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-fallback-next'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_a,
+        {
+            'sender': {'id': 'external-dm-sender-fallback'},
+            'recipient': {'id': 'igA'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-text-fallback-click',
+                'text': 'send link',
+            },
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['status'] == 'replied'
+    assert len(message_calls) == 1
+    assert message_calls[0]['recipient_id'] == 'external-dm-sender-fallback'
+    assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-fallback'
+    assert db.comment_dm_sessions.docs[0]['commenter_id_from_comment'] == 'comment-author-id-only'
+
+
 def test_classify_instagram_quick_reply_aliases_and_nested_postback_payloads():
     quick = server._classify_messaging_event({
         'sender': {'id': 'external'},
