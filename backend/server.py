@@ -111,8 +111,12 @@ if not META_VERIFY_TOKEN:
     META_VERIFY_TOKEN = 'mychat_verify_dev_only'
     META_VERIFY_TOKEN_SOURCE = 'default_dev_only'
 
-# Webhook X-Hub-Signature-256 secret. If META_WEBHOOK_APP_SECRET is set we use
-# it; otherwise we fall back to META_APP_SECRET.
+# Webhook X-Hub-Signature-256 secret. Instagram Business Login may be wired to
+# a different Meta app secret than the Facebook/Meta app env pair. We keep the
+# explicit META_WEBHOOK_APP_SECRET first, but verification below accepts any
+# configured first-party app secret that could legitimately have signed the
+# webhook. This preserves HMAC enforcement while avoiding a false 403 when the
+# Instagram product signs with INSTAGRAM_APP_SECRET / IG_APP_SECRET.
 META_WEBHOOK_APP_SECRET, META_WEBHOOK_APP_SECRET_SOURCE = _resolve_env(
     'META_WEBHOOK_APP_SECRET', 'META_APP_SECRET')
 # When enforce=True, webhooks with bad or missing signatures are rejected with
@@ -139,9 +143,30 @@ IS_PRODUCTION = ENV_NAME in ('production', 'prod')
 # require the secret to actually be configured so we can compute the
 # expected signature. Fail fast so a misconfigured production deploy
 # never silently downgrades to warn-only.
-if IS_PRODUCTION and not META_WEBHOOK_APP_SECRET:
+def _webhook_signature_secret_candidates():
+    candidates = []
+    seen = set()
+    for source, value in (
+        (META_WEBHOOK_APP_SECRET_SOURCE or 'META_WEBHOOK_APP_SECRET',
+         META_WEBHOOK_APP_SECRET),
+        (INSTAGRAM_APP_SECRET_SOURCE or 'INSTAGRAM_APP_SECRET',
+         INSTAGRAM_APP_SECRET),
+        ('INSTAGRAM_APP_SECRET', os.environ.get('INSTAGRAM_APP_SECRET', '')),
+        ('IG_APP_SECRET', os.environ.get('IG_APP_SECRET', '')),
+        ('META_APP_SECRET', META_APP_SECRET),
+    ):
+        secret = str(value or '').strip()
+        if not secret or secret in seen:
+            continue
+        seen.add(secret)
+        candidates.append((source, secret))
+    return candidates
+
+
+if IS_PRODUCTION and not _webhook_signature_secret_candidates():
     raise RuntimeError(
-        'META_WEBHOOK_APP_SECRET (or META_APP_SECRET) is required in '
+        'META_WEBHOOK_APP_SECRET, INSTAGRAM_APP_SECRET, IG_APP_SECRET, or META_APP_SECRET '
+        'is required in '
         'production so the Instagram webhook HMAC signature can be '
         'verified. Refusing to start without it.'
     )
@@ -16018,15 +16043,18 @@ def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dic
     """Verify the X-Hub-Signature-256 header from Meta.
     Returns {valid, reason, signature_present, computed_prefix, received_prefix}.
     """
+    secret_candidates = _webhook_signature_secret_candidates()
     out = {
         'valid': False,
         'reason': None,
         'signature_present': bool(signature_header),
-        'secret_configured': bool(META_WEBHOOK_APP_SECRET),
+        'secret_configured': bool(secret_candidates),
         'computed_prefix': None,
         'received_prefix': None,
+        'matched_secret_source': None,
+        'candidate_sources': [source for source, _secret in secret_candidates],
     }
-    if not META_WEBHOOK_APP_SECRET:
+    if not secret_candidates:
         out['reason'] = 'no_secret_configured'
         return out
     if not signature_header:
@@ -16038,18 +16066,22 @@ def _verify_webhook_signature(request_body: bytes, signature_header: str) -> dic
         out['received_prefix'] = signature_header[:20]
         return out
     received_sig = signature_header[7:]  # strip "sha256="
-    computed_sig = hmac.new(
-        META_WEBHOOK_APP_SECRET.encode('utf-8'),
-        request_body,
-        hashlib.sha256,
-    ).hexdigest()
-    out['computed_prefix'] = computed_sig[:8]
     out['received_prefix'] = received_sig[:8]
-    if hmac.compare_digest(computed_sig, received_sig):
-        out['valid'] = True
-        out['reason'] = 'signature_valid'
-    else:
-        out['reason'] = 'signature_mismatch'
+    for source, secret in secret_candidates:
+        computed_sig = hmac.new(
+            secret.encode('utf-8'),
+            request_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if out['computed_prefix'] is None:
+            out['computed_prefix'] = computed_sig[:8]
+        if hmac.compare_digest(computed_sig, received_sig):
+            out['valid'] = True
+            out['reason'] = 'signature_valid'
+            out['matched_secret_source'] = source
+            out['computed_prefix'] = computed_sig[:8]
+            return out
+    out['reason'] = 'signature_mismatch'
     return out
 
 
@@ -16117,7 +16149,9 @@ async def instagram_webhook(request: Request):
         else:
             logger.warning('webhook_hmac_not_enforced reason=%s', sig_result['reason'])
     else:
-        logger.info('webhook_signature_valid prefix=%s', sig_result['computed_prefix'])
+        logger.info('webhook_signature_valid prefix=%s source=%s',
+                    sig_result['computed_prefix'],
+                    sig_result.get('matched_secret_source'))
         await _record_instagram_automation_event(
             'webhook_signature_ok',
             source='webhook',
