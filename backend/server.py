@@ -69,6 +69,9 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ.get('DB_NAME', 'mychat')
 META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
+FACEBOOK_APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', '')
+FB_APP_SECRET = os.environ.get('FB_APP_SECRET', '')
+FACEBOOK_CLIENT_SECRET = os.environ.get('FACEBOOK_CLIENT_SECRET', '')
 # Instagram API with Business Login uses a SEPARATE App ID/Secret from the
 # Facebook App. Resolution priority for the Instagram credential pair:
 #   INSTAGRAM_APP_ID > IG_APP_ID > META_APP_ID
@@ -154,6 +157,14 @@ def _webhook_signature_secret_candidates():
         ('INSTAGRAM_APP_SECRET', os.environ.get('INSTAGRAM_APP_SECRET', '')),
         ('IG_APP_SECRET', os.environ.get('IG_APP_SECRET', '')),
         ('META_APP_SECRET', META_APP_SECRET),
+        # Older deployments and Meta/Facebook examples often name the same
+        # app secret with Facebook-specific aliases. Accepting these values
+        # keeps HMAC strict while preventing valid Meta webhooks from being
+        # rejected just because the production env uses an older name.
+        ('FACEBOOK_APP_SECRET', FACEBOOK_APP_SECRET),
+        ('FB_APP_SECRET', FB_APP_SECRET),
+        ('FACEBOOK_CLIENT_SECRET', FACEBOOK_CLIENT_SECRET),
+        ('APP_SECRET', os.environ.get('APP_SECRET', '')),
     ):
         secret = str(value or '').strip()
         variants = [(source, secret)]

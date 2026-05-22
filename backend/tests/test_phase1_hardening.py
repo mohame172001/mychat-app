@@ -232,6 +232,28 @@ def test_webhook_hmac_accepts_instagram_app_secret_when_meta_secret_differs(monk
     assert ok['secret_configured'] is True
 
 
+def test_webhook_hmac_accepts_facebook_secret_aliases(monkeypatch):
+    raw_body = b'{"object":"instagram","entry":[{"id":"ig","time":1}]}'
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', 'wrong-meta-secret')
+    monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET_SOURCE', 'META_WEBHOOK_APP_SECRET')
+    monkeypatch.setattr(server, 'INSTAGRAM_APP_SECRET', 'wrong-instagram-secret')
+    monkeypatch.setattr(server, 'INSTAGRAM_APP_SECRET_SOURCE', 'INSTAGRAM_APP_SECRET')
+    monkeypatch.setattr(server, 'IG_APP_SECRET', 'wrong-instagram-secret')
+    monkeypatch.setattr(server, 'META_APP_SECRET', 'wrong-meta-secret')
+    monkeypatch.setattr(server, 'FACEBOOK_APP_SECRET', 'facebook-product-secret')
+    monkeypatch.setattr(server, 'FB_APP_SECRET', '')
+    monkeypatch.setattr(server, 'FACEBOOK_CLIENT_SECRET', '')
+    signature = hmac.new(
+        b'facebook-product-secret', raw_body, hashlib.sha256,
+    ).hexdigest()
+
+    ok = server._verify_webhook_signature(raw_body, f'sha256={signature}')
+
+    assert ok['valid'] is True
+    assert ok['reason'] == 'signature_valid'
+    assert ok['matched_secret_source'] == 'FACEBOOK_APP_SECRET'
+
+
 def test_webhook_hmac_rejects_when_no_configured_app_secret_matches(monkeypatch):
     raw_body = b'{"object":"instagram","entry":[{"id":"ig","time":1}]}'
     monkeypatch.setattr(server, 'META_WEBHOOK_APP_SECRET', 'wrong-meta-secret')

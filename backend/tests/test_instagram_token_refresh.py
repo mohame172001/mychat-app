@@ -633,7 +633,10 @@ def test_instagram_auth_url_uses_signed_add_account_state():
     assert payload['userId'] == 'u1'
     assert payload['mode'] == 'add_account'
     assert payload['returnTo'] == '/app'
-    assert 'u1' not in state
+    # The HMAC signature segment is random-looking base64url and can
+    # coincidentally contain "u1"; only the payload segment is relevant
+    # for this "no raw user id in URL state" assertion.
+    assert 'u1' not in state.split('.', 1)[0]
 
 
 def _oauth_success_responses(ig_id='igB', username='account_b', token='short-b', long_token='long-b'):
