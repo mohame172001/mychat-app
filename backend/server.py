@@ -72,6 +72,8 @@ META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
 FACEBOOK_APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', '')
 FB_APP_SECRET = os.environ.get('FB_APP_SECRET', '')
 FACEBOOK_CLIENT_SECRET = os.environ.get('FACEBOOK_CLIENT_SECRET', '')
+META_CLIENT_SECRET = os.environ.get('META_CLIENT_SECRET', '')
+CLIENT_SECRET = os.environ.get('CLIENT_SECRET', '')
 # Instagram API with Business Login uses a SEPARATE App ID/Secret from the
 # Facebook App. Resolution priority for the Instagram credential pair:
 #   INSTAGRAM_APP_ID > IG_APP_ID > META_APP_ID
@@ -164,6 +166,8 @@ def _webhook_signature_secret_candidates():
         ('FACEBOOK_APP_SECRET', FACEBOOK_APP_SECRET),
         ('FB_APP_SECRET', FB_APP_SECRET),
         ('FACEBOOK_CLIENT_SECRET', FACEBOOK_CLIENT_SECRET),
+        ('META_CLIENT_SECRET', META_CLIENT_SECRET),
+        ('CLIENT_SECRET', CLIENT_SECRET),
         ('APP_SECRET', os.environ.get('APP_SECRET', '')),
     ):
         secret = str(value or '').strip()
@@ -172,6 +176,10 @@ def _webhook_signature_secret_candidates():
             unquoted = secret[1:-1].strip()
             if unquoted and unquoted != secret:
                 variants.append((f'{source}:unquoted', unquoted))
+        if '|' in secret:
+            maybe_secret = secret.rsplit('|', 1)[-1].strip()
+            if maybe_secret and maybe_secret != secret:
+                variants.append((f'{source}:app_access_token_secret', maybe_secret))
         for variant_source, variant_secret in variants:
             if not variant_secret or variant_secret in seen:
                 continue
@@ -16182,13 +16190,16 @@ async def instagram_webhook(request: Request):
     sig_result = _verify_webhook_signature(raw_body, sig_header, legacy_sig_header)
     if not sig_result['valid']:
         logger.warning('webhook_signature_check reason=%s received_prefix=%s '
-                       'computed_prefix=%s algorithm=%s header=%s enforce=%s',
+                       'computed_prefix=%s algorithm=%s header=%s enforce=%s '
+                       'candidate_sources=%s body_bytes=%s',
                        sig_result['reason'],
                        sig_result.get('received_prefix'),
                        sig_result.get('computed_prefix'),
                        sig_result.get('signature_algorithm'),
                        sig_result.get('signature_header'),
-                       META_WEBHOOK_HMAC_ENFORCE)
+                       META_WEBHOOK_HMAC_ENFORCE,
+                       ','.join(sig_result.get('candidate_sources') or []),
+                       len(raw_body or b''))
         if META_WEBHOOK_HMAC_ENFORCE:
             # Reject bad/missing signatures regardless of whether a secret
             # is configured. If HMAC enforcement is on, we never want to
