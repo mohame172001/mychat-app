@@ -201,6 +201,7 @@ def test_dashboard_summary_sets_safe_timing_headers(monkeypatch):
         'contacts',
         'link_clicks',
         'comments',
+        'parallel_reads',
         'read_model',
     }
     header_payload = str(dict(response.headers))

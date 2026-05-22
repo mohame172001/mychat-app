@@ -763,6 +763,72 @@ def test_selected_specific_media_id_returns_none_for_broad_rule():
     assert server._selected_specific_media_id(latest) is None
 
 
+def test_post_specific_rule_with_trigger_drift_still_matches_selected_media(monkeypatch):
+    """Production parity regression: general and post-specific automations
+    share the same execution engine after matching. A post-specific rule can
+    be persisted with post_scope=specific + selectedMediaId while an older UI
+    or repair path leaves trigger as comment:any. It must still match ONLY the
+    selected media and then execute the normal reply + opening-DM flow."""
+    db = _install_multi_account_db(monkeypatch)
+    rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific-drift', 'mediaP')
+    rule.pop('media_id', None)
+    rule.pop('trigger_media_id', None)
+    rule['selectedMediaId'] = 'mediaP'
+    rule['trigger'] = 'comment:any'
+    rule['nodes'][0]['data']['trigger'] = 'comment:any'
+    db.automations.docs = [rule]
+    reply_calls = []
+    send_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append((access_token, comment_id, text))
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        send_calls.append((access_token, ig_user_id, recipient_id, message))
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-drift-match',
+            'media_id': 'mediaP',
+            'commenter_id': 'igsid-external',
+            'commenter_username': 'follower',
+            'text': 'send',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-specific-drift'
+    assert db.comments.docs[0]['matched_rule_scope'] == 'specific_post_exact'
+    assert db.comment_dm_sessions.docs[0]['instagramAccountId'] == 'igB'
+    assert all(call[0] == 'token-b' for call in reply_calls)
+    assert all(call[0] == 'token-b' for call in send_calls)
+
+    miss = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-drift-miss',
+            'media_id': 'mediaQ',
+            'commenter_id': 'igsid-other',
+            'commenter_username': 'other',
+            'text': 'send',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert miss['matched'] is False
+
+
 def test_post_specific_rule_does_not_fire_on_unrelated_media(monkeypatch):
     """Account B's post-specific rule for mediaP must NOT fire when a
     comment lands on mediaQ on Account B."""
@@ -2309,6 +2375,24 @@ def test_comment_poller_loop_iterates_all_connected_accounts(monkeypatch):
     _run(_one_tick())
     # Both accounts must have been polled, in some order.
     assert sorted(polled_ig_ids) == ['igA', 'igB']
+
+
+def test_poller_collects_post_specific_selected_media_alias(monkeypatch):
+    """Polling fallback must scan the same selected post that webhook matching
+    would use, even when the rule stores selectedMediaId instead of media_id."""
+    db = _install_multi_account_db(monkeypatch)
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB-specific-alias', 'mediaP')
+    rule.pop('media_id', None)
+    rule.pop('trigger_media_id', None)
+    rule['selectedMediaId'] = 'mediaP'
+    rule['trigger'] = 'comment:any'
+
+    media_ids = _run(server._collect_target_media_ids(owner_b, [rule]))
+
+    assert 'mediaP' in media_ids
 
 
 def test_recent_flows_endpoint_returns_session_id_for_each_row(monkeypatch):

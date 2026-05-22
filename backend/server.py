@@ -13475,14 +13475,19 @@ def _selected_specific_media_id(rule: dict) -> Optional[str]:
 
     if post_scope in ('any', 'all', 'latest', 'next'):
         return None
-    if trigger_l in ('comment:any', 'comment:all', 'comment:latest', 'comment:next'):
+    if (
+        post_scope != 'specific'
+        and trigger_l in ('comment:any', 'comment:all', 'comment:latest', 'comment:next')
+    ):
         return None
 
     trigger_media = ''
     if trigger_l.startswith('comment:'):
         trigger_media = trigger.split(':', 1)[1].strip()
-        if trigger_media.lower() in ('any', 'all', 'latest', 'next'):
+        if post_scope != 'specific' and trigger_media.lower() in ('any', 'all', 'latest', 'next'):
             return None
+        if post_scope == 'specific' and trigger_media.lower() in ('any', 'all', 'latest', 'next'):
+            trigger_media = ''
 
     selected = media_id or trigger_media
     if not selected:
@@ -13492,6 +13497,41 @@ def _selected_specific_media_id(rule: dict) -> Optional[str]:
     if post_scope and post_scope != 'specific':
         return None
     return selected
+
+
+def _comment_rule_media_matches(rule: dict, media_id: Optional[str], latest_media_id: Optional[str] = None) -> bool:
+    """Return whether a comment's media id matches a comment automation scope.
+
+    General and post-specific rules share the same post-match execution path;
+    this helper is intentionally only about the match condition. It honors the
+    canonical selected-media aliases first so a post-specific rule does not go
+    silent just because its legacy trigger drifted to comment:any or omitted
+    the media id.
+    """
+    media = str(media_id or '').strip()
+    selected_media_id = _selected_specific_media_id(rule)
+    if selected_media_id:
+        return bool(media and media == str(selected_media_id))
+
+    raw_trigger = _comment_rule_trigger_value(rule)
+    trigger = raw_trigger.strip().lower()
+    if trigger.startswith('comment:'):
+        target = raw_trigger.split(':', 1)[1].strip()
+        target_l = target.lower()
+        if target_l in ('any', 'all'):
+            return bool(media)
+        if target_l in ('latest', 'next'):
+            return bool(media and latest_media_id and media == str(latest_media_id))
+        return bool(target and media and target == media)
+
+    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
+    if post_scope in ('any', 'all'):
+        return bool(media)
+    if post_scope in ('latest', 'next'):
+        return bool(media and latest_media_id and media == str(latest_media_id))
+    # Non-comment trigger rules (e.g. keyword:<word>) are media-agnostic unless
+    # _selected_specific_media_id found an explicit post-specific target above.
+    return True
 
 
 def _normalize_historical_catchup_flag(rule: dict) -> bool:
@@ -16334,6 +16374,9 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             return None
 
         if trigger.startswith('keyword:'):
+            if not _comment_rule_media_matches(auto, media_id):
+                cutoff_skip_reason = 'selected_media_no_match'
+                continue
             cutoff_skip_reason = apply_activation_cutoff()
             if cutoff_skip_reason:
                 cutoff_rule = cutoff_rule or auto
@@ -16346,21 +16389,17 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             fire = bool(match_result.get('matches'))
             if not fire:
                 cutoff_skip_reason = match_result.get('reason') or 'no_rule_match'
-        elif trigger.startswith('comment:'):
-            target = raw_trigger.split(':', 1)[1].strip()
-            media_hit = False
-            if target.lower() == 'any':
-                media_hit = bool(media_id)
-            elif target.lower() == 'latest':
+        elif trigger.startswith('comment:') or _selected_specific_media_id(auto):
+            target = raw_trigger.split(':', 1)[1].strip() if trigger.startswith('comment:') else ''
+            latest_media_for_match = None
+            if target.lower() in ('latest', 'next') or str(auto.get('post_scope') or auto.get('postScope') or '').strip().lower() in ('latest', 'next'):
                 if latest_media_id is None:
                     latest_media_id = await _fetch_latest_media_id(
                         user_doc.get('meta_access_token', ''),
                         user_doc.get('ig_user_id', ''),
                     ) or ''
-                if media_id and latest_media_id and media_id == latest_media_id:
-                    media_hit = True
-            elif target and media_id and target == media_id:
-                media_hit = True
+                latest_media_for_match = latest_media_id
+            media_hit = _comment_rule_media_matches(auto, media_id, latest_media_for_match)
             if media_hit:
                 cutoff_skip_reason = apply_activation_cutoff()
                 if cutoff_skip_reason:
@@ -18055,6 +18094,9 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
     needs_latest = False
     needs_any = False
     for a in automations:
+        selected_mid = _selected_specific_media_id(a)
+        if selected_mid and selected_mid not in target:
+            target.append(selected_mid)
         raw_trigger = a.get('trigger') or ''
         trigger = raw_trigger.lower()
         if trigger.startswith('comment:'):
@@ -18066,7 +18108,24 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
             elif t and t not in target:
                 target.append(t)
         # Also honor explicit trigger_media_id on the automation doc
-        mid = a.get('trigger_media_id') or a.get('media_id')
+        mid = (
+            a.get('trigger_media_id')
+            or a.get('media_id')
+            or a.get('selected_media_id')
+            or a.get('selectedMediaId')
+            or a.get('target_media_id')
+            or a.get('targetMediaId')
+            or a.get('selected_post_id')
+            or a.get('selectedPostId')
+            or a.get('target_post_id')
+            or a.get('targetPostId')
+            or a.get('instagram_media_id')
+            or a.get('instagramMediaId')
+            or a.get('post_id')
+            or a.get('postId')
+            or a.get('ig_media_id')
+            or a.get('igMediaId')
+        )
         if mid and mid not in target:
             target.append(mid)
     if needs_latest:
@@ -19404,14 +19463,26 @@ async def admin_instagram_multi_account_health(
         ig_id = str(account.get('instagramAccountId') or account.get('igUserId') or '')
         account_query = _account_scoped_query(owner_id, account) if owner_id else {}
         active_rule_count = 0
+        general_rule_count = 0
+        post_specific_rule_count = 0
+        selected_media_configured = 0
         last_comment = None
         last_dm_log = None
         try:
             if owner_id:
-                active_rule_count = await db.automations.count_documents({
+                active_rules = await db.automations.find({
                     **account_query,
                     'status': 'active',
-                })
+                }).to_list(200)
+                active_rule_count = len(active_rules)
+                for rule in active_rules:
+                    if not _is_comment_automation_rule(rule):
+                        continue
+                    if _selected_specific_media_id(rule):
+                        post_specific_rule_count += 1
+                        selected_media_configured += 1
+                    else:
+                        general_rule_count += 1
                 last_comments = await db.comments.find(account_query, {
                     'created': 1,
                     'source': 1,
@@ -19454,6 +19525,8 @@ async def admin_instagram_multi_account_health(
             issues.append('webhook_subscription_missing_fields')
         if active_rule_count <= 0:
             issues.append('no_active_comment_automations')
+        if post_specific_rule_count and selected_media_configured < post_specific_rule_count:
+            issues.append('post_specific_rule_missing_selected_media')
 
         items.append({
             'account_id_partial': _safe_partial_identifier(account.get('id')),
@@ -19482,6 +19555,14 @@ async def admin_instagram_multi_account_health(
                 'dm_log_event_kind': (last_dm_log or {}).get('event_kind'),
             },
             'active_automation_count': active_rule_count,
+            'automation_types': {
+                'general_count': general_rule_count,
+                'post_specific_count': post_specific_rule_count,
+            },
+            'selected_media_access_status': (
+                'configured' if selected_media_configured else
+                ('not_applicable' if post_specific_rule_count == 0 else 'missing')
+            ),
             'instant_webhook_eligible': bool(
                 owner_id and owner and owner.get('status') not in ('deleted', 'suspended')
                 and account.get('connectionValid') and account.get('accessToken') and ig_id
