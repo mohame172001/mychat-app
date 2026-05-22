@@ -3010,6 +3010,22 @@ async def _create_comment_dm_session(user_doc: dict, automation: dict, recipient
             rule_type=_automation_flight_rule_type(automation),
             skip_reason=None if session else 'session_not_created',
         )
+        await _record_instagram_automation_event(
+            'opening_dm_quick_reply_payload_created',
+            source=(comment_context or {}).get('source'),
+            user_doc=user_doc,
+            media_id=media_id,
+            comment_id=comment_id,
+            commenter_id=recipient_ig_id,
+            rule_id=automation.get('id'),
+            rule_type=_automation_flight_rule_type(automation),
+            extra={
+                'payload_session_partial': _safe_partial_identifier(
+                    _comment_flow_session_id_from_payload(payload)
+                ),
+                'payload_present': bool(payload),
+            },
+        )
         return session
     except Exception as exc:
         await _record_instagram_automation_event(
@@ -3697,6 +3713,26 @@ def _comment_flow_button_text_matches(session: dict, text: str) -> bool:
     ]
     return any(normalized == str(candidate or '').strip().casefold()
                for candidate in candidates if str(candidate or '').strip())
+
+
+def _dm_continuation_actor_id(ig_account_id: Optional[str],
+                              sender_id: Optional[str],
+                              recipient_id: Optional[str]) -> Optional[str]:
+    """Return the external participant for a comment-DM continuation event.
+
+    Meta normally sends incoming messages as sender=external, recipient=business.
+    Some button/postback envelopes can be ambiguous or reversed. For continuation
+    we should bind the session to whichever side is not the connected business
+    account, instead of blindly treating sender.id as the business/customer.
+    """
+    account = str(ig_account_id or '')
+    sender = str(sender_id or '') if sender_id else ''
+    recipient = str(recipient_id or '') if recipient_id else ''
+    if sender and sender != account:
+        return sender
+    if recipient and recipient != account:
+        return recipient
+    return sender or recipient or None
 
 
 async def _ensure_comment_flow_session_messaging_recipient(
@@ -18082,6 +18118,29 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             'created': now,
         }
 
+    continuation_actor_id = _dm_continuation_actor_id(
+        ig_account_id, sender_id, recipient_id
+    )
+    if continuation_actor_id and continuation_actor_id != sender_id:
+        logger.info(
+            'dm_sender_external_user_detected ig_account=%s sender=%s recipient=%s actor=%s',
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(recipient_id),
+            _safe_partial_identifier(continuation_actor_id),
+        )
+        await _record_instagram_automation_event(
+            'external_sender_detected',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=continuation_actor_id,
+            extra={
+                'sender_id_partial': _safe_partial_identifier(sender_id),
+                'recipient_id_partial': _safe_partial_identifier(recipient_id),
+            },
+        )
+
     async def _persist(doc):
         logger.info('dm_log_insert_started dedup_key=%s kind=%s status=%s',
                     dedup_key, event_kind, doc.get('status'))
@@ -18134,24 +18193,26 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             source='dm_webhook',
             user_doc=user_doc,
             comment_id=message_id,
-            commenter_id=sender_id,
+            commenter_id=continuation_actor_id or sender_id,
             extra={'lookup': 'postback'},
         )
         session = await _find_pending_comment_dm_session(
             user_doc,
-            sender_id,
+            continuation_actor_id or sender_id,
             payload=postback_payload,
             text=postback_title or '',
             reply_to_mid=reply_to_mid,
         )
         if session:
-            session = await _ensure_comment_flow_session_messaging_recipient(session, sender_id)
+            session = await _ensure_comment_flow_session_messaging_recipient(
+                session, continuation_actor_id or sender_id
+            )
             await _record_instagram_automation_event(
                 'session_lookup_success',
                 source='dm_webhook',
                 user_doc=user_doc,
                 comment_id=message_id,
-                commenter_id=sender_id,
+                commenter_id=continuation_actor_id or sender_id,
                 rule_id=session.get('automation_id'),
                 extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
             )
@@ -18173,7 +18234,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 source='dm_webhook',
                 user_doc=user_doc,
                 comment_id=message_id,
-                commenter_id=sender_id,
+                commenter_id=continuation_actor_id or sender_id,
                 rule_id=session.get('automation_id'),
                 extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
             )
@@ -18183,7 +18244,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 source='dm_webhook',
                 user_doc=user_doc,
                 comment_id=message_id,
-                commenter_id=sender_id,
+                commenter_id=continuation_actor_id or sender_id,
                 rule_id=session.get('automation_id'),
                 skip_reason=None if ok else 'comment_flow_send_failed',
                 extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
@@ -18202,7 +18263,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
             source='dm_webhook',
             user_doc=user_doc,
             comment_id=message_id,
-            commenter_id=sender_id,
+            commenter_id=continuation_actor_id or sender_id,
             skip_reason='postback_session_missing',
             extra={'lookup': 'postback'},
         )
@@ -18218,11 +18279,201 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
         return {'processed': False, 'status': 'skipped', 'reason': 'non_message_event',
                 'event_kind': event_kind}
 
+    # Comment-DM quick replies must be processed before echo/self-message
+    # filtering. Some Instagram button envelopes can be reversed
+    # (sender=business, recipient=external), but the payload/recent-session
+    # lookup still proves this is a customer continuation, not a bot loop.
+    comment_flow_payload = quick_reply_payload or postback_payload
+    if comment_flow_payload and _comment_flow_session_id_from_payload(comment_flow_payload):
+        actor_id = continuation_actor_id or sender_id
+        logger.info(
+            'quick_reply_click_received source=%s event_kind=%s instagram_account_id=%s '
+            'sender=%s recipient=%s actor=%s payload_session=%s',
+            source,
+            event_kind,
+            _safe_partial_identifier(ig_account_id),
+            _safe_partial_identifier(sender_id),
+            _safe_partial_identifier(recipient_id),
+            _safe_partial_identifier(actor_id),
+            _safe_partial_identifier(_comment_flow_session_id_from_payload(comment_flow_payload)),
+        )
+        await _record_instagram_automation_event(
+            'quick_reply_click_received',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=actor_id,
+            extra={
+                'event_kind': event_kind,
+                'payload_session_partial': _safe_partial_identifier(
+                    _comment_flow_session_id_from_payload(comment_flow_payload)
+                ),
+            },
+        )
+        await _record_instagram_automation_event(
+            'session_lookup_by_payload_started',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=actor_id,
+            extra={
+                'payload_session_partial': _safe_partial_identifier(
+                    _comment_flow_session_id_from_payload(comment_flow_payload)
+                ),
+            },
+        )
+        session = await _find_pending_comment_dm_session(
+            user_doc,
+            actor_id,
+            payload=comment_flow_payload,
+            text=text or postback_title or '',
+            reply_to_mid=reply_to_mid,
+        )
+        if session:
+            session = await _ensure_comment_flow_session_messaging_recipient(session, actor_id)
+            await _record_instagram_automation_event(
+                'session_lookup_by_payload_success',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=actor_id,
+                rule_id=session.get('automation_id'),
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            log_doc = _mk_log('matched')
+            log_doc['sender_id'] = actor_id or sender_id
+            log_doc['comment_flow_session_id'] = session.get('id')
+            if not await _persist(log_doc):
+                return {'processed': False, 'status': 'skipped', 'reason': 'race',
+                        'event_kind': event_kind}
+            if _comment_dm_follow_confirmation_matches(
+                session,
+                text=text or postback_title or '',
+                payload=comment_flow_payload,
+            ):
+                await _mark_comment_dm_follow_confirmed(session)
+                logger.info('follow_gate_confirmation_received session=%s via=quick_reply',
+                            session.get('id'))
+            await _record_instagram_automation_event(
+                'continuation_send_attempted',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=actor_id,
+                rule_id=session.get('automation_id'),
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            ok = await _send_comment_dm_flow_completion(user_doc, session)
+            await _record_instagram_automation_event(
+                'continuation_send_success' if ok else 'continuation_send_failed',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=actor_id,
+                rule_id=session.get('automation_id'),
+                skip_reason=None if ok else 'comment_flow_send_failed',
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            await db.dm_logs.update_one(
+                {'id': log_doc['id']},
+                {'$set': {'status': 'replied' if ok else 'failed',
+                          'skip_reason': None if ok else 'comment_flow_send_failed'}},
+            )
+            return {'processed': True, 'matched': True,
+                    'status': 'replied' if ok else 'failed',
+                    'reason': 'comment_flow_response',
+                    'log_id': log_doc['id'], 'event_kind': event_kind}
+        await _record_instagram_automation_event(
+            'session_lookup_by_payload_failed',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=actor_id,
+            skip_reason='comment_flow_session_missing',
+            extra={
+                'payload_session_partial': _safe_partial_identifier(
+                    _comment_flow_session_id_from_payload(comment_flow_payload)
+                ),
+            },
+        )
+
     # Real text messages from this point on.
     if is_echo or event_kind == 'message_echo':
         await _persist(_mk_log('skipped', skip_reason='echo'))
         return {'processed': False, 'status': 'skipped', 'reason': 'echo',
                 'event_kind': event_kind}
+    if sender_id and sender_id == ig_account_id and continuation_actor_id and continuation_actor_id != sender_id and text:
+        await _record_instagram_automation_event(
+            'session_lookup_by_external_sender_started',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=continuation_actor_id,
+            extra={'lookup': 'reversed_text_button'},
+        )
+        session = await _find_pending_comment_dm_session(
+            user_doc,
+            continuation_actor_id,
+            text=text or postback_title or '',
+            reply_to_mid=reply_to_mid,
+        )
+        if session:
+            session = await _ensure_comment_flow_session_messaging_recipient(
+                session, continuation_actor_id
+            )
+            await _record_instagram_automation_event(
+                'session_lookup_by_external_sender_success',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=continuation_actor_id,
+                rule_id=session.get('automation_id'),
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            log_doc = _mk_log('matched')
+            log_doc['sender_id'] = continuation_actor_id
+            log_doc['comment_flow_session_id'] = session.get('id')
+            if not await _persist(log_doc):
+                return {'processed': False, 'status': 'skipped', 'reason': 'race',
+                        'event_kind': event_kind}
+            await _record_instagram_automation_event(
+                'continuation_send_attempted',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=continuation_actor_id,
+                rule_id=session.get('automation_id'),
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            ok = await _send_comment_dm_flow_completion(user_doc, session)
+            await _record_instagram_automation_event(
+                'continuation_send_success' if ok else 'continuation_send_failed',
+                source='dm_webhook',
+                user_doc=user_doc,
+                comment_id=message_id,
+                commenter_id=continuation_actor_id,
+                rule_id=session.get('automation_id'),
+                skip_reason=None if ok else 'comment_flow_send_failed',
+                extra={'session_id_partial': _safe_partial_identifier(session.get('id'))},
+            )
+            await db.dm_logs.update_one(
+                {'id': log_doc['id']},
+                {'$set': {'status': 'replied' if ok else 'failed',
+                          'skip_reason': None if ok else 'comment_flow_send_failed'}},
+            )
+            return {'processed': True, 'matched': True,
+                    'status': 'replied' if ok else 'failed',
+                    'reason': 'comment_flow_response',
+                    'log_id': log_doc['id'], 'event_kind': event_kind}
+        await _record_instagram_automation_event(
+            'session_lookup_by_external_sender_failed',
+            source='dm_webhook',
+            user_doc=user_doc,
+            comment_id=message_id,
+            commenter_id=continuation_actor_id,
+            skip_reason='no_matching_reversed_text_button_session',
+            extra={'lookup': 'reversed_text_button'},
+        )
     if sender_id and sender_id == ig_account_id:
         await _persist(_mk_log('skipped', skip_reason='self_message'))
         return {'processed': False, 'status': 'skipped', 'reason': 'self_message',

@@ -1004,6 +1004,124 @@ def test_external_quick_reply_text_fallback_finds_unique_button_session(monkeypa
     assert db.comment_dm_sessions.docs[0]['commenter_id_from_comment'] == 'comment-author-id-only'
 
 
+def test_reversed_external_quick_reply_payload_continues_before_self_skip(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-reversed-payload',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_user_id': 'igA',
+        'recipient_id': 'comment-author-before-dm',
+        'automation_id': 'ruleA',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-reversed-payload:continue',
+        'link_dm_text': 'next message',
+        'created': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    })
+    message_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-reversed-next'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_a,
+        {
+            # Reversed envelopes must not be skipped as self_message before
+            # the secure comment_flow payload is resolved.
+            'sender': {'id': 'igA'},
+            'recipient': {'id': 'external-dm-sender-reversed'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-reversed-payload-click',
+                'text': 'send link',
+                'quick_reply': {
+                    'payload': 'comment_flow:session-reversed-payload:continue',
+                },
+            },
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['status'] == 'replied'
+    assert len(message_calls) == 1
+    assert message_calls[0]['recipient_id'] == 'external-dm-sender-reversed'
+    assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-reversed'
+
+
+def test_reversed_external_quick_reply_text_fallback_continues_before_self_skip(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.comment_dm_sessions.docs.append({
+        'id': 'session-reversed-text',
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_user_id': 'igA',
+        'recipient_id': 'comment-author-before-dm-text',
+        'automation_id': 'ruleA',
+        'status': 'pending',
+        'stage': 'awaiting_user_action',
+        'payload': 'comment_flow:session-reversed-text:continue',
+        'opening_dm_button_text': 'ابعت',
+        'link_dm_text': 'next message',
+        'created': datetime.utcnow(),
+        'updated': datetime.utcnow(),
+    })
+    message_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-reversed-text-next'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_a,
+        {
+            'sender': {'id': 'igA'},
+            'recipient': {'id': 'external-dm-sender-reversed-text'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-reversed-text-click',
+                'text': 'ابعت',
+            },
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['status'] == 'replied'
+    assert len(message_calls) == 1
+    assert message_calls[0]['recipient_id'] == 'external-dm-sender-reversed-text'
+    assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-reversed-text'
+
+
 def test_classify_instagram_quick_reply_aliases_and_nested_postback_payloads():
     quick = server._classify_messaging_event({
         'sender': {'id': 'external'},
