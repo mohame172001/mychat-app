@@ -478,6 +478,67 @@ def test_send_ig_message_refreshes_token_once_on_graph_190(monkeypatch):
     assert post_tokens == ['old-token', 'new-token']
 
 
+def test_send_ig_message_uses_stored_account_token_before_refresh(monkeypatch):
+    fake_db = FakeDB(
+        _account(instagramAccountId='ig1', accessToken='current-token'),
+        {'id': 'u1', 'ig_user_id': 'ig1'},
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient([
+        FakeResponse(400, {'error': {'message': 'bad token', 'code': 190}}),
+        FakeResponse(200, {'recipient_id': 'external-1', 'message_id': 'm1'}),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=15: fake_client)
+
+    result = _run(server.send_ig_message(
+        'stale-user-token',
+        'ig1',
+        'external-1',
+        {'text': 'hello'},
+    ))
+
+    assert result['ok'] is True
+    post_tokens = [call[1]['params']['access_token'] for call in fake_client.post_calls]
+    assert post_tokens == ['stale-user-token', 'current-token']
+    assert fake_client.get_calls == []
+
+
+def test_comment_reply_uses_stored_account_token_before_refresh(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='acc1', instagramAccountId='ig1', accessToken='current-token'),
+        {'id': 'u1', 'ig_user_id': 'ig1'},
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient([
+        FakeResponse(400, {'error': {'message': 'bad token', 'code': 190}}),
+        FakeResponse(200, {'id': 'reply-1'}),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=15: fake_client)
+
+    first = _run(server.reply_to_ig_comment_detailed(
+        'stale-user-token',
+        'comment-1',
+        'reply text',
+    ))
+    result, token = _run(server._retry_comment_reply_after_token_refresh(
+        {
+            'id': 'u1',
+            'active_instagram_account_id': 'acc1',
+            'ig_user_id': 'ig1',
+        },
+        'stale-user-token',
+        'comment-1',
+        'reply text',
+        first,
+    ))
+
+    assert result['ok'] is True
+    assert token == 'current-token'
+    post_tokens = [call[1]['data']['access_token'] for call in fake_client.post_calls]
+    assert post_tokens == ['stale-user-token', 'current-token']
+    assert fake_client.get_calls == []
+
+
 def test_instagram_media_refreshes_token_and_retries_after_graph_190(monkeypatch):
     user = _user(
         id='u1',

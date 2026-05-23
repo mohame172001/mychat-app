@@ -1938,6 +1938,21 @@ async def _find_instagram_account_for_graph_retry(*,
         return None
 
 
+async def _current_account_token_for_graph_retry(*,
+                                                 account_id: Optional[str] = None,
+                                                 ig_user_id: Optional[str] = None,
+                                                 fallback_token: Optional[str] = None) -> Optional[str]:
+    """Return the latest stored account token before attempting refresh."""
+    account = await _find_instagram_account_for_graph_retry(
+        account_id=account_id,
+        ig_user_id=ig_user_id,
+    )
+    if not account:
+        return fallback_token
+    token = str(account.get('accessToken') or '').strip()
+    return token or fallback_token
+
+
 async def _refresh_token_for_graph_retry(*,
                                          account_id: Optional[str] = None,
                                          ig_user_id: Optional[str] = None,
@@ -2055,6 +2070,28 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
             classified = classify_instagram_send_error(safe_error, r.status_code)
             first_result = _detailed_send_result(False, r.status_code, error=safe_error)
             if _is_graph_permission_token_error(first_result):
+                stored_token = await _current_account_token_for_graph_retry(
+                    ig_user_id=ig_user_id,
+                    fallback_token=access_token,
+                )
+                if stored_token and stored_token != access_token:
+                    retry = await c.post(url, json=payload, params={'access_token': stored_token})
+                    if retry.status_code == 200:
+                        try:
+                            body = retry.json()
+                        except Exception:
+                            body = {}
+                        logger.info(
+                            'send_ig_message_stored_token_retry_succeeded ig_user_id=%s recipient=%s',
+                            _safe_partial_identifier(ig_user_id),
+                            _safe_partial_identifier(recipient_ig_id),
+                        )
+                        _LAST_DM_FAILURE.set({})
+                        return _detailed_send_result(True, retry.status_code, body=body)
+                    safe_error = _safe_provider_error_payload(retry.text[:500])
+                    classified = classify_instagram_send_error(safe_error, retry.status_code)
+                    r = retry
+                    access_token = stored_token
                 refresh = await _refresh_token_for_graph_retry(
                     ig_user_id=ig_user_id,
                     operation='send_ig_message',
@@ -4255,6 +4292,23 @@ async def _retry_comment_reply_after_token_refresh(user: dict,
         return first_result, access_token
     account_id = user.get('active_instagram_account_id') or user.get('instagram_account_id')
     ig_user_id = user.get('ig_user_id') or user.get('instagramAccountId')
+    stored_token = await _current_account_token_for_graph_retry(
+        account_id=account_id,
+        ig_user_id=ig_user_id,
+        fallback_token=access_token,
+    )
+    if stored_token and stored_token != access_token:
+        retry_result = await _call_reply_to_ig_comment_detailed(stored_token, ig_comment_id, text)
+        if retry_result.get('ok'):
+            logger.info(
+                'comment_reply_stored_token_retry_succeeded ig_comment_id=%s account_id=%s',
+                _safe_partial_identifier(ig_comment_id),
+                account_id,
+            )
+            return retry_result, stored_token
+        if not _is_graph_permission_token_error(retry_result):
+            return retry_result, stored_token
+        access_token = stored_token
     refresh = await _refresh_token_for_graph_retry(
         account_id=account_id,
         ig_user_id=ig_user_id,
@@ -4327,6 +4381,18 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
 
     access_token = user.get('meta_access_token', '')
     ig_user_id = user.get('ig_user_id', '')
+    current_access_token = await _current_account_token_for_graph_retry(
+        account_id=user.get('active_instagram_account_id') or user.get('instagram_account_id'),
+        ig_user_id=ig_user_id,
+        fallback_token=access_token,
+    )
+    if current_access_token and current_access_token != access_token:
+        logger.info(
+            'execute_flow_using_current_account_token ig_user_id=%s rule_id=%s',
+            _safe_partial_identifier(ig_user_id),
+            automation.get('id'),
+        )
+        access_token = current_access_token
     flow_source = (comment_context or {}).get('source') if comment_context else None
     flow_received_monotonic = (comment_context or {}).get('received_monotonic') if comment_context else None
     flow_comment_id = (comment_context or {}).get('ig_comment_id') if comment_context else None
@@ -7287,6 +7353,11 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     if not ig_comment_id:
         raise HTTPException(400, 'Comment has no Instagram ID (seed data cannot be replied to)')
     access_token = account.get('accessToken', '')
+    access_token = await _current_account_token_for_graph_retry(
+        account_id=account.get('id'),
+        ig_user_id=account.get('instagramAccountId') or account.get('igUserId'),
+        fallback_token=access_token,
+    ) or access_token
     text = (data.text or '').strip()
     if not text:
         raise HTTPException(400, 'Empty reply')
@@ -7508,7 +7579,11 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
         raise HTTPException(400, 'Comment has no Instagram ID (seed data cannot be replied to)')
 
     user_doc = await db.users.find_one({'id': user_id}) or {}
-    access_token = user_doc.get('meta_access_token') or ''
+    access_token = await _current_account_token_for_graph_retry(
+        account_id=account.get('id'),
+        ig_user_id=account.get('instagramAccountId') or account.get('igUserId'),
+        fallback_token=user_doc.get('meta_access_token') or '',
+    ) or ''
     if not access_token:
         raise HTTPException(400, 'Instagram not connected')
 
