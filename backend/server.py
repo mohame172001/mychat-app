@@ -1887,6 +1887,87 @@ from contextvars import ContextVar as _DMContextVar  # used by both send paths b
 _LAST_DM_FAILURE: _DMContextVar = _DMContextVar('_LAST_DM_FAILURE', default={})
 
 
+def _is_graph_permission_token_error(result_or_payload: Optional[dict]) -> bool:
+    """Return True for Graph errors that are worth one token refresh retry."""
+    data = result_or_payload or {}
+    error = data.get('error') if isinstance(data.get('error'), dict) else data
+    code = (
+        data.get('provider_code')
+        or data.get('graph_code')
+        or error.get('code')
+    )
+    reason = data.get('failure_reason') or data.get('safe_label')
+    try:
+        code_int = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code_int = None
+    return reason == 'permission_error' and code_int == 190
+
+
+def _media_errors_have_token_permission_error(errors: dict) -> bool:
+    for detail in (errors or {}).values():
+        if not isinstance(detail, dict):
+            continue
+        status = detail.get('status')
+        body = detail.get('body') or detail.get('error') or ''
+        classified = classify_instagram_send_error(body, status)
+        if _is_graph_permission_token_error(classified):
+            return True
+    return False
+
+
+async def _find_instagram_account_for_graph_retry(*,
+                                                  account_id: Optional[str] = None,
+                                                  ig_user_id: Optional[str] = None) -> Optional[dict]:
+    query: Dict[str, Any]
+    if account_id:
+        query = {'id': str(account_id)}
+    elif ig_user_id:
+        ig = str(ig_user_id)
+        query = {'$or': [
+            {'instagramAccountId': ig},
+            {'igUserId': ig},
+            {'ig_user_id': ig},
+        ], 'isActive': {'$ne': False}}
+    else:
+        return None
+    try:
+        return await db.instagram_accounts.find_one(query)
+    except Exception as exc:
+        logger.warning('instagram_token_retry_account_lookup_failed err=%s', type(exc).__name__)
+        return None
+
+
+async def _refresh_token_for_graph_retry(*,
+                                         account_id: Optional[str] = None,
+                                         ig_user_id: Optional[str] = None,
+                                         operation: str = 'graph_send') -> dict:
+    """Refresh the account token after Graph code 190, returning a safe status."""
+    account = await _find_instagram_account_for_graph_retry(
+        account_id=account_id,
+        ig_user_id=ig_user_id,
+    )
+    if not account or not account.get('id'):
+        return {'ok': False, 'status': 'account_not_found'}
+    result = await refreshInstagramToken(str(account['id']), force=True)
+    refreshed = await db.instagram_accounts.find_one({'id': account['id']}) or account
+    new_token = refreshed.get('accessToken') if result.get('status') == 'refreshed' else None
+    logger.info(
+        'instagram_token_retry_refresh_result operation=%s account_id=%s status=%s refreshed=%s',
+        operation,
+        account.get('id'),
+        result.get('status'),
+        bool(new_token),
+    )
+    return {
+        'ok': bool(new_token),
+        'status': result.get('status'),
+        'accountId': account.get('id'),
+        'accessToken': new_token,
+        'instagramAccountId': refreshed.get('instagramAccountId') or refreshed.get('igUserId'),
+    }
+
+
 async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: str,
                           message: dict,
                           allow_workspace_recipient: bool = False) -> dict:
@@ -1972,6 +2053,30 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
                 return _detailed_send_result(True, r.status_code, body=body)
             safe_error = _safe_provider_error_payload(r.text[:500])
             classified = classify_instagram_send_error(safe_error, r.status_code)
+            first_result = _detailed_send_result(False, r.status_code, error=safe_error)
+            if _is_graph_permission_token_error(first_result):
+                refresh = await _refresh_token_for_graph_retry(
+                    ig_user_id=ig_user_id,
+                    operation='send_ig_message',
+                )
+                new_token = refresh.get('accessToken')
+                if new_token and new_token != access_token:
+                    retry = await c.post(url, json=payload, params={'access_token': new_token})
+                    if retry.status_code == 200:
+                        try:
+                            body = retry.json()
+                        except Exception:
+                            body = {}
+                        logger.info(
+                            'send_ig_message_token_refresh_retry_succeeded ig_user_id=%s recipient=%s',
+                            _safe_partial_identifier(ig_user_id),
+                            _safe_partial_identifier(recipient_ig_id),
+                        )
+                        _LAST_DM_FAILURE.set({})
+                        return _detailed_send_result(True, retry.status_code, body=body)
+                    safe_error = _safe_provider_error_payload(retry.text[:500])
+                    classified = classify_instagram_send_error(safe_error, retry.status_code)
+                    r = retry
             # Phase 2.18Y: when classification falls through to
             # unknown_graph_error, surface a sanitized snippet of the
             # actual Meta error message so we can extend the classifier
@@ -4140,6 +4245,35 @@ async def _call_reply_to_ig_comment_detailed(access_token: str, ig_comment_id: s
     return await reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
 
 
+async def _retry_comment_reply_after_token_refresh(user: dict,
+                                                   access_token: str,
+                                                   ig_comment_id: str,
+                                                   text: str,
+                                                   first_result: dict) -> tuple[dict, str]:
+    """Retry one public comment reply after Graph code 190 by refreshing account token."""
+    if not _is_graph_permission_token_error(first_result):
+        return first_result, access_token
+    account_id = user.get('active_instagram_account_id') or user.get('instagram_account_id')
+    ig_user_id = user.get('ig_user_id') or user.get('instagramAccountId')
+    refresh = await _refresh_token_for_graph_retry(
+        account_id=account_id,
+        ig_user_id=ig_user_id,
+        operation='reply_to_ig_comment',
+    )
+    new_token = refresh.get('accessToken')
+    if not new_token or new_token == access_token:
+        return first_result, access_token
+    retry_result = await _call_reply_to_ig_comment_detailed(new_token, ig_comment_id, text)
+    if retry_result.get('ok'):
+        logger.info(
+            'comment_reply_token_refresh_retry_succeeded ig_comment_id=%s account_id=%s',
+            _safe_partial_identifier(ig_comment_id),
+            refresh.get('accountId'),
+        )
+        return retry_result, new_token
+    return retry_result, new_token
+
+
 # ---------------- Automation engine ----------------
 async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                        trigger_text: str = '', comment_context: Optional[dict] = None,
@@ -4591,6 +4725,13 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                         )
                         reply_result = await _call_reply_to_ig_comment_detailed(
                             access_token, comment_context['ig_comment_id'], msg_text
+                        )
+                        reply_result, access_token = await _retry_comment_reply_after_token_refresh(
+                            user,
+                            access_token,
+                            comment_context['ig_comment_id'],
+                            msg_text,
+                            reply_result,
                         )
                         reply_result = _normalize_reply_result_for_provider_proof(reply_result)
                     ok = bool(reply_result.get('ok'))
@@ -7150,8 +7291,20 @@ async def reply_to_comment(cid: str, data: MessageIn, user_id: str = Depends(get
     if not text:
         raise HTTPException(400, 'Empty reply')
     attempted_at = datetime.utcnow()
+    raw_result = await _call_reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
+    raw_result, access_token = await _retry_comment_reply_after_token_refresh(
+        {
+            'id': user_id,
+            'active_instagram_account_id': account.get('id'),
+            'ig_user_id': account.get('instagramAccountId') or account.get('igUserId'),
+        },
+        access_token,
+        ig_comment_id,
+        text,
+        raw_result,
+    )
     result = _normalize_reply_result_for_provider_proof(
-        await _call_reply_to_ig_comment_detailed(access_token, ig_comment_id, text)
+        raw_result
     )
     if not _reply_result_has_provider_proof(result):
         await db.comments.update_one(
@@ -7408,6 +7561,17 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
         }
 
     result = await reply_to_ig_comment_detailed(access_token, ig_comment_id, reply_text)
+    result, access_token = await _retry_comment_reply_after_token_refresh(
+        {
+            'id': user_id,
+            'active_instagram_account_id': account.get('id'),
+            'ig_user_id': account.get('instagramAccountId') or account.get('igUserId'),
+        },
+        access_token,
+        ig_comment_id,
+        reply_text,
+        result,
+    )
     classified_reason = result.get('failure_reason')
     final_now = datetime.utcnow()
 
@@ -15370,6 +15534,56 @@ async def instagram_media(user_id: str = Depends(get_current_active_user_id), li
                         errors[label] = {'status': r.status_code, 'body': r.text[:500]}
                 except Exception as e:
                     errors[label] = {'exception': str(e)[:200]}
+
+            if _media_errors_have_token_permission_error(errors):
+                refresh = await _refresh_token_for_graph_retry(
+                    account_id=account.get('id'),
+                    ig_user_id=ig_id,
+                    operation='instagram_media',
+                )
+                refreshed_token = refresh.get('accessToken')
+                if refreshed_token and refreshed_token != token:
+                    retry_errors = {}
+                    for url, label in endpoints:
+                        retry_label = f'{label}:after_refresh'
+                        try:
+                            r = await c.get(url, params={
+                                'access_token': refreshed_token,
+                                'fields': fields,
+                                'limit': lim,
+                            })
+                            if r.status_code == 200:
+                                items = (r.json() or {}).get('data') or []
+                                logger.info(
+                                    'instagram_media_token_refresh_retry_succeeded account_id=%s endpoint=%s',
+                                    account.get('id'),
+                                    label,
+                                )
+                                return {
+                                    'ok': True,
+                                    'accountId': account.get('id'),
+                                    'endpointUsed': label,
+                                    'media': items,
+                                    'items': items,
+                                    'count': len(items),
+                                    'warning': None if items else f'No media returned from {label}',
+                                    'errors': errors,
+                                    'graphMeId': me_id_for_debug,
+                                    'dbIgUserId': ig_id or None,
+                                    'idMatch': (bool(me_id_for_debug) and me_id_for_debug == ig_id) if ig_id else None,
+                                    'tokenRefresh': 'refreshed',
+                                }
+                            retry_errors[retry_label] = {
+                                'status': r.status_code,
+                                'body': r.text[:500],
+                            }
+                        except Exception as e:
+                            retry_errors[retry_label] = {'exception': str(e)[:200]}
+                    errors['after_token_refresh'] = retry_errors
+                else:
+                    errors['token_refresh'] = {
+                        'status': refresh.get('status') or 'not_refreshed',
+                    }
 
         return {
             'ok': False,

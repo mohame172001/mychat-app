@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -24,7 +25,7 @@ class FakeResponse:
     def __init__(self, status_code, body):
         self.status_code = status_code
         self._body = body
-        self.text = str(body)
+        self.text = json.dumps(body) if isinstance(body, dict) else str(body)
         self.headers = {'content-type': 'application/json'}
 
     def json(self):
@@ -449,6 +450,65 @@ def test_public_refresh_status_never_returns_access_token():
 
     assert 'accessToken' not in row
     assert 'secret-token' not in str(row)
+
+
+def test_send_ig_message_refreshes_token_once_on_graph_190(monkeypatch):
+    fake_db = FakeDB(_account(instagramAccountId='ig1'), {'id': 'u1', 'ig_user_id': 'ig1'})
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient([
+        FakeResponse(400, {'error': {'message': 'bad token', 'code': 190}}),
+        FakeResponse(200, {
+            'access_token': 'new-token',
+            'expires_in': 60 * 60 * 24 * 60,
+        }),
+        FakeResponse(200, {'recipient_id': 'external-1', 'message_id': 'm1'}),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=15: fake_client)
+
+    result = _run(server.send_ig_message(
+        'old-token',
+        'ig1',
+        'external-1',
+        {'text': 'hello'},
+    ))
+
+    assert result['ok'] is True
+    assert fake_db.instagram_accounts.docs[0]['accessToken'] == 'new-token'
+    post_tokens = [call[1]['params']['access_token'] for call in fake_client.post_calls]
+    assert post_tokens == ['old-token', 'new-token']
+
+
+def test_instagram_media_refreshes_token_and_retries_after_graph_190(monkeypatch):
+    user = _user(
+        id='u1',
+        active_instagram_account_id='acc1',
+        ig_user_id='ig1',
+        meta_access_token='old-token',
+    )
+    fake_db = FakeDB(_account(instagramAccountId='ig1'), user)
+    monkeypatch.setattr(server, 'db', fake_db)
+    graph_190 = FakeResponse(400, {'error': {'message': 'bad token', 'code': 190}})
+    fake_client = FakeAsyncClient([
+        graph_190,  # /me debug probe
+        graph_190,  # /me/media first endpoint
+        graph_190,  # /v21.0/me/media
+        graph_190,  # /{ig_id}/media
+        graph_190,  # graph.facebook.com/{ig_id}/media
+        FakeResponse(200, {
+            'access_token': 'new-token',
+            'expires_in': 60 * 60 * 24 * 60,
+        }),
+        FakeResponse(200, {'data': [{'id': 'media1', 'caption': 'ok'}]}),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+
+    result = _run(server.instagram_media(user_id='u1', limit=25))
+
+    assert result['ok'] is True
+    assert result['tokenRefresh'] == 'refreshed'
+    assert result['count'] == 1
+    assert fake_db.instagram_accounts.docs[0]['accessToken'] == 'new-token'
+    assert fake_client.get_calls[-1][1]['params']['access_token'] == 'new-token'
 
 
 def _multi_account_db():
