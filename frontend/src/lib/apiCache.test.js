@@ -229,10 +229,17 @@ describe('cachedApiGet', () => {
       data: '<html />',
     }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
 
+    await expect(cachedApiGetSWR('instagram-media:u1:acc1', () => ({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      data: { ok: false, error: { body: 'All media endpoints failed' } },
+    }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
+
     clearApiMemoryCacheForTests();
 
     expect(getCachedApiData('dashboard-summary:u1:acc1')).toBeUndefined();
     expect(getCachedApiData('automations-summary:u1:acc1')).toBeUndefined();
+    expect(getCachedApiData('instagram-media:u1:acc1')).toBeUndefined();
   });
 
   test('logout-style clear removes persisted snapshots', async () => {

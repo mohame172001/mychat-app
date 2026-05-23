@@ -622,7 +622,11 @@ const Automations = () => {
     // arrives. This removes the multi-second "loading..." spinner the
     // user used to see when picking a post to attach an automation to.
     const cacheKey = `instagram-media:${user?.id || 'anon'}:${user?.activeInstagramAccountId || user?.activeInstagramIgUserId || 'active'}`;
-    const cached = getCachedApiData(cacheKey, { maxStaleMs: 30 * 60 * 1000 });
+    const cachedRaw = getCachedApiData(cacheKey, { maxStaleMs: 30 * 60 * 1000 });
+    const cached = cachedRaw?.ok === false ? null : cachedRaw;
+    if (cachedRaw?.ok === false) {
+      invalidateApiCache(cacheKey);
+    }
     const applyMediaPayload = (data) => {
       if (!data) return;
       const items = data?.media || data?.items || [];
@@ -663,6 +667,7 @@ const Automations = () => {
         {
           ttlMs: 5 * 60 * 1000,
           maxStaleMs: 30 * 60 * 1000,
+          force: cachedRaw?.ok === false,
           persist: true,
           onUpdate: (data) => applyMediaPayload(data),
         }

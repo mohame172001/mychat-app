@@ -4381,18 +4381,6 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
 
     access_token = user.get('meta_access_token', '')
     ig_user_id = user.get('ig_user_id', '')
-    current_access_token = await _current_account_token_for_graph_retry(
-        account_id=user.get('active_instagram_account_id') or user.get('instagram_account_id'),
-        ig_user_id=ig_user_id,
-        fallback_token=access_token,
-    )
-    if current_access_token and current_access_token != access_token:
-        logger.info(
-            'execute_flow_using_current_account_token ig_user_id=%s rule_id=%s',
-            _safe_partial_identifier(ig_user_id),
-            automation.get('id'),
-        )
-        access_token = current_access_token
     flow_source = (comment_context or {}).get('source') if comment_context else None
     flow_received_monotonic = (comment_context or {}).get('received_monotonic') if comment_context else None
     flow_comment_id = (comment_context or {}).get('ig_comment_id') if comment_context else None

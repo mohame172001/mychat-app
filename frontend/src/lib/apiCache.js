@@ -66,7 +66,11 @@ function isJsonResponse(response) {
 function isCacheableResponse(response) {
   if (!response || response.data === undefined) return true;
   const status = Number(response.status || 200);
-  return status >= 200 && status < 300 && isJsonResponse(response);
+  if (!(status >= 200 && status < 300) || !isJsonResponse(response)) return false;
+  if (response.data && typeof response.data === 'object' && response.data.ok === false) {
+    return false;
+  }
+  return true;
 }
 
 function isAuthError(error) {
@@ -117,6 +121,10 @@ function loadPersistentEntry(key) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.data === undefined || !Number(parsed.updatedAt)) return null;
+    if (parsed.data && typeof parsed.data === 'object' && parsed.data.ok === false) {
+      window.localStorage.removeItem(storageKey(key));
+      return null;
+    }
     return { data: parsed.data, updatedAt: parsed.updatedAt, promise: null, persisted: true };
   } catch {
     try { window.localStorage.removeItem(storageKey(key)); } catch (_) {}
@@ -126,6 +134,10 @@ function loadPersistentEntry(key) {
 
 function persistEntry(key, data, updatedAt, persist) {
   if (!persist || !canUseStorage() || !isPersistableKey(key)) return;
+  if (data && typeof data === 'object' && data.ok === false) {
+    removePersistentEntry(key);
+    return;
+  }
   try {
     const clean = sanitizeForPersistence(data);
     window.localStorage.setItem(storageKey(key), JSON.stringify({ data: clean, updatedAt }));
