@@ -3219,6 +3219,76 @@ def test_recent_completed_session_still_blocks_within_ttl(monkeypatch):
     assert result.get('classified_reason') == 'same_commenter_same_post_same_rule'
 
 
+def test_old_completed_session_does_not_block_fresh_comment_forever(monkeypatch):
+    """A completed flow should block near-immediate repeats, but not make
+    the same commenter/post/rule tuple look broken forever on a later
+    legitimate comment."""
+    db = _install_multi_account_db(monkeypatch)
+    rule = _comment_rule('accB', 'igB', 'ruleB-completed-reopen')
+    rule['activationStartedAt'] = datetime.utcnow() - timedelta(days=2)
+    db.automations.docs = [rule]
+    old = datetime.utcnow() - timedelta(
+        seconds=server._COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS + 60,
+    )
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-old-completed',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'automation_id': 'ruleB-completed-reopen',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-repeat',
+        'commenter_id': 'igsid-repeat',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB-completed-reopen', 'mediaB', 'igsid-repeat',
+        ),
+        'status': 'completed',
+        'stage': 'final_sent',
+        'finalDmSentAt': old,
+        'created': old,
+        'updated': old,
+    })
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append({'access_token': access_token, 'ig_user_id': ig_user_id})
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'fresh-after-old-completed',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-repeat',
+            'text': 'send me again later',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-completed-reopen'
+    assert any(c['comment_id'] == 'fresh-after-old-completed' for c in reply_calls)
+    assert any(c['ig_user_id'] == 'igB' for c in dm_calls)
+    old_row = next(s for s in db.comment_dm_sessions.docs if s['id'] == 'sess-old-completed')
+    assert old_row['status'] == 'reopened_after_completed'
+    assert old_row['opening_dedupe_key'] is None
+    assert old_row['reopen_reason'] == 'completed_ttl_expired'
+
+
 def test_opening_dm_skips_inline_subscription_meta_call_when_cache_fresh(monkeypatch):
     """Speed: when the self-heal loop recently verified the account's
     webhook subscription (cache age within window and no critical

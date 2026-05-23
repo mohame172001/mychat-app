@@ -3292,6 +3292,9 @@ _COMMENT_DM_SUBSCRIPTION_CACHE_MAX_AGE_SECONDS = int(
 _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS = int(
     os.environ.get('COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS', '86400')
 )
+_COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS = int(
+    os.environ.get('COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS', '900')
+)
 
 # Fallback-continuation TTL. When the opening DM was successfully
 # delivered (the user sees it in Instagram), but Meta has not sent us
@@ -17146,13 +17149,29 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     # get tagged so the diagnostic UI can surface them
                     # and the opener proceeds to create a fresh session.
                     is_stale_pending = False
-                    if not flow_completed:
-                        existing_created = existing_flow.get('created')
-                        if isinstance(existing_created, datetime):
-                            stale_age = (datetime.utcnow() - existing_created).total_seconds()
-                            if stale_age > _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS:
-                                is_stale_pending = True
-                    if is_stale_pending:
+                    is_stale_completed = False
+                    existing_created = existing_flow.get('created')
+                    existing_updated = (
+                        existing_flow.get('finalDmSentAt')
+                        or existing_flow.get('updated')
+                        or existing_flow.get('replied_at')
+                        or existing_created
+                    )
+                    if isinstance(existing_created, datetime):
+                        stale_age = (datetime.utcnow() - existing_created).total_seconds()
+                        if (
+                            not flow_completed
+                            and stale_age > _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS
+                        ):
+                            is_stale_pending = True
+                    if isinstance(existing_updated, datetime):
+                        completed_age = (datetime.utcnow() - existing_updated).total_seconds()
+                        if (
+                            flow_completed
+                            and completed_age > _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS
+                        ):
+                            is_stale_completed = True
+                    if is_stale_pending or is_stale_completed:
                         # Tag the stale row so the next diagnostic /
                         # reset round-trip can see it auto-expired,
                         # and clear its opening_dedupe_key so future
@@ -17162,10 +17181,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                                 await db.comment_dm_sessions.update_one(
                                     {'id': existing_flow.get('id')},
                                     {'$set': {
-                                        'status': 'stale_expired',
-                                        'stage': 'stale_expired',
+                                        'status': 'stale_expired' if is_stale_pending else 'reopened_after_completed',
+                                        'stage': 'stale_expired' if is_stale_pending else 'reopened_after_completed',
                                         'opening_dedupe_key': None,
                                         'openingDedupeKey': None,
+                                        'reopen_reason': (
+                                            'stale_pending_ttl_expired'
+                                            if is_stale_pending
+                                            else 'completed_ttl_expired'
+                                        ),
                                         'updated': datetime.utcnow(),
                                     }},
                                 )
@@ -17179,24 +17203,39 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                                         'opening_dedupe_key': None,
                                         'openingDedupeKey': None,
                                         'stale_expired_at': datetime.utcnow(),
+                                        'reopen_reason': (
+                                            'stale_pending_ttl_expired'
+                                            if is_stale_pending
+                                            else 'completed_ttl_expired'
+                                        ),
                                         'updated': datetime.utcnow(),
                                     }},
                                 )
                             except Exception:
                                 pass
+                        reopen_age_base = existing_created if is_stale_pending else existing_updated
                         logger.info(
-                            'comment_opening_flow_stale_reopen_allowed user_id=%s '
+                            'comment_opening_flow_reopen_allowed reason=%s user_id=%s '
                             'instagram_account_id=%s automation_id=%s media_id=%s '
                             'commenter_id=%s prior_session_id=%s age_seconds=%s ttl_seconds=%s',
+                            (
+                                'stale_pending_ttl_expired'
+                                if is_stale_pending
+                                else 'completed_ttl_expired'
+                            ),
                             user_id,
                             _safe_partial_identifier(ig_account_id),
                             rule_id,
                             _safe_partial_identifier(media_id),
                             _safe_partial_identifier(commenter_id),
                             existing_flow.get('id') if existing_session else None,
-                            int((datetime.utcnow() - existing_flow.get('created')).total_seconds())
-                                if isinstance(existing_flow.get('created'), datetime) else None,
-                            _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS,
+                            int((datetime.utcnow() - reopen_age_base).total_seconds())
+                                if isinstance(reopen_age_base, datetime) else None,
+                            (
+                                _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS
+                                if is_stale_pending
+                                else _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS
+                            ),
                         )
                         # Fall through to the normal opening path —
                         # do NOT skip.
