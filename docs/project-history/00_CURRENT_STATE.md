@@ -1,6 +1,6 @@
 # Current State
 
-Last updated by: Codex  
+Last updated by: Claude Code  
 Last updated date: 2026-05-24
 
 ## Project
@@ -24,9 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current origin/master: `df454e612302e5001e03c5153cbe64532d52150f`
-- Current production build_sha: `df454e612302`
-- Current working status: local legacy general any-post matching fix; not pushed/deployed yet
+- Current local HEAD (docs): `a488bbb3179ca4bdadc56b815f82cb9c28b5e87d`
+- Current origin/master: `a488bbb3179ca4bdadc56b815f82cb9c28b5e87d`
+- Current production build_sha: `a488bbb3179c`
+- Current working status: legacy general any-post matching fix pushed and deployed; awaiting live retest on both linked accounts before marking known-good
 
 Update these values at the start and end of every agent session.
 
