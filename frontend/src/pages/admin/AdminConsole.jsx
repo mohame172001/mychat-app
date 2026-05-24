@@ -1756,6 +1756,377 @@ function AutomationStopPointCard({ summary }) {
 }
 
 
+/**
+ * Sanitized rule-coverage inspector, gated by the same admin permission
+ * as the other Instagram support tabs. Calls the protected backend
+ * endpoint /api/admin/instagram/rule-coverage-inspector and renders the
+ * already-sanitized JSON. Used to answer "my Stop Point says
+ * rule_not_matched — what does the backend actually see in my rule
+ * document?" without reintroducing the deleted /app/admin/
+ * instagram-diagnostics page. All identifiers are partial-redacted by
+ * the backend; we render exactly what the API returned and never fetch
+ * raw rule bodies or tokens.
+ */
+function RuleCoverageTab() {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [copyStatus, setCopyStatus] = useState('idle');
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    setCopyStatus('idle');
+    try {
+      const r = await api.get('/admin/instagram/rule-coverage-inspector');
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const onCopyJson = useCallback(async () => {
+    if (!data) return;
+    try {
+      const text = JSON.stringify(data, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    } catch (_) {
+      setCopyStatus('error');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    }
+  }, [data]);
+
+  const accounts = data?.accounts || [];
+  const ar = isAr();
+
+  return (
+    <section data-testid="admin-rule-coverage">
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[200px]">
+          <div className="font-semibold text-slate-800">
+            {ar ? 'تغطية القواعد' : 'Rule Coverage'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {ar
+              ? 'الشكل الفعلي لكل قاعدة أتمتة نشطة كما يقرأها الخادم — لتحديد سبب «rule_not_matched». المعرّفات مغطّاة جزئياً.'
+              : 'How the backend sees each active automation rule — to explain "rule_not_matched". External ids are partial-redacted.'}
+          </div>
+        </div>
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {accounts.length} {ar ? 'حساب' : 'accounts'}
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> {ar ? 'غير مصرّح' : 'Forbidden'}
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <AlertTriangle className="w-3 h-3 me-1" /> {ar ? 'فشل' : 'Failed'}
+          </Badge>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={load}
+          disabled={state === 'loading'}
+          data-testid="rule-coverage-reload"
+        >
+          <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          {ar ? 'تحديث' : 'Reload'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onCopyJson}
+          disabled={!data || state === 'loading'}
+          data-testid="rule-coverage-copy"
+        >
+          {copyStatus === 'copied'
+            ? (ar ? 'تم النسخ' : 'Copied')
+            : copyStatus === 'error'
+              ? (ar ? 'فشل النسخ' : 'Copy failed')
+              : (ar ? 'نسخ JSON' : 'Copy JSON')}
+        </Button>
+      </header>
+
+      {state === 'loading' && <AdminSkeleton rows={3} />}
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3">
+          {error}
+        </div>
+      )}
+      {state === 'forbidden' && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {ar
+            ? 'حسابك لا يملك صلاحية admin.users.view المطلوبة.'
+            : 'Your account does not have the required admin.users.view permission.'}
+        </div>
+      )}
+
+      {state === 'success' && accounts.length === 0 && (
+        <div className="text-xs text-slate-500 py-6 text-center">
+          {ar
+            ? 'لا توجد حسابات Instagram مربوطة على workspace الخاص بك.'
+            : 'No linked Instagram accounts on this workspace.'}
+        </div>
+      )}
+
+      {accounts.length > 0 && (
+        <div className="space-y-3">
+          {accounts.map((acc) => (
+            <RuleCoverageAccountCard
+              key={acc.instagram_account_id_partial || acc.username || Math.random()}
+              account={acc}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RuleCoverageAccountCard({ account }) {
+  const ar = isAr();
+  const counts = account.classification_counts || {};
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg p-3 text-sm" data-testid="rule-coverage-account-card">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <span className="font-semibold text-slate-800">@{account.username || '-'}</span>
+        <span className="text-xs text-slate-500 font-mono">
+          {account.instagram_account_id_partial || '-'}
+        </span>
+        <span className="text-xs text-slate-400">·</span>
+        <span className="text-xs text-slate-500">
+          {ar ? 'آخر تعليق على media:' : 'latest comment media:'}{' '}
+          <span className="font-mono">{account.latest_comment_media_id_partial || '-'}</span>
+        </span>
+        <div className="ms-auto flex flex-wrap gap-1">
+          <Badge className="bg-slate-100 text-slate-700 border-0 text-[10px]">
+            {ar ? 'قواعد نشطة' : 'active'}: {account.active_rule_count ?? 0}
+          </Badge>
+          <Badge className="bg-emerald-100 text-emerald-700 border-0 text-[10px]">
+            {ar ? 'عامة' : 'general'}: {counts.general_any_post ?? 0}
+          </Badge>
+          <Badge className="bg-sky-100 text-sky-700 border-0 text-[10px]">
+            {ar ? 'محدّدة' : 'post-specific'}: {counts.post_specific ?? 0}
+          </Badge>
+          {(counts.invalid_or_non_comment ?? 0) > 0 && (
+            <Badge className="bg-rose-100 text-rose-700 border-0 text-[10px]">
+              {ar ? 'غير صالحة' : 'invalid'}: {counts.invalid_or_non_comment}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {Array.isArray(account.rules) && account.rules.length > 0 ? (
+        <div className="space-y-2">
+          {account.rules.map((rule, idx) => (
+            <RuleCoverageRuleRow
+              key={(rule.rule_id_partial || `rule-${idx}`) + idx}
+              rule={rule}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-slate-500 py-3 text-center">
+          {ar ? 'لا توجد قواعد نشطة لهذا الحساب.' : 'No active rules for this account.'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleCoverageRuleRow({ rule }) {
+  const ar = isAr();
+  const cls = rule.classification?.class || 'invalid_or_non_comment';
+  const should = rule.classification?.should_evaluate_as_comment_rule;
+  const match = rule.latest_comment_match?.should_match;
+  const matchReason = rule.latest_comment_match?.match_failure_reason;
+  const toneBg = cls === 'general'
+    ? (match === true ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200')
+    : cls === 'post_specific'
+      ? 'bg-sky-50 border-sky-200'
+      : 'bg-rose-50 border-rose-200';
+  const nodes = Array.isArray(rule.trigger_nodes) ? rule.trigger_nodes : [];
+  const selectedAliases = rule.selected_media_alias_partials || {};
+  const scopeFields = rule.scope_field_partials || {};
+  const aliasEntries = Object.entries(selectedAliases).filter(([, v]) => v);
+  const scopeEntries = Object.entries(scopeFields).filter(([, v]) => v);
+
+  return (
+    <div className={`rounded-md border p-2 ${toneBg}`} data-testid="rule-coverage-rule-row">
+      <div className="flex flex-wrap items-center gap-2 text-xs mb-1">
+        <span className="font-mono text-slate-700">{rule.rule_id_partial || '-'}</span>
+        <Badge className="bg-white text-slate-700 border border-slate-300 text-[10px]">
+          {rule.status || 'unknown'}
+        </Badge>
+        <Badge className={`border-0 text-[10px] ${
+          cls === 'general' ? 'bg-emerald-100 text-emerald-800' :
+          cls === 'post_specific' ? 'bg-sky-100 text-sky-800' :
+          'bg-rose-100 text-rose-800'
+        }`}>
+          {cls}
+        </Badge>
+        {should === true ? (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0 text-[10px]">
+            {ar ? 'سيُقيَّم كـ comment' : 'evaluates as comment'}
+          </Badge>
+        ) : should === false ? (
+          <Badge className="bg-rose-100 text-rose-700 border-0 text-[10px]">
+            {ar ? 'لن يُقيَّم' : 'not evaluated'}
+          </Badge>
+        ) : null}
+        {match === true && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0 text-[10px]">
+            {ar ? 'مطابقة' : 'should match'}
+          </Badge>
+        )}
+        {match === false && (
+          <Badge className="bg-amber-100 text-amber-800 border-0 text-[10px]">
+            {ar ? 'لن تطابق' : 'will NOT match'}{matchReason ? `: ${matchReason}` : ''}
+          </Badge>
+        )}
+        {rule.name && (
+          <span className="text-slate-600 truncate">{rule.name}</span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-700">
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'القيم الخام' : 'raw top-level'}
+          </div>
+          <div>
+            trigger:{' '}
+            <span className="font-mono">{rule.raw_top_level?.trigger ?? '-'}</span>
+          </div>
+          <div>
+            post_scope:{' '}
+            <span className="font-mono">{rule.raw_top_level?.post_scope ?? '-'}</span>
+          </div>
+          <div>
+            postScope:{' '}
+            <span className="font-mono">{rule.raw_top_level?.postScope ?? '-'}</span>
+          </div>
+          <div>
+            scope:{' '}
+            <span className="font-mono">{rule.raw_top_level?.scope ?? '-'}</span>
+          </div>
+          <div>
+            process_existing:{' '}
+            <span className="font-mono">{String(!!rule.raw_top_level?.process_existing_unreplied_comments)}</span>
+          </div>
+        </div>
+
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'القيم المعيارية' : 'canonical normalized'}
+          </div>
+          <div>
+            trigger:{' '}
+            <span className="font-mono">{rule.normalized?.canonical_trigger ?? '-'}</span>
+          </div>
+          <div>
+            post_scope:{' '}
+            <span className="font-mono">{rule.normalized?.canonical_post_scope ?? '-'}</span>
+          </div>
+          <div>
+            selected_media:{' '}
+            <span className="font-mono">{rule.normalized?.selected_specific_media_id_partial ?? '-'}</span>
+          </div>
+          <div>
+            is_comment_automation_rule:{' '}
+            <span className="font-mono">{String(!!rule.classification?.is_comment_automation_rule)}</span>
+          </div>
+        </div>
+
+        <div className="md:col-span-2">
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'العقد (trigger nodes)' : 'trigger nodes'}
+          </div>
+          {nodes.length === 0 ? (
+            <div className="text-slate-500">{ar ? 'لا يوجد عقد trigger.' : '(no trigger node)'}</div>
+          ) : (
+            <ul className="list-disc ps-5">
+              {nodes.map((n, i) => (
+                <li key={i}>
+                  <span className="font-mono">
+                    data.trigger=
+                    {n.data_trigger || '-'}
+                    {n.data_trigger_type ? ` · trigger_type=${n.data_trigger_type}` : ''}
+                    {' · '}
+                    data.post_scope={n.data_post_scope || '-'}
+                    {n.data_media_id_partial ? ` · media=${n.data_media_id_partial}` : ''}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'اختيار الـ media' : 'selected media aliases'}
+          </div>
+          {aliasEntries.length === 0 ? (
+            <div className="text-slate-500">{ar ? 'لا يوجد.' : '(none)'}</div>
+          ) : (
+            <ul className="list-disc ps-5">
+              {aliasEntries.map(([k, v]) => (
+                <li key={k}>
+                  <span className="font-mono">{k}={v}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'نطاق الحساب' : 'account scoping fields'}
+          </div>
+          {scopeEntries.length === 0 ? (
+            <div className="text-slate-500">{ar ? 'لا يوجد.' : '(none)'}</div>
+          ) : (
+            <ul className="list-disc ps-5">
+              {scopeEntries.map(([k, v]) => (
+                <li key={k}>
+                  <span className="font-mono">{k}={v}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const { lang } = useTranslation();
@@ -1920,6 +2291,16 @@ export default function AdminConsole() {
             <Activity className="w-4 h-4 me-2" /> {ar ? 'نقطة توقّف الأتمتة' : 'Automation Stop Point'}
           </Button>
         )}
+        {canViewUsers && (
+          <Button
+            variant={tab === 'rule-coverage' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('rule-coverage'); setSelectedUserId(null); }}
+            data-testid="admin-tab-rule-coverage"
+          >
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'تغطية القواعد' : 'Rule Coverage'}
+          </Button>
+        )}
         <div className="ms-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -1957,6 +2338,11 @@ export default function AdminConsole() {
       {tab === 'automation-stop-point' && canViewUsers && (
         <AdminSectionErrorBoundary name="automation-stop-point" resetKey="automation-stop-point">
           <AutomationStopPointTab />
+        </AdminSectionErrorBoundary>
+      )}
+      {tab === 'rule-coverage' && canViewUsers && (
+        <AdminSectionErrorBoundary name="rule-coverage" resetKey="rule-coverage">
+          <RuleCoverageTab />
         </AdminSectionErrorBoundary>
       )}
     </div>

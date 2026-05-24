@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending inspector commit
-- Current origin/master: `ff590dc76f75ce649059cd60f656b97d12a87d02` (pre-inspector)
-- Current production build_sha: `ff590dc76f75`
-- Current working status: legacy general matching fix `54fb527` deployed, but live retest still shows `rule_not_matched` on both linked accounts; adding protected backend-only `/api/admin/instagram/rule-coverage-inspector` for diagnosis. No automation logic change.
+- Current local HEAD: pending Rule Coverage admin UI commit
+- Current origin/master: `72bc25c1aa90d8c98a8560396077f3045c05e8f5` (rule-coverage-inspector backend endpoint deployed)
+- Current production build_sha: `72bc25c1aa90`
+- Current working status: protected backend inspector endpoint deployed; adding admin-only Rule Coverage panel inside existing `/app/admin` so the operator can read the sanitized inspector output without copying an admin JWT. No backend or automation behavior change.
 
 Update these values at the start and end of every agent session.
 
