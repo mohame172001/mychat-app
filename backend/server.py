@@ -22080,6 +22080,210 @@ async def admin_instagram_automation_stop_point(
     }
 
 
+@api.get('/admin/instagram/rule-coverage-inspector')
+async def admin_instagram_rule_coverage_inspector(
+    username: Optional[str] = None,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Sanitized backend-only inspector for general/post-specific rule
+    coverage. Returns, per linked Instagram account, the active rules
+    that the same ``_account_scoped_query`` used by the live comment
+    handler would load — plus the canonical-normalized trigger/scope
+    and a classification reason that explains exactly why each rule
+    does or does not match the most recent comment for that account.
+
+    The endpoint exists so an operator can answer the question
+    "my Stop Point says rule_not_matched but I have an active general
+    rule — what does the backend actually see in this rule document?"
+    without having to read raw Mongo or reintroduce the deleted
+    diagnostics frontend page.
+
+    Privacy contract — same as every other ``/admin/instagram/*``:
+    partial identifiers only, no access tokens, no full comment or
+    DM bodies, no full webhook payloads, no raw rule node bodies.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+
+    def _partial(v: Any) -> Optional[str]:
+        return _safe_partial_identifier(v)
+
+    def _sanitize_node(node: dict) -> dict:
+        data = node.get('data') or {}
+        return {
+            'type': str(node.get('type') or '')[:40],
+            'data_trigger': str(data.get('trigger') or '')[:40] or None,
+            'data_trigger_type': str(data.get('trigger_type') or data.get('triggerType') or '')[:40] or None,
+            'data_post_scope': str(
+                data.get('post_scope') or data.get('postScope') or data.get('scope') or ''
+            )[:40] or None,
+            # Partial only — never full media ids in support output.
+            'data_media_id_partial': _partial(
+                data.get('media_id') or data.get('selected_media_id') or data.get('selectedMediaId')
+            ),
+        }
+
+    def _classify_rule(rule: dict, comment_media_id: Optional[str], comment_latest_media_id: Optional[str]) -> dict:
+        canonical_trigger = _comment_rule_canonical_trigger_value(rule)
+        canonical_scope = _comment_rule_post_scope_value(rule)
+        selected_media_id = _selected_specific_media_id(rule)
+        is_comment_rule = _is_comment_automation_rule(rule)
+        should_evaluate = _should_evaluate_comment_rule(rule)
+        if selected_media_id:
+            classification = 'post_specific'
+        elif _is_comment_scope_value(canonical_scope) or _is_comment_trigger_value(canonical_trigger):
+            classification = 'general'
+        elif is_comment_rule:
+            classification = 'comment_rule_other'
+        else:
+            classification = 'invalid_or_non_comment'
+        should_match: Optional[bool] = None
+        match_failure_reason: Optional[str] = None
+        if comment_media_id and should_evaluate:
+            should_match = _comment_rule_media_matches(rule, comment_media_id, comment_latest_media_id)
+            if not should_match:
+                if selected_media_id:
+                    match_failure_reason = 'selected_media_no_match'
+                elif classification == 'general' and not str(comment_media_id or '').strip():
+                    match_failure_reason = 'comment_missing_media_id'
+                else:
+                    match_failure_reason = 'media_scope_no_match'
+        elif comment_media_id and not should_evaluate:
+            should_match = False
+            match_failure_reason = 'rule_not_classified_as_comment_capable'
+        return {
+            'rule_id_partial': _partial(rule.get('id')),
+            'status': str(rule.get('status') or '')[:40],
+            'active': str(rule.get('status') or '').strip().lower() == 'active',
+            'name': str(rule.get('name') or '')[:80],
+            'scope_field_partials': {
+                'userId': _partial(rule.get('userId')),
+                'user_id': _partial(rule.get('user_id')),
+                'instagramAccountId': _partial(rule.get('instagramAccountId')),
+                'igUserId': _partial(rule.get('igUserId')),
+                'ig_user_id': _partial(rule.get('ig_user_id')),
+                'instagramAccountDbId': _partial(rule.get('instagramAccountDbId')),
+                'instagram_account_id': _partial(rule.get('instagram_account_id')),
+                'accountId': _partial(rule.get('accountId')),
+            },
+            'raw_top_level': {
+                'trigger': str(rule.get('trigger') or '')[:60] or None,
+                'post_scope': str(rule.get('post_scope') or '')[:40] or None,
+                'postScope': str(rule.get('postScope') or '')[:40] or None,
+                'scope': str(rule.get('scope') or '')[:40] or None,
+                'process_existing_unreplied_comments': bool(
+                    rule.get('process_existing_unreplied_comments')
+                    or rule.get('processExistingComments')
+                    or rule.get('processExistingUnrepliedComments')
+                ),
+            },
+            'selected_media_alias_partials': {
+                key: _partial(rule.get(key))
+                for key in (
+                    'media_id', 'trigger_media_id', 'selected_media_id',
+                    'selectedMediaId', 'target_media_id', 'targetMediaId',
+                    'selected_post_id', 'selectedPostId', 'target_post_id',
+                    'targetPostId', 'instagram_media_id', 'instagramMediaId',
+                    'post_id', 'postId', 'ig_media_id', 'igMediaId',
+                )
+                if rule.get(key)
+            },
+            'trigger_nodes': [
+                _sanitize_node(node)
+                for node in (rule.get('nodes') or [])
+                if isinstance(node, dict) and str(node.get('type') or '').lower() == 'trigger'
+            ],
+            'normalized': {
+                'canonical_trigger': canonical_trigger[:60] or None,
+                'canonical_post_scope': canonical_scope[:40] or None,
+                'selected_specific_media_id_partial': _partial(selected_media_id),
+            },
+            'classification': {
+                'class': classification,
+                'is_comment_automation_rule': bool(is_comment_rule),
+                'should_evaluate_as_comment_rule': bool(should_evaluate),
+            },
+            'latest_comment_match': {
+                'incoming_media_id_partial': _partial(comment_media_id),
+                'latest_media_id_partial': _partial(comment_latest_media_id),
+                'should_match': should_match,
+                'match_failure_reason': match_failure_reason,
+            },
+        }
+
+    accounts_query: Dict[str, Any] = {'userId': user_id, 'isActive': {'$ne': False}}
+    accounts = await db.instagram_accounts.find(accounts_query).limit(20).to_list(20)
+    if username:
+        username_key = _automation_flight_username_key(username)
+        if username_key:
+            accounts = [
+                acc for acc in accounts
+                if _automation_flight_username_key(acc.get('username')) == username_key
+            ]
+    if not accounts:
+        return {'ok': True, 'count': 0, 'accounts': []}
+
+    items: List[Dict[str, Any]] = []
+    for account in accounts:
+        owner_id = str(account.get('userId') or account.get('user_id') or '')
+        ig_id = str(account.get('instagramAccountId') or account.get('igUserId') or '')
+        account_query = _account_scoped_query(owner_id, account) if owner_id else {}
+        active_rules: List[Dict[str, Any]] = []
+        latest_comment_media_id: Optional[str] = None
+        try:
+            if owner_id:
+                active_rules = await db.automations.find({
+                    **account_query,
+                    'status': 'active',
+                }).to_list(200)
+                last_comments = await db.comments.find(
+                    account_query, {'media_id': 1, 'created': 1},
+                ).sort('created', -1).limit(1).to_list(1)
+                if last_comments:
+                    latest_comment_media_id = str(last_comments[0].get('media_id') or '') or None
+        except Exception as exc:
+            logger.info(
+                'rule_coverage_inspector_per_account_error account=%s err=%s',
+                _safe_partial_identifier(ig_id or account.get('id')),
+                type(exc).__name__,
+            )
+
+        # latest_media_id for 'latest/next' scoped rules — best-effort
+        # from instagram_accounts.lastKnownMediaId if present; never
+        # touches Graph from a support endpoint.
+        latest_known_media_id = (
+            account.get('lastKnownMediaId')
+            or account.get('latest_media_id')
+        )
+
+        rule_views = [
+            _classify_rule(rule, latest_comment_media_id, latest_known_media_id)
+            for rule in active_rules
+        ]
+        general_count = sum(1 for v in rule_views if v['classification']['class'] == 'general')
+        post_specific_count = sum(1 for v in rule_views if v['classification']['class'] == 'post_specific')
+        non_comment_count = sum(1 for v in rule_views if v['classification']['class'] == 'invalid_or_non_comment')
+        match_capable = sum(
+            1 for v in rule_views
+            if v['classification']['should_evaluate_as_comment_rule']
+            and v['latest_comment_match']['should_match']
+        )
+        items.append({
+            'username': account.get('username'),
+            'instagram_account_id_partial': _partial(ig_id),
+            'owner_user_id_partial': _partial(owner_id),
+            'latest_comment_media_id_partial': _partial(latest_comment_media_id),
+            'active_rule_count': len(rule_views),
+            'classification_counts': {
+                'general_any_post': general_count,
+                'post_specific': post_specific_count,
+                'invalid_or_non_comment': non_comment_count,
+                'should_match_latest_comment': match_capable,
+            },
+            'rules': rule_views,
+        })
+    return {'ok': True, 'count': len(items), 'accounts': items}
+
+
 @api.post('/instagram/process-unreplied-comments')
 async def instagram_process_unreplied_comments(user_id: str = Depends(get_current_active_user_id)):
     """Manual catch-up for selected-post historical replies.

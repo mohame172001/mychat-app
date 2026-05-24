@@ -570,6 +570,117 @@ def test_multi_account_health_exposes_sanitized_stop_point(monkeypatch):
     assert 'accessToken' not in str(result)
 
 
+def test_rule_coverage_inspector_classifies_general_rule_as_should_match(monkeypatch):
+    """A general any-post rule scoped to the same account as the latest
+    comment must be reported by the inspector as
+    classification=general, should_evaluate_as_comment_rule=true, and
+    should_match=true. This is the contract the live retest depends
+    on."""
+    db = _install_multi_account_db(monkeypatch)
+    # Latest comment on account A's media so the inspector can compute
+    # should_match deterministically.
+    db.comments.docs.append({
+        'id': 'cA1',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accA',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        'ig_comment_id': 'cA1',
+        'media_id': 'mediaA1',
+        'created': datetime.utcnow(),
+    })
+    monkeypatch.setattr(server, '_require_admin_permission',
+                        lambda *_a, **_kw: asyncio.sleep(0))
+
+    result = _run(server.admin_instagram_rule_coverage_inspector(user_id='u1'))
+
+    assert result['ok'] is True
+    account_a = next(item for item in result['accounts'] if item['username'] == 'account_a')
+    assert account_a['active_rule_count'] >= 1
+    rule_view = next(r for r in account_a['rules'] if r['rule_id_partial'] is not None)
+    assert rule_view['classification']['class'] == 'general'
+    assert rule_view['classification']['should_evaluate_as_comment_rule'] is True
+    assert rule_view['latest_comment_match']['should_match'] is True
+    # Privacy: no access tokens leak.
+    assert 'token-a' not in str(result)
+    assert 'accessToken' not in str(result)
+
+
+def test_rule_coverage_inspector_flags_legacy_rule_without_nodes_as_invalid(monkeypatch):
+    """A legacy rule with trigger=Manual, no post_scope, no nodes and
+    no media_id alias must be reported as
+    classification=invalid_or_non_comment with
+    should_evaluate_as_comment_rule=false so the operator can see
+    exactly why it doesn't match."""
+    db = _install_multi_account_db(monkeypatch)
+    # Replace ruleA with a degenerate legacy shape.
+    db.automations.docs = [
+        rule for rule in db.automations.docs if rule.get('id') != 'ruleA'
+    ]
+    db.automations.docs.append({
+        'id': 'ruleLegacyA',
+        'user_id': 'u1',
+        'status': 'active',
+        'trigger': 'Manual',
+        'instagramAccountDbId': 'accA',
+        'instagramAccountId': 'igA',
+        'igUserId': 'igA',
+        # Note: no post_scope, no nodes, no media_id alias.
+    })
+    monkeypatch.setattr(server, '_require_admin_permission',
+                        lambda *_a, **_kw: asyncio.sleep(0))
+
+    result = _run(server.admin_instagram_rule_coverage_inspector(user_id='u1'))
+    account_a = next(item for item in result['accounts'] if item['username'] == 'account_a')
+    legacy_view = next(r for r in account_a['rules'] if r['rule_id_partial'] is not None)
+    assert legacy_view['normalized']['canonical_trigger'].lower() == 'manual'
+    assert legacy_view['normalized']['canonical_post_scope'] is None
+    assert legacy_view['classification']['class'] == 'invalid_or_non_comment'
+    assert legacy_view['classification']['should_evaluate_as_comment_rule'] is False
+
+
+def test_rule_coverage_inspector_classifies_legacy_node_only_general(monkeypatch):
+    """A legacy rule whose top-level trigger is missing/'Manual' but
+    whose nodes[].data.trigger='comment:any' must be classified as
+    general after the 54fb527 canonical-trigger fix."""
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        rule for rule in db.automations.docs if rule.get('id') != 'ruleA'
+    ]
+    db.automations.docs.append(_legacy_general_rule('accA', 'igA', 'ruleLegacyNode',
+                                                   trigger='Manual',
+                                                   node_trigger='comment:any',
+                                                   include_top_trigger=True))
+    db.comments.docs.append({
+        'id': 'cA1', 'user_id': 'u1', 'instagramAccountDbId': 'accA',
+        'instagramAccountId': 'igA', 'igUserId': 'igA',
+        'ig_comment_id': 'cA1', 'media_id': 'mediaX',
+        'created': datetime.utcnow(),
+    })
+    monkeypatch.setattr(server, '_require_admin_permission',
+                        lambda *_a, **_kw: asyncio.sleep(0))
+
+    result = _run(server.admin_instagram_rule_coverage_inspector(user_id='u1'))
+    account_a = next(item for item in result['accounts'] if item['username'] == 'account_a')
+    legacy_view = next(r for r in account_a['rules'] if r['rule_id_partial'] is not None)
+    assert legacy_view['normalized']['canonical_trigger'] == 'comment:any'
+    assert legacy_view['classification']['class'] == 'general'
+    assert legacy_view['classification']['should_evaluate_as_comment_rule'] is True
+    assert legacy_view['latest_comment_match']['should_match'] is True
+
+
+def test_rule_coverage_inspector_does_not_leak_secrets(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    monkeypatch.setattr(server, '_require_admin_permission',
+                        lambda *_a, **_kw: asyncio.sleep(0))
+    result = _run(server.admin_instagram_rule_coverage_inspector(user_id='u1'))
+    s = str(result)
+    assert 'token-a' not in s
+    assert 'token-b' not in s
+    assert 'accessToken' not in s
+    assert 'meta_access_token' not in s
+
+
 def test_webhook_resolver_accepts_account_aliases_not_active_ui_account(monkeypatch):
     """Later connected accounts can arrive with a Page/Graph alias in
     webhook entry.id. The resolver must choose that account, not the

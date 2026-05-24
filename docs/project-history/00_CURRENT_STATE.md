@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD (docs): `a488bbb3179ca4bdadc56b815f82cb9c28b5e87d`
-- Current origin/master: `a488bbb3179ca4bdadc56b815f82cb9c28b5e87d`
-- Current production build_sha: `a488bbb3179c`
-- Current working status: legacy general any-post matching fix pushed and deployed; awaiting live retest on both linked accounts before marking known-good
+- Current local HEAD: pending inspector commit
+- Current origin/master: `ff590dc76f75ce649059cd60f656b97d12a87d02` (pre-inspector)
+- Current production build_sha: `ff590dc76f75`
+- Current working status: legacy general matching fix `54fb527` deployed, but live retest still shows `rule_not_matched` on both linked accounts; adding protected backend-only `/api/admin/instagram/rule-coverage-inspector` for diagnosis. No automation logic change.
 
 Update these values at the start and end of every agent session.
 
