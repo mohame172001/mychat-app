@@ -229,11 +229,17 @@ describe('cachedApiGet', () => {
       data: '<html />',
     }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
 
-    await expect(cachedApiGetSWR('instagram-media:u1:acc1', () => ({
+    const failedMedia = await cachedApiGetSWR('instagram-media:u1:acc1', () => ({
       status: 200,
       headers: { 'content-type': 'application/json' },
       data: { ok: false, error: { body: 'All media endpoints failed' } },
-    }), { persist: true })).rejects.toMatchObject({ code: 'api_cache_uncacheable_response' });
+    }), { persist: true });
+    expect(failedMedia).toMatchObject({
+      cached: false,
+      stale: false,
+      cacheable: false,
+      data: { ok: false },
+    });
 
     clearApiMemoryCacheForTests();
 

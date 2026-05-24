@@ -675,6 +675,9 @@ const Automations = () => {
       applyMediaPayload(result.data);
     } catch (e) {
       if (!cached) {
+        if (e?.code === 'api_cache_uncacheable_response') {
+          e.message = '';
+        }
         setMediaError(e?.response?.data?.detail || e?.message || (ar ? 'تعذّر تحميل المنشورات. اربط Instagram أولاً.' : 'Failed to load posts. Connect Instagram first.'));
         setMedia([]);
       }

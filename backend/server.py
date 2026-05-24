@@ -14644,6 +14644,22 @@ async def _record_instagram_oauth_code_result(
         pass
 
 
+def _is_instagram_oauth_code_already_used_error(payload: Any) -> bool:
+    """Return true for Meta's replayed OAuth-code response.
+
+    A replayed callback must never clear an existing Instagram
+    connection. Meta can return this even when our local consumed-code
+    marker is missing, for example after a deploy, browser retry, or TTL
+    expiry.
+    """
+    if not isinstance(payload, dict):
+        return False
+    raw = payload.get('raw')
+    message = payload.get('error_message') or payload.get('message')
+    haystack = ' '.join(str(part or '') for part in (raw, message)).lower()
+    return 'authorization code has been used' in haystack
+
+
 @api.get('/instagram/callback')
 async def instagram_callback(request: Request,
                              code: Optional[str] = Query(None),
@@ -14802,6 +14818,22 @@ async def instagram_callback(request: Request,
             audit['permissionsReturned'] = data.get('permissions') or data.get('scope') or []
             if not token:
                 safe = _redact_secrets(data)
+                if _is_instagram_oauth_code_already_used_error(safe):
+                    logger.warning(
+                        'IG token exchange skipped reused authorization code user_id=%s mode=%s',
+                        _safe_partial_identifier(user_id),
+                        oauth_mode,
+                    )
+                    await _store_oauth_failure(
+                        user_id,
+                        'oauth_code_already_used',
+                        safe,
+                        clear_existing_connection=False,
+                    )
+                    return RedirectResponse(_frontend_redirect_url(
+                        return_to,
+                        {'ig': 'error', 'reason': 'oauth_code_already_used'},
+                    ))
                 logger.error('IG token exchange failed: %s', safe)
                 await _store_oauth_failure(
                     user_id,

@@ -940,6 +940,48 @@ def test_instagram_callback_duplicate_code_after_meta_failure_keeps_connection(m
     assert user_after_second['meta_access_token'] == 'preexisting-token'
 
 
+def test_instagram_callback_meta_code_used_error_keeps_connection(monkeypatch, caplog):
+    fake_db = _multi_account_db()
+    _run(fake_db.users.update_one(
+        {'id': 'u1'},
+        {'$set': {
+            'instagramConnected': True,
+            'instagram_connection_valid': True,
+            'meta_access_token': 'preexisting-token',
+            'ig_user_id': 'igA',
+            'instagramHandle': 'account_a',
+        }},
+    ))
+    monkeypatch.setattr(server, 'db', fake_db)
+    fake_client = FakeAsyncClient([
+        FakeResponse(400, {
+            'error_type': 'OAuthException',
+            'code': 400,
+            'error_message': 'This authorization code has been used',
+        }),
+    ])
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'connect',
+        'returnTo': '/app/settings?tab=instagram',
+    })
+
+    import logging
+    caplog.set_level(logging.WARNING, logger=server.logger.name)
+    response = _run(server.instagram_callback(
+        _request(), code='already-used-code', state=state, error=None, error_description=None,
+    ))
+
+    assert response.status_code == 307
+    assert 'reason=oauth_code_already_used' in response.headers['location']
+    user_after = _run(fake_db.users.find_one({'id': 'u1'}))
+    assert user_after['instagramConnected'] is True
+    assert user_after['instagram_connection_valid'] is True
+    assert user_after['meta_access_token'] == 'preexisting-token'
+    assert 'ig token exchange failed' not in caplog.text.lower()
+
+
 def test_instagram_callback_does_not_store_or_log_raw_code(monkeypatch, caplog):
     fake_db = _multi_account_db()
     monkeypatch.setattr(server, 'db', fake_db)

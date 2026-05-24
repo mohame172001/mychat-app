@@ -73,6 +73,18 @@ function isCacheableResponse(response) {
   return true;
 }
 
+function isSafeUncacheableJsonResponse(response) {
+  const status = Number(response?.status || 200);
+  return (
+    status >= 200 &&
+    status < 300 &&
+    isJsonResponse(response) &&
+    response?.data &&
+    typeof response.data === 'object' &&
+    response.data.ok === false
+  );
+}
+
 function isAuthError(error) {
   const status = Number(error?.response?.status || error?.status || 0);
   return status === 401 || status === 403;
@@ -240,6 +252,11 @@ export async function cachedApiGet(key, fetcher, options = {}) {
     .then(fetcher)
     .then((response) => {
       if (!isCacheableResponse(response)) {
+        if (isSafeUncacheableJsonResponse(response)) {
+          removePersistentEntry(key);
+          cache.set(key, { data: undefined, updatedAt: 0, promise: null });
+          return { data: response.data, cached: false, stale: false, cacheable: false };
+        }
         const error = new Error('api_cache_uncacheable_response');
         error.code = 'api_cache_uncacheable_response';
         error.response = response;
