@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206` plus pending fix to `_collect_target_media_ids`
-- Current local HEAD: pending polling-target legacy-rule fix
-- Current origin/master: `d4dae1adb8423f3589ca87a0a9baab0c153fa317`
-- Current production build_sha: `d4dae1adb842`
-- Current working status: Diagnosed root cause for muhammad_gehad's "did not send" — `_collect_target_media_ids` was reading the raw top-level `a.get('trigger')` field, so a legacy general rule (`trigger='Manual'`, `post_scope='any'`, `nodes[].data.trigger='comment:any'`) never set `needs_any=True` and `_fetch_recent_media_ids` was never called. The poller only scanned whatever stale `selected_media_id` / `trigger_media_id` aliases were on the rule, never the user's NEW post. mogehad17 succeeded only because its webhook arrived from Meta and bypassed the polling target list. Fix in progress: extend the canonical-trigger / canonical-post_scope helpers (introduced by 54fb527 in rule classification) to the polling target-collection path. Account-agnostic. No rule-matching, dedupe, send, or rate-limit change.
+- Current local app-code fix: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
+- Current local HEAD: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
+- Current origin/master: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
+- Current production build_sha: `948a9964e1d5`
+- Current working status: Live retest confirmed muhammad_gehad polling now processes fresh new-post comments successfully after `948a996`. A fresh comment from a completely new external Instagram account on a new post on muhammad_gehad produced reply + opening DM via the polling fallback. mogehad17 webhook path remains successful. Multi-account general automation is now verified across both linked accounts via two independent delivery paths (webhook for mogehad17, polling for muhammad_gehad). Meta webhook delivery for muhammad_gehad's comment-field events is NOT marked verified — the polling fallback is what carries the new known-good.
 
 Update these values at the start and end of every agent session.
 
