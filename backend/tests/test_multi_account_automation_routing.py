@@ -4145,6 +4145,211 @@ def test_resolve_webhook_counters_prefers_globals_when_set(monkeypatch):
     assert last_processed == now
 
 
+def test_duplicate_comment_already_replied_records_skip_event_and_does_not_resend(monkeypatch):
+    """Repeated comment from the same external user on the same post must
+    NOT re-send reply/DM, and must record an automation_skipped event
+    with a clear `already_replied_success` skip_reason so the stop-point
+    summary can show that instead of the misleading literal
+    `rule_not_matched`."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],  # accB / igB
+    )
+    fresh_ts = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000')
+    first = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-dup-1',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'test',
+        'timestamp': fresh_ts,
+    }, source='polling'))
+    assert first['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+    # Same external user, same post, NEW ig_comment_id (Instagram does not
+    # mint identical ids), but the rule's same-commenter-same-post dedupe
+    # at the COMMENT-doc level (different code path) already enforces the
+    # no-resend guarantee. Here we exercise the same-ig_comment_id path
+    # specifically by re-calling with the SAME id — that hits the
+    # `already_replied_success` early-return inside _handle_new_comment.
+    second = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-dup-1',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'test again',
+        'timestamp': fresh_ts,
+    }, source='polling'))
+
+    assert second.get('already_processed') is True
+    assert second.get('reason') == 'already_replied_success'
+    # No additional reply / DM sent.
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+    skipped_events = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'already_replied_success'
+        and e.get('comment_id_partial') == server._safe_partial_identifier('comment-dup-1')
+    ]
+    assert len(skipped_events) >= 1, (
+        'expected automation_skipped event with skip_reason=already_replied_success'
+    )
+
+    # Stop-point summary should now reflect the skip reason instead of
+    # falling back to the literal rule_not_matched.
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['exact_stop_reason'] in {
+        'automation_success', 'already_replied_success',
+    }, (
+        f'summary should show the success or the recorded skip reason, '
+        f'not the literal rule_not_matched; got {summary["exact_stop_reason"]!r}'
+    )
+
+
+def test_duplicate_pending_queue_records_skip_event(monkeypatch):
+    """If the comment doc is in pending/processing, repeated arrivals
+    must record automation_skipped with skip_reason=
+    `comment_already_pending_queue`. No reply/DM is attempted."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'cpending',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-pending',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'action_status': 'pending',
+        'created': now - timedelta(seconds=30),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-pending',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'retry',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+
+    assert res.get('queued') is True
+    assert res.get('reason') == 'comment_already_pending_queue'
+    # No send attempt while pending.
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+
+    skipped = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'comment_already_pending_queue'
+    ]
+    assert len(skipped) >= 1
+
+
+def test_duplicate_dm_failed_permanent_records_skip_event(monkeypatch):
+    """A comment whose previous run failed the DM permanently (no
+    public reply attempted) must NOT retry the DM and must record an
+    automation_skipped event with skip_reason=`comment_already_dm_failed`."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    permanent_reason = next(iter(server.PERMANENT_GRAPH_FAILURE_REASONS))
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'cdmfail',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-dm-failed',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'action_status': 'failed',
+        'reply_status': 'disabled',
+        'dm_status': 'failed',
+        'dm_failure_reason': permanent_reason,
+        'created': now - timedelta(minutes=5),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-dm-failed',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'retry',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+
+    assert res.get('reason') == 'comment_already_dm_failed'
+    # No send retry for a permanent DM failure.
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+
+    skipped = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'comment_already_dm_failed'
+    ]
+    assert len(skipped) >= 1
+
+
+def test_fresh_comment_with_general_rule_still_matches_and_sends(monkeypatch):
+    """The visibility patch must not break the happy path: a fresh
+    comment with an active general rule still matches and runs the
+    full pipeline."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],  # accA / igA
+    )
+    res_a = _run(server._handle_new_comment(owner_a, {
+        'ig_comment_id': 'fresh-a',
+        'media_id': 'mediaA',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'first time',
+        'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+    assert res_a['matched'] is True
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res_b = _run(server._handle_new_comment(owner_b, {
+        'ig_comment_id': 'fresh-b',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'first time',
+        'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+    assert res_b['matched'] is True
+
+    # Both accounts fired a reply + DM. Account parity unchanged.
+    assert len(reply_calls) == 2
+    assert len(dm_calls) == 2
+
+
 def test_admin_automation_stop_point_endpoint_returns_summary(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _patch_admin_gate(monkeypatch)

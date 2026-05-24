@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending Flight Recorder admin UI commit
-- Current origin/master: `0e5544b648c2d0d9c1b5623cac47bfb410739c54`
-- Current production build_sha: `0e5544b648c2`
-- Current working status: Multi-account general automation remains live-verified known-good for the historical test. Newest live retest shows `exact_stop_reason = rule_not_matched` on both accounts even after a fresh comment, narrowed by code analysis to either Candidate 1 (silent dedupe/already-replied early-exit in `_handle_new_comment` before `rule_loading_finished` fires) or Candidate 3 (100-event flight-recorder window over-polluted by `poller_account_scan_started` events pushing `automation_success` out of the summarizer's view). Adding admin-only Flight Recorder tab inside `/app/admin` that calls `/api/admin/instagram/automation-flight-recorder?username=<name>&limit=200` so the operator can pick which candidate fires without DevTools or an admin JWT. Visibility only — no automation/parser/resolver/dedupe/rate-limit change.
+- Current local HEAD: pending duplicate-comment skip-reason visibility commit
+- Current origin/master: `fd27b5e57d25b9071512e52ca58d296199c8af37`
+- Current production build_sha: `fd27b5e57d25`
+- Current working status: Flight Recorder admin tab confirmed Candidate 1 — operator was repeatedly commenting from the same external account on the same posts, so `_handle_new_comment` was early-returning via the dedupe / already-replied / pending-queue / dm-failed-permanent paths BEFORE `rule_loading_finished` fired. Those early-returns were silent (no flight-recorder event), so Stop Point fell back to the literal `rule_not_matched`. Visibility-only patch in progress: every silent dedupe early-return now records an `automation_skipped` event with its existing reason string (`already_replied_success`, `comment_already_pending_queue`, `comment_already_partial_success`, `comment_already_dm_failed`, `public_reply_required_recovery`, plus the generic catch-all). No automation execution change, no extra reply/DM, no dedupe weakening.
 
 Update these values at the start and end of every agent session.
 

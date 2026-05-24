@@ -114,6 +114,18 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Stop-Point Showed rule_not_matched on Repeated Duplicate Tests
+
+- Date/time: 2026-05-24
+- Symptom: Operator was testing by commenting repeatedly from the same external Instagram account on the same posts. Automation Stop Point reported `exact_stop_reason=rule_not_matched` and `reply_attempted=false`, `dm_attempted=false`. The operator suspected a rule-matching regression. Flight Recorder showed `poller_comment_seen` and `dedupe_checked` for the latest comment but no `rule_loading_finished` and no `rule_candidate_evaluated`.
+- Affected area: Admin support reporting only — automation execution path was not affected. Dedupe was working correctly to prevent duplicate replies.
+- Root cause: Inside `_handle_new_comment` (server.py:17005-17351), the dedupe / already-processed early-return paths returned to the caller WITHOUT writing a flight-recorder event. The summarizer's `rule_miss` lookup found no `rule_match_failed` / `automation_skipped` event for the latest `comment_id_partial`, so its fallback at server.py:21691 emitted the literal `'rule_not_matched'`. Affected paths: `comment_already_pending_queue`, the `already_replied_success` branch, the two `comment_already_partial_success` branches, the `comment_already_dm_failed` branch, the `public_reply_required_recovery` branch, and the generic catch-all that already resolved an `exact_reason` / `return_reason` before returning silently.
+- Fix commit: pending (this commit). Each silent early-return now records an `automation_skipped` flight-recorder event with `skip_reason` set to the existing return reason string. No automation logic, no rule matching, no send path, no dedupe behavior changed — only an extra recorder write per silent return.
+- Tests: `test_duplicate_comment_already_replied_records_skip_event_and_does_not_resend`, `test_duplicate_pending_queue_records_skip_event`, `test_duplicate_dm_failed_permanent_records_skip_event`, `test_fresh_comment_with_general_rule_still_matches_and_sends`. `test_multi_account_automation_routing.py` 110 passed; backend full 641 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms Stop Point now shows the actual duplicate/already-processed reason for a repeated comment instead of `rule_not_matched`.
+- Lesson learned: Every early-return path that exits before `rule_loading_finished` must record a flight-recorder event with the same reason it returns to the caller. Silent returns mislead the operator-facing summary into the worst possible default ("rule_not_matched") and waste investigation time.
+- Preventive test added: Yes.
+
 ### Stop-Point Showed rule_not_matched Despite Successful Automation
 
 - Date/time: 2026-05-24

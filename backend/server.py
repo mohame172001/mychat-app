@@ -17168,6 +17168,15 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         if previous_status in ('pending', 'processing'):
             logger.info('comment_already_pending_queue comment_id=%s user=%s next_retry_at=%s',
                         ig_comment_id, user_doc.get('email'), existing.get('next_retry_at'))
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='comment_already_pending_queue',
+            )
             return {'processed': False, 'already_processed': True, 'matched': True,
                     'action_status': previous_status, 'queued': True,
                     'reason': 'comment_already_pending_queue'}
@@ -17200,6 +17209,16 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 _reply_provider_comment_id_exists(existing),
                 existing.get('reply_success_source') or existing.get('source') or 'legacy_migration',
             )
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='already_replied_success',
+                extra={'classified_reason': 'comment_already_replied_success'},
+            )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': 'skipped',
                     'reason': 'already_replied_success',
@@ -17214,6 +17233,16 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 'comment_already_partial_success ig_comment_id=%s user=%s dm_reason=%s',
                 ig_comment_id, user_doc.get('email'),
                 existing.get('dm_failure_reason'),
+            )
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='comment_already_partial_success',
+                extra={'dm_failure_reason': existing.get('dm_failure_reason')},
             )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': 'partial_success',
@@ -17235,11 +17264,31 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         if already_replied and dm_failed and not dm_retryable:
             logger.info('comment_already_partial_success ig_comment_id=%s user=%s dm_reason=%s',
                         ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='comment_already_partial_success',
+                extra={'dm_failure_reason': existing.get('dm_failure_reason')},
+            )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': 'partial_success', 'reason': 'comment_already_partial_success'}
         if dm_failed and not dm_retryable:
             logger.info('comment_already_dm_failed ig_comment_id=%s user=%s dm_reason=%s',
                         ig_comment_id, user_doc.get('email'), existing.get('dm_failure_reason'))
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='comment_already_dm_failed',
+                extra={'dm_failure_reason': existing.get('dm_failure_reason')},
+            )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': previous_status or 'failed', 'reason': 'comment_already_dm_failed'}
         if retry_existing:
@@ -17300,6 +17349,18 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         ig_comment_id, user_doc.get('email'), existing_rule_id,
                         previous_status, previous_reply_status, previous_dm_status,
                     )
+                    await _record_instagram_automation_event(
+                        'automation_skipped',
+                        source=source,
+                        user_doc=user_doc,
+                        media_id=media_id,
+                        comment_id=ig_comment_id,
+                        commenter_id=commenter_id,
+                        rule_id=existing_rule_id,
+                        skip_reason='public_reply_required_recovery',
+                        extra={'classified_reason': 'public_reply_required_not_attempted',
+                               'queued_for_retry': True},
+                    )
                     return {'processed': True, 'recovered': True, 'matched': True,
                             'action_status': 'failed_retryable',
                             'queued': True,
@@ -17345,6 +17406,16 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 exact_reason, ig_comment_id, user_doc.get('email'), source,
                 previous_status, previous_reply_status, previous_dm_status,
                 previous_dm_failure_reason,
+            )
+            await _record_instagram_automation_event(
+                'automation_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason=return_reason or 'comment_already_processed',
+                extra={'classified_reason': exact_reason},
             )
             return {'processed': False, 'already_processed': True, 'matched': False,
                     'action_status': 'skipped', 'reason': return_reason,
