@@ -2127,6 +2127,319 @@ function RuleCoverageRuleRow({ rule }) {
 }
 
 
+/**
+ * Sanitized webhook-health panel. Calls the protected backend
+ * /api/admin/instagram/multi-account-health endpoint and renders the
+ * already-sanitized JSON, so an operator can classify "automation
+ * works but source=polling" into one of these five buckets without
+ * extracting an admin JWT:
+ *   A. Meta does not send comment webhooks for this account.
+ *   B. Webhook arrives but no webhook_comment_detected fires.
+ *   C. Webhook arrives but account resolution fails.
+ *   D. Webhook resolves but processing is skipped.
+ *   E. Webhook is fast, polling overwrites the displayed source.
+ *
+ * Visibility only — no automation logic, no public diagnostics page.
+ * Backend output is partial-redacted; this component renders exactly
+ * what the API returned.
+ */
+function WebhookHealthTab() {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [copyStatus, setCopyStatus] = useState('idle');
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    setCopyStatus('idle');
+    try {
+      const r = await api.get('/admin/instagram/multi-account-health');
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const onCopyJson = useCallback(async () => {
+    if (!data) return;
+    try {
+      const text = JSON.stringify(data, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    } catch (_) {
+      setCopyStatus('error');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    }
+  }, [data]);
+
+  const accounts = data?.accounts || [];
+  const ar = isAr();
+
+  return (
+    <section data-testid="admin-webhook-health">
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[200px]">
+          <div className="font-semibold text-slate-800">
+            {ar ? 'صحّة الـ Webhook' : 'Webhook Health'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {ar
+              ? 'حالة اشتراك Meta Webhooks وأوقات آخر استلام/معالجة لكل حساب — لتشخيص سبب تأخّر التعليقات عبر polling.'
+              : 'Meta webhook subscription state and last received/processed times per linked account — to classify why comments arrive via polling.'}
+          </div>
+        </div>
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {accounts.length} {ar ? 'حساب' : 'accounts'}
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> {ar ? 'غير مصرّح' : 'Forbidden'}
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <AlertTriangle className="w-3 h-3 me-1" /> {ar ? 'فشل' : 'Failed'}
+          </Badge>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={load}
+          disabled={state === 'loading'}
+          data-testid="webhook-health-reload"
+        >
+          <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          {ar ? 'تحديث' : 'Reload'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onCopyJson}
+          disabled={!data || state === 'loading'}
+          data-testid="webhook-health-copy"
+        >
+          {copyStatus === 'copied'
+            ? (ar ? 'تم النسخ' : 'Copied')
+            : copyStatus === 'error'
+              ? (ar ? 'فشل النسخ' : 'Copy failed')
+              : (ar ? 'نسخ JSON' : 'Copy JSON')}
+        </Button>
+      </header>
+
+      {state === 'loading' && <AdminSkeleton rows={3} />}
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3">
+          {error}
+        </div>
+      )}
+      {state === 'forbidden' && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {ar
+            ? 'حسابك لا يملك صلاحية admin.users.view المطلوبة.'
+            : 'Your account does not have the required admin.users.view permission.'}
+        </div>
+      )}
+
+      {state === 'success' && data && (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs mb-3" data-testid="webhook-health-overview">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'آخر webhook استُلم' : 'webhook.last_received_at'}
+              </div>
+              <div className="font-mono break-all">{data.webhook?.last_received_at || '-'}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'آخر webhook عولج' : 'webhook.last_processed_at'}
+              </div>
+              <div className="font-mono break-all">{data.webhook?.last_processed_at || '-'}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'polling مفعّل' : 'polling.enabled'}
+              </div>
+              <div className="font-mono">{String(!!data.polling?.enabled)}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'فاصل polling (ث)' : 'polling.interval_seconds'}
+              </div>
+              <div className="font-mono">{data.polling?.interval_seconds ?? '-'}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {state === 'success' && accounts.length === 0 && (
+        <div className="text-xs text-slate-500 py-6 text-center">
+          {ar
+            ? 'لا توجد حسابات Instagram مربوطة على workspace الخاص بك.'
+            : 'No linked Instagram accounts on this workspace.'}
+        </div>
+      )}
+
+      {accounts.length > 0 && (
+        <div className="space-y-3">
+          {accounts.map((acc) => (
+            <WebhookHealthAccountCard
+              key={acc.instagram_account_id_partial || acc.username || Math.random()}
+              account={acc}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function WebhookHealthAccountCard({ account }) {
+  const ar = isAr();
+  const subscribed = Array.isArray(account.webhook_subscription_fields)
+    ? account.webhook_subscription_fields
+    : [];
+  const missing = Array.isArray(account.webhook_subscription_missing)
+    ? account.webhook_subscription_missing
+    : [];
+  const issues = Array.isArray(account.issues) ? account.issues : [];
+  const stop = account.stop_point_summary || {};
+  const stopReason = stop.exact_stop_reason || '-';
+  const stopSource = stop.source || '-';
+  const lastWebhook = account.last_webhook_event_time;
+  const lastPolling = account.last_polling_scan_time || account.polling_last_scan_at;
+  const lastWebhookMissing = !lastWebhook;
+  const cardTone = !account.connection_valid
+    ? 'bg-rose-50 border-rose-200'
+    : missing.length > 0 || lastWebhookMissing
+      ? 'bg-amber-50 border-amber-200'
+      : 'bg-emerald-50 border-emerald-200';
+
+  return (
+    <div className={`border rounded-lg p-3 text-sm ${cardTone}`} data-testid="webhook-health-account-card">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <span className="font-semibold text-slate-800">@{account.username || '-'}</span>
+        <span className="text-xs text-slate-500 font-mono">
+          {account.instagram_account_id_partial || '-'}
+        </span>
+        <div className="ms-auto flex flex-wrap gap-1">
+          <Badge className={`border-0 text-[10px] ${account.connection_valid ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+            connectionValid: {String(!!account.connection_valid)}
+          </Badge>
+          <Badge className={`border-0 text-[10px] ${account.instant_webhook_eligible ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`}>
+            instant_webhook_eligible: {String(!!account.instant_webhook_eligible)}
+          </Badge>
+          {missing.length > 0 && (
+            <Badge className="bg-rose-100 text-rose-700 border-0 text-[10px]">
+              {ar ? 'حقول مفقودة' : 'missing'}: {missing.length}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-700">
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'حقول مشترك بها' : 'subscribed_fields'}
+          </div>
+          {subscribed.length === 0 ? (
+            <div className="text-rose-700">{ar ? 'لا يوجد' : '(none)'}</div>
+          ) : (
+            <div className="font-mono break-words">{subscribed.join(', ')}</div>
+          )}
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'حقول مفقودة' : 'webhook_subscription_missing'}
+          </div>
+          {missing.length === 0 ? (
+            <div className="text-emerald-700">{ar ? 'لا يوجد' : '(none)'}</div>
+          ) : (
+            <div className="font-mono break-words text-rose-700">{missing.join(', ')}</div>
+          )}
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر فحص اشتراك' : 'subscription_last_checked_at'}
+          </div>
+          <div className="font-mono break-all">{account.webhook_subscription_last_checked_at || '-'}</div>
+        </div>
+
+        <div>
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'آخر webhook (حدث)' : 'last_webhook_event_time'}
+          </div>
+          <div className={`font-mono break-all ${lastWebhookMissing ? 'text-rose-700' : ''}`}>
+            {lastWebhook || (ar ? '— لم يصل بعد' : '— never observed')}
+          </div>
+
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر مسح polling' : 'last_polling_scan_time'}
+          </div>
+          <div className="font-mono break-all">{lastPolling || '-'}</div>
+
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر تعليق رُصد' : 'last_comment_seen_time'}
+          </div>
+          <div className="font-mono break-all">{account.last_comment_seen_time || '-'}</div>
+
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر مطابقة قاعدة' : 'last_rule_match_time'}
+          </div>
+          <div className="font-mono break-all">{account.last_rule_match_time || '-'}</div>
+
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر نجاح أتمتة' : 'last_automation_success_time'}
+          </div>
+          <div className="font-mono break-all">{account.last_automation_success_time || '-'}</div>
+        </div>
+
+        <div className="md:col-span-2">
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+            {ar ? 'نقطة التوقّف' : 'stop_point_summary'}
+          </div>
+          <div className="font-mono break-words">
+            source=<span>{stopSource}</span>{' · '}
+            exact_stop_reason=<span>{stopReason}</span>
+          </div>
+        </div>
+
+        {issues.length > 0 && (
+          <div className="md:col-span-2">
+            <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+              {ar ? 'تنبيهات' : 'issues'}
+            </div>
+            <ul className="list-disc ps-5">
+              {issues.map((iss, i) => (
+                <li key={i} className="font-mono">{iss}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const { lang } = useTranslation();
@@ -2301,6 +2614,16 @@ export default function AdminConsole() {
             <Activity className="w-4 h-4 me-2" /> {ar ? 'تغطية القواعد' : 'Rule Coverage'}
           </Button>
         )}
+        {canViewUsers && (
+          <Button
+            variant={tab === 'webhook-health' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('webhook-health'); setSelectedUserId(null); }}
+            data-testid="admin-tab-webhook-health"
+          >
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'صحّة الـ Webhook' : 'Webhook Health'}
+          </Button>
+        )}
         <div className="ms-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -2343,6 +2666,11 @@ export default function AdminConsole() {
       {tab === 'rule-coverage' && canViewUsers && (
         <AdminSectionErrorBoundary name="rule-coverage" resetKey="rule-coverage">
           <RuleCoverageTab />
+        </AdminSectionErrorBoundary>
+      )}
+      {tab === 'webhook-health' && canViewUsers && (
+        <AdminSectionErrorBoundary name="webhook-health" resetKey="webhook-health">
+          <WebhookHealthTab />
         </AdminSectionErrorBoundary>
       )}
     </div>

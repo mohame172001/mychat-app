@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: `61103fb1a270d4b67e3d80b8d8fa24f139b7d885`
-- Current origin/master: `61103fb1a270d4b67e3d80b8d8fa24f139b7d885`
-- Current production build_sha: `61103fb1a270`
-- Current working status: Live retest confirmed Instagram automation works on both linked accounts with general any-post rules. Rule Coverage admin tab read `should_match=true` for the active general rule on each account, and the live comment test fired the configured reply + opening DM on both accounts. Webhook latency (`source=polling`) is a separate, still-open observation and is NOT marked verified by this entry.
+- Current local HEAD: pending Webhook Health admin UI commit
+- Current origin/master: `e8fec5bb815c8565911f44264de4b023ec26d4ee`
+- Current production build_sha: `e8fec5bb815c`
+- Current working status: Multi-account general automation is live-verified known-good. Adding admin-only Webhook Health panel inside `/app/admin` so the operator can read `/api/admin/instagram/multi-account-health` (subscription state, last webhook time, last polling time per account) without an admin JWT. No backend or automation behavior change. Webhook latency / `source=polling` cause is still being diagnosed.
 
 Update these values at the start and end of every agent session.
 
