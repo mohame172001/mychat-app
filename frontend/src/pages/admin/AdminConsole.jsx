@@ -2473,6 +2473,409 @@ function WebhookHealthAccountCard({ account }) {
 }
 
 
+/**
+ * Sanitized flight-recorder viewer. Calls
+ * GET /api/admin/instagram/automation-flight-recorder?username=<name>&limit=200
+ * and renders the per-event timeline that's already partial-redacted
+ * by the backend. Lets the operator pick which Candidate is firing
+ * (silent dedupe early-exit vs over-polluted event window vs success
+ * present) without DevTools or curl. Visibility only — no fix is
+ * implemented here.
+ */
+const FLIGHT_RECORDER_DEFAULT_LIMIT = 200;
+const HIGHLIGHTED_STAGES = new Set([
+  'poller_comment_seen',
+  'webhook_comment_detected',
+  'rule_loading_finished',
+  'rule_candidate_evaluated',
+  'rule_match_success',
+  'rule_match_failed',
+  'automation_skipped',
+  'public_reply_attempted',
+  'opening_dm_attempted',
+  'automation_success',
+  'automation_failed',
+  'poller_account_scan_started',
+]);
+const STAGE_TONE = {
+  poller_comment_seen: 'bg-sky-100 text-sky-800',
+  webhook_comment_detected: 'bg-sky-100 text-sky-800',
+  rule_loading_finished: 'bg-slate-200 text-slate-800',
+  rule_candidate_evaluated: 'bg-slate-200 text-slate-800',
+  rule_match_success: 'bg-emerald-100 text-emerald-700',
+  rule_match_failed: 'bg-amber-100 text-amber-800',
+  automation_skipped: 'bg-amber-100 text-amber-800',
+  public_reply_attempted: 'bg-slate-200 text-slate-800',
+  opening_dm_attempted: 'bg-slate-200 text-slate-800',
+  automation_success: 'bg-emerald-100 text-emerald-700',
+  automation_failed: 'bg-rose-100 text-rose-700',
+  poller_account_scan_started: 'bg-slate-100 text-slate-500',
+};
+
+function classifyFlightRecorderEvents(events) {
+  const list = Array.isArray(events) ? events : [];
+  // events are returned newest-first by the backend.
+  const latestComment = list.find(
+    (e) => e.stage === 'poller_comment_seen' || e.stage === 'webhook_comment_detected',
+  );
+  const latestCommentId = latestComment?.comment_id_partial || null;
+  const ruleLoadingForLatest = latestCommentId
+    ? list.find((e) => e.stage === 'rule_loading_finished' && e.comment_id_partial === latestCommentId)
+    : null;
+  const candidateEvaluatedForLatest = latestCommentId
+    ? list.find((e) => e.stage === 'rule_candidate_evaluated' && e.comment_id_partial === latestCommentId)
+    : null;
+  const automationSuccessAny = list.find((e) => e.stage === 'automation_success');
+  const scanCount = list.filter((e) => e.stage === 'poller_account_scan_started').length;
+  let suspectedCandidate = 'no_data';
+  if (!latestComment) {
+    suspectedCandidate = 'no_comment_in_window';
+  } else if (!ruleLoadingForLatest) {
+    suspectedCandidate = 'silent_early_exit_possible';
+  } else if (automationSuccessAny) {
+    suspectedCandidate = 'success_present';
+  } else if (scanCount >= 50) {
+    suspectedCandidate = 'event_window_overpolluted_possible';
+  } else {
+    suspectedCandidate = 'no_success_in_window';
+  }
+  return {
+    latest_comment_id_partial: latestCommentId,
+    latest_comment_stage: latestComment?.stage || null,
+    rule_loading_for_latest: !!ruleLoadingForLatest,
+    rule_loading_rules_count: ruleLoadingForLatest?.extra?.rules_count ?? null,
+    candidate_evaluated_for_latest: !!candidateEvaluatedForLatest,
+    automation_success_anywhere: !!automationSuccessAny,
+    automation_success_comment_id_partial: automationSuccessAny?.comment_id_partial || null,
+    poller_account_scan_started_count: scanCount,
+    suspected_candidate: suspectedCandidate,
+  };
+}
+
+function FlightRecorderTab() {
+  const [accountsState, setAccountsState] = useState('idle');
+  const [accounts, setAccounts] = useState([]);
+  const [selectedUsername, setSelectedUsername] = useState('');
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [copyStatus, setCopyStatus] = useState('idle');
+
+  const loadAccounts = useCallback(async () => {
+    setAccountsState('loading');
+    try {
+      const r = await api.get('/admin/instagram/multi-account-health');
+      const list = (r.data?.accounts || [])
+        .map((a) => ({
+          username: a.username || '',
+          partial: a.instagram_account_id_partial || null,
+        }))
+        .filter((a) => a.username);
+      setAccounts(list);
+      setAccountsState('success');
+      if (list.length && !selectedUsername) {
+        setSelectedUsername(list[0].username);
+      }
+    } catch (_err) {
+      setAccountsState('error');
+    }
+  }, [selectedUsername]);
+
+  const load = useCallback(async (username) => {
+    if (!username) return;
+    setState('loading');
+    setError(null);
+    setCopyStatus('idle');
+    try {
+      const r = await api.get(
+        `/admin/instagram/automation-flight-recorder?username=${encodeURIComponent(username)}&limit=${FLIGHT_RECORDER_DEFAULT_LIMIT}`,
+      );
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, []);
+
+  useEffect(() => { loadAccounts(); }, [loadAccounts]);
+  useEffect(() => {
+    if (selectedUsername) load(selectedUsername);
+  }, [selectedUsername, load]);
+
+  const onCopyJson = useCallback(async () => {
+    if (!data) return;
+    try {
+      const text = JSON.stringify(data, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    } catch (_) {
+      setCopyStatus('error');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    }
+  }, [data]);
+
+  const ar = isAr();
+  const events = Array.isArray(data?.events) ? data.events : [];
+  const classification = classifyFlightRecorderEvents(events);
+
+  return (
+    <section data-testid="admin-flight-recorder">
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[200px]">
+          <div className="font-semibold text-slate-800">
+            {ar ? 'مسجّل أحداث الأتمتة' : 'Flight Recorder'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {ar
+              ? 'الجدول الزمني المعقّم للأحداث لكل حساب — لتحديد سبب «rule_not_matched». المعرّفات مُغطّاة جزئياً.'
+              : 'Sanitized per-account event timeline — to pinpoint why a stop point shows rule_not_matched. External ids are partial-redacted.'}
+          </div>
+        </div>
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {events.length} {ar ? 'حدث' : 'events'}
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> {ar ? 'غير مصرّح' : 'Forbidden'}
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <AlertTriangle className="w-3 h-3 me-1" /> {ar ? 'فشل' : 'Failed'}
+          </Badge>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => selectedUsername && load(selectedUsername)}
+          disabled={state === 'loading' || !selectedUsername}
+          data-testid="flight-recorder-reload"
+        >
+          <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          {ar ? 'تحديث' : 'Reload'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onCopyJson}
+          disabled={!data || state === 'loading'}
+          data-testid="flight-recorder-copy"
+        >
+          {copyStatus === 'copied'
+            ? (ar ? 'تم النسخ' : 'Copied')
+            : copyStatus === 'error'
+              ? (ar ? 'فشل النسخ' : 'Copy failed')
+              : (ar ? 'نسخ JSON' : 'Copy JSON')}
+        </Button>
+      </header>
+
+      {accountsState === 'success' && accounts.length === 0 && (
+        <div className="text-xs text-slate-500 py-6 text-center">
+          {ar
+            ? 'لا توجد حسابات Instagram مربوطة على workspace الخاص بك.'
+            : 'No linked Instagram accounts on this workspace.'}
+        </div>
+      )}
+      {accounts.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3" data-testid="flight-recorder-account-buttons">
+          {accounts.map((acc) => (
+            <Button
+              key={acc.username}
+              size="sm"
+              variant={acc.username === selectedUsername ? 'default' : 'outline'}
+              onClick={() => setSelectedUsername(acc.username)}
+              data-testid={`flight-recorder-account-${acc.username}`}
+            >
+              @{acc.username}
+              {acc.partial && (
+                <span className="ms-2 text-[10px] font-mono opacity-70">{acc.partial}</span>
+              )}
+            </Button>
+          ))}
+        </div>
+      )}
+
+      {state === 'loading' && <AdminSkeleton rows={4} />}
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3">
+          {error}
+        </div>
+      )}
+      {state === 'forbidden' && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {ar
+            ? 'حسابك لا يملك صلاحية admin.users.view المطلوبة.'
+            : 'Your account does not have the required admin.users.view permission.'}
+        </div>
+      )}
+
+      {state === 'success' && (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs mb-3" data-testid="flight-recorder-summary">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'آخر تعليق رُصد' : 'latest_comment_id_partial'}
+              </div>
+              <div className="font-mono break-all">{classification.latest_comment_id_partial || '-'}</div>
+              {classification.latest_comment_stage && (
+                <div className="text-[10px] text-slate-500">
+                  via <span className="font-mono">{classification.latest_comment_stage}</span>
+                </div>
+              )}
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'rule_loading للأحدث' : 'rule_loading_finished for latest'}
+              </div>
+              <div className="font-mono">{String(classification.rule_loading_for_latest)}</div>
+              {classification.rule_loading_rules_count != null && (
+                <div className="text-[10px] text-slate-500">
+                  rules_count=<span className="font-mono">{classification.rule_loading_rules_count}</span>
+                </div>
+              )}
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'rule_candidate للأحدث' : 'rule_candidate_evaluated for latest'}
+              </div>
+              <div className="font-mono">{String(classification.candidate_evaluated_for_latest)}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'automation_success في النافذة' : 'automation_success in window'}
+              </div>
+              <div className="font-mono">{String(classification.automation_success_anywhere)}</div>
+              {classification.automation_success_comment_id_partial && (
+                <div className="text-[10px] text-slate-500 font-mono">
+                  on {classification.automation_success_comment_id_partial}
+                </div>
+              )}
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'عيّنات scan' : 'poller_account_scan_started_count'}
+              </div>
+              <div className="font-mono">{classification.poller_account_scan_started_count}</div>
+            </div>
+            <div className="md:col-span-3">
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'المرشح المُشتبه به' : 'suspected_candidate'}
+              </div>
+              <div className="font-mono">{classification.suspected_candidate}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {state === 'success' && events.length === 0 && (
+        <div className="text-xs text-slate-500 py-6 text-center">
+          {ar ? 'لا توجد أحداث في النافذة.' : 'No events in the window.'}
+        </div>
+      )}
+
+      {events.length > 0 && (
+        <div className="space-y-1" data-testid="flight-recorder-events">
+          {events.map((ev, idx) => (
+            <FlightRecorderEventRow key={(ev.created_at || idx) + ':' + idx} event={ev} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function FlightRecorderEventRow({ event }) {
+  const stage = event?.stage || '-';
+  const highlighted = HIGHLIGHTED_STAGES.has(stage);
+  const toneClass = STAGE_TONE[stage] || 'bg-slate-100 text-slate-600';
+  const extra = (event?.extra && typeof event.extra === 'object') ? event.extra : {};
+  const extraEntries = Object.entries(extra)
+    .filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0))
+    .slice(0, 8);
+  return (
+    <div
+      className={`rounded-md border text-[11px] px-2 py-1.5 ${highlighted ? 'border-slate-300' : 'border-slate-200 opacity-80'}`}
+      data-testid="flight-recorder-event-row"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-slate-500 font-mono">{event?.created_at || '-'}</span>
+        <Badge className={`border-0 text-[10px] ${toneClass}`}>{stage}</Badge>
+        {event?.source && (
+          <span className="text-[10px] text-slate-500">
+            source=<span className="font-mono">{event.source}</span>
+          </span>
+        )}
+        {event?.username && (
+          <span className="text-[10px] text-slate-500">
+            @<span className="font-mono">{event.username}</span>
+          </span>
+        )}
+        {event?.comment_id_partial && (
+          <span className="text-[10px] text-slate-500">
+            comment=<span className="font-mono">{event.comment_id_partial}</span>
+          </span>
+        )}
+        {event?.media_id_partial && (
+          <span className="text-[10px] text-slate-500">
+            media=<span className="font-mono">{event.media_id_partial}</span>
+          </span>
+        )}
+        {event?.rule_id_partial && (
+          <span className="text-[10px] text-slate-500">
+            rule=<span className="font-mono">{event.rule_id_partial}</span>
+          </span>
+        )}
+        {event?.skip_reason && (
+          <Badge className="bg-amber-100 text-amber-800 border-0 text-[10px]">
+            {event.skip_reason}
+          </Badge>
+        )}
+        {event?.error_code && (
+          <Badge className="bg-rose-100 text-rose-700 border-0 text-[10px]">
+            err={event.error_code}
+          </Badge>
+        )}
+        {event?.elapsed_ms != null && (
+          <span className="text-[10px] text-slate-500">
+            {event.elapsed_ms}ms
+          </span>
+        )}
+      </div>
+      {extraEntries.length > 0 && (
+        <div className="mt-1 ps-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          {extraEntries.map(([k, v]) => (
+            <span key={k} className="text-[10px] text-slate-600">
+              {k}=<span className="font-mono break-all">
+                {Array.isArray(v) ? v.join(',') : (typeof v === 'object' ? JSON.stringify(v).slice(0, 80) : String(v).slice(0, 80))}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function AdminConsole() {
   const { user } = useAuth();
   const { lang } = useTranslation();
@@ -2657,6 +3060,16 @@ export default function AdminConsole() {
             <Activity className="w-4 h-4 me-2" /> {ar ? 'صحّة الـ Webhook' : 'Webhook Health'}
           </Button>
         )}
+        {canViewUsers && (
+          <Button
+            variant={tab === 'flight-recorder' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('flight-recorder'); setSelectedUserId(null); }}
+            data-testid="admin-tab-flight-recorder"
+          >
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'مسجّل الأحداث' : 'Flight Recorder'}
+          </Button>
+        )}
         <div className="ms-auto" />
         {tab === 'overview' && canViewOverview && (
           <Button
@@ -2704,6 +3117,11 @@ export default function AdminConsole() {
       {tab === 'webhook-health' && canViewUsers && (
         <AdminSectionErrorBoundary name="webhook-health" resetKey="webhook-health">
           <WebhookHealthTab />
+        </AdminSectionErrorBoundary>
+      )}
+      {tab === 'flight-recorder' && canViewUsers && (
+        <AdminSectionErrorBoundary name="flight-recorder" resetKey="flight-recorder">
+          <FlightRecorderTab />
         </AdminSectionErrorBoundary>
       )}
     </div>

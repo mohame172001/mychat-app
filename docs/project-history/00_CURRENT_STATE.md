@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending webhook field-shape visibility commit
-- Current origin/master: `3b076f6a49617faeac6caf27a6f64f0dee6620ee`
-- Current production build_sha: `3b076f6a4961`
-- Current working status: Multi-account general automation remains live-verified known-good. Webhook Health shows top-level webhook traffic exists but per-account `last_webhook_event_time = never observed` on both accounts, suggesting Meta is delivering messaging webhooks but not comment-field webhooks. Adding visibility-only enrichment to `webhook_received` events (records which `entry.changes[].field` values arrive) and surfacing a 50-sample summary in `/api/admin/instagram/multi-account-health → webhook.recent_field_summary` so the operator can confirm whether comment fields ever arrive without an admin JWT. No automation logic, no parser, no resolver, no rule matching touched.
+- Current local HEAD: pending Flight Recorder admin UI commit
+- Current origin/master: `0e5544b648c2d0d9c1b5623cac47bfb410739c54`
+- Current production build_sha: `0e5544b648c2`
+- Current working status: Multi-account general automation remains live-verified known-good for the historical test. Newest live retest shows `exact_stop_reason = rule_not_matched` on both accounts even after a fresh comment, narrowed by code analysis to either Candidate 1 (silent dedupe/already-replied early-exit in `_handle_new_comment` before `rule_loading_finished` fires) or Candidate 3 (100-event flight-recorder window over-polluted by `poller_account_scan_started` events pushing `automation_success` out of the summarizer's view). Adding admin-only Flight Recorder tab inside `/app/admin` that calls `/api/admin/instagram/automation-flight-recorder?username=<name>&limit=200` so the operator can pick which candidate fires without DevTools or an admin JWT. Visibility only — no automation/parser/resolver/dedupe/rate-limit change.
 
 Update these values at the start and end of every agent session.
 
