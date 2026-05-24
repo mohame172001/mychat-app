@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending Webhook Health admin UI commit
-- Current origin/master: `e8fec5bb815c8565911f44264de4b023ec26d4ee`
-- Current production build_sha: `e8fec5bb815c`
-- Current working status: Multi-account general automation is live-verified known-good. Adding admin-only Webhook Health panel inside `/app/admin` so the operator can read `/api/admin/instagram/multi-account-health` (subscription state, last webhook time, last polling time per account) without an admin JWT. No backend or automation behavior change. Webhook latency / `source=polling` cause is still being diagnosed.
+- Current local HEAD: pending admin summarizer accuracy commit
+- Current origin/master: `590e10a938e23410a206f75632cc05d02f38c917`
+- Current production build_sha: `590e10a938e2`
+- Current working status: Multi-account general automation remains live-verified known-good. Reporting-only fix in progress: stop-point summary now prefers the latest comment that has an `automation_success` event so a newer unrelated comment can no longer override a verified success; top-level admin `webhook.last_received_at` / `webhook.last_processed_at` now fall back to the persistent flight recorder so a Railway redeploy no longer nulls them while per-account `source=webhook` continues to be reported. No automation execution change.
 
 Update these values at the start and end of every agent session.
 

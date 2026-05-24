@@ -3963,6 +3963,129 @@ def test_summarize_stop_point_prefers_external_comment_over_bot_reply(monkeypatc
     assert summary['latest_bot_own_reply_at'] == (bot_at + timedelta(seconds=1)).isoformat()
 
 
+def test_summarize_stop_point_prefers_successful_comment_over_newer_unrelated(monkeypatch):
+    """A NEWER external comment that the rule did not process (e.g.
+    dedupe, sibling account, activation cutoff) must NOT hide a
+    successful automation that fired on a slightly older external
+    comment. The summarizer scopes by comment_id_partial, and before
+    this fix it picked the newest external comment unconditionally,
+    so a follow-up no-match comment overrode the prior success and the
+    operator saw rule_not_matched + reply_attempted=false +
+    dm_attempted=false in spite of last_send_result=success.
+    """
+    db = _install_multi_account_db(monkeypatch)
+    success_at = datetime.utcnow() - timedelta(seconds=60)
+    newer_at = datetime.utcnow()
+
+    # Earlier external comment that fully succeeded.
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial='ext-success', created_at=success_at,
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial='ext-success', extra={'rules_count': 1},
+        created_at=success_at + timedelta(seconds=1),
+    )
+    _seed_flight_event(
+        db, stage='rule_match_success', source='polling',
+        comment_id_partial='ext-success',
+        created_at=success_at + timedelta(seconds=2),
+    )
+    _seed_flight_event(
+        db, stage='public_reply_attempted', source='polling',
+        comment_id_partial='ext-success',
+        created_at=success_at + timedelta(seconds=3),
+    )
+    _seed_flight_event(
+        db, stage='opening_dm_attempted', source='polling',
+        comment_id_partial='ext-success',
+        created_at=success_at + timedelta(seconds=4),
+    )
+    _seed_flight_event(
+        db, stage='automation_success', source='polling',
+        comment_id_partial='ext-success',
+        created_at=success_at + timedelta(seconds=5),
+    )
+
+    # NEWER unrelated external comment from a different commenter —
+    # not bot_own_reply, but produced no match (e.g. dedupe / cutoff).
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial='ext-noop', created_at=newer_at,
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial='ext-noop', extra={'rules_count': 1},
+        created_at=newer_at + timedelta(seconds=1),
+    )
+    # No rule_match_success, no automation_success for ext-noop.
+
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+
+    # Summary must reflect the success — not the newer unrelated comment.
+    assert summary['rule_matched'] is True
+    assert summary['reply_attempted'] is True
+    assert summary['dm_attempted'] is True
+    assert summary['exact_stop_reason'] == 'automation_success'
+
+
+def test_summarize_stop_point_falls_back_when_no_success(monkeypatch):
+    """If no automation_success has been recorded for any comment, the
+    summarizer must still pick the latest external comment so non-
+    success states (no_active_rules_loaded, rule_not_matched,
+    selected_media_no_match, etc.) remain reportable. This pins the
+    fallback path."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='ext-1')
+    _seed_flight_event(db, stage='rule_loading_finished', source='polling',
+                       comment_id_partial='ext-1', extra={'rules_count': 1})
+    _seed_flight_event(db, stage='rule_match_failed', source='polling',
+                       comment_id_partial='ext-1',
+                       skip_reason='selected_media_no_match')
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['rule_matched'] is False
+    assert summary['exact_stop_reason'] == 'selected_media_no_match'
+
+
+def test_resolve_webhook_counters_falls_back_to_flight_recorder(monkeypatch):
+    """After a deploy/restart the in-process globals are None, but the
+    flight-recorder collection persists. The /admin endpoints must
+    report the persistent values so per-account `source=webhook` is
+    not contradicted by a null top-level last_received_at."""
+    db = _install_multi_account_db(monkeypatch)
+    monkeypatch.setattr(server, 'WEBHOOK_LAST_RECEIVED_AT', None)
+    monkeypatch.setattr(server, 'WEBHOOK_LAST_PROCESSED_AT', None)
+    recv_at = datetime.utcnow() - timedelta(minutes=2)
+    proc_at = datetime.utcnow() - timedelta(minutes=1)
+    _seed_flight_event(db, stage='webhook_received', created_at=recv_at)
+    _seed_flight_event(
+        db, stage='webhook_comment_detected', created_at=proc_at,
+        comment_id_partial='ext-1',
+    )
+    last_received, last_processed = _run(server._resolve_webhook_counters())
+    assert last_received == recv_at
+    assert last_processed == proc_at
+
+
+def test_resolve_webhook_counters_prefers_globals_when_set(monkeypatch):
+    """If the in-process globals are populated (recent webhook this
+    boot), prefer them — they are tick-accurate. The flight-recorder
+    fallback only runs when a global is None."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    monkeypatch.setattr(server, 'WEBHOOK_LAST_RECEIVED_AT', now)
+    monkeypatch.setattr(server, 'WEBHOOK_LAST_PROCESSED_AT', now)
+    _seed_flight_event(
+        db, stage='webhook_received',
+        created_at=now - timedelta(hours=1),
+    )
+    last_received, last_processed = _run(server._resolve_webhook_counters())
+    assert last_received == now
+    assert last_processed == now
+
+
 def test_admin_automation_stop_point_endpoint_returns_summary(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _patch_admin_gate(monkeypatch)

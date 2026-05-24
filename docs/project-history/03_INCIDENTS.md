@@ -114,6 +114,19 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Stop-Point Showed rule_not_matched Despite Successful Automation
+
+- Date/time: 2026-05-24
+- Symptom: After a successful run (`last_send_result.reply_status=success`, `dm_status=success`, `action_status=success` on the latest comment doc), Automation Stop Point reported `rule_matched=false`, `reply_attempted=false`, `dm_attempted=false`, `exact_stop_reason=rule_not_matched`. Webhook Health top-level `webhook.last_received_at` / `last_processed_at` were `null` even though some accounts showed `last_comment_source=webhook`.
+- Affected area: Admin support summaries only (no automation execution path was involved).
+- Root cause (A): `_latest_external_comment_event` always returned the most recent external comment (excluding bot-own-reply). The stop-point summarizer then scoped all event reads to that single `comment_id_partial`. If a NEWER unrelated external comment arrived after the success (e.g. produced no rule match because of dedupe, activation cutoff, or sibling-commenter), the events for the prior successful comment fell outside the scope and the summary collapsed to the literal default `rule_not_matched`.
+- Root cause (B): The top-level admin webhook counters (`WEBHOOK_LAST_RECEIVED_AT`, `WEBHOOK_LAST_PROCESSED_AT`) are module-level globals that reset on every Railway redeploy. Per-account `source` is computed from the persistent `instagram_automation_events` collection. After a fresh deploy with no inbound webhook yet, the top-level fields were `null` while per-account `source=webhook` continued to be reported correctly — looking like a contradiction.
+- Fix commit: pending (this commit). Selection helper now prefers the comment with the most recent `automation_success` event before falling back to the latest-external behavior. New `_resolve_webhook_counters` helper falls back to a flight-recorder lookup when the in-process globals are `None`. No automation logic, no rule matching, no send path touched.
+- Tests: `test_summarize_stop_point_prefers_successful_comment_over_newer_unrelated`, `test_summarize_stop_point_falls_back_when_no_success`, `test_resolve_webhook_counters_falls_back_to_flight_recorder`, `test_resolve_webhook_counters_prefers_globals_when_set`; `test_multi_account_automation_routing.py` 104 passed; backend full 635 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live admin Stop Point shows a verified success after the deploy.
+- Lesson learned: When a summary view scopes by `comment_id_partial`, the comment chosen must reflect the most meaningful outcome (success), not just the latest event. In-process counters that survive only the current boot must be backed by a persistent store before they are surfaced to a multi-day operator view.
+- Preventive test added: Yes.
+
 ### Legacy General Any-Post Rules Did Not Match
 
 - Date/time: 2026-05-24

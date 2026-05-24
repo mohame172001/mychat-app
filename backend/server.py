@@ -21416,11 +21416,12 @@ async def instagram_automation_health(user_id: str = Depends(get_current_active_
     except Exception:
         logger.exception('automation_health session_counts failed')
 
+    webhook_last_received, webhook_last_processed = await _resolve_webhook_counters()
     return {
         'tasks': tasks_out,
         'webhook': {
-            'last_received_at': _iso(WEBHOOK_LAST_RECEIVED_AT),
-            'last_processed_at': _iso(WEBHOOK_LAST_PROCESSED_AT),
+            'last_received_at': _iso(webhook_last_received),
+            'last_processed_at': _iso(webhook_last_processed),
         },
         'accounts': accounts_out,
         'jobs': {
@@ -21490,6 +21491,41 @@ def _latest_event(events: list, stages: set) -> Optional[dict]:
     return None
 
 
+async def _resolve_webhook_counters() -> tuple[Optional[datetime], Optional[datetime]]:
+    """Return (last_received_at, last_processed_at) for the top-level
+    admin webhook health view. Prefers the in-process globals
+    ``WEBHOOK_LAST_RECEIVED_AT`` / ``WEBHOOK_LAST_PROCESSED_AT`` because
+    those are tick-accurate; falls back to the persistent flight-recorder
+    collection so the values survive a Railway redeploy.
+
+    Without this fallback, every fresh deploy nulls the displayed
+    "webhook.last_received_at" until Meta sends the next webhook, which
+    contradicts per-account ``last_comment_source=webhook`` (that is read
+    from the persistent flight recorder).
+    """
+    last_received = WEBHOOK_LAST_RECEIVED_AT
+    last_processed = WEBHOOK_LAST_PROCESSED_AT
+    try:
+        if last_received is None:
+            row = await db.instagram_automation_events.find_one(
+                {'stage': 'webhook_received'},
+                {'created_at': 1},
+                sort=[('created_at', -1)],
+            )
+            last_received = (row or {}).get('created_at')
+        if last_processed is None:
+            row = await db.instagram_automation_events.find_one(
+                {'stage': 'webhook_comment_detected'},
+                {'created_at': 1},
+                sort=[('created_at', -1)],
+            )
+            last_processed = (row or {}).get('created_at')
+    except Exception:
+        # Best-effort: report whatever the in-process globals know.
+        pass
+    return last_received, last_processed
+
+
 def _bot_own_reply_comment_ids(events: list) -> set:
     ids = set()
     for event in events:
@@ -21503,9 +21539,41 @@ def _bot_own_reply_comment_ids(events: list) -> set:
 
 
 def _latest_external_comment_event(events: list) -> tuple[Optional[dict], Optional[dict]]:
+    """Pick the comment_id_partial to scope the stop-point summary on.
+
+    Priority order:
+      1. The most recent comment that has an ``automation_success`` event
+         attached. This prevents a NEWER unrelated external comment
+         (which the rule did not process — dedupe, sibling, activation
+         cutoff, etc.) from hiding a meaningful success on a slightly
+         older comment.
+      2. Otherwise the most recent external comment that is not a
+         bot-own-reply (legacy behaviour).
+
+    The second tuple value is the latest external comment regardless of
+    outcome — callers use it to detect bot-own-reply ordering.
+    """
     comment_stages = {'webhook_comment_detected', 'poller_comment_seen'}
     bot_reply_ids = _bot_own_reply_comment_ids(events)
     latest_any = _latest_event(events, comment_stages)
+    # 1. Latest comment with a recorded automation_success.
+    success_comment_id: Optional[str] = None
+    for event in events:
+        if event.get('stage') != 'automation_success':
+            continue
+        cid = event.get('comment_id_partial')
+        if not cid or cid in bot_reply_ids:
+            continue
+        success_comment_id = cid
+        break
+    if success_comment_id:
+        for event in events:
+            if (
+                event.get('stage') in comment_stages
+                and event.get('comment_id_partial') == success_comment_id
+            ):
+                return event, latest_any
+    # 2. Fall back to latest external comment (excluding bot replies).
     for event in events:
         if event.get('stage') not in comment_stages:
             continue
@@ -21987,12 +22055,13 @@ async def admin_instagram_multi_account_health(
             'issues': issues,
         })
 
+    webhook_last_received, webhook_last_processed = await _resolve_webhook_counters()
     return {
         'ok': True,
         'count': len(items),
         'webhook': {
-            'last_received_at': _iso(WEBHOOK_LAST_RECEIVED_AT),
-            'last_processed_at': _iso(WEBHOOK_LAST_PROCESSED_AT),
+            'last_received_at': _iso(webhook_last_received),
+            'last_processed_at': _iso(webhook_last_processed),
         },
         'polling': {
             'enabled': IG_POLL_ENABLED,
