@@ -14554,6 +14554,96 @@ async def instagram_auth_url(
     }
 
 
+async def _consume_instagram_oauth_code(
+    code: Optional[str],
+    user_id: Optional[str],
+    mode: Optional[str],
+) -> Dict[str, Any]:
+    """Atomically record consumption of an Instagram OAuth `code`.
+
+    The Instagram callback can be invoked more than once with the same
+    `code` (React 18 StrictMode double-mount, browser refresh, back
+    button, retried request, etc.). The second exchange returns Meta's
+    ``"This authorization code has been used"`` error which historically
+    fell into the ``token_exchange_failed`` branch and wiped the
+    user's working connection. To prevent that we hash the code and
+    upsert an ``oauth_code_consumed`` marker before talking to Meta.
+
+    Race safety: ``find_one_and_update`` with ``upsert=True`` and
+    ``return_document=BEFORE`` is atomic per-document in MongoDB. The
+    first caller observes ``prior is None`` and the row is created with
+    ``result='in_progress'``; every subsequent concurrent caller
+    observes the existing row. The bootstrap task also creates a unique
+    index plus a ~10-minute TTL index for defense in depth, but
+    correctness does NOT depend on the unique index because the upsert
+    is itself atomic.
+
+    The raw OAuth ``code`` is never stored or logged — only its
+    SHA-256 hash.
+    """
+    if not code:
+        return {'is_new': True, 'code_hash': None}
+    code_hash = hashlib.sha256(code.encode('utf-8')).hexdigest()
+    now = datetime.utcnow()
+    try:
+        prior = await db.oauth_code_consumed.find_one_and_update(
+            {'provider': 'instagram', 'code_hash': code_hash},
+            {'$setOnInsert': {
+                'provider': 'instagram',
+                'code_hash': code_hash,
+                'user_id': user_id or None,
+                'mode': mode or None,
+                'created_at': now,
+                'result': 'in_progress',
+            }},
+            upsert=True,
+            return_document=ReturnDocument.BEFORE,
+        )
+    except DuplicateKeyError:
+        # A concurrent call won the race. Re-read the row.
+        try:
+            prior = await db.oauth_code_consumed.find_one(
+                {'provider': 'instagram', 'code_hash': code_hash},
+            )
+        except Exception:
+            prior = {}
+    except Exception as exc:
+        logger.warning(
+            'oauth_code_consume_check_failed err=%s',
+            type(exc).__name__,
+        )
+        # Fail open: one extra Meta call is preferable to blocking a
+        # legitimate first login. The Meta side will still reject a real
+        # duplicate so the user is not silently logged in twice.
+        return {'is_new': True, 'code_hash': code_hash}
+    if prior is None:
+        return {'is_new': True, 'code_hash': code_hash}
+    return {'is_new': False, 'prior': prior, 'code_hash': code_hash}
+
+
+async def _record_instagram_oauth_code_result(
+    code_hash: Optional[str],
+    result: str,
+    reason: Optional[str] = None,
+) -> None:
+    """Stamp the ``oauth_code_consumed`` row with the terminal state of
+    the first attempt so a duplicate callback can be redirected to the
+    right place (success vs. recorded failure)."""
+    if not code_hash:
+        return
+    try:
+        await db.oauth_code_consumed.update_one(
+            {'provider': 'instagram', 'code_hash': code_hash},
+            {'$set': {
+                'result': result,
+                'result_reason': (reason or None),
+                'finished_at': datetime.utcnow(),
+            }},
+        )
+    except Exception:
+        pass
+
+
 @api.get('/instagram/callback')
 async def instagram_callback(request: Request,
                              code: Optional[str] = Query(None),
@@ -14596,6 +14686,10 @@ async def instagram_callback(request: Request,
     audit['stateValid'] = bool(state_payload)
     audit['mode'] = oauth_mode
     audit['returnTo'] = return_to
+    # Late-bound: assigned after the idempotency check below. Referenced by
+    # _store_oauth_failure via closure so every recorded failure also
+    # stamps the consumed-code row.
+    code_hash: Optional[str] = None
 
     async def _store_oauth_failure(
         uid: Optional[str],
@@ -14603,6 +14697,10 @@ async def instagram_callback(request: Request,
         detail: Any = None,
         clear_existing_connection: bool = True,
     ):
+        # Record the terminal state on the consumed-code row so a
+        # duplicate callback redirects to the right place rather than
+        # being treated as a fresh attempt.
+        await _record_instagram_oauth_code_result(code_hash, 'failure', blocker)
         if not uid:
             return
         update = {
@@ -14651,6 +14749,35 @@ async def instagram_callback(request: Request,
             clear_existing_connection=clear_existing_on_failure,
         )
         return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': 'missing_code'}))
+
+    # Idempotency guard — the same OAuth code can be delivered to this
+    # endpoint more than once (React 18 StrictMode double-mount, browser
+    # refresh, back button, Meta retry). Without this check the second
+    # exchange returns "authorization code has been used" and the
+    # token_exchange_failed path wipes the user's working connection.
+    consume_result = await _consume_instagram_oauth_code(code, user_id, oauth_mode)
+    code_hash = consume_result.get('code_hash')
+    if not consume_result.get('is_new'):
+        prior = consume_result.get('prior') or {}
+        prior_result = (prior.get('result') or '').lower()
+        logger.info(
+            'oauth_code_reused_ignored mode=%s prior_result=%s user_id=%s',
+            oauth_mode,
+            prior_result or 'unknown',
+            _safe_partial_identifier(user_id),
+        )
+        if prior_result == 'success':
+            # First exchange succeeded — frontend should pick up the
+            # already-connected state from the existing user record.
+            return RedirectResponse(_frontend_redirect_url(
+                return_to, {'ig': 'connected', 'replayed': '1'},
+            ))
+        # Either still in flight or a recorded failure. Do NOT call Meta
+        # again and do NOT clear the existing connection.
+        return RedirectResponse(_frontend_redirect_url(
+            return_to, {'ig': 'error', 'reason': 'oauth_code_reused'},
+        ))
+
     redirect_uri = audit['redirectUriUsed']
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -14875,6 +15002,7 @@ async def instagram_callback(request: Request,
                 )
             logger.info('IG connected (Business Login) for user %s via %s',
                         user_id, audit['whichMeVariantWorks'])
+            await _record_instagram_oauth_code_result(code_hash, 'success')
             return RedirectResponse(_frontend_redirect_url(
                 return_to,
                 {'ig': 'connected', 'accountId': connected_account_id or ''},
@@ -23813,6 +23941,491 @@ async def response_timing_middleware(request, call_next):
     return response
 
 
+
+
+async def _index_bootstrap():
+    """Heavy index creation + one-time migration work for the Instagram
+    automation pipeline. Scheduled via create_tracked_task from the
+    startup hook so the FastAPI startup phase returns quickly and the
+    Railway /api/ healthcheck is not blocked by a cold-Mongo index build.
+    All exceptions inside this coroutine are logged but never propagated
+    so a single failing index cannot crash the app or stop the rest of
+    bootstrap from running.
+    """
+    started = datetime.utcnow()
+    logger.info('index_bootstrap_started')
+    try:
+        # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
+        try:
+            await db.comments.drop_index('uniq_user_ig_comment')
+        except Exception:
+            pass
+        try:
+            await db.comments.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('ig_comment_id', 1)],
+                unique=True, sparse=True, name='uniq_user_account_ig_comment'
+            )
+        except Exception as e:
+            logger.warning('comments index create: %s', e)
+        # DM automation: dedup index on (user_id, message_id) so the same incoming
+        # DM is never replied to twice even if the webhook is replayed.
+        # Drop legacy non-unique-safe index on (user_id, message_id) which collided
+        # on null mid and silently deduped real messages. Replaced with a unique
+        # index on (user_id, dedup_key) where dedup_key is mid|id|content-hash.
+        try:
+            await db.dm_logs.drop_index('uniq_user_dm_message')
+        except Exception:
+            pass
+        try:
+            await db.dm_logs.drop_index('uniq_user_dm_dedup_key')
+        except Exception:
+            pass
+        try:
+            await db.dm_logs.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('dedup_key', 1)],
+                unique=True, sparse=True, name='uniq_user_ig_dm_dedup_key',
+            )
+        except Exception as e:
+            logger.warning('dm_logs dedup_key index create: %s', e)
+        try:
+            await db.dm_rules.create_index([('user_id', 1), ('is_active', 1)],
+                                           name='dm_rules_user_active')
+        except Exception as e:
+            logger.warning('dm_rules index create: %s', e)
+        try:
+            await db.automations.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('status', 1)],
+                name='automations_user_ig_status',
+            )
+            await db.comments.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='comments_user_ig_created',
+            )
+            await db.comments.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
+                sparse=True,
+                name='comments_user_ig_opening_dedupe',
+            )
+            await db.comments.create_index(
+                [('action_status', 1), ('next_retry_at', 1), ('queue_lock_until', 1)],
+                name='comments_automation_queue_due',
+            )
+            await db.conversations.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='conversations_user_ig_created',
+            )
+            await db.dm_rules.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('is_active', 1)],
+                name='dm_rules_user_ig_active',
+            )
+            await db.dm_logs.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='dm_logs_user_ig_created',
+            )
+            await db.comment_dm_sessions.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='comment_dm_sessions_user_ig_created',
+            )
+            await db.comment_dm_sessions.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
+                sparse=True,
+                name='comment_dm_sessions_user_ig_opening_dedupe',
+            )
+            await db.data_deletion_requests.create_index(
+                [('created_at', -1)],
+                name='data_deletion_requests_created',
+            )
+            await db.contacts.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='contacts_user_ig_created',
+            )
+            await db.tracked_links.create_index(
+                [('shortCode', 1)],
+                unique=True,
+                sparse=True,
+                name='tracked_links_short_code_unique',
+            )
+            await db.tracked_links.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('ruleId', 1)],
+                name='tracked_links_user_ig_rule',
+            )
+            await db.tracked_links.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
+                name='tracked_links_user_ig_created',
+            )
+            await db.tracked_links.create_index(
+                [('expiresAt', 1)],
+                name='tracked_links_expires_at',
+            )
+            await db.link_click_events.create_index(
+                [('trackedLinkId', 1)],
+                name='link_click_events_tracked_link',
+            )
+            await db.link_click_events.create_index(
+                [('shortCode', 1)],
+                name='link_click_events_short_code',
+            )
+            await db.link_click_events.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('clickedAt', -1)],
+                name='link_click_events_user_ig_clicked',
+            )
+            await db.link_click_events.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
+                name='link_click_events_user_ig_contact',
+            )
+            await db.link_click_events.create_index(
+                [('userId', 1)],
+                name='link_click_events_user_id',
+            )
+            await db.usage_events.create_index(
+                [('user_id', 1), ('event_month', 1)],
+                name='usage_events_user_month',
+            )
+            await db.usage_events.create_index(
+                [('user_id', 1), ('event_type', 1), ('event_month', 1)],
+                name='usage_events_user_type_month',
+            )
+            await db.usage_events.create_index(
+                [('user_id', 1), ('event_type', 1), ('event_date', -1)],
+                name='usage_events_user_type_date',
+            )
+            await db.usage_events.create_index(
+                [('instagram_account_id', 1), ('event_month', 1)],
+                name='usage_events_instagram_account_month',
+            )
+            await db.usage_events.create_index(
+                [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
+                name='usage_events_subject_month',
+            )
+            await db.usage_events.create_index(
+                [('automation_id', 1), ('event_month', 1)],
+                name='usage_events_automation_month',
+            )
+            await db.usage_events.create_index(
+                [('created_at', -1)],
+                name='usage_events_created_at',
+            )
+            await db.usage_reservations.create_index(
+                [('idempotency_key', 1)],
+                unique=True,
+                name='usage_reservations_idempotency_unique',
+            )
+            await db.usage_reservations.create_index(
+                [('limit_subject_type', 1), ('limit_subject_id', 1),
+                 ('month', 1), ('metric', 1), ('status', 1)],
+                name='usage_reservations_subject_month_metric_status',
+            )
+            await db.usage_reservations.create_index(
+                [('expires_at', 1), ('status', 1)],
+                name='usage_reservations_expires_status',
+            )
+            await db.usage_reservation_buckets.create_index(
+                [('limit_subject_type', 1), ('limit_subject_id', 1), ('month', 1), ('metric', 1)],
+                unique=True,
+                name='usage_reservation_buckets_subject_month_metric_unique',
+            )
+            # Phase 2.18Y reliability: webhook DLQ retry worker index.
+            await db.webhook_processing_failures.create_index(
+                [('status', 1), ('next_attempt_at', 1)],
+                name='webhook_dlq_status_next_attempt',
+            )
+            await db.webhook_processing_failures.create_index(
+                [('first_failed_at', -1)],
+                name='webhook_dlq_first_failed_at',
+            )
+            await db.dashboard_summaries.create_index(
+                [('user_id', 1), ('instagramAccountId', 1), ('month', 1)],
+                unique=True,
+                name='dashboard_summaries_user_account_month_unique',
+            )
+            await db.dashboard_summaries.create_index(
+                [('user_id', 1), ('month', 1)],
+                name='dashboard_summaries_user_month',
+            )
+            await db.dashboard_summaries.create_index(
+                [('instagramAccountId', 1), ('month', 1)],
+                name='dashboard_summaries_account_month',
+            )
+            await db.dashboard_summaries.create_index(
+                [('expires_at', 1)],
+                name='dashboard_summaries_expires_at',
+            )
+            await db.instagram_automation_events.create_index(
+                [('username_key', 1), ('created_at', -1)],
+                name='instagram_automation_events_username_created',
+            )
+            await db.instagram_automation_events.create_index(
+                [('stage', 1), ('created_at', -1)],
+                name='instagram_automation_events_stage_created',
+            )
+            await db.instagram_automation_events.create_index(
+                [('created_at', -1)],
+                name='instagram_automation_events_created',
+            )
+            try:
+                await db.monthly_usage.drop_index('monthly_usage_user_month_unique')
+            except Exception:
+                pass
+            await db.monthly_usage.create_index(
+                [('user_id', 1), ('event_month', 1)],
+                name='monthly_usage_user_month_lookup',
+            )
+            await db.monthly_usage.create_index(
+                [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
+                name='monthly_usage_subject_month',
+            )
+            await db.monthly_usage.create_index(
+                [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
+                unique=True,
+                name='monthly_usage_subject_unique',
+                partialFilterExpression={
+                    'limit_subject_type': {'$exists': True},
+                    'limit_subject_id': {'$exists': True},
+                },
+            )
+            # Phase 2.2: user_plans — one row per user.
+            await db.user_plans.create_index(
+                [('user_id', 1)], unique=True, name='user_plans_user_unique',
+            )
+            # Phase 2.4: admin audit log indexes for the console activity feed.
+            await db.admin_audit_logs.create_index(
+                [('admin_user_id', 1), ('created_at', -1)],
+                name='admin_audit_admin_created',
+            )
+            await db.admin_audit_logs.create_index(
+                [('target_user_id', 1), ('created_at', -1)],
+                name='admin_audit_target_user_created',
+            )
+            await db.admin_audit_logs.create_index(
+                [('action', 1), ('created_at', -1)],
+                name='admin_audit_action_created',
+            )
+            # Phase 2.7: Google sub unique (sparse — most users won't have one).
+            await db.users.create_index(
+                [('google_sub', 1)], unique=True, sparse=True,
+                name='users_google_sub_unique',
+            )
+            # Phase 2.12G: normalized email lookup. This is intentionally
+            # non-unique until legacy duplicate diagnostics can be reviewed.
+            await db.users.create_index(
+                [('normalized_email', 1)], sparse=True,
+                name='users_normalized_email_lookup',
+            )
+            await db.users.create_index(
+                [('email_verification_token_hash', 1)],
+                sparse=True,
+                name='users_email_verification_token_hash',
+            )
+            # Phase 2.18X: missing-but-critical indexes surfaced by the
+            # 2000-user readiness audit.
+            #
+            # users.id is the surrogate key used by *every* find_one in
+            # the auth path. MongoDB does NOT auto-index it (only _id is
+            # auto-indexed, and we use a custom id field). Without this
+            # index, the user lookup becomes a collection scan at scale.
+            await db.users.create_index(
+                [('id', 1)], unique=True, name='users_id_unique',
+            )
+            # users.username uniqueness check fires on signup + on PATCH
+            # /auth/me. Indexing it both removes the scan and enforces
+            # the uniqueness at the DB layer.
+            await db.users.create_index(
+                [('username', 1)], unique=True, sparse=True,
+                name='users_username_unique',
+            )
+            # Phase 2.14 password reset token hash lookup — identical
+            # access pattern to email_verification_token_hash so it gets
+            # the same shape of index.
+            await db.users.create_index(
+                [('password_reset_token_hash', 1)],
+                sparse=True,
+                name='users_password_reset_token_hash',
+            )
+            # Phase 2.18V notification preferences — one row per user,
+            # always looked up by user_id.
+            await db.user_notification_preferences.create_index(
+                [('user_id', 1)], unique=True,
+                name='user_notification_preferences_user_unique',
+            )
+            # Phase 2.8: user_limit_overrides indexes.
+            await db.user_limit_overrides.create_index(
+                [('user_id', 1), ('status', 1)],
+                name='user_limit_overrides_user_status',
+            )
+            await db.user_limit_overrides.create_index(
+                [('user_id', 1), ('starts_at', 1), ('ends_at', 1)],
+                name='user_limit_overrides_user_window',
+            )
+            await db.user_limit_overrides.create_index(
+                [('status', 1), ('ends_at', 1)],
+                name='user_limit_overrides_status_ends',
+            )
+            await db.user_limit_overrides.create_index(
+                [('created_by_user_id', 1), ('created_at', -1)],
+                name='user_limit_overrides_creator_created',
+            )
+            # Phase 2.8: status field on users (sparse — legacy rows treated as active).
+            await db.users.create_index(
+                [('status', 1)], sparse=True,
+                name='users_status',
+            )
+            # Phase 2.6: admin_members.
+            await db.admin_members.create_index(
+                [('user_id', 1)], unique=True, sparse=True,
+                name='admin_members_user_unique',
+            )
+            await db.admin_members.create_index(
+                [('email', 1)], unique=True, sparse=True,
+                name='admin_members_email_unique',
+            )
+            await db.admin_members.create_index(
+                [('role', 1), ('created_at', -1)],
+                name='admin_members_role_created',
+            )
+            await db.admin_members.create_index(
+                [('disabled_at', 1)],
+                name='admin_members_disabled_at',
+            )
+        except Exception as e:
+            logger.warning('account scoped index create: %s', e)
+        try:
+            await db.comment_dm_sessions.create_index(
+                [('user_id', 1), ('recipient_id', 1), ('status', 1), ('created', -1)],
+                name='comment_dm_sessions_pending_lookup',
+            )
+        except Exception as e:
+            logger.warning('comment_dm_sessions index create: %s', e)
+        try:
+            await db.instagram_accounts.create_index([('id', 1)], unique=True,
+                                                     name='instagram_accounts_id_unique')
+            await db.instagram_accounts.create_index(
+                [('userId', 1), ('instagramAccountId', 1)],
+                unique=True,
+                sparse=True,
+                name='instagram_accounts_user_ig_unique',
+            )
+            await db.instagram_accounts.create_index(
+                [('isActive', 1), ('connectionValid', 1), ('tokenExpiresAt', 1)],
+                name='instagram_accounts_refresh_due',
+            )
+            await db.instagram_accounts.create_index(
+                [('instagramAccountId', 1)],
+                name='instagram_accounts_canonical_lookup',
+            )
+            await db.instagram_accounts.create_index(
+                [('instagramAccountId', 1)],
+                unique=True,
+                name='uniq_active_instagram_account_owner',
+                partialFilterExpression={
+                    'instagramAccountId': {'$exists': True},
+                    'isActive': True,
+                    'connectionValid': True,
+                },
+            )
+            await db.instagram_accounts.create_index(
+                [('userId', 1), ('isActive', 1)],
+                name='instagram_accounts_user_active',
+            )
+            # Legacy igUserId field shows up in the OR-lookups the
+            # comment-DM opener and webhook resolver perform. Without this
+            # sparse index the second branch of those $or queries fell back
+            # to a collection scan whenever the canonical instagramAccountId
+            # index did not also match, adding measurable latency on the
+            # hot path. Sparse so we only index rows that actually carry
+            # the legacy field.
+            await db.instagram_accounts.create_index(
+                [('igUserId', 1)],
+                sparse=True,
+                name='instagram_accounts_ig_user_id_lookup',
+            )
+            await db.instagram_account_trial_claims.create_index(
+                [('instagram_account_id', 1), ('plan_trial_identifier', 1)],
+                unique=True,
+                name='uniq_instagram_trial_claim',
+            )
+            await db.instagram_account_trial_claims.create_index(
+                [('first_claimed_by_user_id', 1), ('claimed_at', -1)],
+                name='instagram_trial_claims_user_claimed',
+            )
+        except Exception as e:
+            logger.warning('instagram_accounts index create: %s', e)
+        try:
+            migrated = await _ensure_instagram_account_docs_for_connected_users()
+            if migrated:
+                logger.info('instagram_accounts_migrated_from_users count=%s', migrated)
+            scoped_users = await db.users.find({
+                'instagramConnected': True,
+                'ig_user_id': {'$nin': [None, '']},
+            }).limit(1000).to_list(1000)
+            scoped_rules = 0
+            for user_doc in scoped_users:
+                scoped_rules += await _ensure_automation_account_scope_for_user(user_doc)
+            if scoped_rules:
+                logger.info('instagram_automation_account_scope_migrated count=%s', scoped_rules)
+        except Exception as e:
+            logger.warning('instagram_accounts migration: %s', e)
+        try:
+            now = datetime.utcnow()
+            comment_rules = {
+                '$or': [
+                    {'trigger': {'$regex': '^comment:', '$options': 'i'}},
+                    {'nodes.data.trigger': {'$regex': '^comment:', '$options': 'i'}},
+                ],
+            }
+            await db.automations.update_many(
+                {**comment_rules, 'activationStartedAt': {'$exists': False}},
+                {'$set': {'activationStartedAt': now}}
+            )
+            await db.automations.update_many(
+                {**comment_rules, 'processExistingComments': {'$exists': False}},
+                {'$set': {'processExistingComments': False}}
+            )
+            await db.automations.update_many(
+                {**comment_rules, 'post_scope': {'$in': ['any', 'all', 'latest', 'next']}},
+                {'$set': {'processExistingComments': False,
+                          'process_existing_unreplied_comments': False}}
+            )
+            await db.automations.update_many(
+                {**comment_rules, 'trigger': {'$in': ['comment:any', 'comment:all', 'comment:latest', 'comment:next']}},
+                {'$set': {'processExistingComments': False,
+                          'process_existing_unreplied_comments': False}}
+            )
+            await db.automations.update_many(
+                {**comment_rules, 'createdAt': {'$exists': False}},
+                {'$set': {'createdAt': now}}
+            )
+            await db.automations.update_many(
+                {**comment_rules, 'updatedAt': {'$exists': False}},
+                {'$set': {'updatedAt': now}}
+            )
+        except Exception as e:
+            logger.warning('comment rule activation migration: %s', e)
+        try:
+            await _repair_legacy_reply_success_without_provider_proof()
+        except Exception as e:
+            logger.warning('legacy reply provider-proof repair: %s', e)
+    except Exception as exc:
+        logger.warning('index_bootstrap_outer_error err=%s', type(exc).__name__)
+    # Defense-in-depth uniqueness + TTL on the oauth_code_consumed
+    # collection so the idempotency guard in instagram_callback has a
+    # backing unique index, and rows expire ~10 minutes after creation.
+    try:
+        await db.oauth_code_consumed.create_index(
+            [('provider', 1), ('code_hash', 1)],
+            unique=True,
+            name='oauth_code_consumed_provider_hash_unique',
+        )
+        await db.oauth_code_consumed.create_index(
+            [('created_at', 1)],
+            name='oauth_code_consumed_ttl',
+            expireAfterSeconds=600,
+        )
+    except Exception as exc:
+        logger.warning('oauth_code_consumed index create: %s', exc)
+    duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
+    logger.info('index_bootstrap_completed duration_ms=%s', duration_ms)
+
+
 @app.on_event('startup')
 async def _startup():
     global _poll_task, IS_SHUTTING_DOWN
@@ -23825,455 +24438,10 @@ async def _startup():
     except Exception as _e:
         logger.info('observability_init_skipped reason=%s', str(_e)[:80])
     SHUTDOWN_EVENT.clear()
-    # Ensure a unique index on (user_id, ig_comment_id) so dedup is fast and safe
-    try:
-        await db.comments.drop_index('uniq_user_ig_comment')
-    except Exception:
-        pass
-    try:
-        await db.comments.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('ig_comment_id', 1)],
-            unique=True, sparse=True, name='uniq_user_account_ig_comment'
-        )
-    except Exception as e:
-        logger.warning('comments index create: %s', e)
-    # DM automation: dedup index on (user_id, message_id) so the same incoming
-    # DM is never replied to twice even if the webhook is replayed.
-    # Drop legacy non-unique-safe index on (user_id, message_id) which collided
-    # on null mid and silently deduped real messages. Replaced with a unique
-    # index on (user_id, dedup_key) where dedup_key is mid|id|content-hash.
-    try:
-        await db.dm_logs.drop_index('uniq_user_dm_message')
-    except Exception:
-        pass
-    try:
-        await db.dm_logs.drop_index('uniq_user_dm_dedup_key')
-    except Exception:
-        pass
-    try:
-        await db.dm_logs.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('dedup_key', 1)],
-            unique=True, sparse=True, name='uniq_user_ig_dm_dedup_key',
-        )
-    except Exception as e:
-        logger.warning('dm_logs dedup_key index create: %s', e)
-    try:
-        await db.dm_rules.create_index([('user_id', 1), ('is_active', 1)],
-                                       name='dm_rules_user_active')
-    except Exception as e:
-        logger.warning('dm_rules index create: %s', e)
-    try:
-        await db.automations.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('status', 1)],
-            name='automations_user_ig_status',
-        )
-        await db.comments.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='comments_user_ig_created',
-        )
-        await db.comments.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
-            sparse=True,
-            name='comments_user_ig_opening_dedupe',
-        )
-        await db.comments.create_index(
-            [('action_status', 1), ('next_retry_at', 1), ('queue_lock_until', 1)],
-            name='comments_automation_queue_due',
-        )
-        await db.conversations.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='conversations_user_ig_created',
-        )
-        await db.dm_rules.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('is_active', 1)],
-            name='dm_rules_user_ig_active',
-        )
-        await db.dm_logs.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='dm_logs_user_ig_created',
-        )
-        await db.comment_dm_sessions.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='comment_dm_sessions_user_ig_created',
-        )
-        await db.comment_dm_sessions.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('opening_dedupe_key', 1), ('created', -1)],
-            sparse=True,
-            name='comment_dm_sessions_user_ig_opening_dedupe',
-        )
-        await db.data_deletion_requests.create_index(
-            [('created_at', -1)],
-            name='data_deletion_requests_created',
-        )
-        await db.contacts.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='contacts_user_ig_created',
-        )
-        await db.tracked_links.create_index(
-            [('shortCode', 1)],
-            unique=True,
-            sparse=True,
-            name='tracked_links_short_code_unique',
-        )
-        await db.tracked_links.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('ruleId', 1)],
-            name='tracked_links_user_ig_rule',
-        )
-        await db.tracked_links.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
-            name='tracked_links_user_ig_created',
-        )
-        await db.tracked_links.create_index(
-            [('expiresAt', 1)],
-            name='tracked_links_expires_at',
-        )
-        await db.link_click_events.create_index(
-            [('trackedLinkId', 1)],
-            name='link_click_events_tracked_link',
-        )
-        await db.link_click_events.create_index(
-            [('shortCode', 1)],
-            name='link_click_events_short_code',
-        )
-        await db.link_click_events.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('clickedAt', -1)],
-            name='link_click_events_user_ig_clicked',
-        )
-        await db.link_click_events.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('instagramUserId', 1)],
-            name='link_click_events_user_ig_contact',
-        )
-        await db.link_click_events.create_index(
-            [('userId', 1)],
-            name='link_click_events_user_id',
-        )
-        await db.usage_events.create_index(
-            [('user_id', 1), ('event_month', 1)],
-            name='usage_events_user_month',
-        )
-        await db.usage_events.create_index(
-            [('user_id', 1), ('event_type', 1), ('event_month', 1)],
-            name='usage_events_user_type_month',
-        )
-        await db.usage_events.create_index(
-            [('user_id', 1), ('event_type', 1), ('event_date', -1)],
-            name='usage_events_user_type_date',
-        )
-        await db.usage_events.create_index(
-            [('instagram_account_id', 1), ('event_month', 1)],
-            name='usage_events_instagram_account_month',
-        )
-        await db.usage_events.create_index(
-            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
-            name='usage_events_subject_month',
-        )
-        await db.usage_events.create_index(
-            [('automation_id', 1), ('event_month', 1)],
-            name='usage_events_automation_month',
-        )
-        await db.usage_events.create_index(
-            [('created_at', -1)],
-            name='usage_events_created_at',
-        )
-        await db.usage_reservations.create_index(
-            [('idempotency_key', 1)],
-            unique=True,
-            name='usage_reservations_idempotency_unique',
-        )
-        await db.usage_reservations.create_index(
-            [('limit_subject_type', 1), ('limit_subject_id', 1),
-             ('month', 1), ('metric', 1), ('status', 1)],
-            name='usage_reservations_subject_month_metric_status',
-        )
-        await db.usage_reservations.create_index(
-            [('expires_at', 1), ('status', 1)],
-            name='usage_reservations_expires_status',
-        )
-        await db.usage_reservation_buckets.create_index(
-            [('limit_subject_type', 1), ('limit_subject_id', 1), ('month', 1), ('metric', 1)],
-            unique=True,
-            name='usage_reservation_buckets_subject_month_metric_unique',
-        )
-        # Phase 2.18Y reliability: webhook DLQ retry worker index.
-        await db.webhook_processing_failures.create_index(
-            [('status', 1), ('next_attempt_at', 1)],
-            name='webhook_dlq_status_next_attempt',
-        )
-        await db.webhook_processing_failures.create_index(
-            [('first_failed_at', -1)],
-            name='webhook_dlq_first_failed_at',
-        )
-        await db.dashboard_summaries.create_index(
-            [('user_id', 1), ('instagramAccountId', 1), ('month', 1)],
-            unique=True,
-            name='dashboard_summaries_user_account_month_unique',
-        )
-        await db.dashboard_summaries.create_index(
-            [('user_id', 1), ('month', 1)],
-            name='dashboard_summaries_user_month',
-        )
-        await db.dashboard_summaries.create_index(
-            [('instagramAccountId', 1), ('month', 1)],
-            name='dashboard_summaries_account_month',
-        )
-        await db.dashboard_summaries.create_index(
-            [('expires_at', 1)],
-            name='dashboard_summaries_expires_at',
-        )
-        await db.instagram_automation_events.create_index(
-            [('username_key', 1), ('created_at', -1)],
-            name='instagram_automation_events_username_created',
-        )
-        await db.instagram_automation_events.create_index(
-            [('stage', 1), ('created_at', -1)],
-            name='instagram_automation_events_stage_created',
-        )
-        await db.instagram_automation_events.create_index(
-            [('created_at', -1)],
-            name='instagram_automation_events_created',
-        )
-        try:
-            await db.monthly_usage.drop_index('monthly_usage_user_month_unique')
-        except Exception:
-            pass
-        await db.monthly_usage.create_index(
-            [('user_id', 1), ('event_month', 1)],
-            name='monthly_usage_user_month_lookup',
-        )
-        await db.monthly_usage.create_index(
-            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
-            name='monthly_usage_subject_month',
-        )
-        await db.monthly_usage.create_index(
-            [('event_month', 1), ('limit_subject_type', 1), ('limit_subject_id', 1)],
-            unique=True,
-            name='monthly_usage_subject_unique',
-            partialFilterExpression={
-                'limit_subject_type': {'$exists': True},
-                'limit_subject_id': {'$exists': True},
-            },
-        )
-        # Phase 2.2: user_plans — one row per user.
-        await db.user_plans.create_index(
-            [('user_id', 1)], unique=True, name='user_plans_user_unique',
-        )
-        # Phase 2.4: admin audit log indexes for the console activity feed.
-        await db.admin_audit_logs.create_index(
-            [('admin_user_id', 1), ('created_at', -1)],
-            name='admin_audit_admin_created',
-        )
-        await db.admin_audit_logs.create_index(
-            [('target_user_id', 1), ('created_at', -1)],
-            name='admin_audit_target_user_created',
-        )
-        await db.admin_audit_logs.create_index(
-            [('action', 1), ('created_at', -1)],
-            name='admin_audit_action_created',
-        )
-        # Phase 2.7: Google sub unique (sparse — most users won't have one).
-        await db.users.create_index(
-            [('google_sub', 1)], unique=True, sparse=True,
-            name='users_google_sub_unique',
-        )
-        # Phase 2.12G: normalized email lookup. This is intentionally
-        # non-unique until legacy duplicate diagnostics can be reviewed.
-        await db.users.create_index(
-            [('normalized_email', 1)], sparse=True,
-            name='users_normalized_email_lookup',
-        )
-        await db.users.create_index(
-            [('email_verification_token_hash', 1)],
-            sparse=True,
-            name='users_email_verification_token_hash',
-        )
-        # Phase 2.18X: missing-but-critical indexes surfaced by the
-        # 2000-user readiness audit.
-        #
-        # users.id is the surrogate key used by *every* find_one in
-        # the auth path. MongoDB does NOT auto-index it (only _id is
-        # auto-indexed, and we use a custom id field). Without this
-        # index, the user lookup becomes a collection scan at scale.
-        await db.users.create_index(
-            [('id', 1)], unique=True, name='users_id_unique',
-        )
-        # users.username uniqueness check fires on signup + on PATCH
-        # /auth/me. Indexing it both removes the scan and enforces
-        # the uniqueness at the DB layer.
-        await db.users.create_index(
-            [('username', 1)], unique=True, sparse=True,
-            name='users_username_unique',
-        )
-        # Phase 2.14 password reset token hash lookup — identical
-        # access pattern to email_verification_token_hash so it gets
-        # the same shape of index.
-        await db.users.create_index(
-            [('password_reset_token_hash', 1)],
-            sparse=True,
-            name='users_password_reset_token_hash',
-        )
-        # Phase 2.18V notification preferences — one row per user,
-        # always looked up by user_id.
-        await db.user_notification_preferences.create_index(
-            [('user_id', 1)], unique=True,
-            name='user_notification_preferences_user_unique',
-        )
-        # Phase 2.8: user_limit_overrides indexes.
-        await db.user_limit_overrides.create_index(
-            [('user_id', 1), ('status', 1)],
-            name='user_limit_overrides_user_status',
-        )
-        await db.user_limit_overrides.create_index(
-            [('user_id', 1), ('starts_at', 1), ('ends_at', 1)],
-            name='user_limit_overrides_user_window',
-        )
-        await db.user_limit_overrides.create_index(
-            [('status', 1), ('ends_at', 1)],
-            name='user_limit_overrides_status_ends',
-        )
-        await db.user_limit_overrides.create_index(
-            [('created_by_user_id', 1), ('created_at', -1)],
-            name='user_limit_overrides_creator_created',
-        )
-        # Phase 2.8: status field on users (sparse — legacy rows treated as active).
-        await db.users.create_index(
-            [('status', 1)], sparse=True,
-            name='users_status',
-        )
-        # Phase 2.6: admin_members.
-        await db.admin_members.create_index(
-            [('user_id', 1)], unique=True, sparse=True,
-            name='admin_members_user_unique',
-        )
-        await db.admin_members.create_index(
-            [('email', 1)], unique=True, sparse=True,
-            name='admin_members_email_unique',
-        )
-        await db.admin_members.create_index(
-            [('role', 1), ('created_at', -1)],
-            name='admin_members_role_created',
-        )
-        await db.admin_members.create_index(
-            [('disabled_at', 1)],
-            name='admin_members_disabled_at',
-        )
-    except Exception as e:
-        logger.warning('account scoped index create: %s', e)
-    try:
-        await db.comment_dm_sessions.create_index(
-            [('user_id', 1), ('recipient_id', 1), ('status', 1), ('created', -1)],
-            name='comment_dm_sessions_pending_lookup',
-        )
-    except Exception as e:
-        logger.warning('comment_dm_sessions index create: %s', e)
-    try:
-        await db.instagram_accounts.create_index([('id', 1)], unique=True,
-                                                 name='instagram_accounts_id_unique')
-        await db.instagram_accounts.create_index(
-            [('userId', 1), ('instagramAccountId', 1)],
-            unique=True,
-            sparse=True,
-            name='instagram_accounts_user_ig_unique',
-        )
-        await db.instagram_accounts.create_index(
-            [('isActive', 1), ('connectionValid', 1), ('tokenExpiresAt', 1)],
-            name='instagram_accounts_refresh_due',
-        )
-        await db.instagram_accounts.create_index(
-            [('instagramAccountId', 1)],
-            name='instagram_accounts_canonical_lookup',
-        )
-        await db.instagram_accounts.create_index(
-            [('instagramAccountId', 1)],
-            unique=True,
-            name='uniq_active_instagram_account_owner',
-            partialFilterExpression={
-                'instagramAccountId': {'$exists': True},
-                'isActive': True,
-                'connectionValid': True,
-            },
-        )
-        await db.instagram_accounts.create_index(
-            [('userId', 1), ('isActive', 1)],
-            name='instagram_accounts_user_active',
-        )
-        # Legacy igUserId field shows up in the OR-lookups the
-        # comment-DM opener and webhook resolver perform. Without this
-        # sparse index the second branch of those $or queries fell back
-        # to a collection scan whenever the canonical instagramAccountId
-        # index did not also match, adding measurable latency on the
-        # hot path. Sparse so we only index rows that actually carry
-        # the legacy field.
-        await db.instagram_accounts.create_index(
-            [('igUserId', 1)],
-            sparse=True,
-            name='instagram_accounts_ig_user_id_lookup',
-        )
-        await db.instagram_account_trial_claims.create_index(
-            [('instagram_account_id', 1), ('plan_trial_identifier', 1)],
-            unique=True,
-            name='uniq_instagram_trial_claim',
-        )
-        await db.instagram_account_trial_claims.create_index(
-            [('first_claimed_by_user_id', 1), ('claimed_at', -1)],
-            name='instagram_trial_claims_user_claimed',
-        )
-    except Exception as e:
-        logger.warning('instagram_accounts index create: %s', e)
-    try:
-        migrated = await _ensure_instagram_account_docs_for_connected_users()
-        if migrated:
-            logger.info('instagram_accounts_migrated_from_users count=%s', migrated)
-        scoped_users = await db.users.find({
-            'instagramConnected': True,
-            'ig_user_id': {'$nin': [None, '']},
-        }).limit(1000).to_list(1000)
-        scoped_rules = 0
-        for user_doc in scoped_users:
-            scoped_rules += await _ensure_automation_account_scope_for_user(user_doc)
-        if scoped_rules:
-            logger.info('instagram_automation_account_scope_migrated count=%s', scoped_rules)
-    except Exception as e:
-        logger.warning('instagram_accounts migration: %s', e)
-    try:
-        now = datetime.utcnow()
-        comment_rules = {
-            '$or': [
-                {'trigger': {'$regex': '^comment:', '$options': 'i'}},
-                {'nodes.data.trigger': {'$regex': '^comment:', '$options': 'i'}},
-            ],
-        }
-        await db.automations.update_many(
-            {**comment_rules, 'activationStartedAt': {'$exists': False}},
-            {'$set': {'activationStartedAt': now}}
-        )
-        await db.automations.update_many(
-            {**comment_rules, 'processExistingComments': {'$exists': False}},
-            {'$set': {'processExistingComments': False}}
-        )
-        await db.automations.update_many(
-            {**comment_rules, 'post_scope': {'$in': ['any', 'all', 'latest', 'next']}},
-            {'$set': {'processExistingComments': False,
-                      'process_existing_unreplied_comments': False}}
-        )
-        await db.automations.update_many(
-            {**comment_rules, 'trigger': {'$in': ['comment:any', 'comment:all', 'comment:latest', 'comment:next']}},
-            {'$set': {'processExistingComments': False,
-                      'process_existing_unreplied_comments': False}}
-        )
-        await db.automations.update_many(
-            {**comment_rules, 'createdAt': {'$exists': False}},
-            {'$set': {'createdAt': now}}
-        )
-        await db.automations.update_many(
-            {**comment_rules, 'updatedAt': {'$exists': False}},
-            {'$set': {'updatedAt': now}}
-        )
-    except Exception as e:
-        logger.warning('comment rule activation migration: %s', e)
-    try:
-        await _repair_legacy_reply_success_without_provider_proof()
-    except Exception as e:
-        logger.warning('legacy reply provider-proof repair: %s', e)
+    # All heavy index creation and one-time migration work is scheduled
+    # as a background tracked task so the startup hook returns quickly
+    # and the /api/ healthcheck is not blocked on a cold-Mongo connect.
+    create_tracked_task(_index_bootstrap(), 'index_bootstrap')
     if IG_POLL_ENABLED:
         _register_bg_task('comment_poller', _comment_poller_loop)
     else:

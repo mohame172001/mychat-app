@@ -236,8 +236,25 @@ class FakeCollection:
     async def create_index(self, *_args, **_kwargs):
         return _kwargs.get('name') or 'fake_index'
 
-    async def find_one_and_update(self, query, update, **_kwargs):
+    async def find_one_and_update(self, query, update, **kwargs):
+        upsert = bool(kwargs.get('upsert'))
+        return_document = kwargs.get('return_document')
+        # Real pymongo: ReturnDocument.BEFORE returns the document state
+        # before the update was applied (None if it didn't exist and
+        # upsert was True). ReturnDocument.AFTER returns the post-state.
+        try:
+            from pymongo import ReturnDocument as _RD  # local import to mirror real
+        except Exception:
+            _RD = None
         doc = await self.find_one(query)
+        existed = doc is not None
+        before_snapshot = dict(doc) if existed else None
+        if not doc and upsert:
+            doc = dict(query)
+            if '$setOnInsert' in update:
+                for key, value in update['$setOnInsert'].items():
+                    doc.setdefault(key, value)
+            self.docs.append(doc)
         if not doc:
             return None
         for key, value in update.get('$set', {}).items():
@@ -246,6 +263,8 @@ class FakeCollection:
             doc.pop(key, None)
         for key, value in update.get('$inc', {}).items():
             doc[key] = int(doc.get(key) or 0) + value
+        if _RD is not None and return_document == _RD.BEFORE:
+            return before_snapshot  # None when it didn't exist (matches real Motor)
         return doc
 
 
@@ -275,6 +294,7 @@ class FakeDB:
         self.user_limit_overrides = FakeCollection(collections.get('user_limit_overrides', []))
         self.instagram_account_trial_claims = FakeCollection(collections.get('instagram_account_trial_claims', []))
         self.instagram_automation_events = FakeCollection(collections.get('instagram_automation_events', []))
+        self.oauth_code_consumed = FakeCollection(collections.get('oauth_code_consumed', []))
 
 
 def _account(**overrides):
@@ -806,6 +826,168 @@ def test_instagram_callback_creates_second_account_and_sets_it_active(monkeypatc
     public = _run(server.instagram_accounts(user_id='u1'))
     assert [row['id'] for row in public['accounts'] if row['active']] == [account_b['id']]
     assert 'long-b' not in str(public)
+
+
+def test_instagram_callback_duplicate_code_does_not_call_meta_again(monkeypatch):
+    """Second callback with the same code must NOT re-exchange with Meta
+    and must NOT clear the existing connection."""
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def multi_account_limits(_user_id):
+        return {'max_instagram_accounts': 5}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', multi_account_limits)
+
+    fake_client = FakeAsyncClient(_oauth_success_responses())
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'add_account',
+        'returnTo': '/app',
+    })
+
+    first = _run(server.instagram_callback(
+        _request(), code='code-b', state=state, error=None, error_description=None,
+    ))
+    assert first.status_code == 307
+    assert 'ig=connected' in first.headers['location']
+    user_before_replay = dict(_run(fake_db.users.find_one({'id': 'u1'})))
+    assert user_before_replay['instagramConnected'] is True
+    assert user_before_replay['meta_access_token'] == 'long-b'
+
+    # No more Meta responses queued — if instagram_callback calls .post or
+    # .get against the fake client it will raise IndexError.
+    fake_client.responses = []
+    calls_before = fake_client.calls
+
+    second = _run(server.instagram_callback(
+        _request(), code='code-b', state=state, error=None, error_description=None,
+    ))
+
+    assert second.status_code == 307
+    # Did not re-call Meta.
+    assert fake_client.calls == calls_before
+    # Existing connection intact.
+    user_after_replay = _run(fake_db.users.find_one({'id': 'u1'}))
+    assert user_after_replay['instagramConnected'] is True
+    assert user_after_replay['meta_access_token'] == 'long-b'
+    assert user_after_replay.get('instagram_connection_blocker') in (None, '')
+    # Frontend marker so the SPA knows this was a replay.
+    assert 'ig=connected' in second.headers['location']
+    assert 'replayed=1' in second.headers['location']
+    # Idempotency marker stored.
+    consumed = _run(fake_db.oauth_code_consumed.find_one({'provider': 'instagram'}))
+    assert consumed is not None
+    assert consumed['code_hash'] != 'code-b'  # only the hash is stored
+    assert len(consumed['code_hash']) == 64
+    assert consumed['result'] == 'success'
+
+
+def test_instagram_callback_duplicate_code_after_meta_failure_keeps_connection(monkeypatch):
+    """If the first attempt failed but Meta did consume the code, the
+    second callback must NOT re-call Meta and must NOT clear the
+    existing connection. It should redirect with a safe error reason."""
+    fake_db = _multi_account_db()
+    # Give the user an existing connection that we must not wipe.
+    _run(fake_db.users.update_one(
+        {'id': 'u1'},
+        {'$set': {
+            'instagramConnected': True,
+            'instagram_connection_valid': True,
+            'meta_access_token': 'preexisting-token',
+            'ig_user_id': 'igA',
+            'instagramHandle': 'account_a',
+        }},
+    ))
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    # First call: Meta returns no access_token → token_exchange_failed.
+    fail_responses = [FakeResponse(400, {'error_type': 'OAuthException',
+                                         'code': 400,
+                                         'error_message': 'simulated first-call failure'})]
+    fake_client = FakeAsyncClient(fail_responses)
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'add_account',
+        'returnTo': '/app',
+    })
+    first = _run(server.instagram_callback(
+        _request(), code='code-fail', state=state, error=None, error_description=None,
+    ))
+    assert first.status_code == 307
+    assert 'ig=error' in first.headers['location']
+    # add_account mode doesn't clear existing.
+    user_after_first = _run(fake_db.users.find_one({'id': 'u1'}))
+    assert user_after_first['instagramConnected'] is True
+    assert user_after_first['meta_access_token'] == 'preexisting-token'
+
+    # Second call with same code — no more Meta responses queued.
+    fake_client.responses = []
+    calls_before = fake_client.calls
+    second = _run(server.instagram_callback(
+        _request(), code='code-fail', state=state, error=None, error_description=None,
+    ))
+    assert second.status_code == 307
+    assert fake_client.calls == calls_before
+    assert 'reason=oauth_code_reused' in second.headers['location']
+
+    # Connection still intact.
+    user_after_second = _run(fake_db.users.find_one({'id': 'u1'}))
+    assert user_after_second['instagramConnected'] is True
+    assert user_after_second['meta_access_token'] == 'preexisting-token'
+
+
+def test_instagram_callback_does_not_store_or_log_raw_code(monkeypatch, caplog):
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def multi_account_limits(_user_id):
+        return {'max_instagram_accounts': 5}
+
+    monkeypatch.setattr(server, 'compute_effective_limits', multi_account_limits)
+    fake_client = FakeAsyncClient(_oauth_success_responses())
+    monkeypatch.setattr(server.httpx, 'AsyncClient', lambda timeout=20: fake_client)
+    state = server._sign_instagram_oauth_state({
+        'userId': 'u1',
+        'mode': 'add_account',
+        'returnTo': '/app',
+    })
+    code = 'secret-raw-code-do-not-log'
+    import logging
+    caplog.set_level(logging.DEBUG, logger=server.logger.name)
+    _run(server.instagram_callback(
+        _request(), code=code, state=state, error=None, error_description=None,
+    ))
+    # Raw code must not appear in any stored idempotency row.
+    rows_str = str(list(fake_db.oauth_code_consumed.docs))
+    assert code not in rows_str
+    # Raw code must not appear in any log line emitted during the call.
+    for record in caplog.records:
+        assert code not in record.getMessage()
+
+
+def test_consume_instagram_oauth_code_is_race_safe(monkeypatch):
+    """Two concurrent consumers of the same code: exactly one observes
+    is_new=True, the other observes is_new=False with the prior row."""
+    fake_db = _multi_account_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def runner():
+        first, second = await asyncio.gather(
+            server._consume_instagram_oauth_code('shared-code', 'u1', 'connect'),
+            server._consume_instagram_oauth_code('shared-code', 'u1', 'connect'),
+        )
+        return first, second
+
+    first, second = _run(runner())
+    new_flags = sorted([first['is_new'], second['is_new']])
+    assert new_flags == [False, True]
+    # Both share the same hash.
+    assert first['code_hash'] == second['code_hash']
+    assert len(first['code_hash']) == 64
 
 
 def test_instagram_callback_updates_existing_account_without_duplicate(monkeypatch):
