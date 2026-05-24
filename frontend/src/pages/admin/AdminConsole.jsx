@@ -2291,6 +2291,39 @@ function WebhookHealthTab() {
               <div className="font-mono">{data.polling?.interval_seconds ?? '-'}</div>
             </div>
           </div>
+          {data.webhook?.recent_field_summary && (
+            <div className="mt-3 pt-3 border-t border-slate-200" data-testid="webhook-health-field-summary">
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mb-1">
+                {ar ? 'آخر 50 webhook — حقول مرصودة' : 'recent webhook field-shape (last 50)'}
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div>
+                  <div className="text-slate-500 text-[10px]">{ar ? 'عيّنات' : 'samples'}</div>
+                  <div className="font-mono">{data.webhook.recent_field_summary.samples ?? 0}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 text-[10px]">
+                    {ar ? 'حقول رُصدت' : 'fields_seen'}
+                  </div>
+                  <div className="font-mono break-words">
+                    {(data.webhook.recent_field_summary.fields_seen || []).join(', ') || '-'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500 text-[10px]">
+                    {ar ? 'عيّنات تحوي comments' : 'comment_field_samples'}
+                  </div>
+                  <div className="font-mono">{data.webhook.recent_field_summary.comment_field_samples ?? 0}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 text-[10px]">
+                    {ar ? 'عيّنات messaging فقط' : 'messaging_only_samples'}
+                  </div>
+                  <div className="font-mono">{data.webhook.recent_field_summary.messaging_only_samples ?? 0}</div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

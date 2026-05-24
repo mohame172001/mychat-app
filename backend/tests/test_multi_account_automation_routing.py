@@ -4069,6 +4069,65 @@ def test_resolve_webhook_counters_falls_back_to_flight_recorder(monkeypatch):
     assert last_processed == proc_at
 
 
+def test_multi_account_health_includes_recent_field_summary(monkeypatch):
+    """Visibility patch: multi-account-health top-level webhook block
+    must aggregate the recent `webhook_received` events so the operator
+    can tell whether comment-field webhooks are arriving or only
+    messaging-side ones."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    base = datetime.utcnow() - timedelta(minutes=10)
+    # 2 messaging-only samples
+    for i in range(2):
+        db.instagram_automation_events.docs.append({
+            'created_at': base + timedelta(seconds=i),
+            'stage': 'webhook_received',
+            'source': 'webhook',
+            'extra': {
+                'object': 'instagram',
+                'entries_count': 1,
+                'change_fields': [],
+                'has_messaging': True,
+                'has_comment_field': False,
+            },
+        })
+    # 1 comment-field sample
+    db.instagram_automation_events.docs.append({
+        'created_at': base + timedelta(seconds=10),
+        'stage': 'webhook_received',
+        'source': 'webhook',
+        'extra': {
+            'object': 'instagram',
+            'entries_count': 1,
+            'change_fields': ['comments'],
+            'has_messaging': False,
+            'has_comment_field': True,
+        },
+    })
+
+    result = _run(server.admin_instagram_multi_account_health(user_id='admin-user'))
+    summary = result['webhook']['recent_field_summary']
+    assert summary['samples'] == 3
+    assert 'comments' in summary['fields_seen']
+    assert summary['comment_field_samples'] == 1
+    assert summary['messaging_only_samples'] == 2
+
+
+def test_multi_account_health_recent_field_summary_no_events(monkeypatch):
+    """No webhook_received events yet — endpoint must still return a
+    safe structured summary, not error out."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    result = _run(server.admin_instagram_multi_account_health(user_id='admin-user'))
+    summary = result['webhook']['recent_field_summary']
+    assert summary['samples'] == 0
+    assert summary['fields_seen'] == []
+    assert summary['comment_field_samples'] == 0
+    assert summary['messaging_only_samples'] == 0
+
+
 def test_resolve_webhook_counters_prefers_globals_when_set(monkeypatch):
     """If the in-process globals are populated (recent webhook this
     boot), prefer them — they are tick-accurate. The flight-recorder

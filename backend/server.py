@@ -16759,10 +16759,39 @@ async def instagram_webhook(request: Request):
         )
     logger.info('ig_webhook_payload_received object=%s entries=%s',
                 payload.get('object'), len(payload.get('entry') or []))
+    # Capture the field shape of the incoming webhook so an operator can
+    # tell whether comment-field events are actually arriving or only
+    # messaging-side events (DM/read-receipt/postback/etc.). This is
+    # visibility only — the parser still routes the same way regardless
+    # of what we record here. No tokens, no message text, no commenter
+    # ids: just the field-name strings Meta sent.
+    _change_fields_set: set = set()
+    _has_messaging = False
+    try:
+        for _entry in payload.get('entry') or []:
+            for _ch in _entry.get('changes') or []:
+                _fname = _ch.get('field')
+                if _fname:
+                    _change_fields_set.add(str(_fname)[:40])
+            if _entry.get('messaging'):
+                _has_messaging = True
+    except Exception:
+        # Diagnostic enrichment must never break ack-fast.
+        pass
     await _record_instagram_automation_event(
         'webhook_received',
         source='webhook',
-        extra={'object': payload.get('object'), 'entries_count': len(payload.get('entry') or [])},
+        extra={
+            'object': payload.get('object'),
+            'entries_count': len(payload.get('entry') or []),
+            'change_fields': sorted(_change_fields_set),
+            'has_messaging': _has_messaging,
+            'has_comment_field': bool(
+                'comments' in _change_fields_set
+                or 'live_comments' in _change_fields_set
+                or 'feed' in _change_fields_set
+            ),
+        },
     )
     # ACK fast — heavy work moves to background tasks. Fire-and-forget keeps
     # the webhook ACK well under the 5-second Meta retry threshold.
@@ -22056,12 +22085,52 @@ async def admin_instagram_multi_account_health(
         })
 
     webhook_last_received, webhook_last_processed = await _resolve_webhook_counters()
+    # Recent webhook field-shape summary so the operator can tell whether
+    # comment-field webhooks are arriving at all. Aggregated from the last
+    # N `webhook_received` events. No tokens, no payload contents.
+    recent_field_summary: Dict[str, Any] = {
+        'samples': 0,
+        'fields_seen': [],
+        'comment_field_samples': 0,
+        'messaging_only_samples': 0,
+    }
+    try:
+        recent_webhook_events = await db.instagram_automation_events.find(
+            {'stage': 'webhook_received'},
+            {'extra': 1, 'created_at': 1},
+        ).sort('created_at', -1).limit(50).to_list(50)
+        fields_union: set = set()
+        comment_field_samples = 0
+        messaging_only_samples = 0
+        for ev in recent_webhook_events:
+            extra = (ev.get('extra') or {}) if isinstance(ev, dict) else {}
+            fields = extra.get('change_fields') or []
+            if isinstance(fields, list):
+                for f in fields:
+                    if f:
+                        fields_union.add(str(f)[:40])
+            has_comment = bool(extra.get('has_comment_field'))
+            has_messaging = bool(extra.get('has_messaging'))
+            if has_comment:
+                comment_field_samples += 1
+            elif has_messaging and not has_comment:
+                messaging_only_samples += 1
+        recent_field_summary = {
+            'samples': len(recent_webhook_events),
+            'fields_seen': sorted(fields_union),
+            'comment_field_samples': comment_field_samples,
+            'messaging_only_samples': messaging_only_samples,
+        }
+    except Exception:
+        # Diagnostic only — never block the endpoint on aggregation errors.
+        pass
     return {
         'ok': True,
         'count': len(items),
         'webhook': {
             'last_received_at': _iso(webhook_last_received),
             'last_processed_at': _iso(webhook_last_processed),
+            'recent_field_summary': recent_field_summary,
         },
         'polling': {
             'enabled': IG_POLL_ENABLED,

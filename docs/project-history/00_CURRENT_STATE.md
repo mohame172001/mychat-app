@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending admin summarizer accuracy commit
-- Current origin/master: `590e10a938e23410a206f75632cc05d02f38c917`
-- Current production build_sha: `590e10a938e2`
-- Current working status: Multi-account general automation remains live-verified known-good. Reporting-only fix in progress: stop-point summary now prefers the latest comment that has an `automation_success` event so a newer unrelated comment can no longer override a verified success; top-level admin `webhook.last_received_at` / `webhook.last_processed_at` now fall back to the persistent flight recorder so a Railway redeploy no longer nulls them while per-account `source=webhook` continues to be reported. No automation execution change.
+- Current local HEAD: pending webhook field-shape visibility commit
+- Current origin/master: `3b076f6a49617faeac6caf27a6f64f0dee6620ee`
+- Current production build_sha: `3b076f6a4961`
+- Current working status: Multi-account general automation remains live-verified known-good. Webhook Health shows top-level webhook traffic exists but per-account `last_webhook_event_time = never observed` on both accounts, suggesting Meta is delivering messaging webhooks but not comment-field webhooks. Adding visibility-only enrichment to `webhook_received` events (records which `entry.changes[].field` values arrive) and surfacing a 50-sample summary in `/api/admin/instagram/multi-account-health → webhook.recent_field_summary` so the operator can confirm whether comment fields ever arrive without an admin JWT. No automation logic, no parser, no resolver, no rule matching touched.
 
 Update these values at the start and end of every agent session.
 
