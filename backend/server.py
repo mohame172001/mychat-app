@@ -21419,6 +21419,32 @@ def _latest_event(events: list, stages: set) -> Optional[dict]:
     return None
 
 
+def _bot_own_reply_comment_ids(events: list) -> set:
+    ids = set()
+    for event in events:
+        if (
+            event.get('stage') == 'automation_skipped'
+            and event.get('skip_reason') == 'bot_own_reply'
+            and event.get('comment_id_partial')
+        ):
+            ids.add(event.get('comment_id_partial'))
+    return ids
+
+
+def _latest_external_comment_event(events: list) -> tuple[Optional[dict], Optional[dict]]:
+    comment_stages = {'webhook_comment_detected', 'poller_comment_seen'}
+    bot_reply_ids = _bot_own_reply_comment_ids(events)
+    latest_any = _latest_event(events, comment_stages)
+    for event in events:
+        if event.get('stage') not in comment_stages:
+            continue
+        comment_id = event.get('comment_id_partial')
+        if comment_id and comment_id in bot_reply_ids:
+            continue
+        return event, latest_any
+    return latest_any, latest_any
+
+
 def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> str:
     """Map an exact stop_reason into a single operator-facing next-step
     string. Used by /api/admin/instagram/automation-stop-point so the
@@ -21507,50 +21533,71 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
 
 async def summarize_account_automation_stop_point(username: str, limit: int = 100) -> dict:
     events = await _automation_flight_events_for_username(username, limit=limit)
-    comment_event = _latest_event(events, {'webhook_comment_detected', 'poller_comment_seen'})
+    comment_event, raw_latest_comment_event = _latest_external_comment_event(events)
+    latest_bot_own_reply = _latest_event(
+        [
+            event for event in events
+            if event.get('stage') == 'automation_skipped'
+            and event.get('skip_reason') == 'bot_own_reply'
+        ],
+        {'automation_skipped'},
+    )
+    scoped_events = events
+    selected_comment_id = (comment_event or {}).get('comment_id_partial')
+    if selected_comment_id:
+        # Summarize the latest real external/commenter event, not the bot's
+        # own public reply that often arrives immediately after a success.
+        # Account-resolution and poll-scan events are account-level, so they
+        # continue to be read from the full event list below.
+        scoped = [
+            event for event in events
+            if event.get('comment_id_partial') == selected_comment_id
+        ]
+        if scoped:
+            scoped_events = scoped
     account_failed = _latest_event(events, {'account_resolution_failed'})
     account_success = _latest_event(events, {'account_resolution_success'})
-    rules_loaded = _latest_event(events, {'rule_loading_finished'})
-    rule_match = _latest_event(events, {'rule_match_success'})
-    rule_miss = _latest_event(events, {'rule_match_failed', 'automation_skipped'})
-    reply_attempt = _latest_event(events, {'public_reply_attempted'})
-    dm_attempt = _latest_event(events, {'opening_dm_attempted'})
-    session_attempt = _latest_event(events, {'session_create_attempted'})
-    session_created = _latest_event(events, {'session_create_success', 'opening_dm_quick_reply_payload_created'})
-    opening_sent = _latest_event(events, {'opening_dm_success'})
+    rules_loaded = _latest_event(scoped_events, {'rule_loading_finished'})
+    rule_match = _latest_event(scoped_events, {'rule_match_success'})
+    rule_miss = _latest_event(scoped_events, {'rule_match_failed', 'automation_skipped'})
+    reply_attempt = _latest_event(scoped_events, {'public_reply_attempted'})
+    dm_attempt = _latest_event(scoped_events, {'opening_dm_attempted'})
+    session_attempt = _latest_event(scoped_events, {'session_create_attempted'})
+    session_created = _latest_event(scoped_events, {'session_create_success', 'opening_dm_quick_reply_payload_created'})
+    opening_sent = _latest_event(scoped_events, {'opening_dm_success'})
     # Post-opening-DM signals: did the user's click webhook arrive,
     # did session lookup succeed, did continuation send go through?
-    click_received = _latest_event(events, {
+    click_received = _latest_event(scoped_events, {
         'quick_reply_click_received',
         'quick_reply_payload_detected',
         'postback_payload_detected',
         'comment_flow_payload_detected',
     })
-    session_lookup_success = _latest_event(events, {
+    session_lookup_success = _latest_event(scoped_events, {
         'session_lookup_by_payload_success',
         'session_lookup_success',
         'session_lookup_by_external_sender_success',
     })
-    continuation_send_success = _latest_event(events, {
+    continuation_send_success = _latest_event(scoped_events, {
         'continuation_send_success',
         'continuation_message_success',
     })
-    continuation_send_failed = _latest_event(events, {
+    continuation_send_failed = _latest_event(scoped_events, {
         'continuation_send_failed',
         'continuation_message_failed',
     })
-    session_lookup_failed = _latest_event(events, {
+    session_lookup_failed = _latest_event(scoped_events, {
         'session_lookup_by_payload_failed',
         'session_lookup_failed',
     })
-    failure = _latest_event(events, {
+    failure = _latest_event(scoped_events, {
         'public_reply_failed',
         'opening_dm_failed',
         'session_create_failed',
         'automation_failed',
         'dedupe_skipped',
     })
-    success = _latest_event(events, {'automation_success'})
+    success = _latest_event(scoped_events, {'automation_success'})
     poll_scan = _latest_event(events, {'poller_account_scan_started'})
 
     rules_count = None
@@ -21673,6 +21720,21 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'continuation_send_success': bool(continuation_send_success),
         'exact_stop_reason': stop_reason,
         'last_send_error': last_send_error,
+        'latest_external_comment_at': (
+            comment_event.get('created_at').isoformat()
+            if comment_event and isinstance(comment_event.get('created_at'), datetime)
+            else None
+        ),
+        'latest_bot_own_reply_at': (
+            latest_bot_own_reply.get('created_at').isoformat()
+            if latest_bot_own_reply and isinstance(latest_bot_own_reply.get('created_at'), datetime)
+            else None
+        ),
+        'latest_event_is_bot_own_reply': bool(
+            raw_latest_comment_event
+            and latest_bot_own_reply
+            and raw_latest_comment_event.get('comment_id_partial') == latest_bot_own_reply.get('comment_id_partial')
+        ),
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
             if events and isinstance(events[0].get('created_at'), datetime) else None,
     }

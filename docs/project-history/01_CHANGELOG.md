@@ -4,6 +4,7 @@ Important commits only. Keep this table updated after every meaningful commit.
 
 | Date | Commit | Area | Summary | Behavior changed? | Tests | Deploy status |
 |---|---|---|---|---|---|---|
+| 2026-05-24 | pending stop-point summary fix | Instagram support diagnostics | Stop-point summary now prefers latest real external/commenter event over bot-owned public reply events, so `bot_own_reply` no longer hides the actual automation result. | No automation execution change | `py_compile backend/server.py`; `test_multi_account_automation_routing.py` 92 passed; backend 623 passed | Local, deploy required if accepted |
 | 2026-05-24 | `d30f04e` | Instagram OAuth, frontend cache | Preserve existing IG connection on reused OAuth code; stop persisting failed media payloads; hide internal cache error from media picker. | Yes | Backend 622, frontend 184, build passed | Deployed, build_sha `d30f04e15582` |
 | 2026-05-24 | `8ebe8c6` | OAuth, startup | Added OAuth code idempotency guard and moved heavy index/bootstrap work off startup healthcheck path. | Yes | Backend 621 reported in commit | Deployed before `d30f04e` |
 | 2026-05-23 | `d547203` | Instagram token flow, media cache | Restored event-scoped token context for automation flow and refused to persist `ok=false` media snapshots. | Yes | Backend 614, frontend cache 17, build passed | Deployed before `8ebe8c6` |

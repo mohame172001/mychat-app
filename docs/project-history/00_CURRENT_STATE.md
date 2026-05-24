@@ -23,10 +23,10 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local HEAD: `d30f04e155828c61c85713142c10a6e7888a90d8`
-- Current origin/master: `d30f04e155828c61c85713142c10a6e7888a90d8`
-- Current production build_sha: `d30f04e15582`
-- Current working status: clean before this docs-only archive commit
+- Current local HEAD: `5d58f2611b67a8dd2cd50f31388233dbc211ed32` plus local stop-point summary fix pending commit
+- Current origin/master: `5d58f2611b67a8dd2cd50f31388233dbc211ed32`
+- Current production build_sha: `5d58f2611b67`
+- Current working status: dirty during backend stop-point summary accuracy fix
 
 Update these values at the start and end of every agent session.
 
@@ -40,12 +40,14 @@ Update these values at the start and end of every agent session.
 - Full backend suite passed at commit `d30f04e`: 622 tests.
 - Full frontend suite passed at commit `d30f04e`: 184 tests.
 - Frontend production build passed at commit `d30f04e`.
+- Local backend suite passed after the stop-point summary accuracy fix: 623 tests.
 
 ## Current Blockers
 
 - Billing remains blocked.
 - Auth recovery email delivery E2E remains a billing blocker until proven end to end.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
+- Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

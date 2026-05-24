@@ -3480,7 +3480,8 @@ def test_after_reset_dedupe_still_blocks_immediate_repeat_on_same_new_comment(mo
 
 def _seed_flight_event(db, *, stage, username='account_b', source='webhook',
                        skip_reason=None, error_code=None, error_message=None,
-                       extra=None, created_at=None):
+                       extra=None, created_at=None, comment_id_partial=None,
+                       media_id_partial=None, commenter_id_partial=None):
     db.instagram_automation_events.docs.append({
         'created_at': created_at or datetime.utcnow(),
         'source': source,
@@ -3490,6 +3491,9 @@ def _seed_flight_event(db, *, stage, username='account_b', source='webhook',
         'skip_reason': skip_reason,
         'error_code': error_code,
         'error_message': error_message,
+        'comment_id_partial': comment_id_partial,
+        'media_id_partial': media_id_partial,
+        'commenter_id_partial': commenter_id_partial,
         'extra': extra or {},
     })
 
@@ -3629,6 +3633,55 @@ def test_summarize_stop_point_polling_source_visible_when_only_poller_ran(monkey
     assert summary['last_comment_reached_backend'] is True
     assert summary['source'] == 'polling'
     assert summary['polling_scanned_account'] is True
+
+
+def test_summarize_stop_point_prefers_external_comment_over_bot_reply(monkeypatch):
+    """A successful public reply can create a newer bot-owned comment event.
+    The support summary must not let that bot_own_reply hide the latest real
+    external-user automation result.
+    """
+    db = _install_multi_account_db(monkeypatch)
+    external_at = datetime.utcnow() - timedelta(seconds=30)
+    bot_at = datetime.utcnow()
+
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial='ext-comment', created_at=external_at,
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial='ext-comment', extra={'rules_count': 1},
+        created_at=external_at + timedelta(seconds=1),
+    )
+    _seed_flight_event(
+        db, stage='rule_match_success', source='polling',
+        comment_id_partial='ext-comment',
+        created_at=external_at + timedelta(seconds=2),
+    )
+    _seed_flight_event(
+        db, stage='automation_success', source='polling',
+        comment_id_partial='ext-comment',
+        created_at=external_at + timedelta(seconds=3),
+    )
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial='bot-comment', created_at=bot_at,
+    )
+    _seed_flight_event(
+        db, stage='automation_skipped', source='polling',
+        comment_id_partial='bot-comment', skip_reason='bot_own_reply',
+        created_at=bot_at + timedelta(seconds=1),
+    )
+
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+
+    assert summary['last_comment_reached_backend'] is True
+    assert summary['source'] == 'polling'
+    assert summary['rule_matched'] is True
+    assert summary['exact_stop_reason'] == 'automation_success'
+    assert summary['latest_event_is_bot_own_reply'] is True
+    assert summary['latest_external_comment_at'] == external_at.isoformat()
+    assert summary['latest_bot_own_reply_at'] == (bot_at + timedelta(seconds=1)).isoformat()
 
 
 def test_admin_automation_stop_point_endpoint_returns_summary(monkeypatch):
