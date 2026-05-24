@@ -23,10 +23,10 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `e109f6e3545d43f77433c7edf0d3ba2be15f6a8c`
-- Current origin/master: `5d58f2611b67a8dd2cd50f31388233dbc211ed32`
-- Current production build_sha: `5d58f2611b67`
-- Current working status: clean after local stop-point summary accuracy fix commit; not pushed/deployed yet
+- Current local app-code fix: `3fa9954f3ed8a2728527a19fb62a3b3eef382f1c`
+- Current origin/master: `df454e612302e5001e03c5153cbe64532d52150f`
+- Current production build_sha: `df454e612302`
+- Current working status: local legacy general any-post matching fix; not pushed/deployed yet
 
 Update these values at the start and end of every agent session.
 
@@ -41,6 +41,7 @@ Update these values at the start and end of every agent session.
 - Full frontend suite passed at commit `d30f04e`: 184 tests.
 - Frontend production build passed at commit `d30f04e`.
 - Local backend suite passed after the stop-point summary accuracy fix: 623 tests.
+- Local backend suite passed after the legacy general any-post matching fix: 627 tests.
 
 ## Current Blockers
 
@@ -48,6 +49,7 @@ Update these values at the start and end of every agent session.
 - Auth recovery email delivery E2E remains a billing blocker until proven end to end.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
+- Legacy general/any-post rule matching fix still requires production deploy and live retest before it can be considered known-good.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

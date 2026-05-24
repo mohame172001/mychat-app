@@ -14100,8 +14100,79 @@ def _comment_rule_trigger_value(rule: dict) -> str:
     return ''
 
 
+def _comment_rule_trigger_candidates(rule: dict) -> list:
+    candidates = []
+    trigger = rule.get('trigger') or ''
+    if trigger:
+        candidates.append(str(trigger))
+    for node in rule.get('nodes') or []:
+        if node.get('type') == 'trigger':
+            data = node.get('data') or {}
+            for key in ('trigger', 'trigger_type', 'triggerType'):
+                node_trigger = data.get(key) or ''
+                if node_trigger:
+                    candidates.append(str(node_trigger))
+    return candidates
+
+
+def _comment_rule_post_scope_value(rule: dict) -> str:
+    scope = str(
+        rule.get('post_scope')
+        or rule.get('postScope')
+        or rule.get('scope')
+        or ''
+    ).strip().lower()
+    if scope:
+        return scope
+    for node in rule.get('nodes') or []:
+        if node.get('type') != 'trigger':
+            continue
+        data = node.get('data') or {}
+        scope = str(
+            data.get('post_scope')
+            or data.get('postScope')
+            or data.get('scope')
+            or ''
+        ).strip().lower()
+        if scope:
+            return scope
+    return ''
+
+
+def _is_comment_trigger_value(value: Any) -> bool:
+    trigger = str(value or '').strip().lower()
+    return bool(
+        trigger.startswith('comment:')
+        or trigger in {
+            'comment', 'comments', 'any_comment', 'any_comments',
+            'all_comments', 'reply_all', 'instagram_comment',
+        }
+    )
+
+
+def _comment_rule_canonical_trigger_value(rule: dict) -> str:
+    candidates = _comment_rule_trigger_candidates(rule)
+    for candidate in candidates:
+        if _is_comment_trigger_value(candidate):
+            return candidate
+    return candidates[0] if candidates else ''
+
+
+def _is_comment_scope_value(value: Any) -> bool:
+    scope = str(value or '').strip().lower()
+    return scope in {'any', 'all', 'general', 'broad', 'latest', 'next', 'specific'}
+
+
 def _is_comment_automation_rule(rule: dict) -> bool:
-    return _comment_rule_trigger_value(rule).lower().startswith('comment:')
+    return bool(
+        _is_comment_trigger_value(_comment_rule_canonical_trigger_value(rule))
+        or _is_comment_scope_value(_comment_rule_post_scope_value(rule))
+        or _selected_specific_media_id(rule)
+    )
+
+
+def _should_evaluate_comment_rule(rule: dict) -> bool:
+    return _is_comment_automation_rule(rule)
 
 
 def _selected_specific_media_id(rule: dict) -> Optional[str]:
@@ -14138,8 +14209,8 @@ def _selected_specific_media_id(rule: dict) -> Optional[str]:
             media_id = str(candidate).strip()
             if media_id:
                 break
-    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
-    trigger = _comment_rule_trigger_value(rule).strip()
+    post_scope = _comment_rule_post_scope_value(rule)
+    trigger = _comment_rule_canonical_trigger_value(rule).strip()
     trigger_l = trigger.lower()
 
     if post_scope in ('any', 'all', 'latest', 'next'):
@@ -14182,7 +14253,7 @@ def _comment_rule_media_matches(rule: dict, media_id: Optional[str], latest_medi
     if selected_media_id:
         return bool(media and media == str(selected_media_id))
 
-    raw_trigger = _comment_rule_trigger_value(rule)
+    raw_trigger = _comment_rule_canonical_trigger_value(rule)
     trigger = raw_trigger.strip().lower()
     if trigger.startswith('comment:'):
         target = raw_trigger.split(':', 1)[1].strip()
@@ -14193,7 +14264,7 @@ def _comment_rule_media_matches(rule: dict, media_id: Optional[str], latest_medi
             return bool(media and latest_media_id and media == str(latest_media_id))
         return bool(target and media and target == media)
 
-    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
+    post_scope = _comment_rule_post_scope_value(rule)
     if post_scope in ('any', 'all'):
         return bool(media)
     if post_scope in ('latest', 'next'):
@@ -14226,8 +14297,8 @@ def _comment_rule_scope(rule: dict, media_id: Optional[str] = None) -> str:
     selected_media_id = _selected_specific_media_id(rule)
     if selected_media_id:
         return 'specific_post_exact' if media_id and selected_media_id == media_id else 'specific_post_other'
-    trigger = _comment_rule_trigger_value(rule).strip().lower()
-    post_scope = str(rule.get('post_scope') or rule.get('postScope') or '').strip().lower()
+    trigger = _comment_rule_canonical_trigger_value(rule).strip().lower()
+    post_scope = _comment_rule_post_scope_value(rule)
     if trigger in ('comment:any', 'comment:all') or post_scope in ('any', 'all'):
         return 'broad'
     if post_scope in ('latest', 'next') or trigger in ('comment:latest', 'comment:next'):
@@ -17323,7 +17394,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'rule_candidate_evaluated comment_id=%s media_id=%s rule_id=%s rule_scope=%s priority=%s',
             ig_comment_id, media_id, auto.get('id'), rule_scope, rule_priority
         )
-        raw_trigger = auto.get('trigger') or ''
+        raw_trigger = _comment_rule_canonical_trigger_value(auto)
         trigger = raw_trigger.lower()
         fire = False
 
@@ -17426,7 +17497,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     matched=False,
                     skip_reason=cutoff_skip_reason,
                 )
-        elif trigger.startswith('comment:') or _selected_specific_media_id(auto):
+        elif _should_evaluate_comment_rule(auto):
             target = raw_trigger.split(':', 1)[1].strip() if trigger.startswith('comment:') else ''
             latest_media_for_match = None
             if target.lower() in ('latest', 'next') or str(auto.get('post_scope') or auto.get('postScope') or '').strip().lower() in ('latest', 'next'):

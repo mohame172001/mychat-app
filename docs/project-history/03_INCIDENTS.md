@@ -113,3 +113,15 @@ Use this file to record production-impacting problems and the exact fix.
 - Deploy status: Local, deploy required if accepted.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
+
+### Legacy General Any-Post Rules Did Not Match
+
+- Date/time: 2026-05-24
+- Symptom: Automation Stop Point showed `comment reached=true`, `source=polling`, `rule_matched=false`, `reply_attempted=false`, and `dm_attempted=false` for linked accounts even though the operator confirmed the rules were general/any-post.
+- Affected area: Instagram comment automation rule matching.
+- Root cause: `_handle_new_comment` used the top-level `trigger` field directly to decide whether a rule should enter the comment matching branch. Legacy/general rules could be persisted with `post_scope=any` and/or `nodes[].data.trigger=comment:any` while top-level `trigger` was missing, empty, or `Manual`, so the rule loaded but was never evaluated as a comment rule.
+- Fix commit: `3fa9954`.
+- Tests: `py_compile backend/server.py`; `test_multi_account_automation_routing.py` 96 passed; full backend 627 passed.
+- Deploy status: Local, deploy required; do not mark known-good until live retest confirms both linked accounts' general rules fire.
+- Lesson learned: Any-post versus post-specific should affect only the media match condition; comment-capability detection must read canonical trigger aliases and post scope, not only top-level `trigger`.
+- Preventive test added: Yes.

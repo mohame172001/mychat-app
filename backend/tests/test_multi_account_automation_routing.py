@@ -150,6 +150,47 @@ def _install_multi_account_db(monkeypatch):
     return db
 
 
+def _install_successful_comment_sends(monkeypatch):
+    reply_calls = []
+    dm_calls = []
+
+    async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({
+            'access_token': access_token,
+            'comment_id': comment_id,
+            'text': text,
+        })
+        return _reply_provider_ok()
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append({
+            'access_token': access_token,
+            'ig_user_id': ig_user_id,
+            'recipient_id': recipient_id,
+            'message': message,
+            'allow_workspace_recipient': allow_workspace_recipient,
+        })
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
+
+    monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    return reply_calls, dm_calls
+
+
+def _legacy_general_rule(account_db_id, ig_id, rule_id, *, trigger='Manual',
+                         node_trigger='comment:any', include_top_trigger=True):
+    rule = _comment_rule(account_db_id, ig_id, rule_id, trigger=trigger)
+    rule['post_scope'] = 'any'
+    rule['media_id'] = ''
+    rule.pop('trigger_media_id', None)
+    if not include_top_trigger:
+        rule.pop('trigger', None)
+    if rule.get('nodes'):
+        rule['nodes'][0]['data'] = {'trigger': node_trigger} if node_trigger else {}
+    return rule
+
+
 def test_default_dm_send_blocks_workspace_recipient_but_comment_flow_can_allow(monkeypatch):
     db = FakeDB([
         _account(id='accA', userId='u1', instagramAccountId='igA'),
@@ -242,6 +283,133 @@ def test_account_a_comment_on_account_b_routes_only_to_b_rule_and_token(monkeypa
     assert dm_calls[0]['recipient_id'] == 'igA'
     assert dm_calls[0]['allow_workspace_recipient'] is True
     assert db.comments.docs[0]['instagramAccountId'] == 'igB'
+
+
+def test_legacy_general_node_trigger_matches_account_a_any_media(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _legacy_general_rule('accA', 'igA', 'ruleA-legacy'),
+    ]
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    result = _run(server._handle_new_comment(
+        owner,
+        {
+            'ig_comment_id': 'legacy-general-a',
+            'media_id': 'any-media-a',
+            'commenter_id': 'external-user-a',
+            'commenter_username': 'external_a',
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleA-legacy'
+    assert reply_calls[0]['access_token'] == 'token-a'
+    assert dm_calls[0]['access_token'] == 'token-a'
+    assert dm_calls[0]['ig_user_id'] == 'igA'
+
+
+def test_legacy_general_node_trigger_matches_account_b_even_when_ui_active_is_a(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.users.docs[0]['active_instagram_account_id'] = 'accA'
+    db.users.docs[0]['ig_user_id'] = 'igA'
+    db.automations.docs = [
+        _legacy_general_rule('accB', 'igB', 'ruleB-legacy'),
+    ]
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'legacy-general-b',
+            'media_id': 'any-media-b',
+            'commenter_id': 'external-user-b',
+            'commenter_username': 'external_b',
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-legacy'
+    assert reply_calls[0]['access_token'] == 'token-b'
+    assert dm_calls[0]['access_token'] == 'token-b'
+    assert dm_calls[0]['ig_user_id'] == 'igB'
+
+
+def test_general_post_scope_any_matches_when_top_level_trigger_missing(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _legacy_general_rule(
+            'accB',
+            'igB',
+            'ruleB-post-scope-only',
+            node_trigger='',
+            include_top_trigger=False,
+        ),
+    ]
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'post-scope-only-b',
+            'media_id': 'another-media-b',
+            'commenter_id': 'external-user-b2',
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    assert result['rule_id'] == 'ruleB-post-scope-only'
+    assert reply_calls[0]['access_token'] == 'token-b'
+    assert dm_calls[0]['ig_user_id'] == 'igB'
+
+
+def test_legacy_general_account_scope_does_not_cross_match_sibling_account(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.automations.docs = [
+        _legacy_general_rule('accA', 'igA', 'ruleA-legacy'),
+    ]
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'legacy-a-rule-on-b-comment',
+            'media_id': 'media-owned-by-b',
+            'commenter_id': 'external-user',
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is False
+    assert reply_calls == []
+    assert dm_calls == []
 
 
 def test_flight_recorder_writes_comment_pipeline_stages(monkeypatch):
