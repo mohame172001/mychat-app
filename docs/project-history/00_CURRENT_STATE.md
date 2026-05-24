@@ -23,7 +23,7 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `3fa9954f3ed8a2728527a19fb62a3b3eef382f1c`
+- Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
 - Current origin/master: `df454e612302e5001e03c5153cbe64532d52150f`
 - Current production build_sha: `df454e612302`
 - Current working status: local legacy general any-post matching fix; not pushed/deployed yet
