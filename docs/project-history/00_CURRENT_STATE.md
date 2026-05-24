@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending duplicate-comment skip-reason visibility commit
-- Current origin/master: `fd27b5e57d25b9071512e52ca58d296199c8af37`
-- Current production build_sha: `fd27b5e57d25`
-- Current working status: Flight Recorder admin tab confirmed Candidate 1 — operator was repeatedly commenting from the same external account on the same posts, so `_handle_new_comment` was early-returning via the dedupe / already-replied / pending-queue / dm-failed-permanent paths BEFORE `rule_loading_finished` fired. Those early-returns were silent (no flight-recorder event), so Stop Point fell back to the literal `rule_not_matched`. Visibility-only patch in progress: every silent dedupe early-return now records an `automation_skipped` event with its existing reason string (`already_replied_success`, `comment_already_pending_queue`, `comment_already_partial_success`, `comment_already_dm_failed`, `public_reply_required_recovery`, plus the generic catch-all). No automation execution change, no extra reply/DM, no dedupe weakening.
+- Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206` plus pending fix to `_collect_target_media_ids`
+- Current local HEAD: pending polling-target legacy-rule fix
+- Current origin/master: `d4dae1adb8423f3589ca87a0a9baab0c153fa317`
+- Current production build_sha: `d4dae1adb842`
+- Current working status: Diagnosed root cause for muhammad_gehad's "did not send" — `_collect_target_media_ids` was reading the raw top-level `a.get('trigger')` field, so a legacy general rule (`trigger='Manual'`, `post_scope='any'`, `nodes[].data.trigger='comment:any'`) never set `needs_any=True` and `_fetch_recent_media_ids` was never called. The poller only scanned whatever stale `selected_media_id` / `trigger_media_id` aliases were on the rule, never the user's NEW post. mogehad17 succeeded only because its webhook arrived from Meta and bypassed the polling target list. Fix in progress: extend the canonical-trigger / canonical-post_scope helpers (introduced by 54fb527 in rule classification) to the polling target-collection path. Account-agnostic. No rule-matching, dedupe, send, or rate-limit change.
 
 Update these values at the start and end of every agent session.
 

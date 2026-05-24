@@ -4310,6 +4310,151 @@ def test_duplicate_dm_failed_permanent_records_skip_event(monkeypatch):
     assert len(skipped) >= 1
 
 
+def test_collect_target_media_ids_includes_recent_for_legacy_general_rule(monkeypatch):
+    """Regression: the poller's media target collection must recognise a
+    legacy general rule (top-level `trigger='Manual'`, `post_scope='any'`,
+    `nodes[].data.trigger='comment:any'`) and fetch recent media for
+    polling. Before this fix, _collect_target_media_ids read the raw
+    `a.get('trigger')` directly so the legacy shape never triggered the
+    needs_any path and the new post was never scanned."""
+    rule = _legacy_general_rule('accB', 'igB', 'ruleLegacyB',
+                                trigger='Manual',
+                                node_trigger='comment:any',
+                                include_top_trigger=True)
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+
+    async def fake_recent(token, ig_user_id, limit=10):
+        # The poller now reaches _fetch_recent_media_ids because needs_any
+        # is correctly set; it would NOT be called pre-fix.
+        return ['new-media-1', 'new-media-2']
+
+    async def fake_latest(token, ig_user_id):  # should not be called for needs_any
+        return None
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    targets = _run(server._collect_target_media_ids(user, [rule]))
+    assert 'new-media-1' in targets
+    assert 'new-media-2' in targets
+
+
+def test_collect_target_media_ids_includes_recent_for_post_scope_only_general_rule(monkeypatch):
+    """A rule with only `post_scope='any'` and no `nodes[].data.trigger`
+    must still drive needs_any via the canonical post_scope helper."""
+    rule = _legacy_general_rule('accB', 'igB', 'rulePostScopeOnly',
+                                trigger='Manual',
+                                node_trigger=None,
+                                include_top_trigger=True)
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+
+    async def fake_recent(token, ig_user_id, limit=10):
+        return ['recent-a', 'recent-b']
+    async def fake_latest(token, ig_user_id):
+        return None
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    targets = _run(server._collect_target_media_ids(user, [rule]))
+    assert 'recent-a' in targets
+    assert 'recent-b' in targets
+
+
+def test_collect_target_media_ids_unchanged_for_post_specific_rule(monkeypatch):
+    """A post-specific rule must NOT trigger needs_any — only the
+    selected media id should be in the target. Polling stays scoped."""
+    rule = _post_specific_comment_flow_rule('accB', 'igB', 'rulePostSpecific',
+                                            'selected-media-b')
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+
+    recent_calls = []
+    async def fake_recent(token, ig_user_id, limit=10):
+        recent_calls.append((token, ig_user_id, limit))
+        return ['leak-media-1', 'leak-media-2']
+    async def fake_latest(token, ig_user_id):
+        return None
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    targets = _run(server._collect_target_media_ids(user, [rule]))
+    assert 'selected-media-b' in targets
+    # No needs_any was set, so _fetch_recent_media_ids must NOT have been
+    # called and recent ids must not be in the target.
+    assert recent_calls == []
+    assert 'leak-media-1' not in targets
+
+
+def test_legacy_general_rule_fresh_polling_comment_matches_and_sends(monkeypatch):
+    """End-to-end: legacy general rule (Manual top-level, post_scope=any,
+    nodes data trigger comment:any) on Account B; fresh poll cycle on a
+    NEW media id returned by recent_media; comment processed; reply + DM
+    fire. This is the exact production scenario that was failing for
+    muhammad_gehad."""
+    accounts = [
+        _account(id='accB', userId='u1', instagramAccountId='igB',
+                 igUserId='igB', username='account_b', accessToken='token-b'),
+    ]
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+    legacy_rule = _legacy_general_rule('accB', 'igB', 'ruleLegacyB',
+                                       trigger='Manual',
+                                       node_trigger='comment:any',
+                                       include_top_trigger=True)
+    db = FakeDB(accounts, user, automations=[legacy_rule])
+    monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(server, 'ws_manager',
+                        SimpleNamespace(send=lambda *_a, **_kw: asyncio.sleep(0)))
+    monkeypatch.setattr(server, 'reserve_usage_limit',
+                        lambda *a, **kw: asyncio.sleep(0, result={'allowed': True, 'exceeded': False, 'fail_open': False}))
+    monkeypatch.setattr(server, 'confirm_usage_reservation',
+                        lambda *a, **kw: asyncio.sleep(0, result=True))
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    async def fake_recent(token, ig_user_id, limit=10):
+        return ['new-fresh-media']
+    async def fake_latest(token, ig_user_id):
+        return None
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            return False
+        async def get(self, *_args, **_kwargs):
+            # One fresh external comment on the new media.
+            return FakeResponse(200, {
+                'data': [{
+                    'id': 'fresh-comment-on-new-media',
+                    'text': 'hello fresh',
+                    'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                    'from': {'id': 'external-fan', 'username': 'fan'},
+                }]
+            })
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+
+    owner = server._with_instagram_account_context(user, accounts[0])
+    stats = _run(server._poll_user_comments(owner))
+
+    assert stats['mediaChecked'] == 1
+    assert stats['matched'] == 1
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'poller_account_scan_started' in stages
+    assert 'poller_comment_seen' in stages
+    assert 'rule_match_success' in stages
+    assert 'automation_success' in stages
+
+
 def test_fresh_comment_with_general_rule_still_matches_and_sends(monkeypatch):
     """The visibility patch must not break the happy path: a fresh
     comment with an active general rule still matches and runs the

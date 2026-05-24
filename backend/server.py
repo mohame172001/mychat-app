@@ -19983,7 +19983,21 @@ _follow_verifier_task: Optional[asyncio.Task] = None
 
 
 async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
-    """Resolve the set of media IDs we need to poll for this user."""
+    """Resolve the set of media IDs we need to poll for this user.
+
+    Reads via the canonical trigger/scope helpers introduced in 54fb527
+    so a legacy general rule (top-level ``trigger`` missing or ``Manual``
+    but ``nodes[].data.trigger='comment:any'`` or ``post_scope='any'``)
+    correctly drives ``needs_any`` and therefore brings recent media
+    into the polling target list. Without this, the poller would only
+    scan whatever stale ``selected_media_id`` / ``trigger_media_id``
+    aliases happen to be set on the rule and miss every new post — the
+    bug that left ``muhammad_gehad`` reliant on webhook delivery while
+    its general any-post rule's fresh comments never reached
+    ``_handle_new_comment``. Account-agnostic: identical change applies
+    to every linked account; no rule-matching, dedupe, send, or rate-
+    limit behavior is affected.
+    """
     target: list = []
     needs_latest = False
     needs_any = False
@@ -19991,16 +20005,22 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
         selected_mid = _selected_specific_media_id(a)
         if selected_mid and selected_mid not in target:
             target.append(selected_mid)
-        raw_trigger = a.get('trigger') or ''
+        raw_trigger = _comment_rule_canonical_trigger_value(a)
         trigger = raw_trigger.lower()
         if trigger.startswith('comment:'):
             t = raw_trigger.split(':', 1)[1].strip()
-            if t.lower() == 'latest':
+            tl = t.lower()
+            if tl in ('latest', 'next'):
                 needs_latest = True
-            elif t.lower() == 'any':
+            elif tl in ('any', 'all'):
                 needs_any = True
             elif t and t not in target:
                 target.append(t)
+        canonical_scope = _comment_rule_post_scope_value(a)
+        if canonical_scope in ('any', 'all', 'general', 'broad'):
+            needs_any = True
+        elif canonical_scope in ('latest', 'next'):
+            needs_latest = True
         # Also honor explicit trigger_media_id on the automation doc
         mid = (
             a.get('trigger_media_id')

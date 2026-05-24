@@ -114,6 +114,18 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Polling Target Skipped Legacy General Rule's New Posts
+
+- Date/time: 2026-05-25
+- Symptom: With webhook delivery missing for `muhammad_gehad`, polling was the only path for that account. Fresh comments on NEW posts never reached `_handle_new_comment` even though `mogehad17` (whose webhook arrived from Meta) succeeded on the same external commenter. The Flight Recorder for `muhammad_gehad` showed only `poller_comment_seen` / `automation_skipped` events for OLD comments (`already_replied_success`, `historical`, `bot_own_reply`).
+- Affected area: `_collect_target_media_ids` (server.py:19985). Polling target collection only; rule matching and execution are unaffected.
+- Root cause: The polling target-collection function still read the raw top-level `a.get('trigger')` field. For a legacy general rule with `trigger='Manual'` (or empty), `post_scope='any'`, and `nodes[].data.trigger='comment:any'`, `trigger.startswith('comment:')` was False so `needs_any` never became True, `_fetch_recent_media_ids` was never called, and the target list contained only whatever stale `selected_media_id`/`trigger_media_id` aliases lived on the rule. The user's NEW post — which had no matching alias — was never polled. `mogehad17` only worked because Meta's webhook delivered the new comment directly, bypassing the target-collection path entirely. The same canonical-trigger / canonical-post_scope helpers introduced by `54fb527` to fix rule classification existed but had never been applied to target collection.
+- Fix commit: pending (this commit). `_collect_target_media_ids` now uses `_comment_rule_canonical_trigger_value` and `_comment_rule_post_scope_value`. Account-agnostic; identical change applies to every linked account. Post-specific rules still scope strictly to their selected media — the `_selected_specific_media_id` branch is unchanged.
+- Tests: `test_collect_target_media_ids_includes_recent_for_legacy_general_rule`, `test_collect_target_media_ids_includes_recent_for_post_scope_only_general_rule`, `test_collect_target_media_ids_unchanged_for_post_specific_rule`, `test_legacy_general_rule_fresh_polling_comment_matches_and_sends`. `test_multi_account_automation_routing.py` 114 passed; backend full 645 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms `muhammad_gehad`'s fresh comments on new posts are processed via polling.
+- Lesson learned: When a code-path matures around a canonical-form helper (here `54fb527`'s canonical trigger/scope), every consumer of the raw legacy field must be updated. The polling target list is the exact mirror site of rule classification — both decide "should this rule cause us to scan media X?" and both must read through the same canonical lens.
+- Preventive test added: Yes.
+
 ### Stop-Point Showed rule_not_matched on Repeated Duplicate Tests
 
 - Date/time: 2026-05-24
