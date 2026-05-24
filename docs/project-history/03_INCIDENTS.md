@@ -108,7 +108,7 @@ Use this file to record production-impacting problems and the exact fix.
 - Symptom: Automation Stop Point could show `exact_stop_reason=bot_own_reply` for `@muhammad_gehad` even after a real external user comment had triggered the automation.
 - Affected area: Protected backend stop-point summary and admin support output.
 - Root cause: The summary reducer selected the latest comment-related event globally. A bot-owned public reply generated after a successful automation could be newer than the real external comment, so its `bot_own_reply` skip reason hid the meaningful external-user stop point.
-- Fix commit: Pending local stop-point summary fix.
+- Fix commit: `e109f6e`.
 - Tests: `test_summarize_stop_point_prefers_external_comment_over_bot_reply`; focused multi-account tests 92 passed; full backend 623 passed.
 - Deploy status: Local, deploy required if accepted.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.

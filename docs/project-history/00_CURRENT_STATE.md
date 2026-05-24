@@ -23,10 +23,10 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local HEAD: `5d58f2611b67a8dd2cd50f31388233dbc211ed32` plus local stop-point summary fix pending commit
+- Current local app-code fix: `e109f6e3545d43f77433c7edf0d3ba2be15f6a8c`
 - Current origin/master: `5d58f2611b67a8dd2cd50f31388233dbc211ed32`
 - Current production build_sha: `5d58f2611b67`
-- Current working status: dirty during backend stop-point summary accuracy fix
+- Current working status: clean after local stop-point summary accuracy fix commit; not pushed/deployed yet
 
 Update these values at the start and end of every agent session.
 
