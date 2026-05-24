@@ -24,10 +24,10 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: `54fb527fb1fdb3eed0a676166d2ff7b85b38a206`
-- Current local HEAD: pending Rule Coverage admin UI commit
-- Current origin/master: `72bc25c1aa90d8c98a8560396077f3045c05e8f5` (rule-coverage-inspector backend endpoint deployed)
-- Current production build_sha: `72bc25c1aa90`
-- Current working status: protected backend inspector endpoint deployed; adding admin-only Rule Coverage panel inside existing `/app/admin` so the operator can read the sanitized inspector output without copying an admin JWT. No backend or automation behavior change.
+- Current local HEAD: `61103fb1a270d4b67e3d80b8d8fa24f139b7d885`
+- Current origin/master: `61103fb1a270d4b67e3d80b8d8fa24f139b7d885`
+- Current production build_sha: `61103fb1a270`
+- Current working status: Live retest confirmed Instagram automation works on both linked accounts with general any-post rules. Rule Coverage admin tab read `should_match=true` for the active general rule on each account, and the live comment test fired the configured reply + opening DM on both accounts. Webhook latency (`source=polling`) is a separate, still-open observation and is NOT marked verified by this entry.
 
 Update these values at the start and end of every agent session.
 

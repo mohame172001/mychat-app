@@ -119,9 +119,10 @@ Use this file to record production-impacting problems and the exact fix.
 - Date/time: 2026-05-24
 - Symptom: Automation Stop Point showed `comment reached=true`, `source=polling`, `rule_matched=false`, `reply_attempted=false`, and `dm_attempted=false` for linked accounts even though the operator confirmed the rules were general/any-post.
 - Affected area: Instagram comment automation rule matching.
-- Root cause: `_handle_new_comment` used the top-level `trigger` field directly to decide whether a rule should enter the comment matching branch. Legacy/general rules could be persisted with `post_scope=any` and/or `nodes[].data.trigger=comment:any` while top-level `trigger` was missing, empty, or `Manual`, so the rule loaded but was never evaluated as a comment rule.
+- Root cause: The execution path in `_handle_new_comment` decided whether a rule should enter the comment matching branch using the top-level `trigger` field directly. Legacy/general rules could be persisted with `post_scope=any` and/or `nodes[].data.trigger=comment:any` while top-level `trigger` was missing, empty, or `Manual`, so the rule loaded but was never evaluated as a comment rule and produced no `rule_match_failed` event.
 - Fix commit: `54fb527`.
 - Tests: `py_compile backend/server.py`; `test_multi_account_automation_routing.py` 96 passed; full backend 627 passed.
-- Deploy status: Local, deploy required; do not mark known-good until live retest confirms both linked accounts' general rules fire.
+- Deploy status: **Resolved.** Deployed through `a488bbb`; production reached `61103fb1a270` and the fix was live-verified end to end on both linked Instagram accounts.
+- Verification: Live retest with a fresh comment on a general any-post rule on Account 1 and Account 2 produced reply + opening DM on both. The Rule Coverage admin tab reported `should_match=true` on the active general rule for each linked account. Webhook delivery latency (`source=polling`) remains a separate, unresolved observation and is NOT covered by this resolution.
 - Lesson learned: Any-post versus post-specific should affect only the media match condition; comment-capability detection must read canonical trigger aliases and post scope, not only top-level `trigger`.
 - Preventive test added: Yes.
