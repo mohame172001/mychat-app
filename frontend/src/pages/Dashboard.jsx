@@ -5,6 +5,7 @@ import { Badge } from '../components/ui/badge';
 import {
   Users, Zap, Send, TrendingUp, Plus, RefreshCw,
   MessageSquare, Reply, Mail, MousePointerClick, Instagram,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -66,11 +67,11 @@ const classifyDashboardError = (err, user, m) => {
 const RANGE_OPTIONS = ['24h', '7d', '30d', 'all'];
 const DEFAULT_RANGE = '7d';
 
-const formatXAxisLabel = (point, rangeKey) => {
+const formatXAxisLabel = (point, rangeKey, locale) => {
   if (!point) return '';
   // Route every range through the central helper so axis labels stay
   // in lockstep with tooltip titles and never leak raw ISO strings.
-  const formatted = fmtChartAxisLabel(point.date || point.day, rangeKey);
+  const formatted = fmtChartAxisLabel(point.date || point.day, rangeKey, locale);
   if (formatted && formatted !== '-') return formatted;
   return point.day || '';
 };
@@ -222,15 +223,16 @@ const Dashboard = () => {
   };
 
   const chart = useMemo(() => stats?.weeklyPerformance || stats?.weekly_chart || [], [stats]);
+  const chartLocale = ar ? 'ar' : 'en';
   const xAxisItems = useMemo(() => {
     const indexes = dashboardTickIndexes(chart.length, range);
     const maxIndex = Math.max(1, chart.length - 1);
     return indexes.map((index) => ({
       key: `${index}:${chart[index]?.date || chart[index]?.day || 'point'}`,
-      label: formatXAxisLabel(chart[index], range),
+      label: formatXAxisLabel(chart[index], range, chartLocale),
       left: chart.length <= 1 ? 0 : (index / maxIndex) * 100,
     }));
-  }, [chart, range]);
+  }, [chart, range, chartLocale]);
   const maxVal = Math.max(
     1,
     ...chart.map(d => Math.max(Number(d.messages || 0), Number(d.conversions || 0)))
@@ -294,7 +296,17 @@ const Dashboard = () => {
       ]
     : [];
   const topAutomations = stats?.topAutomations || [];
-  const compactTopAutomations = topAutomations.slice(0, 3);
+  // Main dashboard prefers active automations. Paused/draft drop to the
+  // bottom and are slightly de-emphasized when shown. Within each tier
+  // we keep the backend's existing sort (sent desc, created desc) by
+  // using a stable sort. Cap at 3 for visual focus.
+  const compactTopAutomations = [...topAutomations]
+    .sort((a, b) => {
+      const aActive = (a?.status || '').toLowerCase() === 'active' ? 0 : 1;
+      const bActive = (b?.status || '').toLowerCase() === 'active' ? 0 : 1;
+      return aActive - bActive;
+    })
+    .slice(0, 3);
 
   // Phase 2.18Z: first-run empty state — when a user has signed up
   // but hasn't connected Instagram OR has zero automations, the
@@ -450,7 +462,9 @@ const Dashboard = () => {
         <Card className="p-4 sm:p-5 rounded-xl border-slate-100">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="min-w-0">
-              <h3 className="font-display font-semibold text-base">{t('dashboard.weeklyTitle')}</h3>
+              <h3 className="font-display font-semibold text-base" data-testid="dashboard-chart-title">
+                {t(`dashboard.performanceTitles.${range}`) || t('dashboard.weeklyTitle')}
+              </h3>
               <p className="text-xs text-slate-500">{t('dashboard.weeklySubtitle')}</p>
             </div>
             <div className="flex gap-3 text-[11px] text-slate-500">
@@ -496,7 +510,7 @@ const Dashboard = () => {
                             data-testid="dashboard-chart-tooltip"
                           >
                             <div className="font-semibold">
-                              {formatChartTooltipTitle(d.date || d.day, range)}
+                              {formatChartTooltipTitle(d.date || d.day, range, chartLocale)}
                             </div>
                             <div className="mt-1 flex justify-between gap-4"><span>{ar ? 'الرسائل' : 'Messages'}</span><b>{messages}</b></div>
                             <div className="flex justify-between gap-4"><span>{ar ? 'التحويلات' : 'Conversions'}</span><b>{conversions}</b></div>
@@ -542,11 +556,14 @@ const Dashboard = () => {
           <button
             type="button"
             onClick={() => setShowMoreStats((value) => !value)}
-            className="text-xs font-medium text-slate-500 hover:text-slate-900"
+            className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-200 transition-colors"
             aria-expanded={showMoreStats}
             data-testid="dashboard-more-stats-toggle"
           >
-            {showMoreStats ? 'Hide stats' : 'More stats'}
+            <span>{showMoreStats ? t('dashboard.lessStats') : t('dashboard.moreStats')}</span>
+            {showMoreStats
+              ? <ChevronUp className="w-3 h-3" aria-hidden="true" />
+              : <ChevronDown className="w-3 h-3" aria-hidden="true" />}
           </button>
           {showMoreStats && (
             <div
@@ -576,7 +593,10 @@ const Dashboard = () => {
       <div className="mt-4">
         <Card className="p-4 sm:p-5 rounded-xl border-slate-100">
           <div className="flex items-center justify-between">
-            <h3 className="font-display font-semibold text-base">{t('dashboard.topAutomations')}</h3>
+            <div className="min-w-0">
+              <h3 className="font-display font-semibold text-base">{t('dashboard.topAutomations')}</h3>
+              <p className="text-[11px] text-slate-500">{t('dashboard.topAutomationsSubtitle')}</p>
+            </div>
             <Link to={ROUTES.APP_AUTOMATIONS} className="text-xs font-medium text-slate-500 hover:text-slate-900">{t('dashboard.viewAll')}</Link>
           </div>
           <div className="mt-3 divide-y divide-slate-100">
@@ -587,22 +607,29 @@ const Dashboard = () => {
                 ))}
               </div>
             )}
-            {compactTopAutomations.map(a => (
-              <div key={a.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
-                <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
-                  <Zap className="w-3.5 h-3.5 text-slate-600" />
+            {compactTopAutomations.map(a => {
+              const isActive = (a?.status || '').toLowerCase() === 'active';
+              return (
+                <div
+                  key={a.id}
+                  className={`flex items-center gap-3 py-2.5 first:pt-0 last:pb-0 ${isActive ? '' : 'opacity-70'}`}
+                  data-testid="dashboard-top-automation-row"
+                >
+                  <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+                    <Zap className="w-3.5 h-3.5 text-slate-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm truncate">{a.name}</div>
+                    <div className="text-[11px] text-slate-500">{a.trigger} · {(a.sent || 0).toLocaleString()} {ar ? 'مُرسلة' : 'sent'}</div>
+                  </div>
+                  <Badge className={`rounded-full text-[10px] ${a.status === 'active' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : a.status === 'paused' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                    {ar
+                      ? (a.status === 'active' ? 'نشطة' : a.status === 'paused' ? 'متوقّفة' : a.status === 'draft' ? 'مسودّة' : a.status)
+                      : a.status}
+                  </Badge>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm truncate">{a.name}</div>
-                  <div className="text-[11px] text-slate-500">{a.trigger} · {(a.sent || 0).toLocaleString()} {ar ? 'مُرسلة' : 'sent'}</div>
-                </div>
-                <Badge className={`rounded-full text-[10px] ${a.status === 'active' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : a.status === 'paused' ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                  {ar
-                    ? (a.status === 'active' ? 'نشطة' : a.status === 'paused' ? 'متوقّفة' : a.status === 'draft' ? 'مسودّة' : a.status)
-                    : a.status}
-                </Badge>
-              </div>
-            ))}
+              );
+            })}
             {!loading && topAutomations.length === 0 && <div className="text-sm text-slate-500 text-center py-6">{t('dashboard.noAutomations')}</div>}
           </div>
         </Card>

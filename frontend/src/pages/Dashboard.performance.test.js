@@ -31,7 +31,30 @@ describe('Dashboard performance wiring', () => {
     expect(source).toContain('statsCards = [');
     expect(source).toContain('dashboard-more-stats-toggle');
     expect(source).toContain('showMoreStats &&');
-    expect(source).toContain('topAutomations.slice(0, 3)');
+    // Top Automations: active-first sort + cap at 3.
+    expect(source).toContain('.slice(0, 3)');
+    expect(source).toMatch(/aActive\s*-\s*bActive/);
+  });
+
+  test('chart title is range-aware', () => {
+    expect(source).toContain("dashboard.performanceTitles.${range}");
+    expect(source).toContain('dashboard-chart-title');
+  });
+
+  test('More stats button uses i18n labels and chevron icon', () => {
+    expect(source).toContain("t('dashboard.lessStats')");
+    expect(source).toContain("t('dashboard.moreStats')");
+    expect(source).toMatch(/ChevronUp|ChevronDown/);
+  });
+
+  test('Top Automations row de-emphasizes paused entries', () => {
+    expect(source).toContain('dashboard-top-automation-row');
+    expect(source).toMatch(/isActive\s*\?\s*''\s*:\s*'opacity-70'/);
+  });
+
+  test('chart tooltip forces locale instead of using browser default', () => {
+    expect(source).toContain('chartLocale');
+    expect(source).toContain('formatChartTooltipTitle(d.date || d.day, range, chartLocale)');
   });
 
   test('uses sparse range-aware x-axis labels', () => {

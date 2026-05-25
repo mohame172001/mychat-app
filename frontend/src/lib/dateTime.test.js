@@ -86,4 +86,24 @@ describe('dateTime helper', () => {
     const out = formatChartTooltipTitle('2026-05', 'all');
     expect(/May/i.test(out)).toBe(true);
   });
+
+  test('formatChartTooltipTitle forces English locale by default', () => {
+    // Even if the browser system locale is Arabic, an English UI
+    // tooltip must read in English (no Arabic month names, no RTL
+    // order glyphs).
+    const out = formatChartTooltipTitle('2026-05-21', '7d');
+    // Arabic month "مايو" must not appear.
+    expect(out).not.toMatch(/[؀-ۿ]/);
+  });
+
+  test('formatChartTooltipTitle Arabic locale shows Arabic month', () => {
+    const out = formatChartTooltipTitle('2026-05', 'all', 'ar');
+    // Some Arabic output must be present.
+    expect(/[؀-ۿ]/.test(out)).toBe(true);
+  });
+
+  test('formatChartAxisLabel forces English locale by default', () => {
+    const out = formatChartAxisLabel('2026-05-21', '30d');
+    expect(out).not.toMatch(/[؀-ۿ]/);
+  });
 });

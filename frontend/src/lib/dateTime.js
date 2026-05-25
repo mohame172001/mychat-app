@@ -42,9 +42,9 @@ function _toDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function _safeFormat(date, options) {
+function _safeFormat(date, options, locale) {
   try {
-    return new Intl.DateTimeFormat(undefined, options).format(date);
+    return new Intl.DateTimeFormat(locale || undefined, options).format(date);
   } catch (_) {
     return date.toLocaleString();
   }
@@ -108,22 +108,37 @@ export function formatDateShort(value) {
 }
 
 /**
+ * Resolve the locale to use for chart labels. Chart text should follow
+ * the app UI language (`ar` or `en`), NOT the browser's system locale,
+ * so an English user on an Arabic-locale browser still sees
+ * "May 24, 22:00" instead of "24 مايو 22:00". The optional locale arg
+ * lets the caller pass `'en'` / `'ar'` / `'en-US'` etc explicitly.
+ * When omitted the helper falls back to the browser default (used by
+ * generic visible timestamps where browser locale is appropriate).
+ */
+function _chartLocale(localeOverride) {
+  if (localeOverride) return localeOverride;
+  return 'en';
+}
+
+/**
  * Compact x-axis label per dashboard range. Used by the chart bars
  * underneath the bucket. Always short, never includes year.
  */
-export function formatChartAxisLabel(value, rangeKey) {
+export function formatChartAxisLabel(value, rangeKey, locale) {
   const d = _toDate(value);
   if (!d) return FALLBACK;
+  const loc = _chartLocale(locale);
   if (rangeKey === '24h') {
-    return _safeFormat(d, { hour: '2-digit', hour12: false });
+    return _safeFormat(d, { hour: '2-digit', hour12: false }, loc);
   }
   if (rangeKey === 'all') {
-    return _safeFormat(d, { month: 'short' });
+    return _safeFormat(d, { month: 'short' }, loc);
   }
   if (rangeKey === '7d') {
-    return _safeFormat(d, { weekday: 'short' });
+    return _safeFormat(d, { weekday: 'short' }, loc);
   }
-  return _safeFormat(d, { month: 'short', day: 'numeric' });
+  return _safeFormat(d, { month: 'short', day: 'numeric' }, loc);
 }
 
 /**
@@ -133,25 +148,32 @@ export function formatChartAxisLabel(value, rangeKey) {
  *    7d: "Tue, May 21"
  *   30d: "May 21"   (year if different)
  *   all: "May 2026"
+ *
+ * Locale is forced to English by default so the tooltip stays
+ * predictable for English UI users regardless of the browser
+ * system locale. Pass `'ar'` when the app language is Arabic.
  */
-export function formatChartTooltipTitle(value, rangeKey) {
+export function formatChartTooltipTitle(value, rangeKey, locale) {
   const d = _toDate(value);
   if (!d) return FALLBACK;
   const now = new Date();
   const yearOpt = d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' };
+  const loc = _chartLocale(locale);
+  const isAr = String(loc).toLowerCase().startsWith('ar');
+  const todayPrefix = isAr ? 'اليوم' : 'Today';
   if (rangeKey === '24h') {
-    const hm = _safeFormat(d, { hour: '2-digit', minute: '2-digit', hour12: false });
-    if (_isSameDay(d, now)) return `Today, ${hm}`;
-    return `${_safeFormat(d, { month: 'short', day: 'numeric', ...yearOpt })}, ${hm}`;
+    const hm = _safeFormat(d, { hour: '2-digit', minute: '2-digit', hour12: false }, loc);
+    if (_isSameDay(d, now)) return `${todayPrefix}, ${hm}`;
+    return `${_safeFormat(d, { month: 'short', day: 'numeric', ...yearOpt }, loc)}, ${hm}`;
   }
   if (rangeKey === '7d') {
-    return _safeFormat(d, { weekday: 'short', month: 'short', day: 'numeric', ...yearOpt });
+    return _safeFormat(d, { weekday: 'short', month: 'short', day: 'numeric', ...yearOpt }, loc);
   }
   if (rangeKey === '30d') {
-    return _safeFormat(d, { month: 'short', day: 'numeric', ...yearOpt });
+    return _safeFormat(d, { month: 'short', day: 'numeric', ...yearOpt }, loc);
   }
   if (rangeKey === 'all') {
-    return _safeFormat(d, { year: 'numeric', month: 'short' });
+    return _safeFormat(d, { year: 'numeric', month: 'short' }, loc);
   }
   return formatDateTime(value);
 }
