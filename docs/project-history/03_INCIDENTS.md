@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Fresh Polling Comments Were Marked Historical
+
+- Date/time: 2026-05-25
+- Symptom: After `e2bc4a3`, a fresh comment from the same external Instagram user on a different eligible post still skipped. Flight Recorder showed the polling path reached the comment and loaded one rule, then emitted `historical_before_rule_activation` / historical-related skips, while Stop Point could still fall back to the generic `rule_not_matched` summary.
+- Affected area: Instagram polling comment timestamp handling, existing-comment historical skip classification, and protected Stop Point summary fields.
+- Root cause: Polling comments without a Graph `timestamp` / `created_time` had no reliable proof that they were fresh, so the historical cutoff logic could treat them as unprovable/historical. Separately, an existing comment document with a stale `historical_before_rule_activation` skip could be trusted forever even when a current payload proved the comment timestamp was at/after the stored activation cutoff. The support summary did not surface enough timestamp/cutoff metadata, so the operator saw `rule_not_matched` instead of the concrete historical cutoff.
+- Fix commit: pending (this commit).
+- Tests: `test_fresh_polling_comment_missing_timestamp_uses_first_seen`, `test_old_polling_comment_before_activation_still_skips`, `test_stale_historical_skip_reprocesses_when_current_payload_is_after_activation`, `test_summarize_stop_point_surfaces_historical_skip_not_rule_not_matched`, plus webhook timestamp fallback regression. `test_multi_account_automation_routing.py` 135 passed; `test_webhook_timestamp_fallback.py` 7 passed; backend full 678 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms same-commenter/different-post works, exact duplicates still skip, browser typed fallback works, and mobile quick reply still works.
+- Lesson learned: For polling-only Meta flows, a missing provider timestamp is not evidence that a comment predates rule activation. Use provider timestamps when present; otherwise use first-seen time for newly observed polling events and keep exact-comment/provider-proof dedupe as the duplicate safety layer.
+- Preventive test added: Yes.
+
 ### Dashboard Range Labels Were Crowded And Range Switching Felt Heavy
 
 - Date/time: 2026-05-25

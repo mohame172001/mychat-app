@@ -24,9 +24,9 @@ Stack:
 ## Git And Deploy State
 
 - Current local app-code fix: pending `fix(instagram): prevent fresh comments from being marked historical` (separate session, uncommitted backend files in working tree).
-- Current local HEAD: `9b2af1bbd96e22d11bc373fed6430fcf11ee99ab` (dashboard polish, live-verified).
-- Current origin/master: `9b2af1bbd96e22d11bc373fed6430fcf11ee99ab`.
-- Current production build_sha: `9b2af1bbd96e`.
+- Current local HEAD: `62b46a46aaa39bbed45e98cef2bb1784fbc50c83` (project-history docs after dashboard polish).
+- Current origin/master: `62b46a46aaa39bbed45e98cef2bb1784fbc50c83`.
+- Current production build_sha: `62b46a46aaa3`.
 - Current working status: Dashboard polish commit `9b2af1b` is live-verified and recorded in `02_KNOWN_GOOD_VERSIONS.md` (dashboard UI scope only — does not change the automation pipeline relative to `948a996`). Pending Instagram historical-cutoff fix is a separate session's uncommitted backend work and remains outside this known-good. Original pending notes preserved below: Instagram polling comment handling fix is pending commit/deploy. It keeps real Graph timestamps authoritative for old comments, but if polling sees a comment with no Graph timestamp it uses first-seen time instead of skipping forever as missing/historical. Existing comment docs with stale `historical_before_rule_activation` skips are reprocessed only when the current payload proves the comment is at/after the stored activation cutoff. Stop Point now surfaces latest external comment partial id/media id/timestamp/activation-cutoff details. Separately, frontend-only dashboard polish landed: chart title now range-aware ("Performance — Last 24 hours" / "Last 7 days" / "Last 30 days" / "All time"); tooltip and axis labels now force the app UI language so English users no longer see Arabic month order from the browser locale; More stats becomes a chip-style chevron button with i18n labels; Total Contacts subtitle clarified to "All-time · Active account"; Top Automations sorts active rules first and visually de-emphasizes paused/draft rows. No Billing, HMAC, dedupe removal, rate-limit removal, frontend diagnostics route, dashboard backend behavior, or automation rule-scope change.
 
 Update these values at the start and end of every agent session.

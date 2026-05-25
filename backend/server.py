@@ -17279,14 +17279,6 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     ig_comment_id, media_id, user_id, ig_account_id, source)
     logger.info('comment_text_classified comment_id=%s source=%s text_length=%s non_empty=%s',
                 ig_comment_id, source, len(comment_text or ''), bool(comment_text))
-    await _record_instagram_automation_event(
-        'webhook_comment_detected' if source == 'webhook' else 'poller_comment_seen',
-        source=source,
-        user_doc=user_doc,
-        media_id=media_id,
-        comment_id=ig_comment_id,
-        commenter_id=commenter_id,
-    )
 
     if not ig_comment_id or not commenter_id:
         await _record_instagram_automation_event(
@@ -17327,6 +17319,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     ts_raw = comment_data.get('timestamp')
     comment_ts = _parse_graph_datetime(ts_raw)
     now = datetime.utcnow()
+    first_seen_at = _parse_graph_datetime(comment_data.get('first_seen_at')) or now
 
     # For webhook events: if the payload carries no comment timestamp, use
     # entry.time (the Meta dispatch time) as the effective timestamp so the
@@ -17341,6 +17334,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             'webhook_comment_missing_timestamp_using_entry_time '
             'ig_comment_id=%s entry_time=%s effective_ts=%s',
             ig_comment_id, entry_time_iso, effective_ts.isoformat())
+    elif effective_ts is None and source in ('polling', 'manual_catchup'):
+        # Graph normally returns a comment timestamp, but in production we
+        # have seen polling events with no reliable timestamp. A missing
+        # timestamp does not prove the comment predates the rule; treating it
+        # as historical blocks a real fresh comment forever. Use first-seen
+        # time only when Graph omitted the timestamp. If Graph supplies a
+        # timestamp, the activation cutoff below still uses it as the
+        # canonical proof of age.
+        effective_ts = first_seen_at
+        logger.info(
+            'polling_comment_missing_timestamp_using_first_seen '
+            'ig_comment_id=%s source=%s effective_ts=%s',
+            ig_comment_id, source, effective_ts.isoformat())
     if source == 'webhook':
         timestamp_source = 'payload' if comment_ts else ('entry_time' if comment_data.get('entry_time') else 'now')
         logger.info(
@@ -17349,6 +17355,29 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             timestamp_source,
             effective_ts.isoformat() if effective_ts else None,
         )
+    else:
+        timestamp_source = 'payload' if comment_ts else 'first_seen'
+        logger.info(
+            'polling_comment_effective_timestamp ig_comment_id=%s source=%s timestamp_source=%s ts=%s',
+            ig_comment_id,
+            source,
+            timestamp_source,
+            effective_ts.isoformat() if effective_ts else None,
+        )
+    await _record_instagram_automation_event(
+        'webhook_comment_detected' if source == 'webhook' else 'poller_comment_seen',
+        source=source,
+        user_doc=user_doc,
+        media_id=media_id,
+        comment_id=ig_comment_id,
+        commenter_id=commenter_id,
+        extra={
+            'comment_timestamp': comment_ts.isoformat() if comment_ts else None,
+            'effective_timestamp': effective_ts.isoformat() if effective_ts else None,
+            'timestamp_source': timestamp_source,
+            'first_seen_at': first_seen_at.isoformat() if first_seen_at else None,
+        },
+    )
     retry_existing = False
     retry_reason = None
     existing_doc_id = None
@@ -17657,7 +17686,37 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             # not block rule loading.
             exact_reason: Optional[str] = None
             return_reason: Optional[str] = None
-            if previous_skip == 'historical_before_rule_activation':
+            historical_skip_still_applies = previous_skip == 'historical_before_rule_activation'
+            if historical_skip_still_applies and effective_ts:
+                previous_activation = _parse_graph_datetime(
+                    existing.get('ruleActivationStartedAt')
+                    or existing.get('rule_activation_started_at')
+                    or existing.get('activationStartedAt')
+                )
+                if previous_activation:
+                    previous_activation_floor = previous_activation.replace(microsecond=0)
+                    current_comment_floor = effective_ts.replace(microsecond=0)
+                    if current_comment_floor >= previous_activation_floor:
+                        # The existing row says "historical", but the
+                        # current Graph/polling payload proves this comment
+                        # is not before that activation cutoff. Treat the
+                        # old skip as stale and fall through to rule loading.
+                        historical_skip_still_applies = False
+                        await _record_instagram_automation_event(
+                            'existing_comment_unknown_state_reprocess',
+                            source=source,
+                            user_doc=user_doc,
+                            media_id=media_id,
+                            comment_id=ig_comment_id,
+                            commenter_id=commenter_id,
+                            skip_reason='stale_historical_skip_reprocess',
+                            extra={
+                                'previous_skip': previous_skip,
+                                'comment_timestamp': effective_ts.isoformat(),
+                                'rule_activation_started_at': previous_activation.isoformat(),
+                            },
+                        )
+            if historical_skip_still_applies:
                 exact_reason = 'comment_skipped_historical'
                 return_reason = 'historical'
             elif (
@@ -18235,6 +18294,19 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             rule_id=rule_id,
             rule_type=_automation_flight_rule_type(cutoff_rule),
             skip_reason=cutoff_skip_reason,
+            extra={
+                'comment_timestamp': effective_ts.isoformat() if effective_ts else None,
+                'timestamp_source': timestamp_source,
+                'rule_activation_started_at': (
+                    (_parse_graph_datetime(
+                        (cutoff_rule or {}).get('activationStartedAt')
+                        or (cutoff_rule or {}).get('createdAt')
+                        or (cutoff_rule or {}).get('created')
+                    ) or now).isoformat()
+                    if cutoff_rule else None
+                ),
+                'before_rule_activation': cutoff_skip_reason == 'historical_before_rule_activation',
+            },
         )
     else:
         cutoff_skip_reason = 'no_rule_match'
@@ -18329,7 +18401,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'timestamp': ts_raw,
         'commentTimestamp': effective_ts or comment_ts or ts_raw,
         'effective_timestamp': effective_ts,
-        'timestamp_source': 'payload' if comment_ts else ('entry_time' if source == 'webhook' else 'none'),
+        'timestamp_source': timestamp_source,
         'ruleActivationStartedAt': rule_activation_started_at,
         'processExistingComments': process_existing_comments,
         'processed_at': now,
@@ -20509,6 +20581,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 succeeded = 0
                 failed = 0
                 for cm in data:
+                    seen_at = datetime.utcnow()
                     ig_comment_id = cm.get('id')
                     from_obj = cm.get('from') or {}
                     commenter_id = from_obj.get('id')
@@ -20525,6 +20598,10 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         media_id=mid,
                         comment_id=ig_comment_id,
                         commenter_id=commenter_id,
+                        extra={
+                            'comment_timestamp': cm.get('timestamp') or cm.get('created_time'),
+                            'first_seen_at': seen_at.isoformat(),
+                        },
                     )
                     res = await _handle_new_comment(user_doc, {
                         'ig_comment_id': ig_comment_id,
@@ -20532,7 +20609,8 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         'commenter_id': commenter_id,
                         'commenter_username': commenter_username,
                         'text': cm.get('text') or '',
-                        'timestamp': cm.get('timestamp'),
+                        'timestamp': cm.get('timestamp') or cm.get('created_time'),
+                        'first_seen_at': seen_at,
                         'force_queue': reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN,
                         'queue_reason': 'queued_rate_limit',
                     }, source='polling') or {}
@@ -22358,11 +22436,18 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
     # "Skipped: already_replied_success" rather than just
     # "unknown_state".
     rule_miss_classified = None
+    rule_miss_extra = {}
     if rule_miss is not None:
         rm_extra = (rule_miss.get('extra') or {}) if isinstance(rule_miss, dict) else {}
+        rule_miss_extra = rm_extra if isinstance(rm_extra, dict) else {}
         rule_miss_classified = (
-            rm_extra.get('classified_reason') if isinstance(rm_extra, dict) else None
+            rule_miss_extra.get('classified_reason')
         )
+    comment_event_extra = (
+        (comment_event.get('extra') or {})
+        if isinstance(comment_event, dict) and isinstance(comment_event.get('extra'), dict)
+        else {}
+    )
     summary = {
         'username': _automation_flight_username_key(username),
         'last_comment_reached_backend': bool(comment_event),
@@ -22393,6 +22478,17 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             if comment_event and isinstance(comment_event.get('created_at'), datetime)
             else None
         ),
+        'latest_external_comment_id_partial': (
+            comment_event.get('comment_id_partial') if comment_event else None
+        ),
+        'latest_external_comment_media_id_partial': (
+            comment_event.get('media_id_partial') if comment_event else None
+        ),
+        'latest_external_comment_created_time': (
+            comment_event_extra.get('effective_timestamp')
+            or comment_event_extra.get('comment_timestamp')
+        ),
+        'latest_external_comment_timestamp_source': comment_event_extra.get('timestamp_source'),
         'latest_bot_own_reply_at': (
             latest_bot_own_reply.get('created_at').isoformat()
             if latest_bot_own_reply and isinstance(latest_bot_own_reply.get('created_at'), datetime)
@@ -22429,6 +22525,12 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
                 rule_miss.get('skip_reason') == 'historical_before_rule_activation'
                 or rule_miss_classified == 'comment_skipped_historical'
             )
+        ),
+        'latest_external_before_rule_activation': bool(
+            rule_miss_extra.get('before_rule_activation')
+        ),
+        'latest_external_rule_activation_started_at': (
+            rule_miss_extra.get('rule_activation_started_at')
         ),
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
             if events and isinstance(events[0].get('created_at'), datetime) else None,

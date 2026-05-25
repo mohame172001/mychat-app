@@ -4090,6 +4090,64 @@ def test_summarize_stop_point_post_specific_media_mismatch(monkeypatch):
     assert summary['exact_stop_reason'] == 'selected_media_no_match'
 
 
+def test_summarize_stop_point_surfaces_historical_skip_not_rule_not_matched(monkeypatch):
+    """When the latest external comment was skipped by activation cutoff,
+    the support summary must show that concrete reason and expose the
+    comment/activation timestamps. It should not collapse to the generic
+    rule_not_matched fallback."""
+    db = _install_multi_account_db(monkeypatch)
+    comment_id = server._safe_partial_identifier('historical-summary-comment')
+    media_id = server._safe_partial_identifier('mediaB')
+    now = datetime.utcnow()
+    _seed_flight_event(
+        db,
+        stage='poller_comment_seen',
+        username='account_b',
+        source='polling',
+        comment_id_partial=comment_id,
+        media_id_partial=media_id,
+        created_at=now,
+        extra={
+            'effective_timestamp': '2026-05-25T14:40:08',
+            'timestamp_source': 'payload',
+        },
+    )
+    _seed_flight_event(
+        db,
+        stage='rule_loading_finished',
+        username='account_b',
+        source='polling',
+        comment_id_partial=comment_id,
+        media_id_partial=media_id,
+        created_at=now + timedelta(seconds=1),
+        extra={'rules_count': 1},
+    )
+    _seed_flight_event(
+        db,
+        stage='automation_skipped',
+        username='account_b',
+        source='polling',
+        skip_reason='historical_before_rule_activation',
+        comment_id_partial=comment_id,
+        media_id_partial=media_id,
+        created_at=now + timedelta(seconds=2),
+        extra={
+            'before_rule_activation': True,
+            'rule_activation_started_at': '2026-05-25T14:45:00',
+        },
+    )
+
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+
+    assert summary['exact_stop_reason'] == 'historical_before_rule_activation'
+    assert summary['latest_external_comment_id_partial'] == comment_id
+    assert summary['latest_external_comment_media_id_partial'] == media_id
+    assert summary['latest_external_comment_created_time'] == '2026-05-25T14:40:08'
+    assert summary['latest_external_comment_timestamp_source'] == 'payload'
+    assert summary['latest_external_before_rule_activation'] is True
+    assert summary['latest_external_rule_activation_started_at'] == '2026-05-25T14:45:00'
+
+
 def test_summarize_stop_point_dedupe_skip_is_visible(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _seed_flight_event(db, stage='webhook_comment_detected', source='webhook')
@@ -4706,6 +4764,129 @@ def test_unknown_state_reprocess_does_not_override_known_skips(monkeypatch):
     # No new send.
     assert len(reply_calls) == 0
     assert len(dm_calls) == 0
+
+
+def test_fresh_polling_comment_missing_timestamp_uses_first_seen(monkeypatch):
+    """If Graph omits a timestamp for a newly seen polling comment, do
+    not classify it as historical purely because no created_time was
+    available. The first-seen time is the only safe proof we have, and a
+    fresh eligible comment should still reach the normal rule pipeline."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now - timedelta(minutes=10)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'missing-ts-fresh',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'fresh without timestamp',
+        'first_seen_at': now,
+    }, source='polling'))
+
+    assert res['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    doc = next(d for d in db.comments.docs if d.get('ig_comment_id') == 'missing-ts-fresh')
+    assert doc['timestamp_source'] == 'first_seen'
+    seen_events = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'poller_comment_seen'
+        and e.get('comment_id_partial') == server._safe_partial_identifier('missing-ts-fresh')
+    ]
+    assert seen_events[-1]['extra']['timestamp_source'] == 'first_seen'
+
+
+def test_old_polling_comment_before_activation_still_skips(monkeypatch):
+    """A real Graph timestamp before activation is still authoritative:
+    this protects users from replying to old comments when
+    process_existing is disabled."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'old-before-activation',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'old',
+        'timestamp': (now - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        'first_seen_at': now,
+    }, source='polling'))
+
+    assert res['matched'] is False
+    assert res['action_status'] == 'skipped'
+    doc = next(d for d in db.comments.docs if d.get('ig_comment_id') == 'old-before-activation')
+    assert doc['skip_reason'] == 'historical_before_rule_activation'
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+    historical = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'historical_before_rule_activation'
+    ]
+    assert historical
+    assert historical[-1]['extra']['before_rule_activation'] is True
+
+
+def test_stale_historical_skip_reprocesses_when_current_payload_is_after_activation(monkeypatch):
+    """A previous historical skip is not provider proof. If the current
+    polling payload proves the same comment is at/after the stored
+    activation cutoff, reprocess instead of trusting the stale skip
+    forever."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    activation = now - timedelta(minutes=20)
+    db.automations.docs[1]['activationStartedAt'] = activation
+    db.comments.docs.append({
+        'id': 'stale-historical-doc',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'stale-historical-comment',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'action_status': 'skipped',
+        'skip_reason': 'historical_before_rule_activation',
+        'ruleActivationStartedAt': activation,
+        'created': now - timedelta(minutes=15),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'stale-historical-comment',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'fresh proof',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+
+    assert res['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    stale_reprocess = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'existing_comment_unknown_state_reprocess'
+        and e.get('skip_reason') == 'stale_historical_skip_reprocess'
+    ]
+    assert stale_reprocess
 
 
 def test_duplicate_comment_already_replied_records_skip_event_and_does_not_resend(monkeypatch):

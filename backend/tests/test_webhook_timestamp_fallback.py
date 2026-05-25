@@ -240,8 +240,13 @@ def test_webhook_emoji_only_matches_any_comment_rule(monkeypatch):
     assert ran['count'] == 1
 
 
-def test_polling_missing_timestamp_still_skipped(monkeypatch):
-    """Polling path with no timestamp is still skipped (strict behaviour)."""
+def test_polling_missing_timestamp_uses_first_seen(monkeypatch):
+    """Polling path with no Graph timestamp uses first-seen time.
+
+    This keeps a fresh polling-only comment from being marked historical
+    just because Graph omitted created_time/timestamp. Exact duplicates
+    are still protected by comment/provider dedupe.
+    """
     db = FakeDB(automations=[_rule_active_now()])
     monkeypatch.setattr(server, 'db', db)
     ran = _stub_run(monkeypatch)
@@ -257,10 +262,10 @@ def test_polling_missing_timestamp_still_skipped(monkeypatch):
 
     res = _run(server._handle_new_comment(_user(), comment, source='polling'))
 
-    assert res.get('matched') is False, f'polling missing ts should be skipped; got {res}'
-    assert ran['count'] == 0
+    assert res.get('matched') is True, f'polling missing ts should use first_seen; got {res}'
+    assert ran['count'] == 1
     saved = db.comments.docs[0] if db.comments.docs else {}
-    assert saved.get('skip_reason') == 'missing_comment_timestamp'
+    assert saved.get('timestamp_source') == 'first_seen'
 
 
 def test_polling_dedup_after_webhook_success(monkeypatch):
