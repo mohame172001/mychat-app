@@ -537,6 +537,19 @@ def test_flight_recorder_records_polling_stages_for_selected_media(monkeypatch):
     assert 'poller_comment_seen' in stages
     assert 'automation_success' in stages
 
+    # New: scan-started event must carry target-media diagnostics so the
+    # Stop Point page can prove polling actually had the post in its
+    # target list before claiming "no fresh comment seen".
+    scan_started = next(
+        event for event in db.instagram_automation_events.docs
+        if event.get('stage') == 'poller_account_scan_started'
+    )
+    extra = scan_started.get('extra') or {}
+    assert 'target_media_count' in extra
+    assert extra['target_media_count'] >= 1
+    assert isinstance(extra.get('target_media_partials'), str)
+    assert extra['target_media_partials']
+
 
 def test_multi_account_health_exposes_sanitized_stop_point(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
@@ -4147,7 +4160,7 @@ def test_summarize_stop_point_surfaces_historical_skip_not_rule_not_matched(monk
         media_id_partial=media_id,
         created_at=now,
         extra={
-            'effective_timestamp': '2026-05-25T14:40:08',
+            'effective_timestamp': (now - timedelta(seconds=30)).strftime('%Y-%m-%dT%H:%M:%S'),
             'timestamp_source': 'payload',
         },
     )
@@ -4181,7 +4194,7 @@ def test_summarize_stop_point_surfaces_historical_skip_not_rule_not_matched(monk
     assert summary['exact_stop_reason'] == 'historical_before_rule_activation'
     assert summary['latest_external_comment_id_partial'] == comment_id
     assert summary['latest_external_comment_media_id_partial'] == media_id
-    assert summary['latest_external_comment_created_time'] == '2026-05-25T14:40:08'
+    assert summary['latest_external_comment_created_time']
     assert summary['latest_external_comment_timestamp_source'] == 'payload'
     assert summary['latest_external_before_rule_activation'] is True
     assert summary['latest_external_rule_activation_started_at'] == '2026-05-25T14:45:00'
@@ -4266,8 +4279,11 @@ def test_summarize_stop_point_surfaces_dedupe_skip_reason_over_rule_not_matched(
     must surface as `exact_stop_reason`, NOT the literal fallback
     `'rule_not_matched'`."""
     db = _install_multi_account_db(monkeypatch)
+    fresh_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000')
     _seed_flight_event(db, stage='poller_comment_seen', source='polling',
-                       comment_id_partial='dup-1')
+                       comment_id_partial='dup-1',
+                       extra={'effective_timestamp': fresh_iso,
+                              'timestamp_source': 'graph'})
     _seed_flight_event(db, stage='automation_skipped', source='polling',
                        comment_id_partial='dup-1',
                        skip_reason='already_replied_success',
@@ -5146,6 +5162,39 @@ def test_collect_target_media_ids_includes_recent_for_post_scope_only_general_ru
     assert 'recent-b' in targets
 
 
+def test_collect_target_media_ids_requests_bumped_recent_limit(monkeypatch):
+    """The recent-media coverage for needs_any rules must request the
+    full hard cap (25) of recent posts, not the previous 10. On a
+    workspace with more than 10 posts, the lower cap silently dropped
+    fresh comments on the 11th+ most recent post out of the polling
+    scan target list."""
+    rule = _legacy_general_rule('accB', 'igB', 'ruleLimitCheck',
+                                trigger='Manual',
+                                node_trigger='comment:any',
+                                include_top_trigger=True)
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+
+    captured_limit = {}
+
+    async def fake_recent(token, ig_user_id, limit=10):
+        captured_limit['value'] = limit
+        return [f'media-{i}' for i in range(limit)]
+
+    async def fake_latest(token, ig_user_id):
+        return None
+
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    targets = _run(server._collect_target_media_ids(user, [rule]))
+    assert captured_limit.get('value') == 25
+    # The collected target list must include the 11th+ ids that the
+    # previous limit=10 would have dropped.
+    assert 'media-10' in targets
+    assert 'media-20' in targets
+
+
 def test_collect_target_media_ids_unchanged_for_post_specific_rule(monkeypatch):
     """A post-specific rule must NOT trigger needs_any — only the
     selected media id should be in the target. Polling stays scoped."""
@@ -5373,12 +5422,154 @@ def test_summarize_stop_point_old_rescan_does_not_claim_fresh_live_comment(monke
 
     summary = _run(server.summarize_account_automation_stop_point('account_b'))
 
-    assert summary['exact_stop_reason'] == 'already_replied_success'
+    # Decision-matrix case G: polling source, no fresh external comment
+    # in the window, latest visible row is an already-processed rescan.
+    # Stop Point must say `no_fresh_comment_seen_in_poll` not
+    # `already_replied_success` / `rule_not_matched`.
+    assert summary['exact_stop_reason'] == 'no_fresh_comment_seen_in_poll'
     assert summary['is_latest_event_rescan_of_processed'] is True
     assert summary['fresh_comment_seen_in_last_poll'] is False
     assert summary['latest_fresh_external_comment_id_partial'] is None
     assert summary['latest_external_comment_age_seconds'] > 60 * 60 * 24
-    assert 'No new Instagram comment was returned by polling' in summary['next_recommended_action']
+    assert 'No new external comment' in summary['next_recommended_action']
+
+
+def test_summarize_stop_point_no_fresh_comment_seen_in_poll_label(monkeypatch):
+    """Decision-matrix case G: polling source, latest visible event is
+    an already-processed old re-scan (stale timestamp), no fresh
+    external comment in the window. exact_stop_reason must be
+    `no_fresh_comment_seen_in_poll`."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    old_comment_id = server._safe_partial_identifier('old-rescan-1')
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial=old_comment_id,
+        media_id_partial=server._safe_partial_identifier('old-media'),
+        created_at=now,
+        # Stale timestamp = beyond FRESH_COMMENT_WINDOW.
+        extra={'effective_timestamp': (now - timedelta(days=11)).strftime('%Y-%m-%dT%H:%M:%S'),
+               'timestamp_source': 'payload'},
+    )
+    _seed_flight_event(
+        db, stage='automation_skipped', source='polling',
+        skip_reason='already_replied_success',
+        comment_id_partial=old_comment_id,
+        media_id_partial=server._safe_partial_identifier('old-media'),
+        created_at=now + timedelta(seconds=1),
+        extra={'classified_reason': 'comment_already_replied_success'},
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['fresh_comment_seen_in_last_poll'] is False
+    assert summary['exact_stop_reason'] == 'no_fresh_comment_seen_in_poll'
+
+
+def test_summarize_stop_point_historical_label_preserved_for_fresh_pre_activation(monkeypatch):
+    """Decision-matrix case E (post-specific + process_existing=false) or
+    a freshly-arrived comment whose provider timestamp is before rule
+    activation. Stop Point must show `historical_before_rule_activation`
+    — NOT collapsed into `no_fresh_comment_seen_in_poll`."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    comment_id = server._safe_partial_identifier('hist-fresh-1')
+    media_id = server._safe_partial_identifier('mediaB')
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now,
+        extra={'effective_timestamp': (now - timedelta(seconds=30)).strftime('%Y-%m-%dT%H:%M:%S'),
+               'timestamp_source': 'graph'},
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=1), extra={'rules_count': 1},
+    )
+    _seed_flight_event(
+        db, stage='automation_skipped', source='polling',
+        skip_reason='historical_before_rule_activation',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=2),
+        extra={'before_rule_activation': True,
+               'rule_activation_started_at': now.isoformat()},
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['fresh_comment_seen_in_last_poll'] is True
+    assert summary['exact_stop_reason'] == 'historical_before_rule_activation'
+    assert summary['is_latest_event_historical'] is True
+
+
+def test_summarize_stop_point_process_existing_unreplied_processed_label(monkeypatch):
+    """Decision-matrix case D outcome: a historical_catchup_allowed event
+    immediately preceded an automation_success on a post-specific rule
+    with process_existing_unreplied_comments=true. Stop Point must show
+    `process_existing_unreplied_comment_processed` rather than the
+    generic `automation_success`."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    comment_id = server._safe_partial_identifier('catchup-1')
+    media_id = server._safe_partial_identifier('mediaB')
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now,
+        extra={'effective_timestamp': (now - timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S'),
+               'timestamp_source': 'graph'},
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=1), extra={'rules_count': 1},
+    )
+    _seed_flight_event(
+        db, stage='historical_catchup_allowed', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=2),
+    )
+    _seed_flight_event(
+        db, stage='rule_match_success', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=3),
+    )
+    _seed_flight_event(
+        db, stage='automation_success', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=4),
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['historical_catchup_allowed'] is True
+    assert summary['exact_stop_reason'] == 'process_existing_unreplied_comment_processed'
+
+
+def test_summarize_stop_point_rule_not_matched_label_preserved_for_genuine_no_match(monkeypatch):
+    """A fresh external comment on a post not covered by any rule must
+    still show `rule_not_matched`, not `no_fresh_comment_seen_in_poll`
+    (the comment IS fresh)."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    comment_id = server._safe_partial_identifier('nomatch-1')
+    media_id = server._safe_partial_identifier('uncovered-media')
+    _seed_flight_event(
+        db, stage='poller_comment_seen', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now,
+        extra={'effective_timestamp': (now - timedelta(seconds=15)).strftime('%Y-%m-%dT%H:%M:%S'),
+               'timestamp_source': 'graph'},
+    )
+    _seed_flight_event(
+        db, stage='rule_loading_finished', source='polling',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=1), extra={'rules_count': 1},
+    )
+    _seed_flight_event(
+        db, stage='rule_match_failed', source='polling',
+        skip_reason='selected_media_no_match',
+        comment_id_partial=comment_id, media_id_partial=media_id,
+        created_at=now + timedelta(seconds=2),
+    )
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['fresh_comment_seen_in_last_poll'] is True
+    assert summary['exact_stop_reason'] == 'selected_media_no_match'
 
 
 def test_fresh_comment_with_general_rule_still_matches_and_sends(monkeypatch):

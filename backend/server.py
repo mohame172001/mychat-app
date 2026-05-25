@@ -17888,7 +17888,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         trigger = raw_trigger.lower()
         fire = False
 
-        def apply_activation_cutoff() -> Optional[str]:
+        async def apply_activation_cutoff() -> Optional[str]:
             requested_historical = bool(
                 auto.get('process_existing_unreplied_comments')
                 or auto.get('processExistingComments')
@@ -17933,6 +17933,28 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         'historical_selected_post_catchup_allowed ig_comment_id=%s rule_id=%s media_id=%s source=%s',
                         ig_comment_id, auto.get('id'), media_id, source
                     )
+                    # Record a flight event so Stop Point can distinguish a
+                    # historical-catchup-allowed processing from a true
+                    # pre-activation skip. Decision-matrix case D: post-
+                    # specific rule + selected media match + process_existing
+                    # _unreplied_comments=true must process previous unreplied
+                    # comments on the selected media without classifying as
+                    # historical skip. Account-agnostic.
+                    await _record_instagram_automation_event(
+                        'historical_catchup_allowed',
+                        source=source,
+                        user_doc=user_doc,
+                        media_id=media_id,
+                        selected_media_id=selected_historical_media_id,
+                        comment_id=ig_comment_id,
+                        commenter_id=commenter_id,
+                        rule_id=auto.get('id'),
+                        rule_type=_automation_flight_rule_type(auto),
+                        extra={
+                            'rule_activation_started_at': activation.isoformat() if activation else None,
+                            'comment_timestamp': effective_ts.isoformat() if effective_ts else None,
+                        },
+                    )
                     return None
                 logger.info('comment_skipped_historical ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
                             ig_comment_id, auto.get('id'), effective_ts, activation, source)
@@ -17962,7 +17984,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     skip_reason='selected_media_no_match',
                 )
                 continue
-            cutoff_skip_reason = apply_activation_cutoff()
+            cutoff_skip_reason = await apply_activation_cutoff()
             if cutoff_skip_reason:
                 cutoff_rule = cutoff_rule or auto
                 continue
@@ -17999,7 +18021,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 latest_media_for_match = latest_media_id
             media_hit = _comment_rule_media_matches(auto, media_id, latest_media_for_match)
             if media_hit:
-                cutoff_skip_reason = apply_activation_cutoff()
+                cutoff_skip_reason = await apply_activation_cutoff()
                 if cutoff_skip_reason:
                     cutoff_rule = cutoff_rule or auto
                     continue
@@ -20516,10 +20538,17 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
         if latest and latest not in target:
             target.append(latest)
     if needs_any:
+        # Bump the per-cycle recent-media coverage from 10 to 25 (the
+        # function's existing hard cap). On a workspace with more than
+        # 10 posts, the previous limit of 10 silently dropped any
+        # tested post older than the 10 most recent from the polling
+        # target list — so a fresh comment on, say, the 12th most
+        # recent post would never be discovered by polling. Bounded,
+        # account-agnostic, no fetch-shape or rate-limit change.
         for mid in await _fetch_recent_media_ids(
             user_doc.get('meta_access_token', ''),
             user_doc.get('ig_user_id', ''),
-            limit=10,
+            limit=25,
         ):
             if mid and mid not in target:
                 target.append(mid)
@@ -20531,11 +20560,6 @@ async def _poll_user_comments(user_doc: dict) -> dict:
     user_id = user_doc['id']
     token = user_doc.get('meta_access_token', '')
     ig_id = user_doc.get('ig_user_id', '')
-    await _record_instagram_automation_event(
-        'poller_account_scan_started',
-        source='polling',
-        user_doc=user_doc,
-    )
     stats: dict = {
         'user_id': user_id,
         'mediaChecked': 0,
@@ -20593,6 +20617,16 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         return stats
 
     media_ids = await _collect_target_media_ids(user_doc, automations)
+    await _record_instagram_automation_event(
+        'poller_account_scan_started',
+        source='polling',
+        user_doc=user_doc,
+        extra={
+            'target_media_count': len(media_ids),
+            'target_media_partials': ','.join(_safe_partial_identifier(m) for m in media_ids[:5]),
+            'rules_count': len(automations),
+        },
+    )
     if not media_ids:
         await _record_instagram_automation_event(
             'automation_skipped',
@@ -20605,7 +20639,12 @@ async def _poll_user_comments(user_doc: dict) -> dict:
 
     reply_attempts = 0
     async with httpx.AsyncClient(timeout=20) as c:
-        for mid in media_ids[:10]:  # cap per-user per-tick
+        # Scan up to the full target-media list per tick (bounded by
+        # _collect_target_media_ids at 25). Actual write actions are
+        # still bounded by IG_POLL_REPLY_CAP_PER_RUN below — widening
+        # the read scan only ensures a fresh comment on an older-but-
+        # still-eligible post is actually discovered.
+        for mid in media_ids[:25]:  # cap per-user per-tick
             if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN:
                 logger.info('catchup_reply_cap_reached user=%s cap=%s',
                             user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
@@ -22259,8 +22298,27 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
         return 'The latest skip event did not classify into a known dedupe state. Inspect classified_reason / last_send_error and the most recent comment doc action_status for the underlying cause.'
     if 'selected_media' in reason or reason in {'post_specific_rule_media_mismatch', 'media_match_failed'}:
         return 'Post-specific rule did not fire because the commented post id did not match selected_media_id — comment on the rule\'s selected post or add a general any-post rule.'
-    if reason in {'historical_before_rule_activation'}:
-        return 'Comment timestamp predates the rule\'s activation — only comments newer than activationStartedAt fire.'
+    if reason in {'historical_before_rule_activation', 'historical', 'comment_skipped_historical'}:
+        return (
+            'Comment timestamp predates the rule\'s activation — only comments newer than '
+            'activationStartedAt fire. To process previous unreplied comments on a specific '
+            'post, enable process_existing_unreplied_comments on a post-specific rule whose '
+            'selected media matches that post.'
+        )
+    if reason == 'no_fresh_comment_seen_in_poll':
+        return (
+            'No new external comment was returned by polling in the selected window — '
+            'the latest visible row is either a bot-own reply or an old already-processed '
+            're-scan. Verify the tested post is among the polled target media and that '
+            'Graph returns the fresh comment (check target_media_count / '
+            'target_media_partials on the latest scan-started event).'
+        )
+    if reason == 'process_existing_unreplied_comment_processed':
+        return (
+            'A previously unreplied comment on the selected media was processed under '
+            'the post-specific rule\'s process_existing_unreplied_comments=true setting. '
+            'No action needed — this is the expected behavior of that option.'
+        )
     if reason in {'dedupe_skipped', 'flow_already_completed', 'flow_already_started', 'same_commenter_same_post_same_rule'}:
         return 'The same commenter already had an opening flow on this post + rule — duplicate prevention skipped a repeat. Reset the flow from the diagnostics endpoint or test from a brand-new commenter.'
     if reason in {'public_reply_failed'} or 'reply_failed' in reason:
@@ -22576,6 +22634,78 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         and isinstance(latest_fresh_external_comment.get('extra'), dict)
         else {}
     )
+    # Detect a historical-catchup-allowed event in the window. This is
+    # decision-matrix case D: post-specific rule + selected media match
+    # + process_existing_unreplied_comments=true. When the most recent
+    # such allowance preceded an automation_success, the operator should
+    # see `process_existing_unreplied_comment_processed` rather than
+    # the generic `automation_success` label.
+    historical_catchup_event = None
+    for event in events:
+        if event.get('stage') == 'historical_catchup_allowed':
+            historical_catchup_event = event
+            break
+    # Decision-matrix case G: polling source, no fresh external comment
+    # returned in the window, and the latest visible event is either a
+    # bot-own reply or an old already-processed rescan. Override the
+    # generic stop_reason so Stop Point says
+    # `no_fresh_comment_seen_in_poll` instead of `rule_not_matched`,
+    # `historical_before_rule_activation`, or one of the dedupe labels.
+    polling_source = (
+        comment_event is not None
+        and comment_event.get('source') == 'polling'
+    )
+    raw_latest_event_is_bot_reply = bool(
+        raw_latest_comment_event
+        and latest_bot_own_reply
+        and raw_latest_comment_event.get('comment_id_partial')
+            == latest_bot_own_reply.get('comment_id_partial')
+    )
+    latest_is_rescan_of_processed = bool(
+        rule_miss is not None
+        and (
+            (rule_miss.get('skip_reason') in {
+                'already_replied_success',
+                'comment_already_partial_success',
+                'comment_already_dm_failed',
+                'comment_already_pending_queue',
+                'public_reply_required_recovery',
+                'historical_before_rule_activation',
+            })
+            or (rule_miss_classified in {
+                'comment_already_replied_success',
+                'comment_already_partial_success',
+                'comment_already_dm_failed',
+                'public_reply_required_not_attempted',
+                'comment_skipped_historical',
+            })
+        )
+    )
+    if (
+        polling_source
+        and latest_fresh_external_comment is None
+        and (raw_latest_event_is_bot_reply or latest_is_rescan_of_processed)
+        and stop_reason in {
+            'rule_not_matched',
+            'historical_before_rule_activation',
+            'comment_skipped_historical',
+            'already_replied_success',
+            'comment_already_replied_success',
+            'comment_already_partial_success',
+            'comment_already_dm_failed',
+            'comment_already_pending_queue',
+            'public_reply_required_recovery',
+            'early_exit_before_rule_loading',
+        }
+    ):
+        stop_reason = 'no_fresh_comment_seen_in_poll'
+    elif (
+        historical_catchup_event is not None
+        and stop_reason == 'automation_success'
+    ):
+        # Decision-matrix case D outcome: the success came via the
+        # historical-catchup path; surface it distinctly.
+        stop_reason = 'process_existing_unreplied_comment_processed'
     summary = {
         'username': _automation_flight_username_key(username),
         'last_comment_reached_backend': bool(comment_event),
@@ -22676,6 +22806,7 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'latest_external_rule_activation_started_at': (
             rule_miss_extra.get('rule_activation_started_at')
         ),
+        'historical_catchup_allowed': bool(historical_catchup_event),
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
             if events and isinstance(events[0].get('created_at'), datetime) else None,
     }
