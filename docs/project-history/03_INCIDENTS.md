@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Same Commenter On Different Post Was Skipped And Web Users Needed Manual Button Text
+
+- Date/time: 2026-05-25
+- Symptom: A same external Instagram commenter posted on a different eligible post, but the run could be skipped as already processed before rule loading. Separately, Instagram Web/laptop users might see the opening DM without the quick-reply button and creators were being forced to manually add "type this word" fallback text to every automation.
+- Affected area: `_handle_new_comment` comment-event dedupe edge case and comment-DM opening message composition.
+- Root cause: The exact-comment dedupe lookup trusted an existing processed comment document even when that document carried a different `media_id`, so a stale/colliding legacy row could block a fresh post interaction. Opening DMs with quick replies did not append an automatic typed fallback instruction derived from the button title, even though typed fallback continuation support already existed for pending sessions.
+- Fix commit: pending (this commit).
+- Tests: `test_same_commenter_different_post_general_rule_triggers_again`, `test_already_replied_success_from_other_media_does_not_block_new_post`, Arabic/English fallback append tests, no-duplicate fallback test, random text without pending session test. `test_multi_account_automation_routing.py` 131 passed; backend full 674 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms same-commenter/different-post triggers, exact duplicates still skip, mobile quick replies still work, and typed browser fallback continues once.
+- Lesson learned: Dedupe proof must include the post/media dimension for business-flow behavior, and user-facing quick-reply messages must include a web fallback automatically rather than relying on creator-authored boilerplate.
+- Preventive test added: Yes.
+
 ### OAuth Duplicate Code Could Wipe Connection
 
 - Date/time: 2026-05-24

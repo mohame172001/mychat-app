@@ -860,6 +860,96 @@ def test_same_commenter_same_post_rule_does_not_restart_opening_flow(monkeypatch
     assert db.comments.docs[0]['opening_dedupe_key']
 
 
+def test_same_commenter_different_post_general_rule_triggers_again(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    first = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-b-post-1',
+            'media_id': 'mediaB-one',
+            'commenter_id': 'external-user',
+            'commenter_username': 'external',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+    second = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-b-post-2',
+            'media_id': 'mediaB-two',
+            'commenter_id': 'external-user',
+            'commenter_username': 'external',
+            'text': 'test again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert first['matched'] is True
+    assert second['matched'] is True
+    assert second.get('already_processed') is not True
+    assert len(reply_calls) == 2
+    assert len(dm_calls) == 2
+    assert len(db.comments.docs) == 2
+    assert db.comments.docs[0]['opening_dedupe_key'] != db.comments.docs[1]['opening_dedupe_key']
+
+
+def test_already_replied_success_from_other_media_does_not_block_new_post(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    db.comments.docs.append({
+        'id': 'old-doc-other-media',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-id-collision',
+        'media_id': 'old-media',
+        'commenter_id': 'external-user',
+        'rule_id': 'ruleB',
+        'action_status': 'success',
+        'reply_status': 'success',
+        'dm_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'reply-old',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB', 'old-media', 'external-user',
+        ),
+        'created': datetime.utcnow() - timedelta(minutes=10),
+    })
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-id-collision',
+            'media_id': 'new-media',
+            'commenter_id': 'external-user',
+            'commenter_username': 'external',
+            'text': 'fresh post',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    assert result.get('reason') != 'already_replied_success'
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    assert len(db.comments.docs) == 2
+    assert {doc['media_id'] for doc in db.comments.docs} == {'old-media', 'new-media'}
+
+
 def test_same_commenter_different_account_is_not_cross_suppressed(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     reply_calls = []
@@ -1281,6 +1371,145 @@ def test_external_quick_reply_text_fallback_finds_unique_button_session(monkeypa
     assert message_calls[0]['recipient_id'] == 'external-dm-sender-fallback'
     assert db.comment_dm_sessions.docs[0]['recipient_id'] == 'external-dm-sender-fallback'
     assert db.comment_dm_sessions.docs[0]['commenter_id_from_comment'] == 'comment-author-id-only'
+
+
+def test_opening_dm_with_quick_reply_appends_arabic_browser_fallback(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _, dm_calls = _install_successful_comment_sends(monkeypatch)
+    rule = _comment_rule('accA', 'igA', 'ruleA-arabic-fallback')
+    rule.update({
+        'opening_dm_text': 'أهلا بيك، محتاج التفاصيل؟',
+        'opening_dm_button_text': 'ابعت',
+        'dm_text': 'أهلا بيك، محتاج التفاصيل؟',
+        'link_dm_text': 'اتفضل التفاصيل',
+    })
+    db.automations.docs = [rule]
+
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    result = _run(server._handle_new_comment(
+        owner_a,
+        {
+            'ig_comment_id': 'arabic-fallback-comment',
+            'media_id': 'mediaA',
+            'commenter_id': 'external-user',
+            'commenter_username': 'external',
+            'text': 'hi',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    opening_message = dm_calls[0]['message']
+    assert opening_message['quick_replies'][0]['title'] == 'ابعت'
+    assert 'لو الزر مش ظاهر عندك، ابعت كلمة: ابعت' in opening_message['text']
+
+
+def test_opening_dm_with_quick_reply_appends_english_browser_fallback(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    dm_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append(message)
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-english'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    automation = _comment_rule('accA', 'igA', 'ruleA-english-fallback')
+    automation.update({
+        'opening_dm_text': 'Want the link?',
+        'opening_dm_button_text': 'send',
+        'dm_text': 'Want the link?',
+        'link_dm_text': 'Here is the link',
+    })
+
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_a,
+        automation,
+        'external-user',
+        {'media_id': 'mediaA', 'commenter_id': 'external-user',
+         'ig_comment_id': 'english-fallback-comment', 'comment_doc_id': 'doc-english'},
+    ))
+
+    assert ok is True
+    assert dm_calls[0]['quick_replies'][0]['title'] == 'send'
+    assert 'If the button is not visible, reply with: send' in dm_calls[0]['text']
+
+
+def test_opening_dm_fallback_instruction_is_not_duplicated(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    dm_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append(message)
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-once'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    text = 'Want the link?\n\nIf the button is not visible, reply with: send'
+    automation = _comment_rule('accA', 'igA', 'ruleA-fallback-once')
+    automation.update({
+        'opening_dm_text': text,
+        'opening_dm_button_text': 'send',
+        'dm_text': text,
+        'link_dm_text': 'Here is the link',
+    })
+
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_a,
+        automation,
+        'external-user',
+        {'media_id': 'mediaA', 'commenter_id': 'external-user',
+         'ig_comment_id': 'fallback-once-comment', 'comment_doc_id': 'doc-once'},
+    ))
+
+    assert ok is True
+    assert dm_calls[0]['text'].count('If the button is not visible') == 1
+
+
+def test_random_button_text_without_pending_session_does_not_continue(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    message_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        message_calls.append(message)
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-random'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+
+    result = _run(server._handle_new_dm_message(
+        owner_a,
+        {
+            'sender': {'id': 'external-without-session'},
+            'recipient': {'id': 'igA'},
+            'timestamp': int(datetime.utcnow().timestamp() * 1000),
+            'message': {
+                'mid': 'mid-random-text',
+                'text': 'ابعت',
+            },
+        },
+        source='webhook',
+    ))
+
+    assert result['matched'] is False
+    assert result['reason'] in ('no_active_rules', 'no_rule_match')
+    assert message_calls == []
 
 
 def test_reversed_external_quick_reply_payload_continues_before_self_skip(monkeypatch):
@@ -2526,7 +2755,8 @@ def test_post_specific_nested_rule_creates_session_and_backfills_aliases(monkeyp
     assert session['automation_id'] == 'ruleB-nested-flow'
     assert session['link_url'] == 'https://example.com/nested'
     quick_reply_message = next(call['message'] for call in dm_calls if isinstance(call['message'], dict))
-    assert quick_reply_message['text'] == 'Hello from nested node'
+    assert quick_reply_message['text'].startswith('Hello from nested node')
+    assert 'If the button is not visible, reply with: Send it' in quick_reply_message['text']
     assert quick_reply_message['quick_replies'][0]['title'] == 'Send it'
     assert quick_reply_message['quick_replies'][0]['payload'] == session['payload']
     persisted = db.automations.docs[0]

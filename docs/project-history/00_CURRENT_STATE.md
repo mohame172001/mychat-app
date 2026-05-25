@@ -1,7 +1,7 @@
 # Current State
 
-Last updated by: Claude Code  
-Last updated date: 2026-05-24
+Last updated by: Codex
+Last updated date: 2026-05-25
 
 ## Project
 
@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending dashboard range + redesign commit
-- Current local HEAD: pending dashboard redesign commit
-- Current origin/master: `ef0e1321d5a46692ab05a8f7e7e9cf72ff8f05ed`
-- Current production build_sha: `ef0e1321d5a4`
-- Current working status: Implementing actual dashboard redesign + range filter. Backend: `/api/dashboard/summary?range=24h|7d|30d|all` accepted and validated; cache key now includes range; `_calculate_dashboard_summary_live` builds 24 hourly / 7 daily / 30 daily / 12 monthly buckets per range; counters scoped to the same window. Multi-account strict scoping: `_dashboard_scoped_docs` no longer broad-falls-back to user_id when the workspace has ≥2 active accounts and no active account context — prevents cross-account leak into Total Contacts. Frontend: range selector pill group in header (24h / 7 days / 30 days / All time) persisted to localStorage; tighter card grid (2×4 vs 4-wide); smaller secondary KPI row; compact chart + Top Automations sections; ghost Refresh + rounded New Automation button. No backend automation, rule-matching, webhook, polling, dedupe, HMAC, or rate-limit change. Known-good `948a996` + `ef0e132` automation paths preserved.
+- Current local app-code fix: pending `fix(instagram): scope dedupe per post and add automatic text fallback`
+- Current local HEAD: `c1f1c086e043c75ccd2b2a64d4c0c10409008ff5` plus local working changes
+- Current origin/master: `c1f1c086e043c75ccd2b2a64d4c0c10409008ff5`
+- Current production build_sha: `c1f1c086e043`
+- Current working status: Implementing account-agnostic Instagram automation reliability patch. Same-commenter different-post interactions should no longer be blocked by an older processed comment document from a different media/post; existing exact-comment and same-commenter/same-media/same-rule dedupe remain intact. Opening DMs that include Instagram quick replies now automatically append a browser/laptop typed fallback instruction derived from the same button title (Arabic or English), so creators do not need to edit old automation messages manually. Mobile quick replies remain unchanged; typed fallback still requires a pending comment-DM session. No Billing, HMAC, rate-limit, frontend diagnostics route, or username special-case change.
 
 Update these values at the start and end of every agent session.
 
@@ -43,6 +43,8 @@ Update these values at the start and end of every agent session.
 - Frontend production build passed at commit `d30f04e`.
 - Local backend suite passed after the stop-point summary accuracy fix: 623 tests.
 - Local backend suite passed after the legacy general any-post matching fix: 627 tests.
+- Local multi-account automation routing suite passed after the dedupe-per-post and automatic text fallback patch: 131 tests.
+- Local full backend suite passed after the dedupe-per-post and automatic text fallback patch: 674 tests.
 
 ## Current Blockers
 
@@ -50,7 +52,7 @@ Update these values at the start and end of every agent session.
 - Auth recovery email delivery E2E remains a billing blocker until proven end to end.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
-- Legacy general/any-post rule matching fix still requires production deploy and live retest before it can be considered known-good.
+- Same-commenter different-post dedupe and automatic typed fallback require production deploy and live retest before being considered known-good.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

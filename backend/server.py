@@ -17372,6 +17372,31 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         ],
     })
     if existing:
+        existing_media_id = existing.get('media_id') or existing.get('mediaId')
+        if existing_media_id and media_id and str(existing_media_id) != str(media_id):
+            logger.warning(
+                'comment_dedupe_media_mismatch_reprocess ig_comment_id=%s user=%s '
+                'existing_media=%s current_media=%s',
+                ig_comment_id,
+                user_doc.get('email'),
+                _safe_partial_identifier(existing_media_id),
+                _safe_partial_identifier(media_id),
+            )
+            await _record_instagram_automation_event(
+                'dedupe_checked',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                skip_reason='existing_comment_media_mismatch_reprocess',
+                extra={
+                    'namespace': 'comment_event',
+                    'existing_media_id_partial': _safe_partial_identifier(existing_media_id),
+                },
+            )
+            existing = None
+    if existing:
         previous_skip = existing.get('skip_reason') or existing.get('skipReason')
         previous_status = str(existing.get('action_status') or existing.get('actionStatus') or '').lower()
         previous_reply_status = (
