@@ -12,6 +12,10 @@ import { cachedApiGet, cachedApiGetSWR, getCachedApiData } from '../lib/apiCache
 import { ROUTES } from '../constants/routes';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../lib/i18n';
+import {
+  formatChartAxisLabel as fmtChartAxisLabel,
+  formatChartTooltipTitle,
+} from '../lib/dateTime';
 
 const DASHBOARD_TTL_MS = 60 * 1000;
 // Phase 2.18Y cold-start fix: keep persisted dashboard data eligible
@@ -64,13 +68,10 @@ const DEFAULT_RANGE = '7d';
 
 const formatXAxisLabel = (point, rangeKey) => {
   if (!point) return '';
-  if (rangeKey === '24h' || rangeKey === 'all') return point.day || '';
-  if (rangeKey === '30d') {
-    const parsed = point.date ? new Date(`${point.date}T00:00:00`) : null;
-    if (parsed && !Number.isNaN(parsed.getTime())) {
-      return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    }
-  }
+  // Route every range through the central helper so axis labels stay
+  // in lockstep with tooltip titles and never leak raw ISO strings.
+  const formatted = fmtChartAxisLabel(point.date || point.day, rangeKey);
+  if (formatted && formatted !== '-') return formatted;
   return point.day || '';
 };
 
@@ -490,8 +491,13 @@ const Dashboard = () => {
                         tabIndex={0}
                       >
                         {isActive && (
-                          <div className="absolute -top-16 left-1/2 -translate-x-1/2 z-10 min-w-[150px] rounded-xl bg-slate-950 px-3 py-2 text-xs text-white shadow-xl">
-                            <div className="font-semibold">{d.day}{d.date ? `, ${d.date}` : ''}</div>
+                          <div
+                            className="absolute -top-16 left-1/2 -translate-x-1/2 z-10 min-w-[160px] rounded-xl bg-slate-950 px-3 py-2 text-xs text-white shadow-xl"
+                            data-testid="dashboard-chart-tooltip"
+                          >
+                            <div className="font-semibold">
+                              {formatChartTooltipTitle(d.date || d.day, range)}
+                            </div>
                             <div className="mt-1 flex justify-between gap-4"><span>{ar ? 'الرسائل' : 'Messages'}</span><b>{messages}</b></div>
                             <div className="flex justify-between gap-4"><span>{ar ? 'التحويلات' : 'Conversions'}</span><b>{conversions}</b></div>
                           </div>

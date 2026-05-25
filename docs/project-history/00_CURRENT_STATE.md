@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `c084311ee41ef3db27b27d84e480dd472a858e00` (`fix(dashboard): simplify overview and fix range chart labels`)
-- Current local HEAD: docs-only project-history record commit on top of `c084311ee41ef3db27b27d84e480dd472a858e00` (run `git rev-parse HEAD` for exact current SHA).
-- Current origin/master: same docs-only record commit after push/deploy verification.
-- Current production build_sha: same docs-only record commit after push/deploy verification.
-- Current working status: Dashboard polish deployed. The main dashboard keeps exactly four prominent KPI cards, hides secondary stats behind a collapsed More stats section, caps Top Automations at three rows, fixes range-aware chart x-axis labels, and keeps previous range data visible while a new range refreshes. Warmup/bootstrap dashboard cache keys now include the default `7d` range so the first dashboard paint can reuse the same cached summary. No Billing, Instagram automation, HMAC, dedupe, rate-limit, rule-matching, webhook/polling, or diagnostics-route change.
+- Current local app-code fix: pending `fix(instagram): prevent fresh comments from being marked historical`.
+- Current local HEAD: `75ec2a38638557e2a9bff7c70484feab95ea562f` before the pending Instagram historical-cutoff fix commit.
+- Current origin/master: `75ec2a38638557e2a9bff7c70484feab95ea562f` before the pending Instagram historical-cutoff fix push.
+- Current production build_sha: `75ec2a386385` before the pending Instagram historical-cutoff fix deploy.
+- Current working status: Instagram polling comment handling fix is pending commit/deploy. It keeps real Graph timestamps authoritative for old comments, but if polling sees a comment with no Graph timestamp it uses first-seen time instead of skipping forever as missing/historical. Existing comment docs with stale `historical_before_rule_activation` skips are reprocessed only when the current payload proves the comment is at/after the stored activation cutoff. Stop Point now surfaces latest external comment partial id/media id/timestamp/activation-cutoff details. Separately, frontend-only UI timestamp formatting was centralized via `frontend/src/lib/dateTime.js`: dashboard chart tooltips/axis labels and admin Webhook Health + Flight Recorder visible timestamps no longer show raw ISO strings; uses browser local timezone via Intl.DateTimeFormat. No Billing, HMAC, dedupe removal, rate-limit removal, frontend diagnostics route, dashboard behavior, or automation rule-scope change.
 
 Update these values at the start and end of every agent session.
 
@@ -45,6 +45,9 @@ Update these values at the start and end of every agent session.
 - Local backend suite passed after the legacy general any-post matching fix: 627 tests.
 - Local multi-account automation routing suite passed after the dedupe-per-post and automatic text fallback patch: 131 tests.
 - Local full backend suite passed after the dedupe-per-post and automatic text fallback patch: 674 tests.
+- Local multi-account automation routing suite passed after the historical-cutoff polling fix: 135 tests.
+- Local webhook timestamp fallback suite passed after the historical-cutoff polling fix: 7 tests.
+- Local full backend suite passed after the historical-cutoff polling fix: 678 tests.
 
 ## Current Blockers
 
@@ -53,6 +56,7 @@ Update these values at the start and end of every agent session.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
 - Dashboard simplification / x-axis label polish is deployed and still needs live operator UI confirmation before being considered known-good.
+- Pending Instagram historical-cutoff fix must be deployed and live-tested before it can be considered known-good: same external commenter on a different eligible post should trigger again; exact duplicate should still skip; browser typed fallback and mobile quick reply should still work.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

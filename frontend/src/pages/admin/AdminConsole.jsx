@@ -19,6 +19,10 @@ import {
   hasAnyExceeded, planDistributionRows, planOptions, formatTimestamp,
 } from '../../lib/admin';
 import {
+  formatDateTime as fmtDateTime,
+  formatCompactDateTime as fmtCompactDateTime,
+} from '../../lib/dateTime';
+import {
   ROLE_DISPLAY, hasPermission, canManageRole, roleOptionsAssignableBy,
   PERM_OVERVIEW_VIEW, PERM_USERS_VIEW, PERM_USERS_MANAGE, PERM_PLANS_ASSIGN,
   PERM_AUTOMATIONS_DISABLE, PERM_MEMBERS_VIEW, PERM_MEMBERS_MANAGE,
@@ -2299,13 +2303,13 @@ function WebhookHealthTab() {
               <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
                 {ar ? 'آخر webhook استُلم' : 'webhook.last_received_at'}
               </div>
-              <div className="font-mono break-all">{data.webhook?.last_received_at || '-'}</div>
+              <div className="break-words">{fmtDateTime(data.webhook?.last_received_at)}</div>
             </div>
             <div>
               <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
                 {ar ? 'آخر webhook عولج' : 'webhook.last_processed_at'}
               </div>
-              <div className="font-mono break-all">{data.webhook?.last_processed_at || '-'}</div>
+              <div className="break-words">{fmtDateTime(data.webhook?.last_processed_at)}</div>
             </div>
             <div>
               <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
@@ -2466,22 +2470,22 @@ function WebhookHealthAccountCard({ account }) {
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر فحص اشتراك' : 'subscription_last_checked_at'}
           </div>
-          <div className="font-mono break-all">{account.webhook_subscription_last_checked_at || '-'}</div>
+          <div className="break-words">{fmtDateTime(account.webhook_subscription_last_checked_at)}</div>
         </div>
 
         <div>
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
             {ar ? 'آخر webhook (تعليق)' : 'last_comment_webhook_event_time'}
           </div>
-          <div className={`font-mono break-all ${lastWebhookMissing ? 'text-rose-700' : ''}`}>
-            {lastWebhook || (ar ? '— لم يصل بعد' : '— never observed')}
+          <div className={`break-words ${lastWebhookMissing ? 'text-rose-700' : ''}`}>
+            {lastWebhook ? fmtDateTime(lastWebhook) : (ar ? '— لم يصل بعد' : '— never observed')}
           </div>
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر webhook (messaging)' : 'last_messaging_webhook_event_time'}
           </div>
-          <div className="font-mono break-all">
-            {lastMessagingWebhook || (ar ? '— لم يصل بعد' : '— never observed')}
+          <div className="break-words">
+            {lastMessagingWebhook ? fmtDateTime(lastMessagingWebhook) : (ar ? '— لم يصل بعد' : '— never observed')}
           </div>
 
           {lastResolutionFailed && (
@@ -2489,29 +2493,29 @@ function WebhookHealthAccountCard({ account }) {
               <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
                 {ar ? 'آخر فشل في تحديد الحساب' : 'last_account_resolution_failed_at'}
               </div>
-              <div className="font-mono break-all text-rose-700">{lastResolutionFailed}</div>
+              <div className="break-words text-rose-700">{fmtDateTime(lastResolutionFailed)}</div>
             </>
           )}
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر مسح polling' : 'last_polling_scan_time'}
           </div>
-          <div className="font-mono break-all">{lastPolling || '-'}</div>
+          <div className="break-words">{fmtDateTime(lastPolling)}</div>
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر تعليق رُصد' : 'last_comment_seen_time'}
           </div>
-          <div className="font-mono break-all">{account.last_comment_seen_time || '-'}</div>
+          <div className="break-words">{fmtDateTime(account.last_comment_seen_time)}</div>
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر مطابقة قاعدة' : 'last_rule_match_time'}
           </div>
-          <div className="font-mono break-all">{account.last_rule_match_time || '-'}</div>
+          <div className="break-words">{fmtDateTime(account.last_rule_match_time)}</div>
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر نجاح أتمتة' : 'last_automation_success_time'}
           </div>
-          <div className="font-mono break-all">{account.last_automation_success_time || '-'}</div>
+          <div className="break-words">{fmtDateTime(account.last_automation_success_time)}</div>
         </div>
 
         <div className="md:col-span-2">
@@ -2954,7 +2958,13 @@ function FlightRecorderEventRow({ event }) {
       data-testid="flight-recorder-event-row"
     >
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-slate-500 font-mono">{event?.created_at || '-'}</span>
+        <span
+          className="text-slate-500"
+          title={event?.created_at || ''}
+          data-testid="flight-recorder-event-time"
+        >
+          {fmtCompactDateTime(event?.created_at)}
+        </span>
         <Badge className={`border-0 text-[10px] ${toneClass}`}>{stage}</Badge>
         {event?.source && (
           <span className="text-[10px] text-slate-500">
