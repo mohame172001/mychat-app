@@ -19,6 +19,7 @@ const AuthContext = createContext(null);
 // and the refresh updates in the background.
 const DASHBOARD_TTL_MS = 60 * 1000;
 const DASHBOARD_MAX_STALE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DASHBOARD_RANGE = '7d';
 const AUTOMATIONS_TTL_MS = 90 * 1000;
 const AUTOMATIONS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 const ACCOUNTS_TTL_MS = 180 * 1000;
@@ -42,7 +43,7 @@ function seedFromBootstrap(bootstrap, user) {
   const accountKey = activeAccountKey(user);
   if (bootstrap.dashboard_summary && !bootstrap.dashboard_summary.error) {
     seedApiCacheEntry(
-      `dashboard-summary:${user.id}:${accountKey}`,
+      `dashboard-summary:${user.id}:${accountKey}:${DEFAULT_DASHBOARD_RANGE}`,
       bootstrap.dashboard_summary,
       { persist: true, ttlMs: DASHBOARD_TTL_MS, maxStaleMs: DASHBOARD_MAX_STALE_MS },
     );

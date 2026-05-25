@@ -12,6 +12,7 @@ import { instagramApi } from '../api/instagramApi';
 // silently within the first second.
 const DASHBOARD_TTL_MS = 60 * 1000;
 const DASHBOARD_MAX_STALE_MS = 24 * 60 * 60 * 1000;      // 24h — SWR keeps the UI instant
+const DEFAULT_DASHBOARD_RANGE = '7d';
 const AUTOMATIONS_TTL_MS = 90 * 1000;
 const AUTOMATIONS_MAX_STALE_MS = 24 * 60 * 60 * 1000;    // 24h
 const ACCOUNTS_TTL_MS = 180 * 1000;
@@ -30,7 +31,7 @@ export function getCoreWarmupCacheKeys(user) {
   const userId = user?.id || 'anon';
   const activeAccountKey = getActiveAccountKey(user);
   return {
-    dashboard: `dashboard-summary:${userId}:${activeAccountKey}`,
+    dashboard: `dashboard-summary:${userId}:${activeAccountKey}:${DEFAULT_DASHBOARD_RANGE}`,
     automations: `automations-summary:${userId}:${activeAccountKey}`,
     accounts: `instagram-accounts:${userId}`,
   };
@@ -56,7 +57,7 @@ export function scheduleCoreAppWarmup(user, options = {}) {
   // from the Dashboard mount.
   scheduledPromise = (async () => {
     const tasks = [
-      cachedApiGetSWR(keys.dashboard, () => api.get('/dashboard/summary'), {
+      cachedApiGetSWR(keys.dashboard, () => api.get(`/dashboard/summary?range=${DEFAULT_DASHBOARD_RANGE}`), {
         ttlMs: DASHBOARD_TTL_MS,
         maxStaleMs: DASHBOARD_MAX_STALE_MS,
         persist: true,

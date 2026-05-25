@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending `fix(instagram): scope dedupe per post and add automatic text fallback`
-- Current local HEAD: `c1f1c086e043c75ccd2b2a64d4c0c10409008ff5` plus local working changes
-- Current origin/master: `c1f1c086e043c75ccd2b2a64d4c0c10409008ff5`
-- Current production build_sha: `c1f1c086e043`
-- Current working status: Implementing account-agnostic Instagram automation reliability patch. Same-commenter different-post interactions should no longer be blocked by an older processed comment document from a different media/post; existing exact-comment and same-commenter/same-media/same-rule dedupe remain intact. Opening DMs that include Instagram quick replies now automatically append a browser/laptop typed fallback instruction derived from the same button title (Arabic or English), so creators do not need to edit old automation messages manually. Mobile quick replies remain unchanged; typed fallback still requires a pending comment-DM session. No Billing, HMAC, rate-limit, frontend diagnostics route, or username special-case change.
+- Current local app-code fix: pending `fix(dashboard): simplify overview and fix range chart labels`
+- Current local HEAD: `e2bc4a3b6a90fac6d3aa2d683278abd5fab12f28` plus local dashboard working changes
+- Current origin/master: `e2bc4a3b6a90fac6d3aa2d683278abd5fab12f28`
+- Current production build_sha: `e2bc4a3b6a90`
+- Current working status: Polishing the Dashboard redesign only. The main dashboard keeps exactly four prominent KPI cards, hides secondary stats behind a collapsed More stats section, caps Top Automations at three rows, fixes range-aware chart x-axis labels, and keeps previous range data visible while a new range refreshes. Warmup/bootstrap dashboard cache keys now include the default `7d` range so the first dashboard paint can reuse the same cached summary. No Billing, Instagram automation, HMAC, dedupe, rate-limit, rule-matching, webhook/polling, or diagnostics-route change.
 
 Update these values at the start and end of every agent session.
 
@@ -52,7 +52,7 @@ Update these values at the start and end of every agent session.
 - Auth recovery email delivery E2E remains a billing blocker until proven end to end.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
-- Same-commenter different-post dedupe and automatic typed fallback require production deploy and live retest before being considered known-good.
+- Dashboard simplification / x-axis label polish requires production deploy and live UI confirmation before being considered known-good.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

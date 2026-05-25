@@ -2,6 +2,8 @@
 
 Important commits only. Keep this table updated after every meaningful commit.
 
+Pending dashboard UX entry: 2026-05-25, `fix(dashboard): simplify overview and fix range chart labels`. Dashboard now keeps only the four primary KPI cards prominent, hides secondary stats behind a collapsed More stats toggle, uses sparse range-aware chart labels, keeps previous range data visible while refreshing, seeds the default `7d` dashboard cache through bootstrap/warmup, and caps Top Automations at three rows. Tests: frontend 187 passed; frontend production build passed. No backend, Instagram automation, Billing, HMAC, dedupe, webhook/polling, or rate-limit change.
+
 | Date | Commit | Area | Summary | Behavior changed? | Tests | Deploy status |
 |---|---|---|---|---|---|---|
 | 2026-05-25 | (pending) | Instagram dedupe + quick reply fallback | Comment event dedupe now refuses to let an older processed comment document from a different `media_id` block a fresh comment on another post. Business opening-flow dedupe remains account + rule + media + commenter scoped, so same commenter/same post/same rule and exact duplicate comments still skip. Opening DMs with quick replies now append an automatic browser/laptop typed fallback instruction derived from the quick reply title, e.g. Arabic `لو الزر مش ظاهر عندك، ابعت كلمة: ابعت` or English `If the button is not visible, reply with: send`. Existing automations benefit at send time; creators do not need to edit messages manually. Mobile quick replies remain unchanged. | Yes (dedupe scoping edge case + opening DM text sent to users) | `py_compile backend/server.py`; `test_multi_account_automation_routing.py` 131 passed; backend full 674 passed | Local, deploy required |

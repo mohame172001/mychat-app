@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -62,6 +62,36 @@ const classifyDashboardError = (err, user, m) => {
 const RANGE_OPTIONS = ['24h', '7d', '30d', 'all'];
 const DEFAULT_RANGE = '7d';
 
+const formatXAxisLabel = (point, rangeKey) => {
+  if (!point) return '';
+  if (rangeKey === '24h' || rangeKey === 'all') return point.day || '';
+  if (rangeKey === '30d') {
+    const parsed = point.date ? new Date(`${point.date}T00:00:00`) : null;
+    if (parsed && !Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+  }
+  return point.day || '';
+};
+
+const dashboardTickIndexes = (count, rangeKey) => {
+  if (count <= 0) return [];
+  if (rangeKey === '7d') return Array.from({ length: count }, (_, i) => i);
+  if (rangeKey === '24h') {
+    const indexes = new Set([0, count - 1]);
+    for (let i = 3; i < count - 1; i += 4) indexes.add(i);
+    return [...indexes].sort((a, b) => a - b);
+  }
+  if (rangeKey === '30d') {
+    const indexes = new Set([0, count - 1]);
+    for (let i = 6; i < count - 1; i += 7) indexes.add(i);
+    return [...indexes].sort((a, b) => a - b);
+  }
+  const indexes = new Set([0, count - 1]);
+  for (let i = 2; i < count - 1; i += 3) indexes.add(i);
+  return [...indexes].sort((a, b) => a - b);
+};
+
 const Dashboard = () => {
   const { user } = useAuth();
   const { t, lang } = useTranslation();
@@ -91,6 +121,12 @@ const Dashboard = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [hoveredBar, setHoveredBar] = useState(null);
+  const [showMoreStats, setShowMoreStats] = useState(false);
+  const statsRef = useRef(stats);
+
+  useEffect(() => {
+    statsRef.current = stats;
+  }, [stats]);
 
   useEffect(() => {
     let alive = true;
@@ -99,8 +135,12 @@ const Dashboard = () => {
       setStats(cached);
       setLoading(false);
     } else {
-      setStats(null);
-      setLoading(true);
+      // Keep the previous range visible while the new range refreshes.
+      // This avoids the heavy-feeling blank/skeleton transition when the
+      // user switches between 24h / 7d / 30d / all.
+      const hasPreviousStats = Boolean(statsRef.current);
+      setLoading((currentLoading) => currentLoading && !hasPreviousStats);
+      setRefreshing(hasPreviousStats);
     }
 
     const load = async () => {
@@ -136,7 +176,10 @@ const Dashboard = () => {
           }, m));
         }
       } finally {
-        if (alive) setLoading(false);
+        if (alive) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     };
     load();
@@ -177,7 +220,16 @@ const Dashboard = () => {
     } catch (_) { /* ignore */ }
   };
 
-  const chart = stats?.weeklyPerformance || stats?.weekly_chart || [];
+  const chart = useMemo(() => stats?.weeklyPerformance || stats?.weekly_chart || [], [stats]);
+  const xAxisItems = useMemo(() => {
+    const indexes = dashboardTickIndexes(chart.length, range);
+    const maxIndex = Math.max(1, chart.length - 1);
+    return indexes.map((index) => ({
+      key: `${index}:${chart[index]?.date || chart[index]?.day || 'point'}`,
+      label: formatXAxisLabel(chart[index], range),
+      left: chart.length <= 1 ? 0 : (index / maxIndex) * 100,
+    }));
+  }, [chart, range]);
   const maxVal = Math.max(
     1,
     ...chart.map(d => Math.max(Number(d.messages || 0), Number(d.conversions || 0)))
@@ -241,6 +293,7 @@ const Dashboard = () => {
       ]
     : [];
   const topAutomations = stats?.topAutomations || [];
+  const compactTopAutomations = topAutomations.slice(0, 3);
 
   // Phase 2.18Z: first-run empty state — when a user has signed up
   // but hasn't connected Instagram OR has zero automations, the
@@ -288,6 +341,13 @@ const Dashboard = () => {
               );
             })}
           </div>
+          {refreshing && (
+            <span
+              className="h-2 w-2 rounded-full bg-blue-500 animate-pulse"
+              aria-label="Refreshing dashboard"
+              data-testid="dashboard-range-refreshing"
+            />
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -385,29 +445,6 @@ const Dashboard = () => {
         })}
       </div>
 
-      {secondaryKpis.length > 0 && (
-        <div
-          className="mt-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
-          data-testid="dashboard-secondary-kpis"
-        >
-          {secondaryKpis.map((k) => {
-            const Icon = k.icon;
-            return (
-              <div
-                key={k.label}
-                className="px-3 py-2 rounded-lg bg-white border border-slate-100"
-              >
-                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase tracking-wide">
-                  <Icon className="w-3 h-3" />
-                  <span className="truncate">{k.label}</span>
-                </div>
-                <div className="text-base font-semibold font-display tabular-nums mt-0.5">{k.value}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
       <div className="mt-4">
         <Card className="p-4 sm:p-5 rounded-xl border-slate-100">
           <div className="flex items-center justify-between flex-wrap gap-2">
@@ -437,8 +474,8 @@ const Dashboard = () => {
                   ))}
                 </div>
                 <div className="relative flex items-end justify-between gap-2 sm:gap-3 h-48">
-                  {chart.map((d) => {
-                    const key = d.date || d.day;
+                  {chart.map((d, index) => {
+                    const key = d.date || `${d.day || 'point'}-${index}`;
                     const messages = Number(d.messages || 0);
                     const conversions = Number(d.conversions || 0);
                     const isActive = hoveredBar === key;
@@ -476,14 +513,59 @@ const Dashboard = () => {
               </div>
             </div>
             )}
-            <div className="ms-11 mt-2 grid grid-cols-7 gap-2 sm:gap-3">
-              {chart.map((d) => (
-                <div key={d.date || d.day} className="text-center text-xs text-slate-500 font-medium">{d.day}</div>
+            <div
+              className="relative ms-11 mt-2 h-5"
+              data-testid="dashboard-x-axis"
+            >
+              {xAxisItems.map((tick) => (
+                <div
+                  key={tick.key}
+                  className="absolute top-0 -translate-x-1/2 whitespace-nowrap text-center text-[11px] text-slate-500 font-medium"
+                  style={{ left: `${tick.left}%` }}
+                >
+                  {tick.label}
+                </div>
               ))}
             </div>
           </div>
         </Card>
       </div>
+
+      {secondaryKpis.length > 0 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowMoreStats((value) => !value)}
+            className="text-xs font-medium text-slate-500 hover:text-slate-900"
+            aria-expanded={showMoreStats}
+            data-testid="dashboard-more-stats-toggle"
+          >
+            {showMoreStats ? 'Hide stats' : 'More stats'}
+          </button>
+          {showMoreStats && (
+            <div
+              className="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
+              data-testid="dashboard-secondary-kpis"
+            >
+              {secondaryKpis.map((k) => {
+                const Icon = k.icon;
+                return (
+                  <div
+                    key={k.label}
+                    className="px-3 py-2 rounded-lg bg-white border border-slate-100"
+                  >
+                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase tracking-wide">
+                      <Icon className="w-3 h-3" />
+                      <span className="truncate">{k.label}</span>
+                    </div>
+                    <div className="text-base font-semibold font-display tabular-nums mt-0.5">{k.value}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-4">
         <Card className="p-4 sm:p-5 rounded-xl border-slate-100">
@@ -499,7 +581,7 @@ const Dashboard = () => {
                 ))}
               </div>
             )}
-            {topAutomations.map(a => (
+            {compactTopAutomations.map(a => (
               <div key={a.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
                   <Zap className="w-3.5 h-3.5 text-slate-600" />

@@ -24,6 +24,29 @@ describe('Dashboard performance wiring', () => {
     expect(source).toContain('activeInstagramAccountId');
     expect(source).toContain('activeInstagramIgUserId');
     expect(source).toContain('dashboard-summary');
+    expect(source).toContain('range');
+  });
+
+  test('keeps dashboard focused on four primary KPIs', () => {
+    expect(source).toContain('statsCards = [');
+    expect(source).toContain('dashboard-more-stats-toggle');
+    expect(source).toContain('showMoreStats &&');
+    expect(source).toContain('topAutomations.slice(0, 3)');
+  });
+
+  test('uses sparse range-aware x-axis labels', () => {
+    expect(source).toContain('dashboardTickIndexes');
+    expect(source).toContain("rangeKey === '24h'");
+    expect(source).toContain("rangeKey === '30d'");
+    expect(source).toContain('dashboard-x-axis');
+    expect(source).not.toContain('grid grid-cols-7 gap-2 sm:gap-3');
+  });
+
+  test('keeps previous range data visible while refreshing', () => {
+    expect(source).toContain('Keep the previous range visible');
+    expect(source).toContain('dashboard-range-refreshing');
+    expect(source).toContain('nextRange === range');
+    expect(source).not.toContain('setStats(null);');
   });
 
   test('shows a connection-specific error for Instagram account problems', () => {
