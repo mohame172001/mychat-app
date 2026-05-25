@@ -114,6 +114,18 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Total Contacts Combined Both Linked Accounts on Active-Account Dashboard
+
+- Date/time: 2026-05-25
+- Symptom: The dashboard's Total Contacts card (subtitle "Active Instagram account") displayed a number that combined contacts from BOTH linked Instagram accounts on a 2-account workspace. The number did not change when the active Instagram account was switched.
+- Affected area: `_dashboard_scoped_docs` in `_calculate_dashboard_summary_live`. Dashboard read path only — no Instagram automation, rule matching, webhook, polling, dedupe, HMAC, or rate-limit code was involved.
+- Root cause: When `getActiveInstagramAccount(user_id)` returned None (e.g. brief context-resolution miss between active-account switches, or any transient lookup failure), the dashboard fell back to a broad `{'user_id': user_id}` query in `_dashboard_scoped_docs`. That query matched contacts/comments/clicks/dm_logs from EVERY linked Instagram account on the workspace and unioned them all into the same response. On a single-account workspace that's correct; on a multi-account workspace it silently leaked. The cache TTL (60s / 5min stale) meant the leaked union persisted even after the active context was re-resolved.
+- Fix commit: pending (this commit). The broad fallback now applies only when `include_unscoped=True` (i.e. ≤1 active linked account). With ≥2 active accounts and no active context, `_dashboard_scoped_docs` returns an empty result instead of leaking the union. Account-agnostic.
+- Tests: `test_dashboard_scoped_docs_no_broad_fallback_when_multiaccount`. `test_dashboard_summary.py` 25 passed; backend full 668 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms Total Contacts changes when the operator switches active Instagram account.
+- Lesson learned: A defensive "broad fallback when context is missing" must not silently combine isolated tenants. On a multi-tenant workspace, the safe default is to return empty (or to refuse the read) rather than silently union — the cache then traps the union for minutes.
+- Preventive test added: Yes.
+
 ### Incomplete Comment Doc Blocked as `comment_processed_unknown_state`
 
 - Date/time: 2026-05-25

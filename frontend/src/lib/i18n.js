@@ -92,8 +92,8 @@ export const dictionaries = {
         subtitles: {
           totalContacts: 'Active Instagram account',
           activeAutomations: 'Across this account',
-          messagesSent: 'This month',
-          conversionRate: 'This month',
+          messagesSent: 'In selected range',
+          conversionRate: 'In selected range',
         },
         secondary: {
           commentsProcessed: 'Comments Processed',
@@ -102,6 +102,13 @@ export const dictionaries = {
           linkClicks: 'Link Clicks',
           connectedAccounts: 'Connected Accounts',
         },
+      },
+      range: {
+        label: 'Range',
+        '24h': '24h',
+        '7d': '7 days',
+        '30d': '30 days',
+        all: 'All time',
       },
       weeklyTitle: 'Weekly Performance',
       weeklySubtitle: 'Messages sent vs conversions',
@@ -447,8 +454,8 @@ export const dictionaries = {
         subtitles: {
           totalContacts: 'الحساب النشط',
           activeAutomations: 'على هذا الحساب',
-          messagesSent: 'هذا الشهر',
-          conversionRate: 'هذا الشهر',
+          messagesSent: 'في النطاق المحدّد',
+          conversionRate: 'في النطاق المحدّد',
         },
         secondary: {
           commentsProcessed: 'التعليقات المُعالَجة',
@@ -457,6 +464,13 @@ export const dictionaries = {
           linkClicks: 'نقرات الروابط',
           connectedAccounts: 'الحسابات المربوطة',
         },
+      },
+      range: {
+        label: 'النطاق',
+        '24h': '24 ساعة',
+        '7d': '7 أيام',
+        '30d': '30 يومًا',
+        all: 'كل الوقت',
       },
       weeklyTitle: 'الأداء الأسبوعي',
       weeklySubtitle: 'الرسائل المُرسلة مقابل التحويلات',

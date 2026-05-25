@@ -9492,7 +9492,17 @@ async def _dashboard_scoped_docs(collection_name: str, user_id: str, account: Op
     # only covers the no-id case; adding the broad user_id fallback
     # restores the historical rows without breaking the per-account
     # scoping for users who DO have an active account.
-    if not account:
+    #
+    # Multi-account safety: only apply the broad user_id fallback when
+    # the workspace is in single-account mode (`include_unscoped=True`).
+    # On a workspace with 2+ active linked Instagram accounts, falling
+    # back to user_id-only would silently combine contacts/comments/
+    # link clicks from EVERY linked account into the "active account"
+    # dashboard view — which is exactly the cross-account leakage the
+    # operator just reported on the Total Contacts card. With 2+
+    # accounts and no active context, return an empty result rather
+    # than leak across accounts.
+    if not account and include_unscoped:
         await add_many({'user_id': user_id})
     return docs
 
@@ -9761,6 +9771,117 @@ def _dashboard_event_dt(event: dict) -> Optional[datetime]:
     return _dashboard_dt(event.get('event_date'), event.get('created_at'), event.get('createdAt'))
 
 
+DASHBOARD_RANGE_OPTIONS = ('24h', '7d', '30d', 'all')
+DASHBOARD_RANGE_DEFAULT_KEY = '__default__'  # used when caller passes no range
+
+
+def _normalize_dashboard_range(value: Optional[str]) -> str:
+    """Validate the dashboard `range` query param. Returns one of
+    DASHBOARD_RANGE_OPTIONS, or DASHBOARD_RANGE_DEFAULT_KEY when the
+    caller passed nothing — that preserves the historical
+    last-7-days + current-calendar-month behavior for any client that
+    hasn't been updated yet.
+    """
+    if value is None or value == '':
+        return DASHBOARD_RANGE_DEFAULT_KEY
+    v = str(value).strip().lower()
+    if v in DASHBOARD_RANGE_OPTIONS:
+        return v
+    return DASHBOARD_RANGE_DEFAULT_KEY
+
+
+def _dashboard_window_bounds(range_key: str, now: Optional[datetime] = None) -> tuple:
+    """Return (window_start, window_end) for the given range key.
+
+    `window_end` is always `now`. `window_start` is:
+      - 24h: now - 24h
+      - 7d: now - 7d
+      - 30d: now - 30d
+      - all: epoch
+    For the legacy default (range omitted), the caller still uses the
+    current-calendar-month bounds (existing behavior unchanged).
+    """
+    now_dt = now or datetime.utcnow()
+    if range_key == '24h':
+        return now_dt - timedelta(hours=24), now_dt
+    if range_key == '7d':
+        return now_dt - timedelta(days=7), now_dt
+    if range_key == '30d':
+        return now_dt - timedelta(days=30), now_dt
+    if range_key == 'all':
+        return datetime(1970, 1, 1), now_dt
+    # Legacy default: current calendar month.
+    month = _usage_month(now_dt)
+    month_start, month_end = _dashboard_month_bounds(month)
+    return month_start, month_end
+
+
+def _dashboard_buckets_for_range(range_key: str, now: Optional[datetime] = None) -> dict:
+    """Build the per-range OrderedDict of chart buckets. Each bucket
+    carries a stable string key, a short display label `day`, a
+    full-precision `date` for the frontend, and zero-initialized
+    `messages` / `conversions` counters."""
+    from collections import OrderedDict
+    now_dt = now or datetime.utcnow()
+    buckets: OrderedDict = OrderedDict()
+    if range_key == '24h':
+        # 24 hourly buckets, oldest first. Key by ISO hour
+        # ``YYYY-MM-DDTHH``. `day` shows ``HHh`` for the chart label.
+        anchor = now_dt.replace(minute=0, second=0, microsecond=0)
+        for i in range(23, -1, -1):
+            slot = anchor - timedelta(hours=i)
+            key = slot.strftime('%Y-%m-%dT%H')
+            buckets[key] = {
+                'day': slot.strftime('%H') + 'h',
+                'date': slot.isoformat(),
+                'messages': 0,
+                'conversions': 0,
+            }
+        return buckets
+    if range_key == 'all':
+        # Last 12 months including the current one, oldest first.
+        anchor = datetime(now_dt.year, now_dt.month, 1)
+        for i in range(11, -1, -1):
+            year = anchor.year
+            month = anchor.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            slot = datetime(year, month, 1)
+            key = slot.strftime('%Y-%m')
+            buckets[key] = {
+                'day': slot.strftime('%b'),
+                'date': key,
+                'messages': 0,
+                'conversions': 0,
+            }
+        return buckets
+    # Daily buckets for 7d (default + legacy default) and 30d.
+    days = 30 if range_key == '30d' else 7
+    today = now_dt.date()
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        buckets[d.isoformat()] = {
+            'day': d.strftime('%a'),
+            'date': d.isoformat(),
+            'messages': 0,
+            'conversions': 0,
+        }
+    return buckets
+
+
+def _dashboard_bucket_key(range_key: str, dt: datetime) -> Optional[str]:
+    """Map a real datetime to the bucket key for the active range."""
+    if not isinstance(dt, datetime):
+        return None
+    if range_key == '24h':
+        slot = dt.replace(minute=0, second=0, microsecond=0)
+        return slot.strftime('%Y-%m-%dT%H')
+    if range_key == 'all':
+        return dt.strftime('%Y-%m')
+    return dt.date().isoformat()
+
+
 async def _dashboard_usage_events_for_window(user_id: str, event_types: list, start_date) -> list:
     months = sorted({
         (start_date + timedelta(days=i)).strftime('%Y-%m')
@@ -9809,18 +9930,29 @@ def _dashboard_summary_account_id(account: Optional[dict]) -> str:
     )
 
 
-def _make_dashboard_summary_cache_key(user_id: str, instagram_account_id: str, month: str) -> dict:
+def _make_dashboard_summary_cache_key(
+    user_id: str,
+    instagram_account_id: str,
+    month: str,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
+) -> dict:
     return {
         'user_id': str(user_id),
         'instagramAccountId': str(instagram_account_id or 'none'),
         'month': str(month),
+        'range': str(range_key or DASHBOARD_RANGE_DEFAULT_KEY),
     }
 
 
-async def _get_dashboard_summary_snapshot(user_id: str, instagram_account_id: str, month: str) -> Optional[dict]:
+async def _get_dashboard_summary_snapshot(
+    user_id: str,
+    instagram_account_id: str,
+    month: str,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
+) -> Optional[dict]:
     try:
         return await db.dashboard_summaries.find_one(
-            _make_dashboard_summary_cache_key(user_id, instagram_account_id, month)
+            _make_dashboard_summary_cache_key(user_id, instagram_account_id, month, range_key)
         )
     except Exception as exc:
         logger.warning(
@@ -9838,9 +9970,10 @@ async def _store_dashboard_summary_snapshot(
     month: str,
     summary: dict,
     now: Optional[datetime] = None,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
 ) -> None:
     now_dt = now or datetime.utcnow()
-    key = _make_dashboard_summary_cache_key(user_id, instagram_account_id, month)
+    key = _make_dashboard_summary_cache_key(user_id, instagram_account_id, month, range_key)
     doc = {
         **key,
         'summary': summary,
@@ -9906,25 +10039,36 @@ def _dashboard_snapshot_usable(snapshot: Optional[dict], field: str, now_dt: dat
     return bool(marker and now_dt <= marker and isinstance((snapshot or {}).get('summary'), dict))
 
 
-async def _refresh_dashboard_summary_snapshot(user_id: str, account: Optional[dict], month: str) -> None:
+async def _refresh_dashboard_summary_snapshot(
+    user_id: str,
+    account: Optional[dict],
+    month: str,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
+) -> None:
     instagram_account_id = _dashboard_summary_account_id(account)
     try:
         summary, _meta = await _calculate_dashboard_summary_live(
             user_id,
             account=account,
             account_loaded=True,
+            range_key=range_key,
         )
-        await _store_dashboard_summary_snapshot(user_id, instagram_account_id, month, summary)
+        await _store_dashboard_summary_snapshot(
+            user_id, instagram_account_id, month, summary,
+            range_key=range_key,
+        )
         logger.info(
-            'dashboard_summary_background_refresh_success user_id=%s instagramAccountId=%s',
+            'dashboard_summary_background_refresh_success user_id=%s instagramAccountId=%s range=%s',
             user_id,
             _token_prefix(instagram_account_id),
+            range_key,
         )
     except Exception as exc:
         logger.warning(
-            'dashboard_summary_background_refresh_failed user_id=%s instagramAccountId=%s reason=%s',
+            'dashboard_summary_background_refresh_failed user_id=%s instagramAccountId=%s range=%s reason=%s',
             user_id,
             _token_prefix(instagram_account_id),
+            range_key,
             type(exc).__name__,
         )
 
@@ -9933,12 +10077,15 @@ async def _get_dashboard_summary_readthrough(
     user_id: str,
     account: Optional[dict],
     background_tasks: Optional[BackgroundTasks] = None,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
 ) -> tuple[dict, dict]:
     started = datetime.utcnow()
     now_dt = datetime.utcnow()
     month = _get_dashboard_summary_month(now_dt)
     instagram_account_id = _dashboard_summary_account_id(account)
-    snapshot = await _get_dashboard_summary_snapshot(user_id, instagram_account_id, month)
+    snapshot = await _get_dashboard_summary_snapshot(
+        user_id, instagram_account_id, month, range_key,
+    )
 
     if _dashboard_snapshot_usable(snapshot, 'expires_at', now_dt):
         duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
@@ -9950,7 +10097,10 @@ async def _get_dashboard_summary_readthrough(
 
     if _dashboard_snapshot_usable(snapshot, 'max_stale_at', now_dt):
         if background_tasks is not None:
-            background_tasks.add_task(_refresh_dashboard_summary_snapshot, user_id, account, month)
+            background_tasks.add_task(
+                _refresh_dashboard_summary_snapshot,
+                user_id, account, month, range_key,
+            )
         duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
         return snapshot['summary'], {
             'duration_ms': duration_ms,
@@ -9963,8 +10113,12 @@ async def _get_dashboard_summary_readthrough(
             user_id,
             account=account,
             account_loaded=True,
+            range_key=range_key,
         )
-        await _store_dashboard_summary_snapshot(user_id, instagram_account_id, month, summary, now_dt)
+        await _store_dashboard_summary_snapshot(
+            user_id, instagram_account_id, month, summary, now_dt,
+            range_key=range_key,
+        )
         duration_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
         return summary, {
             **live_meta,
@@ -10006,14 +10160,20 @@ async def _calculate_dashboard_summary_live(
     user_id: str,
     account: Optional[dict] = None,
     account_loaded: bool = False,
+    range_key: str = DASHBOARD_RANGE_DEFAULT_KEY,
 ) -> tuple[dict, dict]:
     """Compact dashboard payload for fast route transitions.
 
     The legacy /dashboard/stats endpoint intentionally remains available for
     backwards compatibility, but it scans several large collections. This
-    summary uses monthly usage counters and bounded event windows so the app can
-    render the dashboard shell and first numbers without waiting on heavy
-    history aggregation.
+    summary uses bounded event windows so the app can render the dashboard
+    shell and first numbers without waiting on heavy history aggregation.
+
+    ``range_key`` is normalized by ``_normalize_dashboard_range`` and selects
+    the time window for window-scoped metrics (messagesSent, conversionRate,
+    commentsProcessed, publicRepliesSent, dmsSent, linkClicks, chart). When
+    omitted (DASHBOARD_RANGE_DEFAULT_KEY) the legacy behavior is preserved:
+    7 daily chart buckets + current-calendar-month counters.
     """
     started = datetime.utcnow()
     if not account_loaded:
@@ -10027,10 +10187,22 @@ async def _calculate_dashboard_summary_live(
 
     include_unscoped = await _dashboard_include_unscoped(user_id)
     instagram_account_id = (account or {}).get('instagramAccountId') or (account or {}).get('igUserId')
-    buckets = _dashboard_last_seven_buckets()
-    start_day = datetime.fromisoformat(next(iter(buckets.keys()))).date()
-    current_month = _usage_month(datetime.utcnow())
-    month_start, month_end = _dashboard_month_bounds(current_month)
+    now_dt = datetime.utcnow()
+    is_legacy_default_range = range_key == DASHBOARD_RANGE_DEFAULT_KEY
+    if is_legacy_default_range:
+        # Legacy callers (no `range` param) keep last-7-days chart + the
+        # current calendar-month window for the counters.
+        buckets = _dashboard_last_seven_buckets()
+        window_start, window_end = _dashboard_window_bounds(
+            DASHBOARD_RANGE_DEFAULT_KEY, now_dt,
+        )
+    else:
+        buckets = _dashboard_buckets_for_range(range_key, now_dt)
+        window_start, window_end = _dashboard_window_bounds(range_key, now_dt)
+    start_day = window_start.date()
+    # Kept for usage_events month-key matching below.
+    current_month = _usage_month(now_dt)
+    month_start, month_end = window_start, window_end
     t_after_meta = datetime.utcnow()
 
     # Phase 2.18C performance fix: the 6 independent read paths below
@@ -10128,21 +10300,27 @@ async def _calculate_dashboard_summary_live(
         if not event_dt:
             continue
         event_type = event.get('event_type')
-        day_key = event_dt.date().isoformat()
-        in_current_month = (event.get('event_month') or event_dt.strftime('%Y-%m')) == current_month
+        if is_legacy_default_range:
+            # Legacy month-keyed semantics preserved for callers that
+            # didn't pass `range`.
+            day_key = event_dt.date().isoformat()
+            in_window = (event.get('event_month') or event_dt.strftime('%Y-%m')) == current_month
+        else:
+            day_key = _dashboard_bucket_key(range_key, event_dt)
+            in_window = bool(window_start <= event_dt < window_end)
         if event_type == 'comment_processed':
-            if in_current_month:
+            if in_window:
                 usage_comments_processed += 1
         elif event_type in ('public_reply_sent', 'dm_sent'):
             if day_key in buckets:
                 buckets[day_key]['messages'] += 1
-            if in_current_month:
+            if in_window:
                 if event_type == 'public_reply_sent':
                     usage_public_replies += 1
                 else:
                     usage_dms += 1
         elif event_type == 'link_clicked':
-            if in_current_month:
+            if in_window:
                 usage_link_clicks += 1
 
     # autos / contacts / clicks / recent_comments were fetched in the
@@ -10200,8 +10378,12 @@ async def _calculate_dashboard_summary_live(
         if not _dashboard_doc_matches_account(click, account, include_unscoped):
             continue
         click_dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
-        if click_dt and click_dt.strftime('%Y-%m') != current_month:
-            continue
+        if is_legacy_default_range:
+            if click_dt and click_dt.strftime('%Y-%m') != current_month:
+                continue
+        else:
+            if click_dt and not (window_start <= click_dt < window_end):
+                continue
         tracked_month_link_clicks += 1
         key = _dashboard_key(
             click.get('instagramUserId') or click.get('instagram_user_id') or
@@ -10228,38 +10410,46 @@ async def _calculate_dashboard_summary_live(
             contact_keys.add(key)
 
         comment_dt = _dashboard_comment_dt(comment)
-        in_current_month = bool(comment_dt and month_start <= comment_dt < month_end)
-        # Collect current-month contacts for the conversion-rate
+        in_window = bool(comment_dt and window_start <= comment_dt < window_end)
+        # Collect window-scoped contacts for the conversion-rate
         # denominator. Mirrors the headline ``contact_keys`` filter:
         # excludes the workspace's own IG account id (bot-own replies)
         # and uses the same external-commenter identity key. Comments
         # whose action_status is ``skipped`` from a polling re-scan of
         # an already-replied comment are still counted as "saw this
-        # contact this month" because the contact really did engage —
+        # contact in this window" because the contact really did engage —
         # they just didn't trigger a new send.
         if (
-            in_current_month
+            in_window
             and key
             and key != ig_owner_id
         ):
             month_contact_keys.add(key)
-        if in_current_month and _dashboard_comment_processed(comment):
+        if in_window and _dashboard_comment_processed(comment):
             provider_comments_processed += 1
-        if in_current_month and _dashboard_public_reply_confirmed(comment):
+        if in_window and _dashboard_public_reply_confirmed(comment):
             provider_public_replies += 1
-            day_key = comment_dt.date().isoformat() if comment_dt else None
+            day_key = _dashboard_bucket_key(
+                DASHBOARD_RANGE_DEFAULT_KEY if is_legacy_default_range else range_key,
+                comment_dt,
+            ) if comment_dt else None
             if day_key in provider_weekly_messages:
                 provider_weekly_messages[day_key] += 1
-        if in_current_month and _dashboard_dm_confirmed(comment):
+        if in_window and _dashboard_dm_confirmed(comment):
             provider_dms += 1
-            day_key = comment_dt.date().isoformat() if comment_dt else None
+            day_key = _dashboard_bucket_key(
+                DASHBOARD_RANGE_DEFAULT_KEY if is_legacy_default_range else range_key,
+                comment_dt,
+            ) if comment_dt else None
             if day_key in provider_weekly_messages:
                 provider_weekly_messages[day_key] += 1
 
     # For workspaces that do not yet have account-scoped usage_events, fall back
     # to the monthly_usage counters only when there is a single account. This
-    # preserves isolation for multi-account users.
-    if include_unscoped:
+    # preserves isolation for multi-account users. The fallback is current-
+    # calendar-month-shaped, so it only applies for the legacy default range
+    # (no `range` param). For explicit ranges we trust the per-event window.
+    if include_unscoped and is_legacy_default_range:
         usage_comments_processed = max(usage_comments_processed, int(counters.get('comments_processed') or 0))
         usage_public_replies = max(usage_public_replies, int(counters.get('public_replies_sent') or 0))
         usage_dms = max(usage_dms, int(counters.get('dms_sent') or 0))
@@ -10288,7 +10478,10 @@ async def _calculate_dashboard_summary_live(
         if not _dashboard_doc_matches_account(click, account, include_unscoped):
             continue
         click_dt = _dashboard_dt(click.get('clickedAt'), click.get('createdAt'), click.get('created'))
-        day_key = click_dt.date().isoformat() if click_dt else None
+        day_key = _dashboard_bucket_key(
+            DASHBOARD_RANGE_DEFAULT_KEY if is_legacy_default_range else range_key,
+            click_dt,
+        ) if click_dt else None
         if day_key not in conversion_users_by_day:
             continue
         user_key = _dashboard_key(
@@ -10400,6 +10593,13 @@ async def _calculate_dashboard_summary_live(
         'queueSummary': queue_summary,
         'plan': usage_summary,
         'topAutomations': top_automations,
+        'range': (
+            None if is_legacy_default_range else range_key
+        ),
+        'rangeWindow': {
+            'start': window_start.isoformat() if not is_legacy_default_range else None,
+            'end': window_end.isoformat() if not is_legacy_default_range else None,
+        } if not is_legacy_default_range else None,
         'lastUpdatedAt': datetime.utcnow().isoformat(),
         'instagram': {
             'connected': bool(account and account.get('connectionValid')),
@@ -10425,10 +10625,12 @@ async def _calculate_dashboard_summary_live(
 
 @api.get('/dashboard/summary')
 async def dashboard_summary(
+    range: Optional[str] = Query(None),
     user_id: str = Depends(get_current_active_user_id),
     response: Response = None,
     background_tasks: BackgroundTasks = None,
 ):
+    range_key = _normalize_dashboard_range(range)
     try:
         account = await getActiveInstagramAccount(user_id)
     except HTTPException as e:
@@ -10439,6 +10641,7 @@ async def dashboard_summary(
         user_id,
         account,
         background_tasks=background_tasks,
+        range_key=range_key,
     )
     if response is not None:
         response.headers['X-Dashboard-Summary-Time'] = str(int(meta.get('duration_ms') or 0))

@@ -240,6 +240,7 @@ def test_dashboard_summary_fresh_snapshot_returns_read_model(monkeypatch):
         'user_id': 'u1',
         'instagramAccountId': 'igA',
         'month': month,
+        'range': server.DASHBOARD_RANGE_DEFAULT_KEY,
         'summary': {'activeAutomations': 123, 'instagram': {'instagramAccountId': 'igA'}},
         'expires_at': now + timedelta(seconds=30),
         'max_stale_at': now + timedelta(minutes=5),
@@ -262,6 +263,7 @@ def test_dashboard_summary_stale_snapshot_returns_immediately_and_schedules_refr
         'user_id': 'u1',
         'instagramAccountId': 'igA',
         'month': month,
+        'range': server.DASHBOARD_RANGE_DEFAULT_KEY,
         'summary': {'activeAutomations': 55, 'instagram': {'instagramAccountId': 'igA'}},
         'expires_at': now - timedelta(seconds=1),
         'max_stale_at': now + timedelta(minutes=5),
@@ -289,6 +291,7 @@ def test_dashboard_summary_expired_snapshot_rebuilds(monkeypatch):
         'user_id': 'u1',
         'instagramAccountId': 'igA',
         'month': month,
+        'range': server.DASHBOARD_RANGE_DEFAULT_KEY,
         'summary': {'activeAutomations': 55, 'instagram': {'instagramAccountId': 'igA'}},
         'expires_at': now - timedelta(minutes=10),
         'max_stale_at': now - timedelta(minutes=5),
@@ -311,6 +314,7 @@ def test_dashboard_summary_stale_fallback_on_rebuild_failure(monkeypatch):
         'user_id': 'u1',
         'instagramAccountId': 'igA',
         'month': month,
+        'range': server.DASHBOARD_RANGE_DEFAULT_KEY,
         'summary': {'activeAutomations': 44, 'instagram': {'instagramAccountId': 'igA'}},
         'expires_at': now - timedelta(seconds=1),
         'max_stale_at': now + timedelta(minutes=5),
@@ -569,6 +573,106 @@ def test_top_automations_does_not_leak_other_accounts(monkeypatch):
     ids = {row['id'] for row in result['topAutomations']}
     assert 'on-active' in ids
     assert 'on-other' not in ids
+
+
+def test_dashboard_summary_range_24h_uses_hourly_buckets(monkeypatch):
+    """When the client passes `range=24h`, the chart returns 24
+    hourly buckets, not 7 daily ones. Counters are scoped to the
+    last 24 hours."""
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1', range='24h'))
+    assert len(result['weeklyPerformance']) == 24
+    # Every bucket key looks like an ISO hour 'YYYY-MM-DDTHH'.
+    for bucket in result['weeklyPerformance']:
+        assert isinstance(bucket['date'], str)
+        assert bucket['day'].endswith('h')
+    assert result['range'] == '24h'
+
+
+def test_dashboard_summary_range_7d_uses_seven_daily_buckets(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1', range='7d'))
+    assert len(result['weeklyPerformance']) == 7
+    assert result['range'] == '7d'
+
+
+def test_dashboard_summary_range_30d_uses_thirty_daily_buckets(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1', range='30d'))
+    assert len(result['weeklyPerformance']) == 30
+    assert result['range'] == '30d'
+
+
+def test_dashboard_summary_range_all_uses_twelve_monthly_buckets(monkeypatch):
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1', range='all'))
+    assert len(result['weeklyPerformance']) == 12
+    # Monthly bucket date keys are 'YYYY-MM'.
+    for bucket in result['weeklyPerformance']:
+        assert isinstance(bucket['date'], str)
+        assert len(bucket['date']) == 7
+        assert bucket['date'][4] == '-'
+    assert result['range'] == 'all'
+
+
+def test_dashboard_summary_invalid_range_falls_back_to_legacy_default(monkeypatch):
+    """Unknown range values must not 400 the dashboard. They quietly
+    fall back to the legacy default (last 7 daily buckets, current
+    calendar month counters) so an old/buggy client never blanks the
+    page."""
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1', range='lifetime'))
+    assert len(result['weeklyPerformance']) == 7
+    assert result['range'] is None  # legacy default
+
+
+def test_dashboard_summary_cache_key_includes_range(monkeypatch):
+    """Two different range values must NOT collide in the dashboard
+    snapshot cache."""
+    fake_db = _summary_db()
+    now = datetime.utcnow()
+    month = now.strftime('%Y-%m')
+    # Pre-seed a fresh '7d'-range snapshot.
+    fake_db.dashboard_summaries.docs.append({
+        'user_id': 'u1',
+        'instagramAccountId': 'igA',
+        'month': month,
+        'range': '7d',
+        'summary': {'activeAutomations': 777, 'instagram': {'instagramAccountId': 'igA'}},
+        'expires_at': now + timedelta(seconds=30),
+        'max_stale_at': now + timedelta(minutes=5),
+    })
+    monkeypatch.setattr(server, 'db', fake_db)
+    # '7d' hits the seeded snapshot.
+    r_7d = _run(server.dashboard_summary(user_id='u1', range='7d'))
+    assert r_7d['activeAutomations'] == 777
+    # '30d' must NOT see the same snapshot — different cache key.
+    r_30d = _run(server.dashboard_summary(user_id='u1', range='30d'))
+    assert r_30d['activeAutomations'] != 777
+
+
+def test_dashboard_scoped_docs_no_broad_fallback_when_multiaccount(monkeypatch):
+    """When a workspace has 2+ active linked Instagram accounts and
+    the dashboard caller has no active account context (account=None),
+    the previous broad `{user_id: user_id}` fallback would silently
+    union contacts/comments/clicks from EVERY linked account into the
+    same response — exactly the Total Contacts cross-account leak.
+    With 2+ accounts and no active context, scoped_docs must return
+    an empty result instead."""
+    fake_db = _summary_db()
+    monkeypatch.setattr(server, 'db', fake_db)
+    # _summary_db builds two accounts (igA, igB). include_unscoped
+    # should be False. With account=None, the broad fallback used to
+    # fire — now it does not.
+    docs = _run(server._dashboard_scoped_docs(
+        'contacts', 'u1', None, include_unscoped=False, limit=100,
+    ))
+    assert docs == []
 
 
 def test_dashboard_metric_sources_are_metadata_only(monkeypatch):

@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending unknown_state-reprocess fix
-- Current local HEAD: pending dedupe-reprocess commit
-- Current origin/master: `dae71ebd7e0141f75998d0001010fbd3cee42b24`
-- Current production build_sha: `dae71ebd7e01`
-- Current working status: Diagnosing muhammad_gehad regression. The admin panels (clarified in `dae71eb`) revealed the real root cause: `_handle_new_comment`'s catch-all `else` block at server.py:17426 always returned an `automation_skipped` with `skip_reason='unknown_state'` whenever the existing comment doc carried NO known processed-state signal (no `reply_status=success`, no `dm_status=success`, no `replied` proof, no historical / partial-success / dm-failed / pending). For a polling cycle that wrote a seen-only doc, this incorrectly blocked rule loading forever. Fix in progress: when the catch-all cannot classify the existing doc as a known processed state, set `retry_existing=True` and continue to rule loading. Downstream `opening_dedupe_key` + provider-proof checks still independently prevent any duplicate send. New visibility event `existing_comment_unknown_state_reprocess` records the decision. Account-agnostic. No rule-matching, send, dedupe, HMAC, or rate-limit change.
+- Current local app-code fix: pending dashboard range + redesign commit
+- Current local HEAD: pending dashboard redesign commit
+- Current origin/master: `ef0e1321d5a46692ab05a8f7e7e9cf72ff8f05ed`
+- Current production build_sha: `ef0e1321d5a4`
+- Current working status: Implementing actual dashboard redesign + range filter. Backend: `/api/dashboard/summary?range=24h|7d|30d|all` accepted and validated; cache key now includes range; `_calculate_dashboard_summary_live` builds 24 hourly / 7 daily / 30 daily / 12 monthly buckets per range; counters scoped to the same window. Multi-account strict scoping: `_dashboard_scoped_docs` no longer broad-falls-back to user_id when the workspace has ≥2 active accounts and no active account context — prevents cross-account leak into Total Contacts. Frontend: range selector pill group in header (24h / 7 days / 30 days / All time) persisted to localStorage; tighter card grid (2×4 vs 4-wide); smaller secondary KPI row; compact chart + Top Automations sections; ghost Refresh + rounded New Automation button. No backend automation, rule-matching, webhook, polling, dedupe, HMAC, or rate-limit change. Known-good `948a996` + `ef0e132` automation paths preserved.
 
 Update these values at the start and end of every agent session.
 
