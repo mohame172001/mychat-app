@@ -16,57 +16,16 @@ _DEFERRED_FLOW_FIELDS = (
 )
 
 
-_OPENING_FALLBACK_MAX_TEXT_LENGTH = 1000
-
-
-def _looks_arabic(value: str) -> bool:
-    return any('\u0600' <= ch <= '\u06ff' for ch in str(value or ''))
-
-
-def _opening_dm_fallback_instruction(button_text: str, message: str = '') -> str:
-    button = str(button_text or '').strip()
-    if not button:
-        return ''
-    if _looks_arabic(button) or _looks_arabic(message):
-        return f'لو الزر مش ظاهر عندك، ابعت كلمة: {button}'
-    return f'If the button is not visible, reply with: {button}'
-
-
 def build_opening_dm_with_fallback(message: str, quick_reply_buttons: Optional[List[dict]]) -> str:
-    """Append a browser/laptop text fallback for Instagram quick replies.
+    """Return creator-authored DM copy without visible fallback text.
 
-    Instagram mobile shows quick replies reliably; Instagram Web can hide them.
-    We keep the quick reply payload untouched and add a human-readable fallback
-    instruction derived from the same button title. This is send-time only, so
-    existing automations benefit without creators editing stored messages.
+    The backend still supports typed quick-reply payload fallback when a
+    valid pending session exists, but outgoing DMs must not advertise a
+    separate browser/laptop fallback instruction. Keeping this helper as
+    the single send-time hook preserves account-agnostic behavior for all
+    linked Instagram accounts while leaving quick reply payloads untouched.
     """
-    text = str(message or '').strip()
-    buttons = quick_reply_buttons if isinstance(quick_reply_buttons, list) else []
-    primary = next((b for b in buttons if isinstance(b, dict)), None)
-    button_text = str(
-        (primary or {}).get('title')
-        or (primary or {}).get('button_text')
-        or (primary or {}).get('text')
-        or ''
-    ).strip()
-    instruction = _opening_dm_fallback_instruction(button_text, text)
-    if not text or not instruction:
-        return text
-    lowered = text.casefold()
-    if instruction.casefold() in lowered:
-        return text
-    duplicate_markers = (
-        'لو الزر مش ظاهر عندك',
-        'if the button is not visible',
-        'reply with:',
-        'ابعت كلمة:',
-    )
-    if any(marker.casefold() in lowered for marker in duplicate_markers):
-        return text
-    combined = f'{text}\n\n{instruction}'
-    if len(combined) > _OPENING_FALLBACK_MAX_TEXT_LENGTH:
-        return text
-    return combined
+    return str(message or '').strip()
 
 
 def _comment_dm_flow_enabled(automation: dict) -> bool:

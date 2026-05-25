@@ -1373,7 +1373,7 @@ def test_external_quick_reply_text_fallback_finds_unique_button_session(monkeypa
     assert db.comment_dm_sessions.docs[0]['commenter_id_from_comment'] == 'comment-author-id-only'
 
 
-def test_opening_dm_with_quick_reply_appends_arabic_browser_fallback(monkeypatch):
+def test_opening_dm_with_quick_reply_does_not_append_arabic_browser_fallback(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _, dm_calls = _install_successful_comment_sends(monkeypatch)
     rule = _comment_rule('accA', 'igA', 'ruleA-arabic-fallback')
@@ -1405,10 +1405,10 @@ def test_opening_dm_with_quick_reply_appends_arabic_browser_fallback(monkeypatch
     assert result['matched'] is True
     opening_message = dm_calls[0]['message']
     assert opening_message['quick_replies'][0]['title'] == 'ابعت'
-    assert 'لو الزر مش ظاهر عندك، ابعت كلمة: ابعت' in opening_message['text']
+    assert opening_message['text'] == rule['opening_dm_text']
 
 
-def test_opening_dm_with_quick_reply_appends_english_browser_fallback(monkeypatch):
+def test_opening_dm_with_quick_reply_does_not_append_english_browser_fallback(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     dm_calls = []
 
@@ -1440,10 +1440,12 @@ def test_opening_dm_with_quick_reply_appends_english_browser_fallback(monkeypatc
 
     assert ok is True
     assert dm_calls[0]['quick_replies'][0]['title'] == 'send'
-    assert 'If the button is not visible, reply with: send' in dm_calls[0]['text']
+    assert dm_calls[0]['text'] == 'Want the link?'
+    assert 'If the button is not visible' not in dm_calls[0]['text']
+    assert 'reply with:' not in dm_calls[0]['text']
 
 
-def test_opening_dm_fallback_instruction_is_not_duplicated(monkeypatch):
+def test_existing_creator_fallback_copy_is_not_removed_or_duplicated(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     dm_calls = []
 
@@ -1477,6 +1479,42 @@ def test_opening_dm_fallback_instruction_is_not_duplicated(monkeypatch):
     assert ok is True
     assert dm_calls[0]['text'].count('If the button is not visible') == 1
 
+
+
+
+def test_linked_accounts_share_quick_reply_message_format_without_visible_fallback(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    _, dm_calls = _install_successful_comment_sends(monkeypatch)
+    for rule in db.automations.docs:
+        rule.update({
+            'opening_dm_text': 'Want the link?',
+            'opening_dm_button_text': 'send',
+            'dm_text': 'Want the link?',
+            'link_dm_text': 'Here is the link',
+        })
+
+    for idx, account in enumerate(db.instagram_accounts.docs):
+        owner = server._with_instagram_account_context(db.users.docs[0], account)
+        result = _run(server._handle_new_comment(
+            owner,
+            {
+                'ig_comment_id': f'parity-comment-{idx}',
+                'media_id': f'parity-media-{idx}',
+                'commenter_id': f'external-user-{idx}',
+                'commenter_username': f'external-{idx}',
+                'text': 'hi',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            },
+            source='polling',
+        ))
+        assert result['matched'] is True
+
+    opening_messages = [call['message'] for call in dm_calls if isinstance(call['message'], dict)]
+    assert len(opening_messages) == 2
+    assert {message['text'] for message in opening_messages} == {'Want the link?'}
+    assert [message['quick_replies'][0]['title'] for message in opening_messages] == ['send', 'send']
+    assert all('If the button is not visible' not in message['text'] for message in opening_messages)
+    assert all('reply with:' not in message['text'] for message in opening_messages)
 
 def test_random_button_text_without_pending_session_does_not_continue(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
@@ -2755,8 +2793,9 @@ def test_post_specific_nested_rule_creates_session_and_backfills_aliases(monkeyp
     assert session['automation_id'] == 'ruleB-nested-flow'
     assert session['link_url'] == 'https://example.com/nested'
     quick_reply_message = next(call['message'] for call in dm_calls if isinstance(call['message'], dict))
-    assert quick_reply_message['text'].startswith('Hello from nested node')
-    assert 'If the button is not visible, reply with: Send it' in quick_reply_message['text']
+    assert quick_reply_message['text'] == 'Hello from nested node'
+    assert 'If the button is not visible' not in quick_reply_message['text']
+    assert 'reply with:' not in quick_reply_message['text']
     assert quick_reply_message['quick_replies'][0]['title'] == 'Send it'
     assert quick_reply_message['quick_replies'][0]['payload'] == session['payload']
     persisted = db.automations.docs[0]

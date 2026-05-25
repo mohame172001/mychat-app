@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Visible Browser Fallback Copy Differed Across Linked Accounts
+
+- Date/time: 2026-05-25
+- Symptom: A browser/laptop fallback instruction was visible in outgoing Instagram DMs for one linked account but not another, creating account-to-account behavior differences and a separate "laptop version" of the automation message.
+- Affected area: Instagram comment-DM opening message composition.
+- Root cause: The centralized quick-reply fallback helper appended visible fallback copy at send time on the comment-DM flow entry path. Accounts/rule shapes that used that helper showed the extra copy, while other paths could preserve the creator-authored body, making the product feel inconsistent across linked accounts.
+- Fix commit: pending (this commit).
+- Tests: `test_opening_dm_with_quick_reply_does_not_append_arabic_browser_fallback`, `test_opening_dm_with_quick_reply_does_not_append_english_browser_fallback`, `test_linked_accounts_share_quick_reply_message_format_without_visible_fallback`; `test_multi_account_automation_routing.py` 139 passed; backend full 682 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms both linked accounts send the same creator-authored opening DM body with quick replies still present.
+- Lesson learned: User-visible message composition must be account-agnostic. Internal typed fallback can exist as a backend safety path, but it should not change outgoing copy unless the product explicitly enables it globally.
+- Preventive test added: Yes.
+
 ### Polling Surfaced Old Re-Scans Instead Of Fresh Live Comment
 
 - Date/time: 2026-05-25
