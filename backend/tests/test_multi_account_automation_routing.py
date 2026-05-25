@@ -3904,6 +3904,102 @@ def test_summarize_stop_point_meta_send_failure_surfaces_error(monkeypatch):
     assert err['error_code'] == '10'
 
 
+def test_summarize_stop_point_account_resolved_true_on_polling(monkeypatch):
+    """Polling never writes `account_resolution_success` (only the
+    webhook handler does). The summary's `account_resolved` flag must
+    therefore accept any polling-stage event as proof of resolution,
+    otherwise polling-only accounts always look like resolution
+    failures."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_account_scan_started', source='polling')
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='fresh-1')
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['account_resolved'] is True
+    assert summary['polling_scanned_account'] is True
+    assert summary['source'] == 'polling'
+
+
+def test_summarize_stop_point_polling_scanned_account_via_comment_seen(monkeypatch):
+    """If `poller_account_scan_started` has aged out of the window but
+    `poller_comment_seen` is still present for the same username, the
+    account WAS scanned and the flag must reflect that."""
+    db = _install_multi_account_db(monkeypatch)
+    # Note: no poller_account_scan_started — only poller_comment_seen.
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='fresh-1')
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['polling_scanned_account'] is True
+    assert summary['account_resolved'] is True
+
+
+def test_summarize_stop_point_surfaces_dedupe_skip_reason_over_rule_not_matched(monkeypatch):
+    """An `automation_skipped` event with a concrete `skip_reason` (e.g.
+    `already_replied_success` from d4dae1a's silent-dedupe enrichment)
+    must surface as `exact_stop_reason`, NOT the literal fallback
+    `'rule_not_matched'`."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='dup-1')
+    _seed_flight_event(db, stage='automation_skipped', source='polling',
+                       comment_id_partial='dup-1',
+                       skip_reason='already_replied_success',
+                       extra={'classified_reason': 'comment_already_replied_success'})
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['exact_stop_reason'] == 'already_replied_success'
+    assert summary['rule_matched'] is False
+
+
+def test_summarize_stop_point_surfaces_classified_reason_when_skip_reason_is_unknown(monkeypatch):
+    """The generic catch-all in `_handle_new_comment` writes
+    skip_reason='unknown_state' and the real reason in
+    extra.classified_reason. The summary must promote
+    classified_reason rather than displaying the bare `unknown_state`."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='catchall-1')
+    _seed_flight_event(db, stage='automation_skipped', source='polling',
+                       comment_id_partial='catchall-1',
+                       skip_reason='unknown_state',
+                       extra={'classified_reason': 'comment_processed_unknown_state'})
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['exact_stop_reason'] == 'comment_processed_unknown_state'
+    assert summary['classified_reason'] == 'comment_processed_unknown_state'
+
+
+def test_summarize_stop_point_labels_early_exit_when_no_rule_loading(monkeypatch):
+    """If `automation_skipped` fires WITHOUT `skip_reason` and
+    `rule_loading_finished` never ran for that comment, the stop reason
+    is the explicit `early_exit_before_rule_loading` — not the
+    misleading literal `rule_not_matched`."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='earlyexit-1')
+    _seed_flight_event(db, stage='automation_skipped', source='polling',
+                       comment_id_partial='earlyexit-1')
+    # No rule_loading_finished, no concrete skip_reason.
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['exact_stop_reason'] == 'early_exit_before_rule_loading'
+
+
+def test_summarize_stop_point_flags_rescan_of_processed_comment(monkeypatch):
+    """The `is_latest_event_rescan_of_processed` flag exposes whether
+    the latest visible state is a polling re-scan of a previously-
+    succeeded comment (no fresh send happens, dedupe correctly
+    intercepts). Frontend Flight Recorder uses this to label the row
+    instead of suggesting a failure."""
+    db = _install_multi_account_db(monkeypatch)
+    _seed_flight_event(db, stage='poller_comment_seen', source='polling',
+                       comment_id_partial='rescan-1')
+    _seed_flight_event(db, stage='automation_skipped', source='polling',
+                       comment_id_partial='rescan-1',
+                       skip_reason='already_replied_success',
+                       extra={'classified_reason': 'comment_already_replied_success'})
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+    assert summary['is_latest_event_rescan_of_processed'] is True
+    assert summary['is_latest_event_historical'] is False
+
+
 def test_summarize_stop_point_polling_source_visible_when_only_poller_ran(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     _seed_flight_event(db, stage='poller_account_scan_started', source='polling')
@@ -4067,6 +4163,71 @@ def test_resolve_webhook_counters_falls_back_to_flight_recorder(monkeypatch):
     last_received, last_processed = _run(server._resolve_webhook_counters())
     assert last_received == recv_at
     assert last_processed == proc_at
+
+
+def test_multi_account_health_labels_polling_fallback_vs_global_unmapped(monkeypatch):
+    """Per-account `webhook_delivery_status` clearly distinguishes:
+    - comment_webhooks_received (this account has webhook_comment_detected)
+    - comment_webhooks_observed_globally_not_mapped (comment-field
+      samples exist globally but none mapped to this account)
+    - polling_fallback_only (no comment webhooks anywhere)
+    So the operator never has to guess why this account is on polling."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    now = datetime.utcnow()
+    # account_b has a webhook_comment_detected — its label should be
+    # comment_webhooks_received.
+    _seed_flight_event(db, stage='webhook_comment_detected', source='webhook',
+                       username='account_b', created_at=now,
+                       comment_id_partial='live-b')
+    # Global webhook_received with comment field present — would mean
+    # comment webhooks are arriving somewhere, but for account_a
+    # specifically there is no webhook_comment_detected.
+    db.instagram_automation_events.docs.append({
+        'created_at': now - timedelta(seconds=10),
+        'stage': 'webhook_received',
+        'source': 'webhook',
+        'extra': {
+            'object': 'instagram',
+            'entries_count': 1,
+            'change_fields': ['comments'],
+            'has_messaging': False,
+            'has_comment_field': True,
+        },
+    })
+
+    result = _run(server.admin_instagram_multi_account_health(user_id='u1'))
+    account_a = next(item for item in result['accounts'] if item['username'] == 'account_a')
+    account_b = next(item for item in result['accounts'] if item['username'] == 'account_b')
+
+    assert account_b['webhook_delivery_status'] == 'comment_webhooks_received'
+    assert account_a['webhook_delivery_status'] == 'comment_webhooks_observed_globally_not_mapped'
+
+
+def test_multi_account_health_labels_polling_fallback_when_no_comment_webhooks(monkeypatch):
+    """When NO comment-field webhooks have arrived globally, the
+    per-account label is `polling_fallback_only` — the operator knows
+    Meta isn't delivering comment webhooks anywhere yet."""
+    db = _install_multi_account_db(monkeypatch)
+    _patch_admin_gate(monkeypatch)
+    _patch_no_admin_audit(monkeypatch)
+    # Only messaging-side webhooks, no comments.
+    db.instagram_automation_events.docs.append({
+        'created_at': datetime.utcnow(),
+        'stage': 'webhook_received',
+        'source': 'webhook',
+        'extra': {
+            'object': 'instagram',
+            'entries_count': 1,
+            'change_fields': [],
+            'has_messaging': True,
+            'has_comment_field': False,
+        },
+    })
+    result = _run(server.admin_instagram_multi_account_health(user_id='u1'))
+    for account in result['accounts']:
+        assert account['webhook_delivery_status'] == 'polling_fallback_only'
 
 
 def test_multi_account_health_includes_recent_field_summary(monkeypatch):

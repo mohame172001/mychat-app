@@ -1722,7 +1722,36 @@ function AutomationStopPointCard({ summary }) {
         <div className="sm:col-span-2">
           {ar ? 'السبب الدقيق:' : 'Exact stop reason:'}{' '}
           <span className="font-mono">{reason || '-'}</span>
+          {summary.classified_reason && summary.classified_reason !== reason && (
+            <>
+              {' · '}
+              <span className="font-mono text-slate-600">
+                classified_reason={summary.classified_reason}
+              </span>
+            </>
+          )}
         </div>
+        {(summary.is_latest_event_rescan_of_processed
+          || summary.is_latest_event_historical
+          || summary.latest_event_is_bot_own_reply) && (
+          <div className="sm:col-span-2 flex flex-wrap gap-1">
+            {summary.latest_event_is_bot_own_reply && (
+              <Badge className="bg-slate-200 text-slate-700 border-0 text-[10px]">
+                {ar ? 'رد من البوت' : 'Bot-own reply ignored'}
+              </Badge>
+            )}
+            {summary.is_latest_event_rescan_of_processed && (
+              <Badge className="bg-amber-100 text-amber-800 border-0 text-[10px]">
+                {ar ? 'إعادة فحص تعليق مُعالَج' : 'Re-scan of already-processed comment'}
+              </Badge>
+            )}
+            {summary.is_latest_event_historical && (
+              <Badge className="bg-slate-200 text-slate-700 border-0 text-[10px]">
+                {ar ? 'تعليق قديم' : 'Historical comment'}
+              </Badge>
+            )}
+          </div>
+        )}
         {summary.last_send_error && (
           <div className="sm:col-span-2 text-rose-700">
             {ar ? 'آخر خطأ Meta:' : 'Last send error:'}{' '}
@@ -2361,14 +2390,35 @@ function WebhookHealthAccountCard({ account }) {
   const stop = account.stop_point_summary || {};
   const stopReason = stop.exact_stop_reason || '-';
   const stopSource = stop.source || '-';
-  const lastWebhook = account.last_webhook_event_time;
+  const lastWebhook = account.last_webhook_event_time || account.last_comment_webhook_event_time;
+  const lastMessagingWebhook = account.last_messaging_webhook_event_time;
+  const lastResolutionFailed = account.last_account_resolution_failed_at;
   const lastPolling = account.last_polling_scan_time || account.polling_last_scan_at;
   const lastWebhookMissing = !lastWebhook;
+  const deliveryStatus = account.webhook_delivery_status || (
+    lastWebhook ? 'comment_webhooks_received' : 'polling_fallback_only'
+  );
   const cardTone = !account.connection_valid
     ? 'bg-rose-50 border-rose-200'
     : missing.length > 0 || lastWebhookMissing
       ? 'bg-amber-50 border-amber-200'
       : 'bg-emerald-50 border-emerald-200';
+  const deliveryBadge = (() => {
+    switch (deliveryStatus) {
+      case 'comment_webhooks_received':
+        return { tone: 'bg-emerald-100 text-emerald-700',
+                 label: ar ? 'webhook عامل' : 'Webhook delivery OK' };
+      case 'comment_webhooks_observed_globally_not_mapped':
+        return { tone: 'bg-amber-100 text-amber-800',
+                 label: ar
+                   ? 'webhook رُصد عالميًا — لم يُربط بهذا الحساب'
+                   : 'Webhook observed globally — not mapped to this account' };
+      case 'polling_fallback_only':
+      default:
+        return { tone: 'bg-slate-200 text-slate-700',
+                 label: ar ? 'يعمل عبر polling فقط' : 'Polling fallback only' };
+    }
+  })();
 
   return (
     <div className={`border rounded-lg p-3 text-sm ${cardTone}`} data-testid="webhook-health-account-card">
@@ -2377,6 +2427,9 @@ function WebhookHealthAccountCard({ account }) {
         <span className="text-xs text-slate-500 font-mono">
           {account.instagram_account_id_partial || '-'}
         </span>
+        <Badge className={`border-0 text-[10px] ${deliveryBadge.tone}`} data-testid="webhook-delivery-status">
+          {deliveryBadge.label}
+        </Badge>
         <div className="ms-auto flex flex-wrap gap-1">
           <Badge className={`border-0 text-[10px] ${account.connection_valid ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
             connectionValid: {String(!!account.connection_valid)}
@@ -2418,11 +2471,27 @@ function WebhookHealthAccountCard({ account }) {
 
         <div>
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
-            {ar ? 'آخر webhook (حدث)' : 'last_webhook_event_time'}
+            {ar ? 'آخر webhook (تعليق)' : 'last_comment_webhook_event_time'}
           </div>
           <div className={`font-mono break-all ${lastWebhookMissing ? 'text-rose-700' : ''}`}>
             {lastWebhook || (ar ? '— لم يصل بعد' : '— never observed')}
           </div>
+
+          <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+            {ar ? 'آخر webhook (messaging)' : 'last_messaging_webhook_event_time'}
+          </div>
+          <div className="font-mono break-all">
+            {lastMessagingWebhook || (ar ? '— لم يصل بعد' : '— never observed')}
+          </div>
+
+          {lastResolutionFailed && (
+            <>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
+                {ar ? 'آخر فشل في تحديد الحساب' : 'last_account_resolution_failed_at'}
+              </div>
+              <div className="font-mono break-all text-rose-700">{lastResolutionFailed}</div>
+            </>
+          )}
 
           <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold mt-2">
             {ar ? 'آخر مسح polling' : 'last_polling_scan_time'}
@@ -2512,6 +2581,14 @@ const STAGE_TONE = {
   poller_account_scan_started: 'bg-slate-100 text-slate-500',
 };
 
+const DEDUPE_SKIP_REASONS = new Set([
+  'already_replied_success',
+  'comment_already_pending_queue',
+  'comment_already_partial_success',
+  'comment_already_dm_failed',
+  'public_reply_required_recovery',
+]);
+
 function classifyFlightRecorderEvents(events) {
   const list = Array.isArray(events) ? events : [];
   // events are returned newest-first by the backend.
@@ -2527,9 +2604,36 @@ function classifyFlightRecorderEvents(events) {
     : null;
   const automationSuccessAny = list.find((e) => e.stage === 'automation_success');
   const scanCount = list.filter((e) => e.stage === 'poller_account_scan_started').length;
+  const skippedForLatest = latestCommentId
+    ? list.find((e) => e.stage === 'automation_skipped' && e.comment_id_partial === latestCommentId)
+    : null;
+  const skipReasonForLatest = skippedForLatest?.skip_reason || null;
+  const classifiedReasonForLatest =
+    skippedForLatest?.extra?.classified_reason || null;
+  const isLatestBotOwnReply = skipReasonForLatest === 'bot_own_reply';
+  const isLatestRescan = !!(
+    skipReasonForLatest && DEDUPE_SKIP_REASONS.has(skipReasonForLatest)
+  );
+  const isLatestHistorical =
+    skipReasonForLatest === 'historical_before_rule_activation' ||
+    classifiedReasonForLatest === 'comment_skipped_historical';
+  const isLatestUnknownState =
+    skipReasonForLatest === 'unknown_state' ||
+    classifiedReasonForLatest === 'comment_processed_unknown_state';
+
   let suspectedCandidate = 'no_data';
   if (!latestComment) {
     suspectedCandidate = 'no_comment_in_window';
+  } else if (isLatestBotOwnReply) {
+    suspectedCandidate = 'latest_is_bot_own_reply';
+  } else if (isLatestRescan) {
+    suspectedCandidate = 'latest_is_rescan_of_processed';
+  } else if (isLatestHistorical) {
+    suspectedCandidate = 'latest_is_historical';
+  } else if (skippedForLatest && (skipReasonForLatest || classifiedReasonForLatest)) {
+    // A concrete skip reason exists — don't call it "silent early exit"
+    // anymore. Surface the actual reason.
+    suspectedCandidate = `skipped:${classifiedReasonForLatest || skipReasonForLatest}`;
   } else if (!ruleLoadingForLatest) {
     suspectedCandidate = 'silent_early_exit_possible';
   } else if (automationSuccessAny) {
@@ -2548,6 +2652,12 @@ function classifyFlightRecorderEvents(events) {
     automation_success_anywhere: !!automationSuccessAny,
     automation_success_comment_id_partial: automationSuccessAny?.comment_id_partial || null,
     poller_account_scan_started_count: scanCount,
+    latest_skip_reason: skipReasonForLatest,
+    latest_classified_reason: classifiedReasonForLatest,
+    is_latest_event_bot_own_reply: isLatestBotOwnReply,
+    is_latest_event_rescan_of_processed: isLatestRescan,
+    is_latest_event_historical: isLatestHistorical,
+    is_latest_event_unknown_state: isLatestUnknownState,
     suspected_candidate: suspectedCandidate,
   };
 }
@@ -2781,6 +2891,33 @@ function FlightRecorderTab() {
                 {ar ? 'المرشح المُشتبه به' : 'suspected_candidate'}
               </div>
               <div className="font-mono">{classification.suspected_candidate}</div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {classification.is_latest_event_bot_own_reply && (
+                  <Badge className="bg-slate-200 text-slate-700 border-0 text-[10px]">
+                    {ar ? 'رد من البوت' : 'Bot-own reply ignored'}
+                  </Badge>
+                )}
+                {classification.is_latest_event_rescan_of_processed && (
+                  <Badge className="bg-amber-100 text-amber-800 border-0 text-[10px]">
+                    {ar ? 'إعادة فحص تعليق مُعالَج' : 'Re-scan of already processed comment'}
+                  </Badge>
+                )}
+                {classification.is_latest_event_historical && (
+                  <Badge className="bg-slate-200 text-slate-700 border-0 text-[10px]">
+                    {ar ? 'تعليق قديم' : 'Historical'}
+                  </Badge>
+                )}
+                {classification.is_latest_event_unknown_state && (
+                  <Badge className="bg-rose-100 text-rose-700 border-0 text-[10px]">
+                    {ar ? 'حالة غير محدّدة' : 'unknown_state'}
+                  </Badge>
+                )}
+                {classification.latest_classified_reason && (
+                  <Badge className="bg-white text-slate-700 border border-slate-300 text-[10px]">
+                    classified_reason=<span className="font-mono">{classification.latest_classified_reason}</span>
+                  </Badge>
+                )}
+              </div>
             </div>
           </div>
         </div>

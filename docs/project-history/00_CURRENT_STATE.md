@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending dashboard metrics fix
-- Current local HEAD: pending dashboard fix commit
-- Current origin/master: `9587d1c0c5609cdce2f5b42510fed3afd50033f6`
-- Current production build_sha: `9587d1c0c560`
-- Current working status: Implementing dashboard correctness/clarity fixes per the read-only audit. (1) Conversion Rate now uses current-month contacts as the denominator so numerator and denominator share the same time window. (2) Top Automations ordered by `sent` desc, active first, created desc. (3) Frontend card subtitles clarify scope (this month / active account). (4) Optional secondary KPI row shows existing payload fields (Comments Processed, Public Replies, Opening DMs, Link Clicks, Connected Accounts). No backend automation change, no rule-matching change, no webhook/polling change. Multi-account general automation remains live-verified known-good from `948a996`.
+- Current local app-code fix: pending admin diagnostic summary fix
+- Current local HEAD: pending admin diagnostic clarity commit
+- Current origin/master: `4ea7bef3e6298b0bb74610e9d09d4840f1b7e544`
+- Current production build_sha: `4ea7bef3e629`
+- Current working status: Cleaning up admin diagnostic panels so they reflect the known-good automation. (1) Stop Point summary: `account_resolved` and `polling_scanned_account` now broaden to any polling-stage event in the window so polling-only accounts no longer report False. (2) `unknown_state` / `rule_not_matched` resolution promotes `extra.classified_reason` and `early_exit_before_rule_loading` when `rule_loading_finished` never ran. (3) New summary flags `classified_reason`, `is_latest_event_rescan_of_processed`, `is_latest_event_historical`. (4) `next_recommended_action` covers the new reasons + the dedupe-skip family. (5) Multi-account-health gains per-account `last_comment_webhook_event_time`, `last_messaging_webhook_event_time`, `last_account_resolution_failed_at`, and a `webhook_delivery_status` label (comment_webhooks_received / comment_webhooks_observed_globally_not_mapped / polling_fallback_only). (6) Frontend Flight Recorder classifier no longer reports `silent_early_exit_possible` when a concrete skip reason exists; renders new badges for bot-own-reply / rescan / historical / unknown_state. (7) Webhook Health card renders the per-account delivery-status badge + the new timestamps. (8) Stop Point card shows `classified_reason` + state badges. No backend automation, rule-matching, webhook, polling, dedupe, HMAC, or rate-limit change. Known-good app code from `948a996` is preserved.
 
 Update these values at the start and end of every agent session.
 

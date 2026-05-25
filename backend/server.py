@@ -21777,6 +21777,19 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
         return 'This Instagram account has no active automations — create or enable a comment automation for it.'
     if reason in {'rule_not_matched', 'no_rule_match'}:
         return 'Comment was on a post not covered by any rule (most likely an uncovered post or a post-specific rule whose selected media did not match).'
+    if reason == 'early_exit_before_rule_loading':
+        return 'Comment processing exited before rule loading — most often a dedupe / already-processed / pending state. Check the classified reason on the latest skip event.'
+    if reason in {
+        'already_replied_success',
+        'comment_already_replied_success',
+        'comment_already_partial_success',
+        'comment_already_dm_failed',
+        'comment_already_pending_queue',
+        'public_reply_required_recovery',
+    }:
+        return 'A previous run already replied or has work pending for this physical comment id — the bot correctly refused to re-send. Test from a brand-new comment to see the full flow again.'
+    if reason in {'unknown_state', 'comment_processed_unknown_state'}:
+        return 'The latest skip event did not classify into a known dedupe state. Inspect classified_reason / last_send_error and the most recent comment doc action_status for the underlying cause.'
     if 'selected_media' in reason or reason in {'post_specific_rule_media_mismatch', 'media_match_failed'}:
         return 'Post-specific rule did not fire because the commented post id did not match selected_media_id — comment on the rule\'s selected post or add a general any-post rule.'
     if reason in {'historical_before_rule_activation'}:
@@ -21870,6 +21883,18 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             scoped_events = scoped
     account_failed = _latest_event(events, {'account_resolution_failed'})
     account_success = _latest_event(events, {'account_resolution_success'})
+    # `account_resolution_success` is only recorded by the webhook handler
+    # (server.py: _process_webhook). The polling path never writes it, so
+    # for polling-only accounts the legacy check `bool(account_success)`
+    # always reported `account_resolved=false` even though polling
+    # clearly had the account context. Widen to also accept any polling-
+    # stage event in the username-scoped window — polling cannot run
+    # without a resolved account.
+    polling_account_context_event = _latest_event(events, {
+        'poller_account_scan_started',
+        'poller_media_scan_started',
+        'poller_comment_seen',
+    })
     rules_loaded = _latest_event(scoped_events, {'rule_loading_finished'})
     rule_match = _latest_event(scoped_events, {'rule_match_success'})
     rule_miss = _latest_event(scoped_events, {'rule_match_failed', 'automation_skipped'})
@@ -21911,26 +21936,64 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'dedupe_skipped',
     })
     success = _latest_event(scoped_events, {'automation_success'})
-    poll_scan = _latest_event(events, {'poller_account_scan_started'})
+    # `polling_scanned_account` previously only checked
+    # `poller_account_scan_started`. If that single stage aged out of
+    # the 100-event window but downstream polling events (media-scan or
+    # per-comment seen) for the same username are still present, the
+    # account WAS scanned and the operator should see that as true.
+    poll_scan = _latest_event(events, {
+        'poller_account_scan_started',
+        'poller_media_scan_started',
+        'poller_comment_seen',
+    })
 
     rules_count = None
     if rules_loaded:
         extra = rules_loaded.get('extra') or {}
         rules_count = extra.get('rules_count')
 
+    # Promote a recorded `classified_reason` (from d4dae1a's silent-
+    # dedupe enrichment) when the bare `skip_reason` is the catch-all
+    # `unknown_state` — gives the operator the underlying reason
+    # instead of the literal string `unknown_state`.
+    def _resolved_skip_reason(event: Optional[dict]) -> Optional[str]:
+        if not event:
+            return None
+        skip_reason = event.get('skip_reason')
+        extra = (event.get('extra') or {}) if isinstance(event, dict) else {}
+        classified = extra.get('classified_reason') if isinstance(extra, dict) else None
+        if skip_reason and skip_reason not in {'unknown_state', 'comment_processed_unknown_state'}:
+            return skip_reason
+        if classified:
+            return classified
+        return skip_reason
+
     stop_reason = 'no_comment_seen'
     if account_failed and (not comment_event or account_failed.get('created_at') >= comment_event.get('created_at')):
-        stop_reason = account_failed.get('skip_reason') or 'account_resolution_failed'
+        stop_reason = _resolved_skip_reason(account_failed) or 'account_resolution_failed'
     elif not comment_event and rule_miss:
-        stop_reason = rule_miss.get('skip_reason') or 'rule_not_matched'
+        stop_reason = _resolved_skip_reason(rule_miss) or 'rule_not_matched'
     elif not comment_event:
         stop_reason = 'no_comment_seen'
-    elif not account_success and comment_event.get('source') == 'webhook':
+    elif not account_success and not polling_account_context_event and comment_event.get('source') == 'webhook':
+        # Only flag account_resolution_not_recorded for true webhook
+        # paths with no resolution event AND no polling context. If
+        # polling has touched the account, treat it as resolved.
         stop_reason = 'account_resolution_not_recorded'
     elif rules_loaded and rules_count == 0:
         stop_reason = 'no_active_rules_loaded'
     elif not rule_match:
-        stop_reason = (rule_miss or {}).get('skip_reason') or 'rule_not_matched'
+        resolved = _resolved_skip_reason(rule_miss)
+        if resolved:
+            stop_reason = resolved
+        elif rule_miss is not None and not rules_loaded:
+            # An automation_skipped fired but rule_loading_finished did
+            # not — execution exited before rule loading (dedupe /
+            # already-replied / pending / dm-failed / catch-all). Label
+            # it concretely instead of the misleading 'rule_not_matched'.
+            stop_reason = 'early_exit_before_rule_loading'
+        else:
+            stop_reason = 'rule_not_matched'
     elif failure:
         stop_reason = failure.get('skip_reason') or failure.get('error_code') or failure.get('stage')
     elif success:
@@ -22009,12 +22072,27 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             'error_code': latest.get('error_code'),
             'error_message': latest.get('error_message'),
         }
+    # `account_resolved` accepts either an explicit webhook
+    # `account_resolution_success` OR any polling-stage event in the
+    # username-scoped window (polling can't run without a resolved
+    # account, so the polling event itself proves resolution).
+    account_resolved_flag = bool(account_success or polling_account_context_event)
+    # Surface the rule_miss classified_reason so the frontend can show
+    # "Skipped: already_replied_success" rather than just
+    # "unknown_state".
+    rule_miss_classified = None
+    if rule_miss is not None:
+        rm_extra = (rule_miss.get('extra') or {}) if isinstance(rule_miss, dict) else {}
+        rule_miss_classified = (
+            rm_extra.get('classified_reason') if isinstance(rm_extra, dict) else None
+        )
     summary = {
         'username': _automation_flight_username_key(username),
         'last_comment_reached_backend': bool(comment_event),
         'source': (comment_event or {}).get('source') if comment_event else 'none',
-        'account_resolved': bool(account_success),
+        'account_resolved': account_resolved_flag,
         'polling_scanned_account': bool(poll_scan),
+        'classified_reason': rule_miss_classified,
         'rules_loaded': bool(rules_loaded),
         'rules_loaded_count': rules_count,
         'rule_matched': bool(rule_match),
@@ -22048,6 +22126,33 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             and latest_bot_own_reply
             and raw_latest_comment_event.get('comment_id_partial') == latest_bot_own_reply.get('comment_id_partial')
         ),
+        # Explicit re-scan / historical / fresh-comment flags for the
+        # latest external comment so the admin UI never has to guess.
+        'is_latest_event_rescan_of_processed': bool(
+            rule_miss is not None
+            and (
+                (rule_miss.get('skip_reason') in {
+                    'already_replied_success',
+                    'comment_already_partial_success',
+                    'comment_already_dm_failed',
+                    'comment_already_pending_queue',
+                    'public_reply_required_recovery',
+                })
+                or (rule_miss_classified in {
+                    'comment_already_replied_success',
+                    'comment_already_partial_success',
+                    'comment_already_dm_failed',
+                    'public_reply_required_not_attempted',
+                })
+            )
+        ),
+        'is_latest_event_historical': bool(
+            rule_miss is not None
+            and (
+                rule_miss.get('skip_reason') == 'historical_before_rule_activation'
+                or rule_miss_classified == 'comment_skipped_historical'
+            )
+        ),
         'last_event_at': _latest_event_time(events, {str(event.get('stage')) for event in events}).isoformat()
             if events and isinstance(events[0].get('created_at'), datetime) else None,
     }
@@ -22078,6 +22183,48 @@ async def admin_instagram_multi_account_health(
     }).limit(limit).to_list(limit)
     items = []
     owner_cache: Dict[str, Optional[dict]] = {}
+
+    # Compute the recent webhook field-shape summary up front so each
+    # per-account block can label its delivery status with reference to
+    # whether comment-field webhooks are arriving GLOBALLY but not for
+    # this specific account. No payload contents are stored or read —
+    # only the field-name strings.
+    recent_field_summary: Dict[str, Any] = {
+        'samples': 0,
+        'fields_seen': [],
+        'comment_field_samples': 0,
+        'messaging_only_samples': 0,
+    }
+    try:
+        recent_webhook_events = await db.instagram_automation_events.find(
+            {'stage': 'webhook_received'},
+            {'extra': 1, 'created_at': 1},
+        ).sort('created_at', -1).limit(50).to_list(50)
+        fields_union: set = set()
+        comment_field_samples_global = 0
+        messaging_only_samples = 0
+        for ev in recent_webhook_events:
+            extra = (ev.get('extra') or {}) if isinstance(ev, dict) else {}
+            fields = extra.get('change_fields') or []
+            if isinstance(fields, list):
+                for f in fields:
+                    if f:
+                        fields_union.add(str(f)[:40])
+            has_comment = bool(extra.get('has_comment_field'))
+            has_messaging = bool(extra.get('has_messaging'))
+            if has_comment:
+                comment_field_samples_global += 1
+            elif has_messaging and not has_comment:
+                messaging_only_samples += 1
+        recent_field_summary = {
+            'samples': len(recent_webhook_events),
+            'fields_seen': sorted(fields_union),
+            'comment_field_samples': comment_field_samples_global,
+            'messaging_only_samples': messaging_only_samples,
+        }
+    except Exception:
+        pass
+    comment_field_samples_global = int(recent_field_summary.get('comment_field_samples') or 0)
 
     for account in accounts:
         owner_id = str(account.get('userId') or account.get('user_id') or '')
@@ -22185,7 +22332,23 @@ async def admin_instagram_multi_account_health(
                 if isinstance(subscription_missing, list) else [],
             'webhook_subscription_last_checked_at': _iso(account.get('webhookSubscriptionLastCheckedAt')),
             'last_webhook_event_time': _iso(_latest_event_time(flight_events, {'webhook_comment_detected'})),
-            'last_polling_scan_time': _iso(_latest_event_time(flight_events, {'poller_account_scan_started'})),
+            'last_comment_webhook_event_time': _iso(_latest_event_time(flight_events, {'webhook_comment_detected'})),
+            'last_messaging_webhook_event_time': _iso(_latest_event_time(flight_events, {
+                'messaging_event_detected', 'dm_webhook_received', 'quick_reply_click_received',
+            })),
+            'last_account_resolution_failed_at': _iso(_latest_event_time(flight_events, {'account_resolution_failed'})),
+            'webhook_delivery_status': (
+                'comment_webhooks_received'
+                if _latest_event_time(flight_events, {'webhook_comment_detected'}) is not None
+                else (
+                    'comment_webhooks_observed_globally_not_mapped'
+                    if comment_field_samples_global > 0
+                    else 'polling_fallback_only'
+                )
+            ),
+            'last_polling_scan_time': _iso(_latest_event_time(flight_events, {
+                'poller_account_scan_started', 'poller_media_scan_started', 'poller_comment_seen',
+            })),
             'last_comment_seen_time': _iso(_latest_event_time(flight_events, {'webhook_comment_detected', 'poller_comment_seen'})),
             'last_rule_match_time': _iso(_latest_event_time(flight_events, {'rule_match_success'})),
             'last_automation_success_time': _iso(_latest_event_time(flight_events, {'automation_success'})),
@@ -22230,45 +22393,6 @@ async def admin_instagram_multi_account_health(
         })
 
     webhook_last_received, webhook_last_processed = await _resolve_webhook_counters()
-    # Recent webhook field-shape summary so the operator can tell whether
-    # comment-field webhooks are arriving at all. Aggregated from the last
-    # N `webhook_received` events. No tokens, no payload contents.
-    recent_field_summary: Dict[str, Any] = {
-        'samples': 0,
-        'fields_seen': [],
-        'comment_field_samples': 0,
-        'messaging_only_samples': 0,
-    }
-    try:
-        recent_webhook_events = await db.instagram_automation_events.find(
-            {'stage': 'webhook_received'},
-            {'extra': 1, 'created_at': 1},
-        ).sort('created_at', -1).limit(50).to_list(50)
-        fields_union: set = set()
-        comment_field_samples = 0
-        messaging_only_samples = 0
-        for ev in recent_webhook_events:
-            extra = (ev.get('extra') or {}) if isinstance(ev, dict) else {}
-            fields = extra.get('change_fields') or []
-            if isinstance(fields, list):
-                for f in fields:
-                    if f:
-                        fields_union.add(str(f)[:40])
-            has_comment = bool(extra.get('has_comment_field'))
-            has_messaging = bool(extra.get('has_messaging'))
-            if has_comment:
-                comment_field_samples += 1
-            elif has_messaging and not has_comment:
-                messaging_only_samples += 1
-        recent_field_summary = {
-            'samples': len(recent_webhook_events),
-            'fields_seen': sorted(fields_union),
-            'comment_field_samples': comment_field_samples,
-            'messaging_only_samples': messaging_only_samples,
-        }
-    except Exception:
-        # Diagnostic only — never block the endpoint on aggregation errors.
-        pass
     return {
         'ok': True,
         'count': len(items),
