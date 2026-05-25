@@ -116,7 +116,11 @@ def test_dashboard_summary_is_scoped_to_active_instagram_account(monkeypatch):
     assert result['messagesSent'] == 2
     assert result['totalContacts'] == 2
     assert result['convertedContacts'] == 1
-    assert result['conversionRate'] == 50.0
+    # Conversion rate is current-month converters / current-month contacts.
+    # The only contact observed engaging this month in this fixture is the
+    # one with a fresh link-click event (viewer1), so 1 / 1 = 100%.
+    # totalContacts (all-time, all engagement sources) stays at 2.
+    assert result['conversionRate'] == 100.0
     assert len(result['weeklyPerformance']) == 7
     assert sum(day['messages'] for day in result['weeklyPerformance']) == 2
     assert sum(day['conversions'] for day in result['weeklyPerformance']) == 1
@@ -398,6 +402,173 @@ def test_dashboard_summary_prefers_provider_proof_for_active_account(monkeypatch
     assert result['messagesSent'] == 2
     assert result['totalContacts'] == 2
     assert sum(day['messages'] for day in result['weeklyPerformance']) == 2
+
+
+def test_conversion_rate_uses_current_month_contacts_as_denominator(monkeypatch):
+    """Pin the dashboard conversion-rate semantic contract:
+    numerator (converted) and denominator (contacts) both come from the
+    SAME current-month window. Before this fix the denominator was
+    all-time, so any workspace with old contact history saw the rate
+    artificially collapse on a fresh month."""
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    fake_db = FakeDB(
+        account=[account_a],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        contacts=[
+            # Three historical contacts — none engaged this month.
+            {'id': 'cA', 'user_id': 'u1', 'instagramAccountId': 'igA', 'instagramUserId': 'historical-1'},
+            {'id': 'cB', 'user_id': 'u1', 'instagramAccountId': 'igA', 'instagramUserId': 'historical-2'},
+            {'id': 'cC', 'user_id': 'u1', 'instagramAccountId': 'igA', 'instagramUserId': 'historical-3'},
+        ],
+        comments=[
+            # Two external commenters observed THIS month — these
+            # populate the conversion denominator.
+            _comment('igA', 'fresh-fan-1'),
+            _comment('igA', 'fresh-fan-2'),
+        ],
+        link_click_events=[
+            # One of them clicked the tracked link.
+            _click('igA', 'fresh-fan-1'),
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_summary(user_id='u1'))
+
+    # totalContacts stays all-time and union-based:
+    # historical-1/2/3 + fresh-fan-1/2 = 5 (fresh-fan-1 dedupes across
+    # comments + clicks, fresh-fan-2 only from comments).
+    assert result['totalContacts'] == 5
+    # current-month contacts = {fresh-fan-1, fresh-fan-2} ⇒ denominator 2.
+    # converted = {fresh-fan-1} ⇒ 1 / 2 = 50.0%.
+    assert result['conversionRate'] == 50.0
+    assert result['convertedContacts'] == 1
+
+
+def test_conversion_rate_zero_when_no_current_month_contacts(monkeypatch):
+    """If no external contact engaged this month, conversion rate is
+    0%, not NaN, not last-month carryover."""
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    fake_db = FakeDB(
+        account=[account_a],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        contacts=[
+            # Old contacts only.
+            {'id': 'old1', 'user_id': 'u1', 'instagramAccountId': 'igA', 'instagramUserId': 'old-1'},
+            {'id': 'old2', 'user_id': 'u1', 'instagramAccountId': 'igA', 'instagramUserId': 'old-2'},
+        ],
+        comments=[],
+        link_click_events=[],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_summary(user_id='u1'))
+    assert result['conversionRate'] == 0
+    assert result['convertedContacts'] == 0
+    # totalContacts is still the all-time value.
+    assert result['totalContacts'] == 2
+
+
+def test_conversion_rate_excludes_bot_own_replies_from_denominator(monkeypatch):
+    """An automation's own-account bot reply must not appear as a
+    contact in either the headline or the conversion denominator."""
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    fake_db = FakeDB(
+        account=[account_a],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        contacts=[],
+        comments=[
+            _comment('igA', commenter='igA'),  # bot-own reply (commenter == own ig id)
+            _comment('igA', commenter='external-1'),
+        ],
+        link_click_events=[
+            _click('igA', 'external-1'),
+        ],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_summary(user_id='u1'))
+    # Only the real external commenter counts.
+    assert result['totalContacts'] == 1
+    assert result['convertedContacts'] == 1
+    assert result['conversionRate'] == 100.0
+
+
+def test_top_automations_orders_by_sent_then_active_then_created(monkeypatch):
+    """Top Automations row must sort by `sent` desc, then active first
+    on ties, then created desc. Currently the dashboard summary fetches
+    in created-desc order; the sort key must re-rank for the card."""
+    now = datetime.utcnow()
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    fake_db = FakeDB(
+        account=[account_a],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            # Newest, draft, zero sends — pre-fix would be the #1 row.
+            {'id': 'new-draft', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'draft', 'name': 'New draft', 'sent': 0,
+             'created': now - timedelta(minutes=1)},
+            # Older active, lots of sends — must end up first after fix.
+            {'id': 'top-volume-active', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'active', 'name': 'Top volume active', 'sent': 999,
+             'created': now - timedelta(days=30)},
+            # Tied sent count, one active one paused.
+            {'id': 'tied-active', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'active', 'name': 'Tied active', 'sent': 50,
+             'created': now - timedelta(days=2)},
+            {'id': 'tied-paused', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'paused', 'name': 'Tied paused', 'sent': 50,
+             'created': now - timedelta(days=1)},
+            # Same sent + same status — newer wins.
+            {'id': 'tied-older', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'active', 'name': 'Tied older', 'sent': 10,
+             'created': now - timedelta(days=10)},
+            {'id': 'tied-newer', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'active', 'name': 'Tied newer', 'sent': 10,
+             'created': now - timedelta(days=1)},
+        ],
+        comments=[],
+        link_click_events=[],
+        contacts=[],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.dashboard_summary(user_id='u1'))
+    ids = [row['id'] for row in result['topAutomations']]
+    assert ids[0] == 'top-volume-active'
+    # Tied-50: active must come before paused.
+    assert ids[1] == 'tied-active'
+    assert ids[2] == 'tied-paused'
+    # Tied-10: newer created first.
+    assert ids[3] == 'tied-newer'
+    assert ids[4] == 'tied-older'
+    # The brand-new zero-sent draft falls to the bottom (or out of top 6).
+    assert ids[5] == 'new-draft'
+
+
+def test_top_automations_does_not_leak_other_accounts(monkeypatch):
+    """Multi-account: Top Automations must show only the active
+    account's automations even though the sort key is global."""
+    account_a = _account(id='accA', userId='u1', instagramAccountId='igA', username='acct_a')
+    account_b = _account(id='accB', userId='u1', instagramAccountId='igB', username='acct_b')
+    fake_db = FakeDB(
+        account=[account_a, account_b],
+        user=_user(id='u1', active_instagram_account_id='accA', ig_user_id='igA'),
+        automations=[
+            {'id': 'on-active', 'user_id': 'u1', 'instagramAccountId': 'igA',
+             'status': 'active', 'name': 'On active', 'sent': 5},
+            {'id': 'on-other', 'user_id': 'u1', 'instagramAccountId': 'igB',
+             'status': 'active', 'name': 'On other', 'sent': 9999},
+        ],
+        comments=[],
+        link_click_events=[],
+        contacts=[],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    result = _run(server.dashboard_summary(user_id='u1'))
+    ids = {row['id'] for row in result['topAutomations']}
+    assert 'on-active' in ids
+    assert 'on-other' not in ids
 
 
 def test_dashboard_metric_sources_are_metadata_only(monkeypatch):

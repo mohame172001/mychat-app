@@ -10148,7 +10148,28 @@ async def _calculate_dashboard_summary_live(
     # autos / contacts / clicks / recent_comments were fetched in the
     # asyncio.gather() above.
     active_autos = [auto for auto in autos if _automation_active(auto)]
-    top_automations = [_dashboard_auto_out(auto) for auto in autos[:6]]
+    # Top Automations card label says "Top". The card surfaces `sent`
+    # next to each row, so the operator expects sorting by activity.
+    # Order:
+    #   1. higher `sent` first (activity desc)
+    #   2. active automations before paused/draft on ties
+    #   3. newer `created` (or `createdAt`) first as final tie-break
+    # so freshly-active high-volume rules float to the top and the row
+    # stops misleading the operator with newly-created drafts above
+    # older volume earners. No backend payload shape change — same
+    # `_dashboard_auto_out` projection. Account scoping unchanged.
+    def _top_auto_sort_key(auto: dict) -> tuple:
+        sent_count = int(auto.get('sent') or 0)
+        active_rank = 0 if _automation_active(auto) else 1
+        created_dt = _dashboard_dt(auto.get('created'), auto.get('createdAt'))
+        created_ts = created_dt.timestamp() if created_dt else 0.0
+        # Tuple key compared as (-sent, active_rank, -created_ts) so a
+        # plain ascending sort matches the rules above.
+        return (-sent_count, active_rank, -created_ts)
+    top_automations = [
+        _dashboard_auto_out(auto)
+        for auto in sorted(autos, key=_top_auto_sort_key)[:6]
+    ]
 
     ig_owner_id = _dashboard_key(instagram_account_id)
     contact_keys = set()
@@ -10164,6 +10185,16 @@ async def _calculate_dashboard_summary_live(
             contact_keys.add(key)
 
     converted_contacts = set()
+    # Phase 2.18Z dashboard metric alignment: collect the SAME time
+    # window for the conversion-rate denominator. ``contact_keys`` stays
+    # all-time so the headline "Total Contacts" card keeps its existing
+    # meaning, but the conversion ratio must compare apples-to-apples —
+    # unique converted contacts THIS MONTH divided by unique observed
+    # contacts THIS MONTH. Before this fix the numerator was month-
+    # scoped while the denominator was all-time, which made the rate
+    # collapse to a misleading single-digit % on any workspace with
+    # contact history older than the current month.
+    month_contact_keys: set = set()
     tracked_month_link_clicks = 0
     for click in clicks:
         if not _dashboard_doc_matches_account(click, account, include_unscoped):
@@ -10179,6 +10210,7 @@ async def _calculate_dashboard_summary_live(
         if key and key != ig_owner_id:
             converted_contacts.add(key)
             contact_keys.add(key)
+            month_contact_keys.add(key)
     # recent_comments was fetched in the asyncio.gather() above.
     provider_comments_processed = 0
     provider_public_replies = 0
@@ -10197,6 +10229,20 @@ async def _calculate_dashboard_summary_live(
 
         comment_dt = _dashboard_comment_dt(comment)
         in_current_month = bool(comment_dt and month_start <= comment_dt < month_end)
+        # Collect current-month contacts for the conversion-rate
+        # denominator. Mirrors the headline ``contact_keys`` filter:
+        # excludes the workspace's own IG account id (bot-own replies)
+        # and uses the same external-commenter identity key. Comments
+        # whose action_status is ``skipped`` from a polling re-scan of
+        # an already-replied comment are still counted as "saw this
+        # contact this month" because the contact really did engage —
+        # they just didn't trigger a new send.
+        if (
+            in_current_month
+            and key
+            and key != ig_owner_id
+        ):
+            month_contact_keys.add(key)
         if in_current_month and _dashboard_comment_processed(comment):
             provider_comments_processed += 1
         if in_current_month and _dashboard_public_reply_confirmed(comment):
@@ -10226,7 +10272,15 @@ async def _calculate_dashboard_summary_live(
 
     total_contacts = len(contact_keys)
     converted_count = len(converted_contacts)
-    conversion_rate = 0 if not total_contacts else round((converted_count / total_contacts) * 100, 1)
+    # Conversion rate aligns numerator + denominator to the current
+    # calendar month (see DASHBOARD_METRIC_SOURCES.conversion_rate).
+    # If no external contacts have been observed this month, the rate
+    # is 0 rather than NaN or stale.
+    month_contacts_count = len(month_contact_keys)
+    conversion_rate = (
+        0 if not month_contacts_count
+        else round((converted_count / month_contacts_count) * 100, 1)
+    )
     month_link_clicks = max(tracked_month_link_clicks, usage_link_clicks)
 
     conversion_users_by_day = {key: set() for key in buckets.keys()}

@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
-- Current local HEAD: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
-- Current origin/master: `948a9964e1d5b30fed432f71bc58cc167e76b75d`
-- Current production build_sha: `948a9964e1d5`
-- Current working status: Live retest confirmed muhammad_gehad polling now processes fresh new-post comments successfully after `948a996`. A fresh comment from a completely new external Instagram account on a new post on muhammad_gehad produced reply + opening DM via the polling fallback. mogehad17 webhook path remains successful. Multi-account general automation is now verified across both linked accounts via two independent delivery paths (webhook for mogehad17, polling for muhammad_gehad). Meta webhook delivery for muhammad_gehad's comment-field events is NOT marked verified — the polling fallback is what carries the new known-good.
+- Current local app-code fix: pending dashboard metrics fix
+- Current local HEAD: pending dashboard fix commit
+- Current origin/master: `9587d1c0c5609cdce2f5b42510fed3afd50033f6`
+- Current production build_sha: `9587d1c0c560`
+- Current working status: Implementing dashboard correctness/clarity fixes per the read-only audit. (1) Conversion Rate now uses current-month contacts as the denominator so numerator and denominator share the same time window. (2) Top Automations ordered by `sent` desc, active first, created desc. (3) Frontend card subtitles clarify scope (this month / active account). (4) Optional secondary KPI row shows existing payload fields (Comments Processed, Public Replies, Opening DMs, Link Clicks, Connected Accounts). No backend automation change, no rule-matching change, no webhook/polling change. Multi-account general automation remains live-verified known-good from `948a996`.
 
 Update these values at the start and end of every agent session.
 

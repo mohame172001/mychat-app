@@ -114,6 +114,19 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Dashboard Conversion Rate + Top Automations Ordering
+
+- Date/time: 2026-05-25
+- Symptom: Read-only dashboard audit found two metric-correctness issues. (1) Conversion Rate mixed time windows — numerator counted unique link-click users in the current calendar month while the denominator was all-time `totalContacts`. Workspaces with old contact history saw the displayed conversion rate artificially collapse at the start of each new month. (2) "Top Automations" was the 6 most recently created automations (`autos[:6]` after a `created` desc fetch), even though the card label said "Top" and rendered `sent` next to each row — newly created drafts ranked above older high-volume rules.
+- Affected area: Dashboard summary endpoint (`/api/dashboard/summary`) and Dashboard frontend card row. No Instagram automation execution path was involved.
+- Root cause (1): `_calculate_dashboard_summary_live` collected the numerator inside the per-month click loop but used the full `contact_keys` set (all-time, union of every source) as the denominator.
+- Root cause (2): the top-automations slice used the natural fetch order (`created` desc) without re-sorting by activity.
+- Fix commit: pending (this commit). (1) New `month_contact_keys` set collected from the per-month click loop and the per-month comment loop, with the same own-account filter and account-scope as `contact_keys`. Conversion rate = `converted_count / len(month_contact_keys) * 100`, 0 when month is empty. `totalContacts` remains all-time. (2) `_top_auto_sort_key` sorts by `(-sent, 0 if active else 1, -created_ts)` before slicing 6. Frontend card subtitles clarify scope ("This month" on messages/conversion, "Active account" on contacts when multiple accounts connected). Optional secondary KPI row exposes payload fields already returned by the endpoint. Backend payload shape unchanged.
+- Tests: `test_conversion_rate_uses_current_month_contacts_as_denominator`, `test_conversion_rate_zero_when_no_current_month_contacts`, `test_conversion_rate_excludes_bot_own_replies_from_denominator`, `test_top_automations_orders_by_sent_then_active_then_created`, `test_top_automations_does_not_leak_other_accounts`. `test_dashboard_summary.py` 18 passed; backend full 650 passed; frontend 184 passed; frontend build passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until a live dashboard retest confirms the numbers display correctly.
+- Lesson learned: When two metrics compose into a ratio, the audit checklist must verify they share the same time window AND the same account/identity filter. A label like "Top X" must correspond to a sort key whose comparator references X.
+- Preventive test added: Yes.
+
 ### Polling Target Skipped Legacy General Rule's New Posts
 
 - Date/time: 2026-05-25

@@ -3,7 +3,8 @@ import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import {
-  Users, Zap, Send, TrendingUp, Plus, RefreshCw
+  Users, Zap, Send, TrendingUp, Plus, RefreshCw,
+  MessageSquare, Reply, Mail, MousePointerClick, Instagram,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -160,12 +161,60 @@ const Dashboard = () => {
   const axisMax = Math.max(1, tickStep * 4);
   const yTicks = Array.from({ length: 5 }, (_, i) => axisMax - (tickStep * i));
 
+  const connectedAccountsCount = Number(stats?.connectedAccounts ?? 0);
+  const totalContactsSubtitle = connectedAccountsCount > 1
+    ? t('dashboard.cards.subtitles.totalContacts')
+    : null;
   const statsCards = [
-    { label: t('dashboard.cards.totalContacts'), value: stats?.totalContacts ?? stats?.total_contacts ?? '-', icon: Users },
-    { label: t('dashboard.cards.activeAutomations'), value: stats?.activeAutomations ?? stats?.active_automations ?? '-', icon: Zap },
-    { label: t('dashboard.cards.messagesSent'), value: stats ? (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString() : '-', icon: Send },
-    { label: t('dashboard.cards.conversionRate'), value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`, icon: TrendingUp },
+    {
+      label: t('dashboard.cards.totalContacts'),
+      value: stats?.totalContacts ?? stats?.total_contacts ?? '-',
+      icon: Users,
+      subtitle: totalContactsSubtitle,
+    },
+    {
+      label: t('dashboard.cards.activeAutomations'),
+      value: stats?.activeAutomations ?? stats?.active_automations ?? '-',
+      icon: Zap,
+      subtitle: connectedAccountsCount > 1
+        ? t('dashboard.cards.subtitles.activeAutomations')
+        : null,
+    },
+    {
+      label: t('dashboard.cards.messagesSent'),
+      value: stats ? (stats?.messagesSent ?? stats?.messages_sent ?? 0).toLocaleString() : '-',
+      icon: Send,
+      subtitle: t('dashboard.cards.subtitles.messagesSent'),
+    },
+    {
+      label: t('dashboard.cards.conversionRate'),
+      value: `${stats?.conversionRate ?? stats?.conversion_rate ?? 0}%`,
+      icon: TrendingUp,
+      subtitle: t('dashboard.cards.subtitles.conversionRate'),
+    },
   ];
+  // Secondary KPI row — uses fields already present in the
+  // /dashboard/summary payload. No backend change. Hidden until the
+  // summary has loaded so we never render zero-everything skeletons.
+  const secondaryKpis = stats
+    ? [
+        { label: t('dashboard.cards.secondary.commentsProcessed'),
+          value: Number(stats?.commentsProcessed ?? 0).toLocaleString(),
+          icon: MessageSquare },
+        { label: t('dashboard.cards.secondary.publicReplies'),
+          value: Number(stats?.publicRepliesSent ?? 0).toLocaleString(),
+          icon: Reply },
+        { label: t('dashboard.cards.secondary.openingDms'),
+          value: Number(stats?.dmsSent ?? 0).toLocaleString(),
+          icon: Mail },
+        { label: t('dashboard.cards.secondary.linkClicks'),
+          value: Number(stats?.linkClicks ?? 0).toLocaleString(),
+          icon: MousePointerClick },
+        { label: t('dashboard.cards.secondary.connectedAccounts'),
+          value: Number(stats?.connectedAccounts ?? 0).toLocaleString(),
+          icon: Instagram },
+      ]
+    : [];
   const topAutomations = stats?.topAutomations || [];
 
   // Phase 2.18Z: first-run empty state — when a user has signed up
@@ -273,10 +322,37 @@ const Dashboard = () => {
                 ) : s.value}
               </div>
               <div className="text-sm text-slate-500 mt-1">{s.label}</div>
+              {s.subtitle && (
+                <div className="text-[11px] text-slate-400 mt-0.5" data-testid="dashboard-card-subtitle">{s.subtitle}</div>
+              )}
             </Card>
           );
         })}
       </div>
+
+      {secondaryKpis.length > 0 && (
+        <div
+          className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3"
+          data-testid="dashboard-secondary-kpis"
+        >
+          {secondaryKpis.map((k) => {
+            const Icon = k.icon;
+            return (
+              <Card key={k.label} className="p-3 rounded-xl border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-slate-50 flex items-center justify-center">
+                    <Icon className="w-3.5 h-3.5 text-slate-500" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-base font-bold font-display leading-tight truncate">{k.value}</div>
+                    <div className="text-[11px] text-slate-500 truncate">{k.label}</div>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
       <div className="mt-6">
         <Card className="p-6 rounded-2xl border-slate-100">
