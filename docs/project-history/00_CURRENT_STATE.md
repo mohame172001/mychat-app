@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending `fix(dashboard): simplify overview and fix range chart labels`
-- Current local HEAD: `e2bc4a3b6a90fac6d3aa2d683278abd5fab12f28` plus local dashboard working changes
-- Current origin/master: `e2bc4a3b6a90fac6d3aa2d683278abd5fab12f28`
-- Current production build_sha: `e2bc4a3b6a90`
-- Current working status: Polishing the Dashboard redesign only. The main dashboard keeps exactly four prominent KPI cards, hides secondary stats behind a collapsed More stats section, caps Top Automations at three rows, fixes range-aware chart x-axis labels, and keeps previous range data visible while a new range refreshes. Warmup/bootstrap dashboard cache keys now include the default `7d` range so the first dashboard paint can reuse the same cached summary. No Billing, Instagram automation, HMAC, dedupe, rate-limit, rule-matching, webhook/polling, or diagnostics-route change.
+- Current local app-code fix: `c084311ee41ef3db27b27d84e480dd472a858e00` (`fix(dashboard): simplify overview and fix range chart labels`)
+- Current local HEAD: docs-only project-history record commit on top of `c084311ee41ef3db27b27d84e480dd472a858e00` (run `git rev-parse HEAD` for exact current SHA).
+- Current origin/master: same docs-only record commit after push/deploy verification.
+- Current production build_sha: same docs-only record commit after push/deploy verification.
+- Current working status: Dashboard polish deployed. The main dashboard keeps exactly four prominent KPI cards, hides secondary stats behind a collapsed More stats section, caps Top Automations at three rows, fixes range-aware chart x-axis labels, and keeps previous range data visible while a new range refreshes. Warmup/bootstrap dashboard cache keys now include the default `7d` range so the first dashboard paint can reuse the same cached summary. No Billing, Instagram automation, HMAC, dedupe, rate-limit, rule-matching, webhook/polling, or diagnostics-route change.
 
 Update these values at the start and end of every agent session.
 
@@ -52,7 +52,7 @@ Update these values at the start and end of every agent session.
 - Auth recovery email delivery E2E remains a billing blocker until proven end to end.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
-- Dashboard simplification / x-axis label polish requires production deploy and live UI confirmation before being considered known-good.
+- Dashboard simplification / x-axis label polish is deployed and still needs live operator UI confirmation before being considered known-good.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

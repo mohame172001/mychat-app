@@ -2,7 +2,7 @@
 
 Important commits only. Keep this table updated after every meaningful commit.
 
-Pending dashboard UX entry: 2026-05-25, `fix(dashboard): simplify overview and fix range chart labels`. Dashboard now keeps only the four primary KPI cards prominent, hides secondary stats behind a collapsed More stats toggle, uses sparse range-aware chart labels, keeps previous range data visible while refreshing, seeds the default `7d` dashboard cache through bootstrap/warmup, and caps Top Automations at three rows. Tests: frontend 187 passed; frontend production build passed. No backend, Instagram automation, Billing, HMAC, dedupe, webhook/polling, or rate-limit change.
+Dashboard UX entry: 2026-05-25, `c084311` / `fix(dashboard): simplify overview and fix range chart labels`. Dashboard now keeps only the four primary KPI cards prominent, hides secondary stats behind a collapsed More stats toggle, uses sparse range-aware chart labels, keeps previous range data visible while refreshing, seeds the default `7d` dashboard cache through bootstrap/warmup, and caps Top Automations at three rows. Tests: frontend 187 passed; frontend production build passed. Deployed. No backend, Instagram automation, Billing, HMAC, dedupe, webhook/polling, or rate-limit change.
 
 | Date | Commit | Area | Summary | Behavior changed? | Tests | Deploy status |
 |---|---|---|---|---|---|---|

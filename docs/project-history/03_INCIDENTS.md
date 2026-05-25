@@ -24,9 +24,9 @@ Use this file to record production-impacting problems and the exact fix.
 - Symptom: After the dashboard range redesign, the chart rendered too many x-axis labels (especially repeated weekday labels for longer ranges), switching ranges felt like a heavy reload, and the main view still exposed secondary metrics that made the dashboard noisy.
 - Affected area: Dashboard frontend only.
 - Root cause: `Dashboard.jsx` rendered one x-axis label for every chart bucket while using a fixed 7-column label grid, so 24h/30d/all ranges produced crowded/repeated labels. Range changes cleared the visible data when the new range had no cache entry, causing skeleton/loading UI instead of stale-while-revalidate behavior. Secondary KPI tiles were always visible.
-- Fix commit: pending (this commit).
+- Fix commit: `c084311`.
 - Tests: Frontend 187 passed; frontend production build passed.
-- Deploy status: Local, deploy required. Not eligible for known-good until live UI confirms the chart and range switching feel correct.
+- Deploy status: Deployed. Not eligible for known-good until live UI confirms the chart and range switching feel correct.
 - Lesson learned: Chart label density must be derived from the selected range, and range filters should keep the previous safe dashboard state visible while refreshing.
 - Preventive test added: Yes.
 
