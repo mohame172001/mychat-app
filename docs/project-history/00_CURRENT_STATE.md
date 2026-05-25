@@ -23,11 +23,11 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending admin diagnostic summary fix
-- Current local HEAD: pending admin diagnostic clarity commit
-- Current origin/master: `4ea7bef3e6298b0bb74610e9d09d4840f1b7e544`
-- Current production build_sha: `4ea7bef3e629`
-- Current working status: Cleaning up admin diagnostic panels so they reflect the known-good automation. (1) Stop Point summary: `account_resolved` and `polling_scanned_account` now broaden to any polling-stage event in the window so polling-only accounts no longer report False. (2) `unknown_state` / `rule_not_matched` resolution promotes `extra.classified_reason` and `early_exit_before_rule_loading` when `rule_loading_finished` never ran. (3) New summary flags `classified_reason`, `is_latest_event_rescan_of_processed`, `is_latest_event_historical`. (4) `next_recommended_action` covers the new reasons + the dedupe-skip family. (5) Multi-account-health gains per-account `last_comment_webhook_event_time`, `last_messaging_webhook_event_time`, `last_account_resolution_failed_at`, and a `webhook_delivery_status` label (comment_webhooks_received / comment_webhooks_observed_globally_not_mapped / polling_fallback_only). (6) Frontend Flight Recorder classifier no longer reports `silent_early_exit_possible` when a concrete skip reason exists; renders new badges for bot-own-reply / rescan / historical / unknown_state. (7) Webhook Health card renders the per-account delivery-status badge + the new timestamps. (8) Stop Point card shows `classified_reason` + state badges. No backend automation, rule-matching, webhook, polling, dedupe, HMAC, or rate-limit change. Known-good app code from `948a996` is preserved.
+- Current local app-code fix: pending unknown_state-reprocess fix
+- Current local HEAD: pending dedupe-reprocess commit
+- Current origin/master: `dae71ebd7e0141f75998d0001010fbd3cee42b24`
+- Current production build_sha: `dae71ebd7e01`
+- Current working status: Diagnosing muhammad_gehad regression. The admin panels (clarified in `dae71eb`) revealed the real root cause: `_handle_new_comment`'s catch-all `else` block at server.py:17426 always returned an `automation_skipped` with `skip_reason='unknown_state'` whenever the existing comment doc carried NO known processed-state signal (no `reply_status=success`, no `dm_status=success`, no `replied` proof, no historical / partial-success / dm-failed / pending). For a polling cycle that wrote a seen-only doc, this incorrectly blocked rule loading forever. Fix in progress: when the catch-all cannot classify the existing doc as a known processed state, set `retry_existing=True` and continue to rule loading. Downstream `opening_dedupe_key` + provider-proof checks still independently prevent any duplicate send. New visibility event `existing_comment_unknown_state_reprocess` records the decision. Account-agnostic. No rule-matching, send, dedupe, HMAC, or rate-limit change.
 
 Update these values at the start and end of every agent session.
 

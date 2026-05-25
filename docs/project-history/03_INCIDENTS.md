@@ -114,6 +114,18 @@ Use this file to record production-impacting problems and the exact fix.
 - Lesson learned: Bot-owned reply events should remain in the flight recorder but must not be treated as the primary support summary when a real external commenter event exists.
 - Preventive test added: Yes.
 
+### Incomplete Comment Doc Blocked as `comment_processed_unknown_state`
+
+- Date/time: 2026-05-25
+- Symptom: muhammad_gehad polling-fallback automation stopped firing for fresh comments. The (now-clearer) admin panels showed `exact_stop_reason=comment_processed_unknown_state`, `classified_reason=comment_processed_unknown_state`, `rule_matched=false`, `reply_attempted=false`, `dm_attempted=false`. Flight Recorder for the latest comment had `poller_comment_seen` + `dedupe_checked` + `automation_skipped(skip_reason=unknown_state)` but NO `rule_loading_finished`. mogehad17 (webhook path) continued to work because webhook delivery creates a fresh `ig_comment_id` with no existing doc, so the catch-all was never reached.
+- Affected area: `_handle_new_comment` existing-comment dedupe classification (server.py:17426–17475). No webhook handler, polling loop, rule matcher, or send helper was involved.
+- Root cause: The catch-all `else` block initialized `exact_reason='comment_processed_unknown_state'` and `return_reason='unknown_state'` as DEFAULTS, then tried to upgrade to a known state (historical / partial_success / replied_success / dm_failed / legacy already_replied). If none of those matched, the defaults stayed, an `automation_skipped` was recorded, and the function returned BEFORE rule loading. A comment doc that had been written by a previous polling cycle in a seen-only / incomplete shape (no canonical reply_status, no canonical dm_status, no `replied` proof, no recognized skip_reason) was therefore silently blocked forever despite carrying no proof that any send had ever been made.
+- Fix commit: pending (this commit). The catch-all now skips only when it CAN classify the doc into a known processed state. When it cannot, the comment is treated as a retry on the existing doc: `retry_existing=True`, `existing_doc_id` / `existing_created` are captured, a new `existing_comment_unknown_state_reprocess` flight-recorder event is written, and execution falls through to rule loading. Downstream `opening_dedupe_key` and the provider-proof checks in `execute_flow` / `send_ig_message` independently protect against any actual duplicate send — so this is safe even if the comment turns out to have been processed via a path we didn't recognize.
+- Tests: `test_unknown_state_comment_doc_is_reprocessed_not_silently_skipped`, `test_unknown_state_reprocess_does_not_overflow_into_duplicate_send`, `test_unknown_state_reprocess_does_not_override_known_skips`. `test_multi_account_automation_routing.py` 125 passed; backend full 661 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms muhammad_gehad fresh comments reply again AND mogehad17 webhook path remains intact AND no duplicate sends on previously-succeeded comments.
+- Lesson learned: A defensive catch-all classification must NOT silently treat "unknown" as "skip" when the skip decision is destructive (blocks rule loading forever). The safe default in dedupe code is to reprocess and rely on downstream provider-proof dedupe layers — a duplicate-send risk that's already independently guarded — rather than silently dropping legitimate work.
+- Preventive test added: Yes.
+
 ### Admin Diagnostic Panels Showed Misleading State After Known-Good Deploy
 
 - Date/time: 2026-05-25

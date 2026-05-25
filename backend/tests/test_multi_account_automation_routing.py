@@ -4306,6 +4306,178 @@ def test_resolve_webhook_counters_prefers_globals_when_set(monkeypatch):
     assert last_processed == now
 
 
+def test_unknown_state_comment_doc_is_reprocessed_not_silently_skipped(monkeypatch):
+    """A comment doc that exists but carries NO known processed-state
+    signal (no reply_status=success, no dm_status=success, no `replied`
+    proof, no historical skip, no partial-success markers, no pending
+    queue status) must NOT be treated as `comment_processed_unknown_state`
+    and skipped. It must continue to rule loading so a fresh polling
+    comment that landed in an incomplete-doc state still produces a
+    reply + DM. Downstream dedupe layers (opening_dedupe_key + provider
+    proofs) protect against any actual duplicate send.
+    """
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    # Seed an existing comment doc on account B with an UNKNOWN state:
+    # no reply_status, no dm_status, no replied flag, no canonical
+    # action_status. Before this fix this fell into the catch-all and
+    # was silently skipped as comment_processed_unknown_state.
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'comment-incomplete-1',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-incomplete-1',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'created': now - timedelta(seconds=15),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],  # accB / igB
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-incomplete-1',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'hello',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+
+    # Rule matched and a real send went out — NOT a skip.
+    assert res['matched'] is True
+    assert res.get('action_status') in ('success', 'partial_success')
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+    # The visibility event for "reprocessed instead of skipping" was
+    # recorded.
+    reprocess_events = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'existing_comment_unknown_state_reprocess'
+    ]
+    assert len(reprocess_events) == 1
+    assert reprocess_events[0].get('comment_id_partial') == server._safe_partial_identifier(
+        'comment-incomplete-1'
+    )
+    # No automation_skipped with unknown_state was recorded for the
+    # same comment id.
+    unknown_skips = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'unknown_state'
+        and e.get('comment_id_partial') == server._safe_partial_identifier(
+            'comment-incomplete-1'
+        )
+    ]
+    assert unknown_skips == []
+
+
+def test_unknown_state_reprocess_does_not_overflow_into_duplicate_send(monkeypatch):
+    """Two back-to-back calls for the same incomplete doc must not
+    produce two reply/DM sends. The first call reprocesses and writes
+    the success state; the second call sees the now-successful state
+    and falls into the legitimate already_replied_success skip.
+    """
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    now = datetime.utcnow()
+    db.comments.docs.append({
+        'id': 'comment-incomplete-2',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-incomplete-2',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'created': now - timedelta(seconds=15),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    first = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-incomplete-2',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'hello',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+    assert first['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+    # Re-run — the doc now has reply_status=success + dm_status=success
+    # from the first call, so the already_replied_success branch fires.
+    second = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-incomplete-2',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'hello',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+    assert second.get('already_processed') is True
+    assert second.get('reason') == 'already_replied_success'
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+
+def test_unknown_state_reprocess_does_not_override_known_skips(monkeypatch):
+    """The new reprocess path must NOT change the existing skip
+    behavior for known processed states: already_replied_success,
+    historical, partial_success, dm_failed, pending."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    # already_replied_success doc.
+    db.comments.docs.append({
+        'id': 'comment-replied',
+        'user_id': 'u1',
+        'instagramAccountDbId': 'accB',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_comment_id': 'comment-replied',
+        'commenter_id': 'external-fan',
+        'media_id': 'mediaB',
+        'action_status': 'success',
+        'reply_status': 'success',
+        'reply_provider_response_ok': True,
+        'reply_provider_comment_id': 'prov-1',
+        'dm_status': 'success',
+        'replied': True,
+        'replied_at': now - timedelta(minutes=5),
+        'created': now - timedelta(minutes=10),
+    })
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'comment-replied',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'hello',
+        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='polling'))
+    assert res.get('already_processed') is True
+    assert res.get('reason') == 'already_replied_success'
+    # No new send.
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+
+
 def test_duplicate_comment_already_replied_records_skip_event_and_does_not_resend(monkeypatch):
     """Repeated comment from the same external user on the same post must
     NOT re-send reply/DM, and must record an automation_skipped event

@@ -17423,11 +17423,12 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                             'rule_id': existing_rule_id,
                             'comment_doc_id': existing.get('id')}
 
-            # Classify the exact reason this comment is being skipped now
-            # — the legacy comment_already_processed line was vague and
-            # masked partial_success / DM-failed states.
-            exact_reason = 'comment_processed_unknown_state'
-            return_reason = 'unknown_state'
+            # Try to classify the existing comment doc into a known
+            # processed state. Only those states justify a skip — an
+            # unclassifiable "unknown_state" doc is incomplete and must
+            # not block rule loading.
+            exact_reason: Optional[str] = None
+            return_reason: Optional[str] = None
             if previous_skip == 'historical_before_rule_activation':
                 exact_reason = 'comment_skipped_historical'
                 return_reason = 'historical'
@@ -17454,26 +17455,74 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 # field (legacy doc written before this refactor).
                 exact_reason = 'comment_already_replied_success'
                 return_reason = 'already_replied_success'
-            logger.info(
-                '%s ig_comment_id=%s user=%s source=%s previous_status=%s '
-                'reply_status=%s dm_status=%s dm_failure_reason=%s',
-                exact_reason, ig_comment_id, user_doc.get('email'), source,
-                previous_status, previous_reply_status, previous_dm_status,
-                previous_dm_failure_reason,
+
+            if exact_reason and return_reason:
+                # The existing doc carries a known processed-state
+                # signal. Keep the skip — the bot must not re-send.
+                logger.info(
+                    '%s ig_comment_id=%s user=%s source=%s previous_status=%s '
+                    'reply_status=%s dm_status=%s dm_failure_reason=%s',
+                    exact_reason, ig_comment_id, user_doc.get('email'), source,
+                    previous_status, previous_reply_status, previous_dm_status,
+                    previous_dm_failure_reason,
+                )
+                await _record_instagram_automation_event(
+                    'automation_skipped',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    skip_reason=return_reason,
+                    extra={'classified_reason': exact_reason},
+                )
+                return {'processed': False, 'already_processed': True, 'matched': False,
+                        'action_status': 'skipped', 'reason': return_reason,
+                        'classified_reason': exact_reason}
+
+            # No known processed-state signal. The existing doc is in
+            # an incomplete/unknown shape — most often a polling cycle
+            # wrote a `seen` row that never reached rule loading, or a
+            # legacy doc without canonical status fields. Continue
+            # processing as a retry on the existing doc rather than
+            # blocking with `unknown_state`. Downstream dedupe layers
+            # (`opening_dedupe_key` and the provider-proof checks in
+            # the reply / DM send helpers) still independently prevent
+            # any actual duplicate send, so this is safe even if the
+            # comment turns out to have been processed via a path we
+            # didn't recognize.
+            retry_existing = True
+            retry_reason = (
+                previous_skip
+                or previous_status
+                or 'incomplete_existing_doc'
             )
+            existing_doc_id = existing.get('id')
+            existing_created = existing.get('created')
             await _record_instagram_automation_event(
-                'automation_skipped',
+                'existing_comment_unknown_state_reprocess',
                 source=source,
                 user_doc=user_doc,
                 media_id=media_id,
                 comment_id=ig_comment_id,
                 commenter_id=commenter_id,
-                skip_reason=return_reason or 'comment_already_processed',
-                extra={'classified_reason': exact_reason},
+                extra={
+                    'previous_status': str(previous_status or '')[:40] or None,
+                    'previous_reply_status': str(previous_reply_status or '')[:40] or None,
+                    'previous_dm_status': str(previous_dm_status or '')[:40] or None,
+                    'previous_skip': str(previous_skip or '')[:40] or None,
+                },
             )
-            return {'processed': False, 'already_processed': True, 'matched': False,
-                    'action_status': 'skipped', 'reason': return_reason,
-                    'classified_reason': exact_reason}
+            logger.info(
+                'existing_comment_unknown_state_reprocess ig_comment_id=%s user=%s source=%s '
+                'previous_status=%s reply_status=%s dm_status=%s previous_skip=%s',
+                ig_comment_id, user_doc.get('email'), source,
+                previous_status, previous_reply_status, previous_dm_status,
+                previous_skip,
+            )
+            # Fall through to rule loading. retry_existing semantics in
+            # the downstream insert path will UPDATE the existing doc
+            # instead of inserting a duplicate.
 
     commenter_username = comment_data.get('commenter_username') or f'ig_{commenter_id[:8]}'
 
