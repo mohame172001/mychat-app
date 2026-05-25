@@ -5199,6 +5199,149 @@ def test_legacy_general_rule_fresh_polling_comment_matches_and_sends(monkeypatch
     assert 'automation_success' in stages
 
 
+def test_polled_comments_sort_newest_external_before_old_rescans_and_bot_replies():
+    now = datetime.utcnow()
+    comments = [
+        {
+            'id': 'old-processed',
+            'timestamp': (now - timedelta(days=6)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            'from': {'id': 'external-fan', 'username': 'fan'},
+        },
+        {
+            'id': 'bot-own-reply',
+            'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            'from': {'id': 'igB', 'username': 'account_b'},
+        },
+        {
+            'id': 'fresh-external',
+            'timestamp': (now - timedelta(seconds=20)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            'from': {'id': 'external-fan', 'username': 'fan'},
+        },
+    ]
+    user = _user(id='u1', ig_user_id='igB')
+    user['instagramUsername'] = 'account_b'
+
+    ordered = server._sort_polled_comments_for_processing(comments, user, seen_at=now)
+
+    assert [c['id'] for c in ordered] == ['fresh-external', 'old-processed', 'bot-own-reply']
+
+
+def test_poll_user_comments_requests_newest_first_order_and_processes_sorted_comments(monkeypatch):
+    accounts = [
+        _account(id='accB', userId='u1', instagramAccountId='igB',
+                 igUserId='igB', username='account_b', accessToken='token-b'),
+    ]
+    user = _user(id='u1', active_instagram_account_id='accB',
+                 ig_user_id='igB', meta_access_token='token-b')
+    legacy_rule = _legacy_general_rule('accB', 'igB', 'ruleLegacyB',
+                                       trigger='Manual',
+                                       node_trigger='comment:any',
+                                       include_top_trigger=True)
+    db = FakeDB(accounts, user, automations=[legacy_rule])
+    monkeypatch.setattr(server, 'db', db)
+    monkeypatch.setattr(server, 'ws_manager',
+                        SimpleNamespace(send=lambda *_a, **_kw: asyncio.sleep(0)))
+    monkeypatch.setattr(server, 'reserve_usage_limit',
+                        lambda *a, **kw: asyncio.sleep(0, result={'allowed': True, 'exceeded': False, 'fail_open': False}))
+    monkeypatch.setattr(server, 'confirm_usage_reservation',
+                        lambda *a, **kw: asyncio.sleep(0, result=True))
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    async def fake_recent(token, ig_user_id, limit=10):
+        return ['new-fresh-media']
+    async def fake_latest(token, ig_user_id):
+        return None
+    monkeypatch.setattr(server, '_fetch_recent_media_ids', fake_recent)
+    monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
+
+    now = datetime.utcnow()
+    seen_params = []
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            return False
+        async def get(self, *_args, **kwargs):
+            seen_params.append(kwargs.get('params') or {})
+            # Simulate Meta returning old-first anyway. The poller must
+            # still process the fresh external comment before stale
+            # re-scans and bot replies.
+            return FakeResponse(200, {
+                'data': [
+                    {
+                        'id': 'old-comment',
+                        'text': 'old',
+                        'timestamp': (now - timedelta(days=6)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                        'from': {'id': 'external-fan', 'username': 'fan'},
+                    },
+                    {
+                        'id': 'bot-reply',
+                        'text': 'bot',
+                        'timestamp': now.strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                        'from': {'id': 'igB', 'username': 'account_b'},
+                    },
+                    {
+                        'id': 'fresh-comment',
+                        'text': 'fresh',
+                        'timestamp': (now - timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                        'from': {'id': 'external-fan', 'username': 'fan'},
+                    },
+                ],
+            })
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+
+    owner = server._with_instagram_account_context(user, accounts[0])
+    stats = _run(server._poll_user_comments(owner))
+
+    assert seen_params
+    assert seen_params[0]['order'] == 'reverse_chronological'
+    assert stats['matched'] >= 1
+    assert reply_calls[0]['comment_id'] == 'fresh-comment'
+    assert dm_calls
+
+
+def test_summarize_stop_point_old_rescan_does_not_claim_fresh_live_comment(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    old_seen = datetime.utcnow()
+    old_comment_id = server._safe_partial_identifier('old-rescan-comment')
+    _seed_flight_event(
+        db,
+        stage='poller_comment_seen',
+        username='account_b',
+        source='polling',
+        comment_id_partial=old_comment_id,
+        media_id_partial=server._safe_partial_identifier('old-media'),
+        created_at=old_seen,
+        extra={
+            'comment_timestamp': (old_seen - timedelta(days=6)).strftime('%Y-%m-%dT%H:%M:%S'),
+            'effective_timestamp': (old_seen - timedelta(days=6)).strftime('%Y-%m-%dT%H:%M:%S'),
+            'timestamp_source': 'payload',
+        },
+    )
+    _seed_flight_event(
+        db,
+        stage='automation_skipped',
+        username='account_b',
+        source='polling',
+        skip_reason='already_replied_success',
+        comment_id_partial=old_comment_id,
+        media_id_partial=server._safe_partial_identifier('old-media'),
+        created_at=old_seen + timedelta(seconds=1),
+        extra={'classified_reason': 'comment_already_replied_success'},
+    )
+
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+
+    assert summary['exact_stop_reason'] == 'already_replied_success'
+    assert summary['is_latest_event_rescan_of_processed'] is True
+    assert summary['fresh_comment_seen_in_last_poll'] is False
+    assert summary['latest_fresh_external_comment_id_partial'] is None
+    assert summary['latest_external_comment_age_seconds'] > 60 * 60 * 24
+    assert 'No new Instagram comment was returned by polling' in summary['next_recommended_action']
+
+
 def test_fresh_comment_with_general_rule_still_matches_and_sends(monkeypatch):
     """The visibility patch must not break the happy path: a fresh
     comment with an active general rule still matches and runs the

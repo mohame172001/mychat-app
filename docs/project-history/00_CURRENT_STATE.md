@@ -23,11 +23,13 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending `fix(instagram): prevent fresh comments from being marked historical` (separate session, uncommitted backend files in working tree).
-- Current local HEAD: `62b46a46aaa39bbed45e98cef2bb1784fbc50c83` (project-history docs after dashboard polish).
-- Current origin/master: `62b46a46aaa39bbed45e98cef2bb1784fbc50c83`.
-- Current production build_sha: `62b46a46aaa3`.
+- Current local app-code fix: pending `fix(instagram): prioritize fresh polling comments over old rescans`.
+- Current local HEAD: `b2ceca2cbf3e91ef2dd1afc27c7514d2b4b68e41`.
+- Current origin/master: `b2ceca2cbf3e91ef2dd1afc27c7514d2b4b68e41`.
+- Current production build_sha: `b2ceca2cbf3e`.
 - Current working status: Dashboard polish commit `9b2af1b` is live-verified and recorded in `02_KNOWN_GOOD_VERSIONS.md` (dashboard UI scope only — does not change the automation pipeline relative to `948a996`). Pending Instagram historical-cutoff fix is a separate session's uncommitted backend work and remains outside this known-good. Original pending notes preserved below: Instagram polling comment handling fix is pending commit/deploy. It keeps real Graph timestamps authoritative for old comments, but if polling sees a comment with no Graph timestamp it uses first-seen time instead of skipping forever as missing/historical. Existing comment docs with stale `historical_before_rule_activation` skips are reprocessed only when the current payload proves the comment is at/after the stored activation cutoff. Stop Point now surfaces latest external comment partial id/media id/timestamp/activation-cutoff details. Separately, frontend-only dashboard polish landed: chart title now range-aware ("Performance — Last 24 hours" / "Last 7 days" / "Last 30 days" / "All time"); tooltip and axis labels now force the app UI language so English users no longer see Arabic month order from the browser locale; More stats becomes a chip-style chevron button with i18n labels; Total Contacts subtitle clarified to "All-time · Active account"; Top Automations sorts active rules first and visually de-emphasizes paused/draft rows. No Billing, HMAC, dedupe removal, rate-limit removal, frontend diagnostics route, dashboard backend behavior, or automation rule-scope change.
+
+Additional current-session note: `fix(instagram): prioritize fresh polling comments over old rescans` is pending commit/deploy. Polling now requests reverse-chronological comments, locally prioritizes fresh external comments over bot-owned replies and old processed rescans, and Stop Point now reports when no fresh comment was returned instead of presenting an old re-scan as the live test result.
 
 Update these values at the start and end of every agent session.
 
@@ -48,6 +50,8 @@ Update these values at the start and end of every agent session.
 - Local multi-account automation routing suite passed after the historical-cutoff polling fix: 135 tests.
 - Local webhook timestamp fallback suite passed after the historical-cutoff polling fix: 7 tests.
 - Local full backend suite passed after the historical-cutoff polling fix: 678 tests.
+- Local multi-account automation routing suite passed after the fresh-polling-priority fix: 138 tests.
+- Local full backend suite passed after the fresh-polling-priority fix: 681 tests.
 
 ## Current Blockers
 
@@ -56,7 +60,7 @@ Update these values at the start and end of every agent session.
 - Instagram automation still requires live verification after every production deploy because Meta behavior cannot be fully proven by unit tests.
 - Instagram comment automation is currently observed through polling in the operator stop-point page; instant webhook delivery still needs protected endpoint/log confirmation and may depend on Meta Advanced Access/subscription state.
 - Dashboard simplification / x-axis label polish is deployed and still needs live operator UI confirmation before being considered known-good.
-- Pending Instagram historical-cutoff fix must be deployed and live-tested before it can be considered known-good: same external commenter on a different eligible post should trigger again; exact duplicate should still skip; browser typed fallback and mobile quick reply should still work.
+- Pending fresh-polling-priority fix must be deployed and live-tested before it can be considered known-good: polling should surface the live test comment instead of an old re-scan; same external commenter on a different eligible post should trigger again; exact duplicate should still skip; browser typed fallback and mobile quick reply should still work.
 - Railway always-on status must be confirmed before billing.
 
 ## Do-Not-Touch Constraints

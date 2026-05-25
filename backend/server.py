@@ -20373,6 +20373,10 @@ IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
+IG_POLL_FRESH_COMMENT_WINDOW_SECONDS = max(
+    60,
+    int(os.environ.get('IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', str(60 * 60 * 2))),
+)
 AUTOMATION_QUEUE_INTERVAL_SECONDS = _env_int_clamped('AUTOMATION_QUEUE_INTERVAL_SECONDS', 5, 2, 60)
 COMMENT_REPLY_MIN_SPACING_SECONDS = _env_int_clamped('COMMENT_REPLY_MIN_SPACING_SECONDS', 2, 1, 30)
 DM_SEND_MIN_SPACING_SECONDS = _env_int_clamped('DM_SEND_MIN_SPACING_SECONDS', 2, 1, 30)
@@ -20383,6 +20387,65 @@ AUTOMATION_TEMP_RETRY_BASE_SECONDS = _env_int_clamped('AUTOMATION_TEMP_RETRY_BAS
 # These legacy globals stayed here only as fallbacks during the migration.
 _poll_task: Optional[asyncio.Task] = None
 _follow_verifier_task: Optional[asyncio.Task] = None
+
+
+def _polled_comment_timestamp(comment: dict) -> Optional[datetime]:
+    for key in ('timestamp', 'created_time', 'createdAt', 'created_at'):
+        parsed = _parse_graph_datetime((comment or {}).get(key))
+        if parsed:
+            return parsed
+    return None
+
+
+def _sort_polled_comments_for_processing(
+    comments: list,
+    user_doc: dict,
+    *,
+    seen_at: Optional[datetime] = None,
+) -> list:
+    """Prioritize fresh external comments in a bounded polling batch.
+
+    Meta's comments endpoint can return older comments, bot replies, and
+    already-processed rescans in the same small slice as the user's new
+    live-test comment. Sorting locally keeps the fallback poller from
+    spending the batch on stale rows when the provider order is old-first
+    or otherwise not useful.
+    """
+    seen_at = seen_at or datetime.utcnow()
+    own_ids = {
+        str(v)
+        for v in (
+            user_doc.get('ig_user_id'),
+            user_doc.get('instagramAccountId'),
+            user_doc.get('igUserId'),
+        )
+        if v
+    }
+    own_usernames = {
+        str(v).strip().lower()
+        for v in (
+            user_doc.get('instagramUsername'),
+            user_doc.get('username'),
+            user_doc.get('ig_username'),
+        )
+        if v
+    }
+
+    def _key(comment: dict):
+        from_obj = (comment or {}).get('from') or {}
+        commenter_id = str(from_obj.get('id') or comment.get('user_id') or comment.get('owner_id') or '')
+        username = str(from_obj.get('username') or comment.get('username') or '').strip().lower()
+        is_own = bool(
+            (commenter_id and commenter_id in own_ids)
+            or (username and username in own_usernames)
+        )
+        ts = _polled_comment_timestamp(comment)
+        timestamp_value = ts.timestamp() if ts else 0.0
+        # External comments first, then newest provider timestamp first.
+        # Stable final key keeps tests and logs deterministic.
+        return (1 if is_own else 0, -timestamp_value, str(comment.get('id') or ''))
+
+    return sorted(list(comments or []), key=_key)
 
 
 async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
@@ -20564,6 +20627,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                         'access_token': token,
                         'fields': 'id,text,username,timestamp,from',
                         'limit': IG_POLL_COMMENT_BATCH_LIMIT,
+                        'order': 'reverse_chronological',
                     },
                 )
                 if r.status_code != 200:
@@ -20572,7 +20636,10 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     stats['media'][mid] = {'http': r.status_code, 'error': r.text[:200]}
                     stats['errors'].append({'media_id': mid, 'http': r.status_code, 'error': r.text[:200]})
                     continue
-                data = (r.json() or {}).get('data') or []
+                data = _sort_polled_comments_for_processing(
+                    (r.json() or {}).get('data') or [],
+                    user_doc,
+                )
                 logger.info('media_comments_fetch_success user=%s media_id=%s count=%s',
                             user_doc.get('email'), mid, len(data))
                 stats['commentsSeen'] += len(data)
@@ -22067,6 +22134,33 @@ def _bot_own_reply_comment_ids(events: list) -> set:
     return ids
 
 
+def _comment_event_timestamp(event: Optional[dict]) -> Optional[datetime]:
+    if not event:
+        return None
+    extra = event.get('extra') or {}
+    for key in ('comment_timestamp', 'effective_timestamp', 'created_time', 'timestamp'):
+        parsed = _parse_graph_datetime(extra.get(key) or event.get(key))
+        if parsed:
+            return parsed
+    return None
+
+
+def _comment_event_age_seconds(event: Optional[dict], *, now: Optional[datetime] = None) -> Optional[int]:
+    ts = _comment_event_timestamp(event)
+    if not ts:
+        return None
+    now = now or datetime.utcnow()
+    try:
+        return max(0, int((now - ts.replace(tzinfo=None)).total_seconds()))
+    except Exception:
+        return None
+
+
+def _is_fresh_comment_event(event: Optional[dict], *, now: Optional[datetime] = None) -> bool:
+    age = _comment_event_age_seconds(event, now=now)
+    return age is not None and age <= IG_POLL_FRESH_COMMENT_WINDOW_SECONDS
+
+
 def _latest_external_comment_event(events: list) -> tuple[Optional[dict], Optional[dict]]:
     """Pick the comment_id_partial to scope the stop-point summary on.
 
@@ -22102,7 +22196,16 @@ def _latest_external_comment_event(events: list) -> tuple[Optional[dict], Option
                 and event.get('comment_id_partial') == success_comment_id
             ):
                 return event, latest_any
-    # 2. Fall back to latest external comment (excluding bot replies).
+    # 2. Prefer a genuinely fresh external comment over old polling rescans.
+    for event in events:
+        if event.get('stage') not in comment_stages:
+            continue
+        comment_id = event.get('comment_id_partial')
+        if comment_id and comment_id in bot_reply_ids:
+            continue
+        if _is_fresh_comment_event(event):
+            return event, latest_any
+    # 3. Fall back to latest external comment (excluding bot replies).
     for event in events:
         if event.get('stage') not in comment_stages:
             continue
@@ -22142,6 +22245,15 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
         'comment_already_pending_queue',
         'public_reply_required_recovery',
     }:
+        if (
+            summary.get('is_latest_event_rescan_of_processed')
+            and summary.get('fresh_comment_seen_in_last_poll') is False
+        ):
+            return (
+                'No new Instagram comment was returned by polling in the selected window. '
+                'The latest visible comment is an old re-scan that was already processed; '
+                'check that the new comment is on owned eligible media and that Graph returns it.'
+            )
         return 'A previous run already replied or has work pending for this physical comment id — the bot correctly refused to re-send. Test from a brand-new comment to see the full flow again.'
     if reason in {'unknown_state', 'comment_processed_unknown_state'}:
         return 'The latest skip event did not classify into a known dedupe state. Inspect classified_reason / last_send_error and the most recent comment doc action_status for the underlying cause.'
@@ -22448,6 +22560,22 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         if isinstance(comment_event, dict) and isinstance(comment_event.get('extra'), dict)
         else {}
     )
+    latest_fresh_external_comment = None
+    for event in events:
+        if event.get('stage') not in {'webhook_comment_detected', 'poller_comment_seen'}:
+            continue
+        cid = event.get('comment_id_partial')
+        if cid and cid in _bot_own_reply_comment_ids(events):
+            continue
+        if _is_fresh_comment_event(event):
+            latest_fresh_external_comment = event
+            break
+    latest_fresh_extra = (
+        (latest_fresh_external_comment.get('extra') or {})
+        if isinstance(latest_fresh_external_comment, dict)
+        and isinstance(latest_fresh_external_comment.get('extra'), dict)
+        else {}
+    )
     summary = {
         'username': _automation_flight_username_key(username),
         'last_comment_reached_backend': bool(comment_event),
@@ -22489,6 +22617,22 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             or comment_event_extra.get('comment_timestamp')
         ),
         'latest_external_comment_timestamp_source': comment_event_extra.get('timestamp_source'),
+        'latest_external_comment_age_seconds': _comment_event_age_seconds(comment_event),
+        'fresh_comment_seen_in_last_poll': bool(latest_fresh_external_comment),
+        'latest_fresh_external_comment_id_partial': (
+            latest_fresh_external_comment.get('comment_id_partial')
+            if latest_fresh_external_comment else None
+        ),
+        'latest_fresh_external_comment_timestamp': (
+            latest_fresh_extra.get('effective_timestamp')
+            or latest_fresh_extra.get('comment_timestamp')
+        ),
+        'latest_fresh_external_comment_seen_at': (
+            latest_fresh_external_comment.get('created_at').isoformat()
+            if latest_fresh_external_comment
+            and isinstance(latest_fresh_external_comment.get('created_at'), datetime)
+            else None
+        ),
         'latest_bot_own_reply_at': (
             latest_bot_own_reply.get('created_at').isoformat()
             if latest_bot_own_reply and isinstance(latest_bot_own_reply.get('created_at'), datetime)
@@ -23158,6 +23302,7 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                         'fields': 'id,text,username,timestamp,from',
                         'access_token': token,
                         'limit': min(remaining, IG_POLL_COMMENT_BATCH_LIMIT),
+                        'order': 'reverse_chronological',
                     },
                 )
                 if r.status_code != 200:
@@ -23165,7 +23310,7 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
                     logger.warning('selected_post_catchup_fetch_failed user_id=%s media_id=%s http=%s body=%s',
                                    user_id, media_id, r.status_code, r.text[:200])
                     continue
-                for cm in (r.json() or {}).get('data') or []:
+                for cm in _sort_polled_comments_for_processing((r.json() or {}).get('data') or [], u):
                     if summary['checked'] >= IG_POLL_COMMENT_BATCH_LIMIT:
                         summary['batch_limit_reached'] = True
                         break

@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Polling Surfaced Old Re-Scans Instead Of Fresh Live Comment
+
+- Date/time: 2026-05-25
+- Symptom: After `b2ceca2`, the user retested from the same external Instagram account on a different post under `muhammad_gehad`, but Stop Point still showed `already_replied_success`. The selected “latest external comment” had provider timestamp `2026-05-19T20:02:11` while it was re-seen on `2026-05-25`, proving the summary was showing an old physical comment re-scan, not the new live test comment.
+- Affected area: Instagram polling comment fetch order, bounded polling candidate ordering, and protected Stop Point summary selection.
+- Root cause: The polling path fetched a bounded `/comments` slice without requesting newest-first order and processed the provider-returned order directly. Old already-processed comments and bot-owned replies could therefore consume the visible slice and the support summary could present an old processed re-scan as if it represented the new live test.
+- Fix commit: pending (this commit).
+- Tests: `test_polled_comments_sort_newest_external_before_old_rescans_and_bot_replies`, `test_poll_user_comments_requests_newest_first_order_and_processes_sorted_comments`, `test_summarize_stop_point_old_rescan_does_not_claim_fresh_live_comment`; `test_multi_account_automation_routing.py` 138 passed; backend full 681 passed.
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until live retest confirms a fresh comment appears in polling/Stop Point, same-commenter different-post triggers, exact duplicates still skip, and quick-reply fallback remains working.
+- Lesson learned: For fallback polling, do not trust provider default order. Always request newest-first where possible, locally prioritize fresh external comments in the bounded slice, and make support summaries distinguish old re-scans from absent fresh comments.
+- Preventive test added: Yes.
+
 ### Fresh Polling Comments Were Marked Historical
 
 - Date/time: 2026-05-25
