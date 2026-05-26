@@ -201,6 +201,29 @@ if IS_PRODUCTION and not META_WEBHOOK_HMAC_ENFORCE:
         'Unsigned Instagram webhooks must never be accepted in prod.'
     )
 
+# Phase 1 SaaS hardening: the legacy "exactly-one-connected-account"
+# webhook fallback is unsafe on a multi-tenant deployment because the
+# very first customer could have an unmapped webhook attributed to
+# their account by default. Default: enabled in non-production
+# (so local + preview deploys still work without configuration),
+# disabled in production unless the operator explicitly opts in via
+# INSTAGRAM_SINGLE_TENANT_FALLBACK=1. NEVER read from any other
+# identity hint — no username, no UI active account, no owner default.
+def _resolve_single_tenant_fallback_flag() -> bool:
+    raw = os.environ.get('INSTAGRAM_SINGLE_TENANT_FALLBACK', '').strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    # Unset: enabled outside production, disabled in production.
+    return not IS_PRODUCTION
+
+
+_SINGLE_TENANT_FALLBACK_ENABLED = _resolve_single_tenant_fallback_flag()
+# Operator-visible warning is emitted at startup (see _startup) once the
+# logger is configured. Computing the flag here is intentional — module
+# load runs before the logger is defined.
+
 # Comma-separated list of explicit allowed origins. In production we ALSO
 # always include FRONTEND_URL (and any RAILWAY_PUBLIC_DOMAIN values) so the
 # main frontend cannot be accidentally locked out by a bad env value.
@@ -17202,6 +17225,10 @@ async def admin_webhook_dlq_retry(
                 'status': 'replayed',
                 'attempts': int(row.get('attempts') or 0) + 1,
                 'replayed_at': datetime.utcnow(),
+                # Phase 1 SaaS hardening: tag terminal rows for the
+                # 30-day TTL index. Active pending_retry rows leave
+                # this field unset and are NEVER pruned.
+                'terminal_at': datetime.utcnow(),
             }},
         )
         logger.info('webhook_dlq_manual_replay_success id=%s admin_user_id=%s',
@@ -20103,7 +20130,15 @@ async def _process_webhook(payload: dict):
                             break
             # Last-resort fallback for single-tenant deployments: if exactly
             # one user has an IG account connected, attribute the event to it.
-            if not user_doc:
+            #
+            # SaaS-readiness gate (Phase 1 hardening): this fallback is unsafe
+            # on a multi-tenant SaaS — the FIRST customer to sign up could
+            # have a misaddressed webhook attributed to them by default.
+            # Disabled in production unless the operator explicitly opts in
+            # via INSTAGRAM_SINGLE_TENANT_FALLBACK=1. In non-production
+            # environments the fallback still activates by default so local
+            # / preview deploys keep working without configuration.
+            if not user_doc and _SINGLE_TENANT_FALLBACK_ENABLED:
                 connected_accounts = await db.instagram_accounts.find(
                     {'isActive': {'$ne': False}, 'connectionValid': {'$ne': False}}
                 ).limit(2).to_list(2)
@@ -20365,9 +20400,18 @@ async def _process_webhook(payload: dict):
                 elif field == 'story_insights' or (field == 'feed' and value.get('item') == 'story_insights'):
                     replier_id = value.get('from', {}).get('id')
                     if replier_id:
-                        automations = await db.automations.find(
-                            {'user_id': user_id, 'status': 'active', 'trigger': 'Story Reply'}
-                        ).to_list(20)
+                        # Phase 1 SaaS hardening: Story Reply rules must
+                        # be scoped to the resolved Instagram account, not
+                        # the owner's entire workspace. Previously a
+                        # Story-Reply rule belonging to a sibling account
+                        # under the same owner could fire on this
+                        # account's story. Same `_account_scoped_query`
+                        # pattern as the comment + DM webhook paths.
+                        automations = await db.automations.find({
+                            **_account_scoped_query(user_id, ig_account_id),
+                            'status': 'active',
+                            'trigger': 'Story Reply',
+                        }).to_list(20)
                         for auto in automations:
                             create_tracked_task(execute_flow(user_doc, auto, replier_id, ''), 'execute_flow')
             logger.info(
@@ -21282,6 +21326,8 @@ async def _webhook_dlq_tick() -> dict:
                     'attempts': attempt,
                     'replayed_at': datetime.utcnow(),
                     'last_failed_at': entry.get('last_failed_at'),
+                    # Tag terminal row for TTL cleanup (30d retention).
+                    'terminal_at': datetime.utcnow(),
                 }},
             )
             summary['replayed_success'] += 1
@@ -21291,17 +21337,21 @@ async def _webhook_dlq_tick() -> dict:
             backoff_seconds = min(3600, 30 * (2 ** attempt))
             permanently_failed = attempt >= WEBHOOK_DLQ_MAX_ATTEMPTS
             new_status = 'permanently_failed' if permanently_failed else 'pending_retry'
+            set_fields = {
+                'status': new_status,
+                'attempts': attempt,
+                'next_attempt_at': datetime.utcnow() + timedelta(seconds=backoff_seconds),
+                'last_failed_at': datetime.utcnow(),
+                'last_exception_type': type(exc).__name__,
+                'last_exception_message': str(exc)[:500],
+            }
+            if permanently_failed:
+                # Tag terminal row for TTL cleanup (30d retention).
+                set_fields['terminal_at'] = datetime.utcnow()
             try:
                 await db.webhook_processing_failures.update_one(
                     {'id': entry.get('id')},
-                    {'$set': {
-                        'status': new_status,
-                        'attempts': attempt,
-                        'next_attempt_at': datetime.utcnow() + timedelta(seconds=backoff_seconds),
-                        'last_failed_at': datetime.utcnow(),
-                        'last_exception_type': type(exc).__name__,
-                        'last_exception_message': str(exc)[:500],
-                    }},
+                    {'$set': set_fields},
                 )
             except Exception:
                 logger.exception('webhook_dlq_update_failed id=%s', entry.get('id'))
@@ -22681,12 +22731,42 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
             })
         )
     )
+    # Phase 1 SaaS hardening (Fix 4b — success-wins-over-dedupe):
+    # If an `automation_success` event exists for the chosen comment
+    # AND no failure event exists for it, surface `automation_success`
+    # even if a LATER polling re-scan recorded `automation_skipped
+    # (skip_reason=already_replied_success)` for the same comment. The
+    # dedupe re-scan is bookkeeping; the success is the meaningful
+    # outcome and what the operator needs to see. Reporting-only — no
+    # sending behavior, no dedupe semantics change.
+    if (
+        success
+        and not failure
+        and stop_reason in {
+            'already_replied_success',
+            'comment_already_replied_success',
+            'comment_already_partial_success',
+            'comment_already_dm_failed',
+            'comment_already_pending_queue',
+            'public_reply_required_recovery',
+            'rule_not_matched',
+            'early_exit_before_rule_loading',
+        }
+    ):
+        stop_reason = 'automation_success'
     if (
         polling_source
         and latest_fresh_external_comment is None
         and (raw_latest_event_is_bot_reply or latest_is_rescan_of_processed)
         and stop_reason in {
             'rule_not_matched',
+            # Phase 1 SaaS hardening (Fix 4a): include the literal
+            # `historical` skip_reason (server.py:17721) — without this
+            # the no-fresh-comment override silently misses polling
+            # accounts whose latest visible event is a months-old
+            # historical re-scan, surfacing the misleading
+            # `exact_stop_reason=historical` label.
+            'historical',
             'historical_before_rule_activation',
             'comment_skipped_historical',
             'already_replied_success',
@@ -25508,6 +25588,41 @@ async def _index_bootstrap():
                 [('userId', 1)],
                 name='link_click_events_user_id',
             )
+            # Phase 1 SaaS hardening: 90-day TTL on raw click events.
+            # The dashboard reads at most the 5000 most-recent clicks
+            # per user (see _safe_clicks in _calculate_dashboard_summary
+            # _live), so 90d raw retention is safe — older detail rows
+            # have no downstream consumer. monthly_usage and dashboard
+            # _summaries persist the aggregated counters separately and
+            # are NOT pruned by this index.
+            link_clicks_ttl_seconds = max(
+                86400,
+                min(int(os.environ.get(
+                    'LINK_CLICK_EVENTS_TTL_SECONDS', str(90 * 86400),
+                )), 365 * 86400),
+            )
+            try:
+                await db.link_click_events.create_index(
+                    [('clickedAt', 1)],
+                    expireAfterSeconds=link_clicks_ttl_seconds,
+                    name='ttl_link_click_events_clicked_at',
+                )
+            except Exception as exc:
+                try:
+                    await db.command(
+                        'collMod',
+                        'link_click_events',
+                        index={
+                            'name': 'ttl_link_click_events_clicked_at',
+                            'expireAfterSeconds': link_clicks_ttl_seconds,
+                        },
+                    )
+                except Exception as mod_exc:
+                    logger.warning(
+                        'link_click_events_ttl_index_failed '
+                        'create_err=%s mod_err=%s',
+                        type(exc).__name__, type(mod_exc).__name__,
+                    )
             await db.usage_events.create_index(
                 [('user_id', 1), ('event_month', 1)],
                 name='usage_events_user_month',
@@ -25564,6 +25679,75 @@ async def _index_bootstrap():
                 [('first_failed_at', -1)],
                 name='webhook_dlq_first_failed_at',
             )
+            # Phase 1 SaaS hardening: TTL terminal DLQ rows after 30d.
+            # Active rows have status='pending_retry' and `terminal_at`
+            # is unset → MongoDB TTL leaves them alone. Rows transitioned
+            # to 'replayed' or 'permanently_failed' set `terminal_at` so
+            # the TTL monitor prunes them 30 days later. Operator can
+            # extend via WEBHOOK_DLQ_TERMINAL_TTL_SECONDS; clamped to
+            # [86400, 365*86400] (1d floor, 1y ceiling).
+            dlq_ttl_seconds = max(
+                86400,
+                min(int(os.environ.get(
+                    'WEBHOOK_DLQ_TERMINAL_TTL_SECONDS', str(30 * 86400),
+                )), 365 * 86400),
+            )
+            try:
+                await db.webhook_processing_failures.create_index(
+                    [('terminal_at', 1)],
+                    expireAfterSeconds=dlq_ttl_seconds,
+                    name='ttl_webhook_dlq_terminal_at',
+                )
+            except Exception as exc:
+                try:
+                    await db.command(
+                        'collMod',
+                        'webhook_processing_failures',
+                        index={
+                            'name': 'ttl_webhook_dlq_terminal_at',
+                            'expireAfterSeconds': dlq_ttl_seconds,
+                        },
+                    )
+                except Exception as mod_exc:
+                    logger.warning(
+                        'webhook_dlq_terminal_ttl_failed '
+                        'create_err=%s mod_err=%s',
+                        type(exc).__name__, type(mod_exc).__name__,
+                    )
+            # Phase 1 SaaS hardening: TTL closed comment-DM sessions 30d
+            # past their natural expiresAt. Active pending sessions have
+            # expiresAt in the future (`now + follow_gate_expires_after
+            # _minutes`), so the TTL leaves them alone. Sessions whose
+            # expiresAt is already past + the retention buffer are
+            # genuinely dead audit rows.
+            sessions_ttl_seconds = max(
+                86400,
+                min(int(os.environ.get(
+                    'COMMENT_DM_SESSIONS_TTL_SECONDS', str(30 * 86400),
+                )), 365 * 86400),
+            )
+            try:
+                await db.comment_dm_sessions.create_index(
+                    [('expiresAt', 1)],
+                    expireAfterSeconds=sessions_ttl_seconds,
+                    name='ttl_comment_dm_sessions_expires_at',
+                )
+            except Exception as exc:
+                try:
+                    await db.command(
+                        'collMod',
+                        'comment_dm_sessions',
+                        index={
+                            'name': 'ttl_comment_dm_sessions_expires_at',
+                            'expireAfterSeconds': sessions_ttl_seconds,
+                        },
+                    )
+                except Exception as mod_exc:
+                    logger.warning(
+                        'comment_dm_sessions_ttl_failed '
+                        'create_err=%s mod_err=%s',
+                        type(exc).__name__, type(mod_exc).__name__,
+                    )
             await db.dashboard_summaries.create_index(
                 [('user_id', 1), ('instagramAccountId', 1), ('month', 1)],
                 unique=True,
@@ -25929,6 +26113,11 @@ async def _startup():
     # as a background tracked task so the startup hook returns quickly
     # and the /api/ healthcheck is not blocked on a cold-Mongo connect.
     create_tracked_task(_index_bootstrap(), 'index_bootstrap')
+    if IS_PRODUCTION and _SINGLE_TENANT_FALLBACK_ENABLED:
+        logger.warning(
+            'instagram_single_tenant_fallback_enabled_in_production '
+            '— SaaS-unsafe. Set INSTAGRAM_SINGLE_TENANT_FALLBACK=0 to disable.'
+        )
     if IG_POLL_ENABLED:
         _register_bg_task('comment_poller', _comment_poller_loop)
     else:

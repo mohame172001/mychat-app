@@ -18,6 +18,22 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Phase 1 SaaS Hardening — Required Before Real-User Onboarding
+
+- Date/time: 2026-05-26
+- Symptom: Full audit at build `ce901be8b400` concluded "Not ready for real-user onboarding; needs infrastructure/storage fixes first." Four latent traps were identified that would either misroute a multi-tenant customer's events, exhaust Atlas storage again, or mislead operators investigating live failures.
+- Affected area: Webhook resolver fallback (server.py:20106-20116), Story Reply automation loading (server.py:20368-20370), three transient collections without TTL retention (webhook_processing_failures, comment_dm_sessions, link_click_events), Stop Point summary reporting (success-vs-dedupe label and literal `historical` skip_reason).
+- Root cause:
+  1. Single-tenant fallback would attribute any unmapped webhook to the only-connected-account when count==1. Safe today (2 accounts), unsafe the moment the very first SaaS customer signs up.
+  2. Story Reply automations loaded by `{user_id, status, trigger}` only — a sibling-account rule could fire on a different account's story webhook under the same owner.
+  3. Three transient collections accumulated indefinitely. The DLQ retry queue, closed comment-DM sessions, and raw click events all wrote without retention.
+  4. Stop Point's stop_reason classifier let later polling re-scans (`automation_skipped(already_replied_success)`) shadow a genuine `automation_success` for the same comment. Separately, the no-fresh-comment override missed the literal `skip_reason='historical'` so old polling re-scans surfaced confusingly.
+- Fix commit: pending (this commit). (1) `_resolve_single_tenant_fallback_flag()` defaults the legacy fallback to OFF in production and ON elsewhere; operator can override via `INSTAGRAM_SINGLE_TENANT_FALLBACK`. Startup warning if enabled in production. (2) Story Reply branch now uses `_account_scoped_query(user_id, ig_account_id)` matching the comment + DM webhook paths. (3) Three new TTL indexes: `ttl_webhook_dlq_terminal_at` (30d on `terminal_at` set when status transitions to terminal; active `pending_retry` rows unaffected), `ttl_comment_dm_sessions_expires_at` (30d past natural `expiresAt`; pending sessions have future `expiresAt`), `ttl_link_click_events_clicked_at` (90d; dashboard caps at 5000 most-recent reads). All env-tunable, all use the collMod-on-conflict fallback. (4) Stop Point: success-wins-over-dedupe override + literal `'historical'` skip_reason added to the no-fresh-comment override set.
+- Tests: 13 new tests in `test_phase1_saas_hardening.py` covering all four fixes with regression-resistant static-source checks for the most-easily-reverted patterns. `test_multi_account_automation_routing.py` and `test_historical_*.py` continue to pass. Backend full: 703 passed (+13).
+- Deploy status: Local, deploy required. Not eligible for `02_KNOWN_GOOD_VERSIONS.md` until a fresh end-to-end Instagram smoke test confirms: (a) `/api/version` returns the new SHA, (b) Atlas Indexes tab shows all four TTL indexes, (c) a fresh external comment produces `automation_success` and Stop Point reports it without dedupe-collapse, (d) no Sentry quota errors after deploy.
+- Lesson learned: A SaaS-readiness audit must check each fallback path AND each reporting label for whether it remains safe when more than one tenant exists. The four fixes here are individually small but collectively cover the "first paying customer accidentally lands in someone else's account" scenario.
+- Preventive test added: Yes. Including static-source checks that the regressions cannot be silently reverted.
+
 ### MongoDB Atlas Free Tier Filled By instagram_automation_events
 
 - Date/time: 2026-05-26
