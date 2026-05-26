@@ -18,6 +18,20 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### MongoDB Atlas Free Tier Filled By instagram_automation_events
+
+- Date/time: 2026-05-26
+- Symptom: Production MongoDB Atlas hit 512MB/512MB. Writes were blocked across the entire database — automation, dashboard, sessions, OAuth, everything. Manual triage showed `instagram_automation_events` was ~465MB by itself, dominating the deployment quota.
+- Affected area: Diagnostic/flight-recorder write path only. No automation execution, dedupe, HMAC, send, or rate-limit code path is involved in the disk pressure.
+- Root cause: `_record_instagram_automation_event` writes one document per stage (poller_comment_seen, rule_loading_finished, rule_match_success, automation_skipped, automation_success, etc.). On a polling-heavy account with many media + many old comments, every 15-second polling tick produces tens of rows even for already-processed comments (re-scans). With no retention policy on the collection it accumulated indefinitely. The collection backs the protected Admin Stop Point / Flight Recorder / Webhook Health views — operators only need recent rows (typical support window ≤ 7 days) but the collection retained months.
+- Manual recovery: `instagram_automation_events` was dropped from Atlas to restore write capacity. Flight Recorder is empty until new events accumulate; this is a fresh diagnostic window, not data loss for end users.
+- Fix commit: pending (this commit). Add a TTL index `ttl_instagram_automation_events_created` on `{created_at: 1}` with `expireAfterSeconds=604800` (7-day default). Atlas's background TTL monitor (60s cadence) prunes expired diagnostic events going forward, capping growth at ~7 days of events per account. Window is tunable via `IG_AUTOMATION_EVENTS_TTL_SECONDS` env var, clamped to `[86400, 7776000]` (1 day floor, 90 day ceiling) so a misconfigured value can neither empty the collection in one polling tick nor silently allow another overflow. If the index already exists with conflicting options, `collMod` updates the window in place. Index creation runs inside the existing non-blocking `_index_bootstrap` task scheduled from startup, so Railway healthcheck remains unaffected.
+- Event-noise reduction: deliberately deferred. The user constraint was "only do this if it does not break Admin Stop Point diagnostics" — every event class is currently load-bearing for at least one Stop Point classification branch (e.g. `poller_comment_seen` drives `fresh_comment_seen_in_last_poll`; `automation_skipped(bot_own_reply)` drives the bot-own-reply selector at `_latest_external_comment_event`). The TTL alone bounds storage; reducing event recording requires deeper Stop Point regression testing and is a separate workstream.
+- Tests: `test_index_bootstrap_creates_instagram_automation_events_ttl_index`, `test_index_bootstrap_clamps_ttl_within_safe_bounds`, `test_index_bootstrap_ttl_failure_does_not_crash_other_indexes`. `test_startup_bootstrap.py` 6 passed (+3). Backend full 690 passed (+3).
+- Deploy status: Local, deploy required. Verify after deploy that the TTL index exists in Atlas (Indexes tab on `instagram_automation_events`) and that storage stays bounded over the next 7-14 days.
+- Lesson learned: Every collection that takes per-event writes needs a TTL or rotation policy from day one. A diagnostic collection that the operator UI does not need beyond ~7 days should not be allowed to outlive a single support window. Atlas free tier has no built-in storage alerts at 80%/90% — add a runbook step to monitor `db.stats()` total size weekly until on a paid tier.
+- Preventive test added: Yes.
+
 ### Visible Browser Fallback Copy Differed Across Linked Accounts
 
 - Date/time: 2026-05-25

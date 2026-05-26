@@ -25593,6 +25593,62 @@ async def _index_bootstrap():
                 [('created_at', -1)],
                 name='instagram_automation_events_created',
             )
+            # TTL index for instagram_automation_events. The collection
+            # grew to ~465MB and filled MongoDB Atlas's 512MB free-tier
+            # quota in production, blocking writes across the whole DB.
+            # The collection is diagnostic-only: it backs the protected
+            # Admin Stop Point / Flight Recorder / Webhook Health views.
+            # 7-day retention preserves operator visibility for the typical
+            # support window while bounding storage. Atlas's background
+            # TTL monitor runs every 60s and prunes expired docs in
+            # batches — no app-side action required after this index lands.
+            #
+            # Configurable via env var so operators can extend/shorten
+            # without a code change (e.g. when debugging a flaky webhook
+            # subscription rollout). Hard lower bound of 1 day so a typo
+            # cannot empty the collection within a single polling cycle.
+            # Hard upper bound of 90 days so the same overflow incident
+            # cannot recur silently if the env var is misconfigured.
+            ttl_seconds = max(
+                86400,
+                min(int(os.environ.get(
+                    'IG_AUTOMATION_EVENTS_TTL_SECONDS', '604800',
+                )), 7776000),
+            )
+            try:
+                await db.instagram_automation_events.create_index(
+                    [('created_at', 1)],
+                    expireAfterSeconds=ttl_seconds,
+                    name='ttl_instagram_automation_events_created',
+                )
+            except Exception as ttl_exc:
+                # If a TTL index already exists with a different
+                # expireAfterSeconds value, MongoDB raises
+                # IndexOptionsConflict. Update it via collMod so the
+                # retention window can be tuned at runtime via the env
+                # var without a manual Atlas index rebuild. Failure here
+                # is non-fatal — the index continues to expire at its
+                # previous value and the operator can adjust manually.
+                try:
+                    await db.command(
+                        'collMod',
+                        'instagram_automation_events',
+                        index={
+                            'name': 'ttl_instagram_automation_events_created',
+                            'expireAfterSeconds': ttl_seconds,
+                        },
+                    )
+                    logger.info(
+                        'instagram_automation_events_ttl_updated seconds=%s',
+                        ttl_seconds,
+                    )
+                except Exception as mod_exc:
+                    logger.warning(
+                        'instagram_automation_events_ttl_index_failed '
+                        'create_err=%s mod_err=%s',
+                        type(ttl_exc).__name__,
+                        type(mod_exc).__name__,
+                    )
             try:
                 await db.monthly_usage.drop_index('monthly_usage_user_month_unique')
             except Exception:

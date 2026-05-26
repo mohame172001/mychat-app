@@ -73,6 +73,12 @@ class _FakeCollection:
 
 
 class _FakeDB:
+    async def command(self, *_a, **_k):
+        # collMod fallback path is exercised when an index already exists
+        # with conflicting options. Tests can override this on individual
+        # instances when they need to assert it was called.
+        return {'ok': 1}
+
     def __init__(self, slow_ms=0):
         # Every collection touched by _index_bootstrap gets a stub.
         for name in [
@@ -179,6 +185,121 @@ def test_index_bootstrap_creates_oauth_code_consumed_indexes(monkeypatch):
     ttl_kwargs = next(kw for (_a, kw) in fake_db.oauth_code_consumed.created_indexes
                       if kw.get('name') == 'oauth_code_consumed_ttl')
     assert ttl_kwargs.get('expireAfterSeconds') == 600
+
+
+def test_index_bootstrap_creates_instagram_automation_events_ttl_index(monkeypatch):
+    """Disk-pressure regression: instagram_automation_events grew to
+    ~465MB and filled Atlas's 512MB free-tier quota, blocking writes
+    across the whole database. The fix is a TTL index so Atlas's
+    background TTL monitor prunes expired diagnostic events. Verify
+    the bootstrap declares it with expireAfterSeconds=604800 (7d
+    default) and that the indexed field is created_at."""
+    _reset_bg_state()
+    fake_db = _FakeDB(slow_ms=0)
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def _noop_repair():
+        return None
+    monkeypatch.setattr(server, '_repair_legacy_reply_success_without_provider_proof', _noop_repair)
+
+    async def _noop_migrate():
+        return 0
+    monkeypatch.setattr(server, '_ensure_instagram_account_docs_for_connected_users', _noop_migrate)
+    monkeypatch.setattr(server, '_ensure_automation_account_scope_for_user',
+                        lambda _u: _noop_migrate())
+    monkeypatch.delenv('IG_AUTOMATION_EVENTS_TTL_SECONDS', raising=False)
+
+    asyncio.run(server._index_bootstrap())
+
+    ttl_calls = [
+        (args, kwargs) for (args, kwargs)
+        in fake_db.instagram_automation_events.created_indexes
+        if kwargs.get('name') == 'ttl_instagram_automation_events_created'
+    ]
+    assert ttl_calls, 'TTL index was not declared on instagram_automation_events'
+    args, kwargs = ttl_calls[0]
+    # The index must be on created_at and carry expireAfterSeconds.
+    assert args[0] == [('created_at', 1)]
+    assert kwargs.get('expireAfterSeconds') == 604800
+
+
+def test_index_bootstrap_clamps_ttl_within_safe_bounds(monkeypatch):
+    """A misconfigured env var must not (a) empty the collection in one
+    polling cycle, nor (b) silently allow another overflow incident.
+    Lower bound: 1 day. Upper bound: 90 days."""
+    _reset_bg_state()
+
+    # Below the floor.
+    monkeypatch.setenv('IG_AUTOMATION_EVENTS_TTL_SECONDS', '1')
+    fake_db_low = _FakeDB(slow_ms=0)
+    monkeypatch.setattr(server, 'db', fake_db_low)
+
+    async def _noop_repair():
+        return None
+    monkeypatch.setattr(server, '_repair_legacy_reply_success_without_provider_proof', _noop_repair)
+
+    async def _noop_migrate():
+        return 0
+    monkeypatch.setattr(server, '_ensure_instagram_account_docs_for_connected_users', _noop_migrate)
+    monkeypatch.setattr(server, '_ensure_automation_account_scope_for_user',
+                        lambda _u: _noop_migrate())
+
+    asyncio.run(server._index_bootstrap())
+    low_kwargs = next(kw for (_a, kw) in fake_db_low.instagram_automation_events.created_indexes
+                      if kw.get('name') == 'ttl_instagram_automation_events_created')
+    assert low_kwargs.get('expireAfterSeconds') == 86400  # 1 day floor
+
+    # Above the ceiling.
+    _reset_bg_state()
+    monkeypatch.setenv('IG_AUTOMATION_EVENTS_TTL_SECONDS', '999999999')
+    fake_db_high = _FakeDB(slow_ms=0)
+    monkeypatch.setattr(server, 'db', fake_db_high)
+    asyncio.run(server._index_bootstrap())
+    high_kwargs = next(kw for (_a, kw) in fake_db_high.instagram_automation_events.created_indexes
+                       if kw.get('name') == 'ttl_instagram_automation_events_created')
+    assert high_kwargs.get('expireAfterSeconds') == 7776000  # 90 day ceiling
+
+
+def test_index_bootstrap_ttl_failure_does_not_crash_other_indexes(monkeypatch):
+    """If the TTL create raises (e.g. IndexOptionsConflict) the bootstrap
+    must keep running. Atlas's existing TTL keeps pruning; the operator
+    can resolve manually."""
+    _reset_bg_state()
+    fake_db = _FakeDB(slow_ms=0)
+    original_create = fake_db.instagram_automation_events.create_index
+    captured = {'collmod': False}
+
+    async def collmod(*_a, **_k):
+        captured['collmod'] = True
+        return {'ok': 1}
+    fake_db.command = collmod  # type: ignore[assignment]
+
+    async def maybe_boom(*args, **kwargs):
+        if kwargs.get('name') == 'ttl_instagram_automation_events_created':
+            raise RuntimeError('simulated IndexOptionsConflict')
+        return await original_create(*args, **kwargs)
+    fake_db.instagram_automation_events.create_index = maybe_boom  # type: ignore[assignment]
+
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def _noop_repair():
+        return None
+    monkeypatch.setattr(server, '_repair_legacy_reply_success_without_provider_proof', _noop_repair)
+
+    async def _noop_migrate():
+        return 0
+    monkeypatch.setattr(server, '_ensure_instagram_account_docs_for_connected_users', _noop_migrate)
+    monkeypatch.setattr(server, '_ensure_automation_account_scope_for_user',
+                        lambda _u: _noop_migrate())
+
+    # Must NOT raise.
+    asyncio.run(server._index_bootstrap())
+
+    # collMod fallback was invoked to update the existing TTL's window.
+    assert captured['collmod'] is True
+    # Downstream indexes (oauth_code_consumed) were still attempted.
+    names = [kwargs.get('name') for (_a, kwargs) in fake_db.oauth_code_consumed.created_indexes]
+    assert 'oauth_code_consumed_provider_hash_unique' in names
 
 
 def test_index_bootstrap_swallows_inner_errors(monkeypatch, caplog):
