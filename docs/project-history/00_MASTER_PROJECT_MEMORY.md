@@ -460,6 +460,67 @@ If `/api/version` still starts with `99ee2fc`, Railway did not deploy Phase 2 or
 
 ---
 
+## 7B. Phase 2B stale polling comment guard
+
+After Phase 2 media catalog + round-robin, polling can discover old comments on old posts.
+
+To prevent delayed replies to historical comments, polling skips comments older than:
+
+```text
+IG_POLL_FRESH_COMMENT_WINDOW_SECONDS
+```
+
+Default:
+
+```text
+3600 seconds
+```
+
+Clamp:
+
+```text
+60 to 21600 seconds
+```
+
+This applies only to:
+
+```text
+source = polling
+```
+
+Webhook events are not blocked.
+
+Explicit selected-post catch-up remains allowed:
+
+```text
+process_existing_unreplied_comments = true
+```
+
+Skip reason:
+
+```text
+stale_polling_comment
+```
+
+Unchanged:
+
+- dedupe
+- HMAC
+- Billing
+- rate limits / send pacing
+- quick reply copy
+- account scoping
+- webhook handling
+
+Product behavior remains:
+
+```text
+A NEW comment on ANY owned post is eligible, even if the post itself is old.
+Historical existing comments are skipped unless explicit catch-up is enabled.
+```
+
+---
+
 ## 8. MongoDB quota incident and storage
 
 ### Incident
@@ -1357,4 +1418,3 @@ It is:
 ```
 
 Until that is done, do not build Billing, do not redesign automation, and do not add more complexity.
-

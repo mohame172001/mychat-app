@@ -18102,6 +18102,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     broad_rules_skipped_due_specific_match = False
     cutoff_rule = None
     cutoff_skip_reason = None
+    cutoff_skip_extra = {}
     for auto in automations:
         rule_priority = _comment_rule_priority(auto, media_id)
         rule_scope = _comment_rule_scope(auto, media_id)
@@ -18128,6 +18129,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         fire = False
 
         async def apply_activation_cutoff() -> Optional[str]:
+            nonlocal cutoff_skip_extra
             requested_historical = bool(
                 auto.get('process_existing_unreplied_comments')
                 or auto.get('processExistingComments')
@@ -18200,6 +18202,30 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 logger.info('skipped_pre_rule_comment ig_comment_id=%s rule_id=%s source=%s',
                             ig_comment_id, auto.get('id'), source)
                 return 'historical_before_rule_activation'
+            if source == 'polling' and not process_existing and comment_ts:
+                comment_age_seconds = max(0, int((now - comment_ts).total_seconds()))
+                if comment_age_seconds > IG_POLL_FRESH_COMMENT_WINDOW_SECONDS:
+                    cutoff_skip_extra = {
+                        'comment_created_time': comment_ts.isoformat(),
+                        'processed_at': now.isoformat(),
+                        'comment_age_seconds': comment_age_seconds,
+                        'fresh_window_seconds': IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
+                    }
+                    logger.info(
+                        'stale_polling_comment_skipped source=%s ig_comment_id=%s media_id=%s '
+                        'rule_id=%s instagram_account_id=%s comment_created_time=%s '
+                        'processed_at=%s age_seconds=%s fresh_window_seconds=%s',
+                        source,
+                        _safe_partial_identifier(ig_comment_id),
+                        _safe_partial_identifier(media_id),
+                        auto.get('id'),
+                        _safe_partial_identifier(ig_account_id),
+                        comment_ts.isoformat(),
+                        now.isoformat(),
+                        comment_age_seconds,
+                        IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
+                    )
+                    return 'stale_polling_comment'
             logger.info('comment_processed_after_activation ig_comment_id=%s rule_id=%s comment_ts=%s activation=%s source=%s',
                         ig_comment_id, auto.get('id'), effective_ts, activation, source)
             if source in ('polling', 'manual_catchup'):
@@ -18545,6 +18571,21 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
+        skip_extra = {
+            'comment_timestamp': effective_ts.isoformat() if effective_ts else None,
+            'timestamp_source': timestamp_source,
+            'rule_activation_started_at': (
+                (_parse_graph_datetime(
+                    (cutoff_rule or {}).get('activationStartedAt')
+                    or (cutoff_rule or {}).get('createdAt')
+                    or (cutoff_rule or {}).get('created')
+                ) or now).isoformat()
+                if cutoff_rule else None
+            ),
+            'before_rule_activation': cutoff_skip_reason == 'historical_before_rule_activation',
+        }
+        if cutoff_skip_extra:
+            skip_extra.update(cutoff_skip_extra)
         await _record_instagram_automation_event(
             'automation_skipped',
             source=source,
@@ -18555,19 +18596,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             rule_id=rule_id,
             rule_type=_automation_flight_rule_type(cutoff_rule),
             skip_reason=cutoff_skip_reason,
-            extra={
-                'comment_timestamp': effective_ts.isoformat() if effective_ts else None,
-                'timestamp_source': timestamp_source,
-                'rule_activation_started_at': (
-                    (_parse_graph_datetime(
-                        (cutoff_rule or {}).get('activationStartedAt')
-                        or (cutoff_rule or {}).get('createdAt')
-                        or (cutoff_rule or {}).get('created')
-                    ) or now).isoformat()
-                    if cutoff_rule else None
-                ),
-                'before_rule_activation': cutoff_skip_reason == 'historical_before_rule_activation',
-            },
+            extra=skip_extra,
         )
     else:
         cutoff_skip_reason = 'no_rule_match'
@@ -20651,9 +20680,11 @@ IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
-IG_POLL_FRESH_COMMENT_WINDOW_SECONDS = max(
+IG_POLL_FRESH_COMMENT_WINDOW_SECONDS = _env_int_clamped(
+    'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS',
+    60 * 60,
     60,
-    int(os.environ.get('IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', str(60 * 60 * 2))),
+    60 * 60 * 6,
 )
 AUTOMATION_QUEUE_INTERVAL_SECONDS = _env_int_clamped('AUTOMATION_QUEUE_INTERVAL_SECONDS', 5, 2, 60)
 COMMENT_REPLY_MIN_SPACING_SECONDS = _env_int_clamped('COMMENT_REPLY_MIN_SPACING_SECONDS', 2, 1, 30)
@@ -22653,6 +22684,12 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
             'activationStartedAt fire. To process previous unreplied comments on a specific '
             'post, enable process_existing_unreplied_comments on a post-specific rule whose '
             'selected media matches that post.'
+        )
+    if reason == 'stale_polling_comment':
+        return (
+            'Polling found an old comment after the rule was activated, but it is outside '
+            'the fresh-comment window, so MyChat correctly skipped it instead of sending '
+            'a delayed reply. A brand-new comment on any owned post should still process.'
         )
     if reason == 'no_fresh_comment_seen_in_poll':
         return (

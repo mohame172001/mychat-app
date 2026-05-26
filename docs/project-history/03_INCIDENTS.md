@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Phase 2 Round-Robin Processed Stale Comments After Activation
+
+- Date/time: 2026-05-26
+- Symptom: After Phase 2 `ed3d842`, media catalog + round-robin correctly discovered older posts, but it could also first-see old comments on those older posts and process them if their provider timestamp was after rule activation. In live evidence, a comment with provider timestamp many hours old reached `rule_match_success`, `public_reply_success`, `opening_dm_success`, and `automation_success`, making automation appear to reply repeatedly to old interactions.
+- Affected area: Instagram polling fallback in `_handle_new_comment`, specifically activation/freshness gating inside `apply_activation_cutoff`.
+- Root cause: The cutoff only asked whether `comment_timestamp < activationStartedAt`. After round-robin, `comment_timestamp >= activationStartedAt` is not sufficient proof of a live/new interaction, because the poller may first discover an older comment on an older media item well after it was created.
+- Fix commit: pending (this commit). Add a polling-only stale guard: when `source='polling'`, `process_existing_unreplied_comments` is false, Graph supplied a timestamp, and age exceeds `IG_POLL_FRESH_COMMENT_WINDOW_SECONDS` (default 3600, clamped 60-21600), skip as `stale_polling_comment` before public reply/DM. Webhook events are not affected, missing polling timestamps still use first-seen safety, and selected-post `process_existing_unreplied_comments=true` catch-up remains eligible.
+- Tests: `test_polling_stale_comment_after_activation_skips_without_sending`, `test_polling_stale_webhook_comment_after_activation_is_not_blocked`, `test_post_specific_process_existing_allows_stale_polling_catchup`, `test_instagram_automation_has_no_username_specific_branches`; `test_multi_account_automation_routing.py` 148 passed; `test_phase2_media_catalog_round_robin.py` 7 passed; full backend 714 passed.
+- Deploy status: Local, deploy required. Do not mark known-good until live retest confirms: a brand-new comment on old media still processes, an old re-scan skips as `stale_polling_comment`, exact duplicates still skip, and both linked accounts behave the same.
+- Lesson learned: After expanding polling coverage, freshness must be an explicit safety dimension separate from rule activation. Activation time protects pre-rule history; freshness protects old post-round-robin discoveries.
+- Preventive test added: Yes.
+
 ### Phase 1 SaaS Hardening — Required Before Real-User Onboarding
 
 - Date/time: 2026-05-26

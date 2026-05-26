@@ -4857,6 +4857,125 @@ def test_fresh_polling_comment_missing_timestamp_uses_first_seen(monkeypatch):
     assert seen_events[-1]['extra']['timestamp_source'] == 'first_seen'
 
 
+def test_polling_stale_comment_after_activation_skips_without_sending(monkeypatch):
+    """Round-robin may discover older comments on older media after the
+    rule was activated. For general any-post rules, those are not live
+    interactions and must not trigger a delayed reply/DM unless explicit
+    catch-up is enabled."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now - timedelta(days=1)
+    monkeypatch.setattr(server, 'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', 3600)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'stale-after-activation',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'old but after activation',
+        'timestamp': (now - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        'first_seen_at': now,
+    }, source='polling'))
+
+    assert res['matched'] is False
+    assert res['action_status'] == 'skipped'
+    doc = next(d for d in db.comments.docs if d.get('ig_comment_id') == 'stale-after-activation')
+    assert doc['skip_reason'] == 'stale_polling_comment'
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+    stale_events = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'automation_skipped'
+        and e.get('skip_reason') == 'stale_polling_comment'
+    ]
+    assert stale_events
+    assert stale_events[-1]['extra']['comment_age_seconds'] > 3600
+    assert stale_events[-1]['extra']['fresh_window_seconds'] == 3600
+
+
+def test_polling_stale_webhook_comment_after_activation_is_not_blocked(monkeypatch):
+    """The stale guard is polling-only. Webhook events are real-time
+    delivery signals, so a stale-looking provider timestamp should not be
+    blocked by the polling freshness window."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now - timedelta(days=1)
+    monkeypatch.setattr(server, 'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', 3600)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'webhook-stale-looking',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'webhook should process',
+        'timestamp': (now - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+    }, source='webhook'))
+
+    assert res['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+
+
+def test_post_specific_process_existing_allows_stale_polling_catchup(monkeypatch):
+    """Explicit catch-up remains opt-in and post-specific: old comments
+    on the selected media are still eligible when the creator enabled
+    process_existing_unreplied_comments for that selected post."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    catchup_rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'mediaB')
+    catchup_rule['activationStartedAt'] = now
+    catchup_rule['process_existing_unreplied_comments'] = True
+    catchup_rule['processExistingUnrepliedComments'] = True
+    db.automations.docs[1] = catchup_rule
+    monkeypatch.setattr(server, 'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', 3600)
+
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    res = _run(server._handle_new_comment(owner, {
+        'ig_comment_id': 'specific-catchup-old',
+        'media_id': 'mediaB',
+        'commenter_id': 'external-fan',
+        'commenter_username': 'fan',
+        'text': 'old selected post',
+        'timestamp': (now - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        'first_seen_at': now,
+    }, source='polling'))
+
+    assert res['matched'] is True
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    assert any(
+        e.get('stage') == 'historical_catchup_allowed'
+        for e in db.instagram_automation_events.docs
+    )
+
+
+def test_instagram_automation_has_no_username_specific_branches():
+    source = Path(server.__file__).read_text(encoding='utf-8')
+    dangerous_patterns = [
+        'if username ==',
+        'if username_key ==',
+        'if account_username ==',
+        'if instagram_username ==',
+        'if handle ==',
+    ]
+    for pattern in dangerous_patterns:
+        assert pattern not in source
+
+
 def test_old_polling_comment_before_activation_still_skips(monkeypatch):
     """A real Graph timestamp before activation is still authoritative:
     this protects users from replying to old comments when
