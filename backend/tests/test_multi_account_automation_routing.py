@@ -4926,6 +4926,182 @@ def test_polling_stale_webhook_comment_after_activation_is_not_blocked(monkeypat
     assert len(dm_calls) == 1
 
 
+def test_poll_user_comments_prefilters_stale_polling_comment_without_full_trace(monkeypatch):
+    """The poller should summarize stale old rows instead of pushing them
+    through _handle_new_comment and emitting rule-loading noise."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now - timedelta(days=1)
+    monkeypatch.setattr(server, 'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', 3600)
+    monkeypatch.setattr(server, '_maybe_sync_media_catalog', lambda *_a, **_kw: asyncio.sleep(0))
+    monkeypatch.setattr(server, '_fetch_recent_media_ids',
+                        lambda *_a, **_kw: asyncio.sleep(0, result=['mediaB']))
+    monkeypatch.setattr(server, '_fetch_latest_media_id',
+                        lambda *_a, **_kw: asyncio.sleep(0, result=None))
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse(200, {
+                'data': [{
+                    'id': 'poll-stale-after-activation',
+                    'text': 'old but after activation',
+                    'timestamp': (now - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                    'from': {'id': 'external-fan', 'username': 'fan'},
+                }],
+            })
+
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+
+    stats = _run(server._poll_user_comments(owner))
+
+    assert stats['commentsSeen'] == 1
+    assert stats['staleSkipped'] == 1
+    assert stats['commentsSentToHandleNewComment'] == 0
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'poller_comment_seen' not in stages
+    assert 'rule_loading_started' not in stages
+    assert 'rule_loading_finished' not in stages
+    assert 'automation_skipped' not in stages
+    summaries = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'polling_scan_summary'
+    ]
+    assert len(summaries) == 1
+    extra = summaries[0]['extra']
+    assert extra['comments_seen'] == 1
+    assert extra['fresh_candidates'] == 0
+    assert extra['stale_skipped'] == 1
+    assert extra['comments_sent_to_handle_new_comment'] == 0
+
+
+def test_poll_user_comments_prefilters_historical_polling_comment_without_full_trace(monkeypatch):
+    """Provider timestamps before activation should be summarized before
+    rule hydration when they arrive through polling."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    db.automations.docs[1]['activationStartedAt'] = now
+    monkeypatch.setattr(server, '_maybe_sync_media_catalog', lambda *_a, **_kw: asyncio.sleep(0))
+    monkeypatch.setattr(server, '_fetch_recent_media_ids',
+                        lambda *_a, **_kw: asyncio.sleep(0, result=['mediaB']))
+    monkeypatch.setattr(server, '_fetch_latest_media_id',
+                        lambda *_a, **_kw: asyncio.sleep(0, result=None))
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse(200, {
+                'data': [{
+                    'id': 'poll-before-activation',
+                    'text': 'historical',
+                    'timestamp': (now - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                    'from': {'id': 'external-fan', 'username': 'fan'},
+                }],
+            })
+
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+
+    stats = _run(server._poll_user_comments(owner))
+
+    assert stats['commentsSeen'] == 1
+    assert stats['historicalSkipped'] == 1
+    assert stats['commentsSentToHandleNewComment'] == 0
+    assert len(reply_calls) == 0
+    assert len(dm_calls) == 0
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'poller_comment_seen' not in stages
+    assert 'rule_loading_started' not in stages
+    assert 'rule_loading_finished' not in stages
+    summaries = [
+        e for e in db.instagram_automation_events.docs
+        if e.get('stage') == 'polling_scan_summary'
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]['extra']['historical_skipped'] == 1
+
+
+def test_poll_user_comments_process_existing_catchup_still_enters_full_trace(monkeypatch):
+    """The early polling filter must not block explicit selected-post
+    catch-up."""
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+    now = datetime.utcnow()
+    catchup_rule = _post_specific_comment_flow_rule('accB', 'igB', 'ruleB', 'mediaB')
+    catchup_rule['activationStartedAt'] = now
+    catchup_rule['process_existing_unreplied_comments'] = True
+    catchup_rule['processExistingUnrepliedComments'] = True
+    db.automations.docs[1] = catchup_rule
+    monkeypatch.setattr(server, 'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS', 3600)
+    monkeypatch.setattr(server, '_maybe_sync_media_catalog', lambda *_a, **_kw: asyncio.sleep(0))
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse(200, {
+                'data': [{
+                    'id': 'poll-catchup-old',
+                    'text': 'old selected post',
+                    'timestamp': (now - timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                    'from': {'id': 'external-fan', 'username': 'fan'},
+                }],
+            })
+
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _Client)
+    owner = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+
+    stats = _run(server._poll_user_comments(owner))
+
+    assert stats['commentsSeen'] == 1
+    assert stats['commentsSentToHandleNewComment'] == 1
+    assert stats['matched'] == 1
+    assert len(reply_calls) == 1
+    assert len(dm_calls) == 1
+    stages = [event['stage'] for event in db.instagram_automation_events.docs]
+    assert 'poller_comment_seen' in stages
+    assert 'rule_loading_started' in stages
+    assert 'historical_catchup_allowed' in stages
+    assert 'automation_success' in stages
+
+
 def test_post_specific_process_existing_allows_stale_polling_catchup(monkeypatch):
     """Explicit catch-up remains opt-in and post-specific: old comments
     on the selected media are still eligible when the creator enabled
@@ -5585,6 +5761,42 @@ def test_summarize_stop_point_no_fresh_comment_seen_in_poll_label(monkeypatch):
     summary = _run(server.summarize_account_automation_stop_point('account_b'))
     assert summary['fresh_comment_seen_in_last_poll'] is False
     assert summary['exact_stop_reason'] == 'no_fresh_comment_seen_in_poll'
+
+
+def test_summarize_stop_point_summary_only_old_polling_not_rule_not_matched(monkeypatch):
+    """When Phase 2C-A prefilters all old polling rows, Stop Point should
+    use the compact scan summary instead of inventing a rule miss."""
+    db = _install_multi_account_db(monkeypatch)
+    now = datetime.utcnow()
+    _seed_flight_event(
+        db,
+        stage='polling_scan_summary',
+        source='polling',
+        created_at=now,
+        extra={
+            'media_checked': 3,
+            'comments_seen': 8,
+            'fresh_candidates': 0,
+            'historical_skipped': 5,
+            'stale_skipped': 3,
+            'comments_sent_to_handle_new_comment': 0,
+            'recent_media_limit': 25,
+            'round_robin_batch_size': 25,
+            'round_robin_cursor_position': 50,
+            'total_known_media_count': 200,
+        },
+    )
+
+    summary = _run(server.summarize_account_automation_stop_point('account_b'))
+
+    assert summary['last_comment_reached_backend'] is False
+    assert summary['polling_scanned_account'] is True
+    assert summary['exact_stop_reason'] == 'only_historical_or_stale_comments_seen'
+    assert summary['polling_summary_comments_seen'] == 8
+    assert summary['polling_summary_historical_skipped'] == 5
+    assert summary['polling_summary_stale_skipped'] == 3
+    assert summary['polling_summary_comments_sent_to_handle_new_comment'] == 0
+    assert 'summarized the scan' in summary['next_recommended_action']
 
 
 def test_summarize_stop_point_historical_label_preserved_for_fresh_pre_activation(monkeypatch):

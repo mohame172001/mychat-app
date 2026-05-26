@@ -1,6 +1,6 @@
 # Current State
 
-Last updated by: Claude
+Last updated by: Codex
 Last updated date: 2026-05-26
 
 ## Project
@@ -23,15 +23,19 @@ Stack:
 
 ## Git And Deploy State
 
+- Current local app-code fix override: pending `fix(instagram): reduce polling noise and summarize scans`. This supersedes the older pending notes below for Phase 2/2B state. Phase 2C-A keeps polling recovery enabled, but filters provably historical/stale polling comments before `_handle_new_comment`, counts them in one `polling_scan_summary`, and updates Stop Point so old polling scans do not collapse into misleading `rule_not_matched`. Fresh polling comments, webhook comments, explicit selected-post catch-up, dedupe, HMAC, Billing, rate limits, quick reply copy, Dashboard/frontend, and account scoping remain unchanged.
+
 - Current local app-code fix: pending `feat(instagram): media catalog + round-robin polling for full any-post coverage`. Stacks on top of the deployed Phase 1 SaaS hardening (`99ee2fc`). New `instagram_media_catalog` collection + `pollingRoundRobinCursor` on `instagram_accounts` + extended `_collect_target_media_ids` to compose recent + pinned + round-robin slices so `comment:any/post_scope=any` rules cover every post over time. Required before customer onboarding so a fresh comment on an older post is not silently invisible to polling. Billing remains blocked. Implements widened polling target-media coverage (10→25) + scan-started diagnostics + full Stop Point decision matrix: A) exact-comment provider-proof dedupe still skips, B) bot-own/self reply still skips, C) general any-post rule processes fresh comments after activation only, D) post-specific + selected-media match + process_existing_unreplied_comments=true processes previous unreplied comments and emits `historical_catchup_allowed` + `process_existing_unreplied_comment_processed`, E) post-specific + selected-media match + process_existing=false skips pre-activation, F) post-specific + selected-media mismatch returns `selected_media_no_match`, G) no fresh comment returned by polling → `no_fresh_comment_seen_in_poll`.
-- Current local HEAD: `ed3d8422299f`.
-- Current origin/master: `ed3d8422299f`.
-- Current production build_sha: `ed3d8422299f`.
-- Current working status: Production is on `ed3d842`, which adds Phase 2 media catalog + round-robin polling coverage. A local uncommitted Phase 2B stale polling guard is in progress. No Billing, HMAC, dedupe removal, rate-limit removal, frontend diagnostics route, dashboard behavior, webhook execution, account-scope, or quick-reply-copy change.
+- Current local HEAD: `237e549d699c`.
+- Current origin/master: `237e549d699c`.
+- Current production build_sha: `237e549d699c`.
+- Current working status: Production is on `237e549`; Phase 2B stale polling guard is live. Phase 2C-A polling-noise reduction is local and pending tests/deploy. No Billing, HMAC, dedupe removal, rate-limit removal, frontend diagnostics route, dashboard behavior, webhook execution, account-scope, or quick-reply-copy change.
 
 Additional current-session note: `fix(instagram): unify quick reply behavior across accounts` is pending commit/deploy. Outgoing Instagram DMs no longer auto-append visible browser/laptop fallback instructions such as "If the button is not visible..." or visible manual-typing instructions. Quick reply payloads remain unchanged, and internal typed fallback remains available only when a valid pending session exists.
 
-Additional current-session note: Phase 2B stale polling guard is pending locally on top of deployed `ed3d842`. Root cause: round-robin can first-see older comments on older media after rule activation and process them as if they were live. Pending fix: polling-only guard skips Graph-timestamped comments older than `IG_POLL_FRESH_COMMENT_WINDOW_SECONDS` (default 3600, clamped 60-21600) unless explicit selected-post `process_existing_unreplied_comments=true` catch-up applies. Webhook events, exact-comment dedupe, HMAC, rate limits, quick reply copy, and account scoping remain unchanged.
+Additional current-session note: Phase 2B stale polling guard is deployed as `237e549`. Root cause: round-robin can first-see older comments on older media after rule activation and process them as if they were live. Live fix: polling-only guard skips Graph-timestamped comments older than `IG_POLL_FRESH_COMMENT_WINDOW_SECONDS` (default 3600, clamped 60-21600) unless explicit selected-post `process_existing_unreplied_comments=true` catch-up applies. Webhook events, exact-comment dedupe, HMAC, rate limits, quick reply copy, and account scoping remain unchanged.
+
+Additional current-session note: Phase 2C-A is pending locally on top of deployed `237e549`. Root cause: `_poll_user_comments` still fed old polling rows into `_handle_new_comment`, causing `poller_comment_seen`, `dedupe_checked`, rule-loading, and historical skip traces for old comments every polling tick. Pending fix: prefilter polling-only historical/stale comments with provider timestamps before `_handle_new_comment`, emit one compact `polling_scan_summary`, and let Stop Point report `only_historical_or_stale_comments_seen` / `no_fresh_comment_seen_in_poll` instead of `rule_not_matched` when no fresh comment was scanned.
 
 Update these values at the start and end of every agent session.
 
@@ -69,6 +73,9 @@ Update these values at the start and end of every agent session.
 - Local multi-account automation routing suite passed after Phase 2B stale polling guard: 148 tests (+4).
 - Local Phase 2 media-catalog + round-robin suite still passed after Phase 2B: 7 tests.
 - Local full backend suite passed after Phase 2B stale polling guard: 714 tests (+4).
+- Local multi-account automation routing suite passed after Phase 2C-A polling prefilter + summary: 152 tests (+4).
+- Local Phase 2 media-catalog + round-robin suite still passed after Phase 2C-A: 7 tests.
+- Local full backend suite passed after Phase 2C-A polling prefilter + summary: 718 tests (+4).
 
 ## Current Blockers
 

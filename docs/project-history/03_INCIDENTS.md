@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Phase 2 Polling Produced Deep Automation Logs For Old Comments
+
+- Date/time: 2026-05-26
+- Symptom: After Phase 2/2B, polling no longer sent delayed replies to stale comments, but it still continuously logged old polling rows through deep stages such as `poller_comment_seen`, `dedupe_checked`, `rule_loading_started`, `rule_loading_finished`, `rule_candidate_evaluated`, and `automation_skipped(historical_before_rule_activation)`. This made Stop Point noisy and could surface misleading `rule_not_matched` when no fresh comment was scanned.
+- Affected area: Instagram polling fallback in `_poll_user_comments`, plus Stop Point summarization.
+- Root cause: `_poll_user_comments` sent every returned Graph comment into `_handle_new_comment`. Historical/stale filtering happened inside the full automation path, after detailed per-comment logs had already been written.
+- Fix commit: pending (this commit). Add a polling-only prefilter before `_handle_new_comment` for provider-timestamped comments that are clearly `historical_before_rule_activation` or `stale_polling_comment` for a matching rule and do not have explicit selected-post catch-up enabled. Emit one `polling_scan_summary` per poll run with counts instead of full traces for those old rows. Stop Point now understands summary-only scans and reports `only_historical_or_stale_comments_seen` / `no_fresh_comment_seen_in_poll`.
+- Tests: `test_poll_user_comments_prefilters_stale_polling_comment_without_full_trace`, `test_poll_user_comments_prefilters_historical_polling_comment_without_full_trace`, `test_poll_user_comments_process_existing_catchup_still_enters_full_trace`, `test_summarize_stop_point_summary_only_old_polling_not_rule_not_matched`; `test_multi_account_automation_routing.py` 152 passed; `test_phase2_media_catalog_round_robin.py` 7 passed; full backend suite 718 passed.
+- Deploy status: Local, deploy required. Do not mark known-good until live verification confirms a fresh polling/webhook comment still gets a full trace, old polling comments summarize only, and both linked accounts remain account-agnostic.
+- Lesson learned: Polling fallback should be a quiet recovery mechanism, not a continuous full automation feeder for historical rows. Filter obvious old polling rows before the full rule/dedupe/send pipeline.
+- Preventive test added: Yes.
+
 ### Phase 2 Round-Robin Processed Stale Comments After Activation
 
 - Date/time: 2026-05-26

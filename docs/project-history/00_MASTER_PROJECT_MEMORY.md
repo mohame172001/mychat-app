@@ -521,6 +521,92 @@ Historical existing comments are skipped unless explicit catch-up is enabled.
 
 ---
 
+## 7C. Phase 2C-A early polling filter and scan summaries
+
+Production `237e549` prevents stale polling comments from sending delayed replies, but polling can still create noisy deep traces for old comments.
+
+Phase 2C-A keeps polling recovery enabled while making it quieter and more webhook-first:
+
+```text
+_poll_user_comments
+-> classify provider-timestamped polling comment against active rules
+-> if historical/stale and process_existing_unreplied_comments is false:
+   summarize only
+-> otherwise call _handle_new_comment
+```
+
+Filtered polling rows do not emit full per-comment automation traces:
+
+```text
+poller_comment_seen
+dedupe_checked
+rule_loading_started
+rule_loading_finished
+rule_candidate_evaluated
+automation_skipped
+```
+
+Instead, the poller emits one compact event:
+
+```text
+stage = polling_scan_summary
+```
+
+Important summary fields:
+
+- media_checked
+- comments_seen
+- fresh_candidates
+- historical_skipped
+- stale_skipped
+- bot_own_skipped
+- already_processed_skipped
+- comments_sent_to_handle_new_comment
+- automation_success_count
+- errors_count
+- target_media_count
+- recent_media_limit
+- round_robin_batch_size
+- round_robin_cursor_position
+- total_known_media_count
+
+Full traces are still required for:
+
+- webhook comments
+- fresh polling comments
+- missing-timestamp polling comments that cannot be safely prefiltered
+- explicit selected-post catch-up
+- send attempts
+- send failures
+- automation_success
+- unexpected errors
+
+Stop Point should read `polling_scan_summary` and report:
+
+```text
+only_historical_or_stale_comments_seen
+```
+
+or:
+
+```text
+no_fresh_comment_seen_in_poll
+```
+
+instead of `rule_not_matched` when no fresh polling comment was processed.
+
+Unchanged:
+
+- dedupe semantics
+- HMAC
+- Billing
+- rate limits / send pacing
+- quick reply copy
+- Dashboard/frontend
+- username/account-specific behavior
+
+---
+
 ## 8. MongoDB quota incident and storage
 
 ### Incident

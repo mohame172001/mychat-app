@@ -20757,6 +20757,73 @@ def _sort_polled_comments_for_processing(
     return sorted(list(comments or []), key=_key)
 
 
+def _polling_process_existing_enabled_for_media(rule: dict, media_id: Optional[str]) -> bool:
+    requested = bool(
+        rule.get('process_existing_unreplied_comments')
+        or rule.get('processExistingUnrepliedComments')
+        or rule.get('processExistingComments')
+    )
+    selected_media_id = _selected_specific_media_id(rule)
+    return bool(
+        requested
+        and selected_media_id
+        and media_id
+        and str(selected_media_id) == str(media_id)
+    )
+
+
+def _polling_prefilter_skip_reason(
+    comment: dict,
+    automations: list,
+    media_id: Optional[str],
+    *,
+    now: Optional[datetime] = None,
+) -> Tuple[Optional[str], Optional[dict], Dict[str, Any]]:
+    """Classify old polling comments before the full automation pipeline.
+
+    This is intentionally conservative: only comments with a provider
+    timestamp and a matching comment rule are filtered here. Missing
+    timestamps, webhook events, and explicit selected-post catch-up stay in
+    the existing `_handle_new_comment` path.
+    """
+    comment_ts = _polled_comment_timestamp(comment)
+    if not comment_ts:
+        return None, None, {}
+
+    now = now or datetime.utcnow()
+    for auto in _sort_comment_rules_by_priority(automations, media_id):
+        if not _should_evaluate_comment_rule(auto):
+            continue
+        if not _comment_rule_media_matches(auto, media_id):
+            continue
+        process_existing = _polling_process_existing_enabled_for_media(auto, media_id)
+        activation = _parse_graph_datetime(
+            auto.get('activationStartedAt') or auto.get('createdAt') or auto.get('created')
+        ) or now
+        if process_existing:
+            return None, auto, {
+                'comment_created_time': comment_ts.isoformat(),
+                'rule_activation_started_at': activation.isoformat() if activation else None,
+                'process_existing_unreplied_comments': True,
+            }
+        activation_floor = activation.replace(microsecond=0) if activation else None
+        comment_floor = comment_ts.replace(microsecond=0)
+        base_extra = {
+            'comment_created_time': comment_ts.isoformat(),
+            'processed_at': now.isoformat(),
+            'comment_age_seconds': max(0, int((now - comment_ts).total_seconds())),
+            'fresh_window_seconds': IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
+            'rule_activation_started_at': activation.isoformat() if activation else None,
+        }
+        if activation_floor and comment_floor < activation_floor:
+            return 'historical_before_rule_activation', auto, base_extra
+        if base_extra['comment_age_seconds'] > IG_POLL_FRESH_COMMENT_WINDOW_SECONDS:
+            return 'stale_polling_comment', auto, base_extra
+        return None, auto, base_extra
+
+    return None, None, {}
+
+
 async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
     """Resolve the set of media IDs we need to poll for this user.
 
@@ -20898,6 +20965,12 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         'user_id': user_id,
         'mediaChecked': 0,
         'commentsSeen': 0,
+        'freshCandidates': 0,
+        'historicalSkipped': 0,
+        'staleSkipped': 0,
+        'botOwnSkipped': 0,
+        'alreadyProcessedSkipped': 0,
+        'commentsSentToHandleNewComment': 0,
         'newComments': 0,
         'matched': 0,
         'actionsSucceeded': 0,
@@ -20905,7 +20978,44 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         'media': {},
         'errors': [],
         'replyCap': IG_POLL_REPLY_CAP_PER_RUN,
+        'targetMediaCount': 0,
+        'recentMediaLimit': _ig_poll_recent_media_limit(),
+        'roundRobinBatchSize': _ig_poll_round_robin_batch(),
+        'roundRobinCursorPosition': None,
+        'totalKnownMediaCount': None,
+        'pollingScanSummaryEmitted': False,
     }
+    summary_emitted = False
+
+    async def emit_polling_scan_summary():
+        nonlocal summary_emitted
+        if summary_emitted:
+            return
+        summary_emitted = True
+        stats['pollingScanSummaryEmitted'] = True
+        await _record_instagram_automation_event(
+            'polling_scan_summary',
+            source='polling',
+            user_doc=user_doc,
+            extra={
+                'media_checked': stats.get('mediaChecked', 0),
+                'comments_seen': stats.get('commentsSeen', 0),
+                'fresh_candidates': stats.get('freshCandidates', 0),
+                'historical_skipped': stats.get('historicalSkipped', 0),
+                'stale_skipped': stats.get('staleSkipped', 0),
+                'bot_own_skipped': stats.get('botOwnSkipped', 0),
+                'already_processed_skipped': stats.get('alreadyProcessedSkipped', 0),
+                'comments_sent_to_handle_new_comment': stats.get('commentsSentToHandleNewComment', 0),
+                'automation_success_count': stats.get('actionsSucceeded', 0),
+                'errors_count': len(stats.get('errors') or []),
+                'target_media_count': stats.get('targetMediaCount', 0),
+                'recent_media_limit': stats.get('recentMediaLimit'),
+                'round_robin_batch_size': stats.get('roundRobinBatchSize'),
+                'round_robin_cursor_position': stats.get('roundRobinCursorPosition'),
+                'total_known_media_count': stats.get('totalKnownMediaCount'),
+                'reply_cap': stats.get('replyCap'),
+            },
+        )
 
     if not token or not ig_id:
         stats['errors'].append('missing_token_or_ig_id')
@@ -20915,6 +21025,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             user_doc=user_doc,
             skip_reason='missing_token_or_ig_id',
         )
+        await emit_polling_scan_summary()
         return stats
     try:
         await db.instagram_accounts.update_one(
@@ -20948,6 +21059,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             skip_reason='no_active_rules',
             extra={'rules_count': 0},
         )
+        await emit_polling_scan_summary()
         return stats
 
     # Best-effort catalog refresh ahead of target collection. The
@@ -20981,6 +21093,9 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             cursor_pos = int((row or {}).get('pollingRoundRobinCursor') or 0)
     except Exception:
         cursor_pos = None
+    stats['targetMediaCount'] = len(media_ids)
+    stats['totalKnownMediaCount'] = catalog_count
+    stats['roundRobinCursorPosition'] = cursor_pos
     await _record_instagram_automation_event(
         'poller_account_scan_started',
         source='polling',
@@ -21003,6 +21118,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             skip_reason='no_target_media_ids',
             extra={'rules_count': len(automations)},
         )
+        await emit_polling_scan_summary()
         return stats
 
     reply_attempts = 0
@@ -21023,6 +21139,7 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 logger.info('catchup_reply_cap_reached user=%s cap=%s',
                             user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
                 stats['errors'].append('reply_cap_reached')
+                await emit_polling_scan_summary()
                 return stats
             stats['mediaChecked'] += 1
             logger.info('media_comments_fetch_started user=%s media_id=%s',
@@ -21060,6 +21177,8 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 matched_count = 0
                 succeeded = 0
                 failed = 0
+                historical_skipped = 0
+                stale_skipped = 0
                 for cm in data:
                     seen_at = datetime.utcnow()
                     ig_comment_id = cm.get('id')
@@ -21071,6 +21190,38 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     )
                     if not commenter_id and commenter_username:
                         commenter_id = f'u:{commenter_username}'
+                    prefilter_reason, prefilter_rule, prefilter_extra = _polling_prefilter_skip_reason(
+                        cm,
+                        automations,
+                        mid,
+                        now=seen_at,
+                    )
+                    if prefilter_reason:
+                        prefilter_extra = dict(prefilter_extra or {})
+                        prefilter_extra.update({
+                            'comment_id_partial': _safe_partial_identifier(ig_comment_id),
+                            'media_id_partial': _safe_partial_identifier(mid),
+                            'rule_id_partial': _safe_partial_identifier((prefilter_rule or {}).get('id')),
+                            'instagram_account_id_partial': _safe_partial_identifier(ig_id),
+                        })
+                        logger.info(
+                            'polling_comment_prefiltered reason=%s comment=%s media=%s rule=%s age=%s window=%s',
+                            prefilter_reason,
+                            _safe_partial_identifier(ig_comment_id),
+                            _safe_partial_identifier(mid),
+                            _safe_partial_identifier((prefilter_rule or {}).get('id')),
+                            prefilter_extra.get('comment_age_seconds'),
+                            prefilter_extra.get('fresh_window_seconds'),
+                        )
+                        if prefilter_reason == 'historical_before_rule_activation':
+                            historical_skipped += 1
+                            stats['historicalSkipped'] += 1
+                        elif prefilter_reason == 'stale_polling_comment':
+                            stale_skipped += 1
+                            stats['staleSkipped'] += 1
+                        continue
+                    stats['freshCandidates'] += 1
+                    stats['commentsSentToHandleNewComment'] += 1
                     await _record_instagram_automation_event(
                         'poller_comment_seen',
                         source='polling',
@@ -21102,6 +21253,17 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                     if res.get('matched'):
                         matched_count += 1
                     st = res.get('action_status')
+                    reason = res.get('reason') or res.get('skip_reason')
+                    if reason == 'bot_own_reply':
+                        stats['botOwnSkipped'] += 1
+                    elif reason in {
+                        'already_replied_success',
+                        'comment_already_partial_success',
+                        'comment_already_dm_failed',
+                        'comment_already_pending_queue',
+                        'public_reply_required_recovery',
+                    }:
+                        stats['alreadyProcessedSkipped'] += 1
                     if st in ('success', 'partial_success'):
                         succeeded += 1
                         reply_attempts += 1
@@ -21117,12 +21279,15 @@ async def _poll_user_comments(user_doc: dict) -> dict:
                 stats['actionsSucceeded'] += succeeded
                 stats['actionsFailed'] += failed
                 stats['media'][mid] = {'total': len(data), 'new': new_count,
-                                       'matched': matched_count}
+                                       'matched': matched_count,
+                                       'historical_skipped': historical_skipped,
+                                       'stale_skipped': stale_skipped}
             except Exception as e:
                 logger.exception('media_comments_fetch_failed user=%s media_id=%s exc=%s',
                                  user_doc.get('email'), mid, e)
                 stats['media'][mid] = {'error': f'exc:{e}'}
                 stats['errors'].append({'media_id': mid, 'error': f'exc:{e}'})
+    await emit_polling_scan_summary()
     return stats
 
 
@@ -22699,6 +22864,13 @@ def _recommend_next_action_for_stop_reason(stop_reason: str, summary: dict) -> s
             'Graph returns the fresh comment (check target_media_count / '
             'target_media_partials on the latest scan-started event).'
         )
+    if reason == 'only_historical_or_stale_comments_seen':
+        return (
+            'Polling scanned this account but only found historical or stale comments, '
+            'so MyChat summarized the scan without running full automation traces for '
+            'those old rows. A fresh new comment should still show poller_comment_seen '
+            'and continue through rule matching.'
+        )
     if reason == 'process_existing_unreplied_comment_processed':
         return (
             'A previously unreplied comment on the selected media was processed under '
@@ -22779,6 +22951,13 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         ],
         {'automation_skipped'},
     )
+    latest_polling_summary = _latest_event(events, {'polling_scan_summary'})
+    latest_polling_summary_extra = (
+        (latest_polling_summary.get('extra') or {})
+        if isinstance(latest_polling_summary, dict)
+        and isinstance(latest_polling_summary.get('extra'), dict)
+        else {}
+    )
     scoped_events = events
     selected_comment_id = (comment_event or {}).get('comment_id_partial')
     if selected_comment_id:
@@ -22805,6 +22984,7 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'poller_account_scan_started',
         'poller_media_scan_started',
         'poller_comment_seen',
+        'polling_scan_summary',
     })
     rules_loaded = _latest_event(scoped_events, {'rule_loading_finished'})
     rule_match = _latest_event(scoped_events, {'rule_match_success'})
@@ -22856,6 +23036,7 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'poller_account_scan_started',
         'poller_media_scan_started',
         'poller_comment_seen',
+        'polling_scan_summary',
     })
 
     rules_count = None
@@ -22880,10 +23061,24 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         return skip_reason
 
     stop_reason = 'no_comment_seen'
+    summary_comments_seen = int(latest_polling_summary_extra.get('comments_seen') or 0)
+    summary_fresh_candidates = int(latest_polling_summary_extra.get('fresh_candidates') or 0)
+    summary_historical_skipped = int(latest_polling_summary_extra.get('historical_skipped') or 0)
+    summary_stale_skipped = int(latest_polling_summary_extra.get('stale_skipped') or 0)
+    summary_only_old_polling = bool(
+        latest_polling_summary
+        and summary_comments_seen > 0
+        and summary_fresh_candidates == 0
+        and (summary_historical_skipped > 0 or summary_stale_skipped > 0)
+    )
     if account_failed and (not comment_event or account_failed.get('created_at') >= comment_event.get('created_at')):
         stop_reason = _resolved_skip_reason(account_failed) or 'account_resolution_failed'
     elif not comment_event and rule_miss:
         stop_reason = _resolved_skip_reason(rule_miss) or 'rule_not_matched'
+    elif not comment_event and summary_only_old_polling:
+        stop_reason = 'only_historical_or_stale_comments_seen'
+    elif not comment_event and latest_polling_summary and summary_fresh_candidates == 0:
+        stop_reason = 'no_fresh_comment_seen_in_poll'
     elif not comment_event:
         stop_reason = 'no_comment_seen'
     elif not account_success and not polling_account_context_event and comment_event.get('source') == 'webhook':
@@ -23041,6 +23236,13 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         comment_event is not None
         and comment_event.get('source') == 'polling'
     )
+    polling_summary_newer_than_comment = bool(
+        latest_polling_summary
+        and (
+            not comment_event
+            or latest_polling_summary.get('created_at') >= comment_event.get('created_at')
+        )
+    )
     raw_latest_event_is_bot_reply = bool(
         raw_latest_comment_event
         and latest_bot_own_reply
@@ -23091,6 +23293,21 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
     ):
         stop_reason = 'automation_success'
     if (
+        latest_fresh_external_comment is None
+        and polling_summary_newer_than_comment
+        and summary_only_old_polling
+        and stop_reason in {
+            'rule_not_matched',
+            'historical',
+            'historical_before_rule_activation',
+            'comment_skipped_historical',
+            'no_comment_seen',
+            'no_fresh_comment_seen_in_poll',
+            'early_exit_before_rule_loading',
+        }
+    ):
+        stop_reason = 'only_historical_or_stale_comments_seen'
+    elif (
         polling_source
         and latest_fresh_external_comment is None
         and (raw_latest_event_is_bot_reply or latest_is_rescan_of_processed)
@@ -23165,6 +23382,17 @@ async def summarize_account_automation_stop_point(username: str, limit: int = 10
         'latest_external_comment_timestamp_source': comment_event_extra.get('timestamp_source'),
         'latest_external_comment_age_seconds': _comment_event_age_seconds(comment_event),
         'fresh_comment_seen_in_last_poll': bool(latest_fresh_external_comment),
+        'polling_summary_comments_seen': summary_comments_seen,
+        'polling_summary_fresh_candidates': summary_fresh_candidates,
+        'polling_summary_historical_skipped': summary_historical_skipped,
+        'polling_summary_stale_skipped': summary_stale_skipped,
+        'polling_summary_comments_sent_to_handle_new_comment': int(
+            latest_polling_summary_extra.get('comments_sent_to_handle_new_comment') or 0
+        ),
+        'polling_summary_total_known_media_count': latest_polling_summary_extra.get('total_known_media_count'),
+        'polling_summary_recent_media_limit': latest_polling_summary_extra.get('recent_media_limit'),
+        'polling_summary_round_robin_batch_size': latest_polling_summary_extra.get('round_robin_batch_size'),
+        'polling_summary_round_robin_cursor_position': latest_polling_summary_extra.get('round_robin_cursor_position'),
         'latest_fresh_external_comment_id_partial': (
             latest_fresh_external_comment.get('comment_id_partial')
             if latest_fresh_external_comment else None
