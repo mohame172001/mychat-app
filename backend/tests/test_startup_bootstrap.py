@@ -91,6 +91,7 @@ class _FakeDB:
             'admin_audit_logs', 'users', 'user_notification_preferences',
             'user_limit_overrides', 'admin_members', 'instagram_accounts',
             'instagram_account_trial_claims', 'oauth_code_consumed',
+            'instagram_media_catalog',
         ]:
             setattr(self, name, _FakeCollection(slow_ms=slow_ms))
 

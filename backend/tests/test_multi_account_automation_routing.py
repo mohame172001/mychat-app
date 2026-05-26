@@ -5383,8 +5383,12 @@ def test_poll_user_comments_requests_newest_first_order_and_processes_sorted_com
     owner = server._with_instagram_account_context(user, accounts[0])
     stats = _run(server._poll_user_comments(owner))
 
-    assert seen_params
-    assert seen_params[0]['order'] == 'reverse_chronological'
+    # The polling loop may issue multiple Graph calls per tick (catalog
+    # sync, comments fetch). The one we care about is the /comments call,
+    # identifiable by the `order` parameter.
+    comment_params = [p for p in seen_params if 'order' in p]
+    assert comment_params, 'no Graph /comments call captured'
+    assert comment_params[0]['order'] == 'reverse_chronological'
     assert stats['matched'] >= 1
     assert reply_calls[0]['comment_id'] == 'fresh-comment'
     assert dm_calls

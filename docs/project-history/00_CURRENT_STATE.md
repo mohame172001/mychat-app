@@ -23,7 +23,7 @@ Stack:
 
 ## Git And Deploy State
 
-- Current local app-code fix: pending `fix(saas): phase 1 multi-tenant + storage hardening` (single-tenant fallback gate + Story Reply scoping + 3 TTL indexes + Stop Point success-wins-over-dedupe + `historical` label fix). Required before onboarding real users. Billing remains blocked. Implements widened polling target-media coverage (10→25) + scan-started diagnostics + full Stop Point decision matrix: A) exact-comment provider-proof dedupe still skips, B) bot-own/self reply still skips, C) general any-post rule processes fresh comments after activation only, D) post-specific + selected-media match + process_existing_unreplied_comments=true processes previous unreplied comments and emits `historical_catchup_allowed` + `process_existing_unreplied_comment_processed`, E) post-specific + selected-media match + process_existing=false skips pre-activation, F) post-specific + selected-media mismatch returns `selected_media_no_match`, G) no fresh comment returned by polling → `no_fresh_comment_seen_in_poll`.
+- Current local app-code fix: pending `feat(instagram): media catalog + round-robin polling for full any-post coverage`. Stacks on top of the deployed Phase 1 SaaS hardening (`99ee2fc`). New `instagram_media_catalog` collection + `pollingRoundRobinCursor` on `instagram_accounts` + extended `_collect_target_media_ids` to compose recent + pinned + round-robin slices so `comment:any/post_scope=any` rules cover every post over time. Required before customer onboarding so a fresh comment on an older post is not silently invisible to polling. Billing remains blocked. Implements widened polling target-media coverage (10→25) + scan-started diagnostics + full Stop Point decision matrix: A) exact-comment provider-proof dedupe still skips, B) bot-own/self reply still skips, C) general any-post rule processes fresh comments after activation only, D) post-specific + selected-media match + process_existing_unreplied_comments=true processes previous unreplied comments and emits `historical_catchup_allowed` + `process_existing_unreplied_comment_processed`, E) post-specific + selected-media match + process_existing=false skips pre-activation, F) post-specific + selected-media mismatch returns `selected_media_no_match`, G) no fresh comment returned by polling → `no_fresh_comment_seen_in_poll`.
 - Current local HEAD: `138abb6a7b43`.
 - Current origin/master: `138abb6a7b43`.
 - Current production build_sha: `138abb6a7b43`.
@@ -62,6 +62,8 @@ Update these values at the start and end of every agent session.
 - Local full backend suite passed after adding instagram_automation_events TTL index: 690 tests (+3).
 - Local Phase 1 SaaS hardening suite passed: 13 new tests in `test_phase1_saas_hardening.py`.
 - Local full backend suite passed after Phase 1 SaaS hardening: 703 tests (+13).
+- Local Phase 2 media-catalog + round-robin polling suite passed: 7 new tests in `test_phase2_media_catalog_round_robin.py`.
+- Local full backend suite passed after Phase 2 media-catalog + round-robin polling: 710 tests (+7).
 
 ## Current Blockers
 

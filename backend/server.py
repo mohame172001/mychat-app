@@ -16608,7 +16608,12 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
                 params={
                     'access_token': access_token,
                     'fields': 'id,timestamp',
-                    'limit': max(1, min(int(limit or 10), 25)),
+                    # PHASE 2: ceiling raised from 25 → 100 so the
+                    # IG_POLL_RECENT_MEDIA_LIMIT env var can scale the
+                    # recent-slice without code edits. The persistent
+                    # catalog covers everything beyond what /me/media
+                    # returns in a single page.
+                    'limit': max(1, min(int(limit or 10), 100)),
                 },
             )
             if r.status_code != 200:
@@ -16622,6 +16627,213 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
             return ids
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 SaaS hardening: Instagram media catalog + round-robin polling.
+#
+# Product requirement: a comment:any / post_scope=any rule must cover a
+# fresh comment on ANY post on the connected account, not only the
+# latest 25. Graph's /me/media endpoint paginates; we sync the full set
+# into a per-account catalog and the polling loop iterates a recent
+# slice + selected/pinned + a round-robin batch over the catalog each
+# tick. Result: every post is eventually polled on a bounded schedule,
+# Graph call budget stays predictable, and account-agnostic — no
+# username branching, no per-account pipeline.
+#
+# Env-tunable knobs (all clamped to safe ranges):
+#   IG_POLL_RECENT_MEDIA_LIMIT     (default 25) — recent slice per tick
+#   IG_POLL_ROUND_ROBIN_BATCH      (default 25) — round-robin slice per tick
+#   IG_MEDIA_CATALOG_SYNC_INTERVAL_SECONDS (default 600) — catalog sync TTL
+#   IG_MEDIA_CATALOG_MAX_PAGES     (default 20) — pagination hard cap (~500)
+# ---------------------------------------------------------------------------
+
+
+def _media_catalog_env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(v, hi))
+
+
+def _ig_poll_recent_media_limit() -> int:
+    return _media_catalog_env_int('IG_POLL_RECENT_MEDIA_LIMIT', 25, 1, 100)
+
+
+def _ig_poll_round_robin_batch() -> int:
+    return _media_catalog_env_int('IG_POLL_ROUND_ROBIN_BATCH', 25, 0, 100)
+
+
+def _ig_media_catalog_sync_interval_seconds() -> int:
+    return _media_catalog_env_int(
+        'IG_MEDIA_CATALOG_SYNC_INTERVAL_SECONDS', 600, 60, 86400,
+    )
+
+
+def _ig_media_catalog_max_pages() -> int:
+    return _media_catalog_env_int('IG_MEDIA_CATALOG_MAX_PAGES', 20, 1, 100)
+
+
+async def _sync_instagram_media_catalog(user_doc: dict) -> dict:
+    """Paginate /me/media and upsert every page into the per-account
+    media catalog. Bounded by IG_MEDIA_CATALOG_MAX_PAGES (default 20 ≈
+    500 media). Updates are idempotent: each media_id is keyed by
+    (instagramAccountDbId, media_id) and only the mutable fields
+    (last_seen_at) are refreshed on existing rows. Active flag is
+    inferred — anything Graph still returns is treated as active; rows
+    that disappear are left in place (not deleted) so historical
+    `selected_media_id` rules don't lose their pin.
+
+    Returns aggregated stats: pages, items, inserted, updated, errors.
+    Account-agnostic; runs the SAME code for every linked account.
+    No tokens are logged. The full media_id IS stored (Mongo only —
+    the field is never echoed back to logs at full length).
+    """
+    user_id = user_doc.get('id')
+    token = user_doc.get('meta_access_token') or ''
+    ig_user_id = user_doc.get('ig_user_id') or ''
+    account_db_id = user_doc.get('active_instagram_account_id') or ''
+    stats = {
+        'user_id': user_id,
+        'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+        'pages': 0,
+        'items': 0,
+        'inserted': 0,
+        'updated': 0,
+        'errors': [],
+    }
+    if not (user_id and token and ig_user_id):
+        stats['errors'].append('missing_token_or_ig_id')
+        return stats
+
+    max_pages = _ig_media_catalog_max_pages()
+    now = datetime.utcnow()
+    cursor_url: Optional[str] = (
+        f'https://graph.instagram.com/{ig_user_id}/media?'
+        f'access_token={token}&fields=id,timestamp,permalink,media_type&limit=50'
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            for _ in range(max_pages):
+                if not cursor_url:
+                    break
+                r = await c.get(cursor_url)
+                if r.status_code != 200:
+                    stats['errors'].append({
+                        'http': r.status_code,
+                        'body': r.text[:200],
+                    })
+                    break
+                payload = r.json() or {}
+                items = payload.get('data') or []
+                stats['pages'] += 1
+                stats['items'] += len(items)
+                for item in items:
+                    media_id = str(item.get('id') or '').strip()
+                    if not media_id:
+                        continue
+                    set_on_insert = {
+                        'user_id': user_id,
+                        'instagramAccountDbId': account_db_id,
+                        'instagramAccountId': ig_user_id,
+                        'igUserId': ig_user_id,
+                        'media_id': media_id,
+                        'created': now,
+                    }
+                    set_always = {
+                        'media_timestamp': item.get('timestamp'),
+                        'permalink': item.get('permalink'),
+                        'media_type': item.get('media_type'),
+                        'last_seen_at': now,
+                        'updated': now,
+                    }
+                    try:
+                        result = await db.instagram_media_catalog.update_one(
+                            {
+                                'instagramAccountDbId': account_db_id,
+                                'media_id': media_id,
+                            },
+                            {
+                                '$setOnInsert': set_on_insert,
+                                '$set': set_always,
+                            },
+                            upsert=True,
+                        )
+                        if result.upserted_id is not None:
+                            stats['inserted'] += 1
+                        elif result.modified_count:
+                            stats['updated'] += 1
+                    except Exception as exc:
+                        stats['errors'].append({
+                            'media_id_partial': _safe_partial_identifier(media_id),
+                            'err': type(exc).__name__,
+                        })
+                cursor_url = (
+                    ((payload.get('paging') or {}).get('next'))
+                    if isinstance(payload.get('paging'), dict) else None
+                )
+    except Exception as exc:
+        stats['errors'].append({
+            'err': type(exc).__name__,
+            'msg': str(exc)[:160],
+        })
+    return stats
+
+
+async def _maybe_sync_media_catalog(user_doc: dict) -> Optional[dict]:
+    """Run _sync_instagram_media_catalog only if enough time has passed
+    since the last sync for this account. The TTL prevents the polling
+    loop (15s cadence) from triggering a Graph paginated fetch every
+    tick. Cadence is env-tunable (default 10 min).
+    """
+    account_db_id = user_doc.get('active_instagram_account_id') or ''
+    if not account_db_id:
+        return None
+    interval_seconds = _ig_media_catalog_sync_interval_seconds()
+    try:
+        account_row = await db.instagram_accounts.find_one(
+            {'id': account_db_id},
+            {'lastMediaCatalogSyncAt': 1},
+        )
+    except Exception:
+        account_row = None
+    last_sync = (account_row or {}).get('lastMediaCatalogSyncAt')
+    if isinstance(last_sync, datetime):
+        age = (datetime.utcnow() - last_sync).total_seconds()
+        if age < interval_seconds:
+            return None
+    stats = await _sync_instagram_media_catalog(user_doc)
+    # Mark the sync attempt timestamp regardless of success — we don't
+    # want a persistent Graph failure to retry on every 15s polling tick.
+    # The next attempt fires after interval_seconds.
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': account_db_id},
+            {'$set': {'lastMediaCatalogSyncAt': datetime.utcnow()}},
+        )
+    except Exception:
+        pass
+    return stats
+
+
+async def _media_catalog_known_ids(account_db_id: str) -> list:
+    """Return ALL known media_ids for the account from the catalog,
+    newest-first by `media_timestamp` (falling back to `last_seen_at`
+    when timestamps are unknown). Used by the polling loop's round-robin
+    batch selection.
+    """
+    if not account_db_id:
+        return []
+    try:
+        cursor = db.instagram_media_catalog.find(
+            {'instagramAccountDbId': account_db_id},
+            {'_id': 0, 'media_id': 1, 'media_timestamp': 1, 'last_seen_at': 1},
+        ).sort([('media_timestamp', -1), ('last_seen_at', -1)])
+        rows = await cursor.to_list(5000)
+    except Exception:
+        rows = []
+    return [r.get('media_id') for r in rows if r.get('media_id')]
 
 
 async def _check_media_ownership(access_token: str, ig_user_id: str, media_id: str) -> str:
@@ -20582,20 +20794,67 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
         if latest and latest not in target:
             target.append(latest)
     if needs_any:
-        # Bump the per-cycle recent-media coverage from 10 to 25 (the
-        # function's existing hard cap). On a workspace with more than
-        # 10 posts, the previous limit of 10 silently dropped any
-        # tested post older than the 10 most recent from the polling
-        # target list — so a fresh comment on, say, the 12th most
-        # recent post would never be discovered by polling. Bounded,
-        # account-agnostic, no fetch-shape or rate-limit change.
+        # PHASE 2: comment:any / post_scope=any rules must cover EVERY
+        # post on the account, not just the latest 25.
+        #
+        # Composition per tick:
+        #   (1) Recent slice from live /me/media (capped IG_POLL_RECENT
+        #       _MEDIA_LIMIT, default 25). Provides instant coverage of
+        #       fresh posts the catalog may not have synced yet.
+        #   (2) Round-robin batch from the persisted media catalog
+        #       (IG_POLL_ROUND_ROBIN_BATCH, default 25). The per-account
+        #       cursor advances each tick so the entire catalog is
+        #       covered on a bounded schedule. Set to 0 to disable.
+        #
+        # Pinned / selected media are already added above (they appear
+        # before this block via the `mid` extraction). Account-agnostic.
+        recent_limit = _ig_poll_recent_media_limit()
         for mid in await _fetch_recent_media_ids(
             user_doc.get('meta_access_token', ''),
             user_doc.get('ig_user_id', ''),
-            limit=25,
+            limit=recent_limit,
         ):
             if mid and mid not in target:
                 target.append(mid)
+        # Round-robin batch from the persisted catalog.
+        rr_batch_size = _ig_poll_round_robin_batch()
+        account_db_id = user_doc.get('active_instagram_account_id') or ''
+        if rr_batch_size and account_db_id:
+            known_ids = await _media_catalog_known_ids(account_db_id)
+            if known_ids:
+                # Read + advance the per-account cursor atomically.
+                try:
+                    row = await db.instagram_accounts.find_one(
+                        {'id': account_db_id},
+                        {'pollingRoundRobinCursor': 1},
+                    )
+                except Exception:
+                    row = None
+                cursor_position = int(
+                    ((row or {}).get('pollingRoundRobinCursor')) or 0
+                ) % max(1, len(known_ids))
+                rr_slice = []
+                # Wrap-around slice of size rr_batch_size starting at cursor.
+                for offset in range(rr_batch_size):
+                    rr_slice.append(known_ids[
+                        (cursor_position + offset) % len(known_ids)
+                    ])
+                for mid in rr_slice:
+                    if mid and mid not in target:
+                        target.append(mid)
+                # Persist next cursor (wrap-around). Failure is non-fatal —
+                # next tick will just start from the same position.
+                next_cursor = (cursor_position + rr_batch_size) % len(known_ids)
+                try:
+                    await db.instagram_accounts.update_one(
+                        {'id': account_db_id},
+                        {'$set': {
+                            'pollingRoundRobinCursor': next_cursor,
+                            'pollingRoundRobinCursorUpdatedAt': datetime.utcnow(),
+                        }},
+                    )
+                except Exception:
+                    pass
     return target
 
 
@@ -20660,7 +20919,37 @@ async def _poll_user_comments(user_doc: dict) -> dict:
         )
         return stats
 
+    # Best-effort catalog refresh ahead of target collection. The
+    # `_maybe_sync_media_catalog` helper enforces its own TTL (default
+    # 10 min) so this does not slow down every 15s polling tick. Errors
+    # are swallowed — polling continues with whatever the catalog
+    # currently holds.
+    try:
+        await _maybe_sync_media_catalog(user_doc)
+    except Exception:
+        logger.info('media_catalog_sync_skipped_err user_id=%s', user_id)
+
     media_ids = await _collect_target_media_ids(user_doc, automations)
+    # PHASE 2 diagnostics: surface catalog size + cursor state so Stop
+    # Point can answer "is the tested post even in the polling window
+    # yet?" without DB inspection.
+    account_db_id = user_doc.get('active_instagram_account_id') or ''
+    try:
+        catalog_count = await db.instagram_media_catalog.count_documents(
+            {'instagramAccountDbId': account_db_id}
+        ) if account_db_id else 0
+    except Exception:
+        catalog_count = 0
+    cursor_pos: Optional[int] = None
+    try:
+        if account_db_id:
+            row = await db.instagram_accounts.find_one(
+                {'id': account_db_id},
+                {'pollingRoundRobinCursor': 1},
+            )
+            cursor_pos = int((row or {}).get('pollingRoundRobinCursor') or 0)
+    except Exception:
+        cursor_pos = None
     await _record_instagram_automation_event(
         'poller_account_scan_started',
         source='polling',
@@ -20669,6 +20958,10 @@ async def _poll_user_comments(user_doc: dict) -> dict:
             'target_media_count': len(media_ids),
             'target_media_partials': ','.join(_safe_partial_identifier(m) for m in media_ids[:5]),
             'rules_count': len(automations),
+            'total_known_media_count': catalog_count,
+            'recent_media_limit': _ig_poll_recent_media_limit(),
+            'round_robin_batch_size': _ig_poll_round_robin_batch(),
+            'round_robin_cursor_position': cursor_pos,
         },
     )
     if not media_ids:
@@ -20683,12 +20976,18 @@ async def _poll_user_comments(user_doc: dict) -> dict:
 
     reply_attempts = 0
     async with httpx.AsyncClient(timeout=20) as c:
-        # Scan up to the full target-media list per tick (bounded by
-        # _collect_target_media_ids at 25). Actual write actions are
-        # still bounded by IG_POLL_REPLY_CAP_PER_RUN below — widening
-        # the read scan only ensures a fresh comment on an older-but-
-        # still-eligible post is actually discovered.
-        for mid in media_ids[:25]:  # cap per-user per-tick
+        # Scan the entire composed target list. _collect_target_media_ids
+        # composes recent + pinned + round-robin, so the list length is
+        # bounded by IG_POLL_RECENT_MEDIA_LIMIT + active rule count +
+        # IG_POLL_ROUND_ROBIN_BATCH (~75 by default). Write actions
+        # remain bounded by IG_POLL_REPLY_CAP_PER_RUN. Scanning the full
+        # composed list guarantees that the round-robin slice from the
+        # catalog actually gets visited each tick.
+        per_tick_scan_cap = max(
+            25,
+            _ig_poll_recent_media_limit() + _ig_poll_round_robin_batch() + 25,
+        )
+        for mid in media_ids[:per_tick_scan_cap]:
             if reply_attempts >= IG_POLL_REPLY_CAP_PER_RUN:
                 logger.info('catchup_reply_cap_reached user=%s cap=%s',
                             user_doc.get('email'), IG_POLL_REPLY_CAP_PER_RUN)
@@ -25549,6 +25848,19 @@ async def _index_bootstrap():
             await db.contacts.create_index(
                 [('user_id', 1), ('instagramAccountId', 1), ('created', -1)],
                 name='contacts_user_ig_created',
+            )
+            # PHASE 2: media catalog for round-robin polling coverage.
+            # Per-account uniqueness on (instagramAccountDbId, media_id)
+            # so the catalog never holds duplicates. Sorted reads by
+            # media_timestamp DESC use the secondary index.
+            await db.instagram_media_catalog.create_index(
+                [('instagramAccountDbId', 1), ('media_id', 1)],
+                unique=True,
+                name='instagram_media_catalog_account_media_unique',
+            )
+            await db.instagram_media_catalog.create_index(
+                [('instagramAccountDbId', 1), ('media_timestamp', -1)],
+                name='instagram_media_catalog_account_timestamp',
             )
             await db.tracked_links.create_index(
                 [('shortCode', 1)],
