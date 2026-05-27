@@ -2666,6 +2666,324 @@ function classifyFlightRecorderEvents(events) {
   };
 }
 
+/**
+ * Phase 2C-C admin UI for `GET /api/admin/instagram/webhook-verification`.
+ *
+ * Operator can verify, without DB access or a shell admin JWT, whether
+ * Meta's comment webhooks arrived, mapped to an `instagram_accounts`
+ * row, parsed correctly, and called `_handle_new_comment(source='webhook')`
+ * within a recent window.
+ *
+ * Read-only. Calls the backend endpoint with the existing authenticated
+ * frontend API client. Backend already redacts identifiers to first-3/
+ * last-3 partials and excludes tokens / raw text / full payloads — this
+ * component renders exactly what the API returns plus a "Copy JSON"
+ * button for sharing the raw output (e.g. paste back into a chat).
+ *
+ * Same admin gate as the other diagnostic tabs: `canViewUsers` →
+ * backend `PERM_USERS_VIEW`. No new permission introduced.
+ */
+function WebhookVerificationTab() {
+  const ar = isAr();
+  const [username, setUsername] = useState('');
+  const [sinceMinutes, setSinceMinutes] = useState(10);
+  const [commentIdPartial, setCommentIdPartial] = useState('');
+  const [mediaIdPartial, setMediaIdPartial] = useState('');
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [copyStatus, setCopyStatus] = useState('idle');
+
+  const load = useCallback(async () => {
+    setState('loading');
+    setError(null);
+    setCopyStatus('idle');
+    try {
+      const params = new URLSearchParams();
+      const u = (username || '').trim();
+      if (u) params.set('username', u);
+      const s = parseInt(sinceMinutes, 10);
+      if (Number.isFinite(s) && s > 0) params.set('since_minutes', String(s));
+      const cid = (commentIdPartial || '').trim();
+      if (cid) params.set('comment_id_partial', cid);
+      const mid = (mediaIdPartial || '').trim();
+      if (mid) params.set('media_id_partial', mid);
+      const qs = params.toString();
+      const r = await api.get(
+        `/admin/instagram/webhook-verification${qs ? `?${qs}` : ''}`,
+      );
+      setData(r.data);
+      setState('success');
+    } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setError(String(detail).slice(0, 240));
+      setState(status === 401 || status === 403 ? 'forbidden' : 'error');
+    }
+  }, [username, sinceMinutes, commentIdPartial, mediaIdPartial]);
+
+  // Auto-load once on mount with defaults so the operator sees the
+  // current state immediately. Subsequent loads are explicit via the
+  // Reload button.
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onCopyJson = useCallback(async () => {
+    if (!data) return;
+    try {
+      const text = JSON.stringify(data, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    } catch (_) {
+      setCopyStatus('error');
+      setTimeout(() => setCopyStatus('idle'), 1500);
+    }
+  }, [data]);
+
+  const summary = data?.summary || null;
+  const events = Array.isArray(data?.events) ? data.events : [];
+
+  return (
+    <section data-testid="admin-webhook-verification">
+      <header className="flex flex-wrap items-center gap-3 mb-3">
+        <Activity className="w-4 h-4 text-slate-500" />
+        <div className="flex-1 min-w-[200px]">
+          <div className="font-semibold text-slate-800">
+            {ar ? 'تحقّق الـ Webhook' : 'Webhook Verification'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {ar
+              ? 'تحقَّق هل وصل webhook التعليق وتم تعيينه وتشغيل _handle_new_comment خلال نافذة قريبة. تشخيص فقط، بدون تأثير على المنطق.'
+              : 'Did Meta\'s comment webhook arrive, map to an account, and call _handle_new_comment(source="webhook") within a recent window? Diagnostic only — no automation logic affected.'}
+          </div>
+        </div>
+        {state === 'success' && (
+          <Badge className="bg-emerald-100 text-emerald-700 border-0">
+            <CheckCircle2 className="w-3 h-3 me-1" /> {events.length} {ar ? 'حدث' : 'events'}
+          </Badge>
+        )}
+        {state === 'forbidden' && (
+          <Badge className="bg-amber-100 text-amber-800 border-0">
+            <ShieldAlert className="w-3 h-3 me-1" /> {ar ? 'غير مصرّح' : 'Forbidden'}
+          </Badge>
+        )}
+        {state === 'error' && (
+          <Badge className="bg-rose-100 text-rose-700 border-0">
+            <AlertTriangle className="w-3 h-3 me-1" /> {ar ? 'فشل' : 'Failed'}
+          </Badge>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={load}
+          disabled={state === 'loading'}
+          data-testid="webhook-verification-reload"
+        >
+          <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
+          {ar ? 'تحديث' : 'Reload'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onCopyJson}
+          disabled={!data || state === 'loading'}
+          data-testid="webhook-verification-copy"
+        >
+          {copyStatus === 'copied'
+            ? (ar ? 'تم النسخ' : 'Copied')
+            : copyStatus === 'error'
+              ? (ar ? 'فشل النسخ' : 'Copy failed')
+              : (ar ? 'نسخ JSON' : 'Copy JSON')}
+        </Button>
+      </header>
+
+      {/* Filter controls */}
+      <div
+        className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-3"
+        data-testid="webhook-verification-filters"
+      >
+        <input
+          type="text"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder={ar ? 'username (افتراضي: كل الحسابات)' : 'username (blank = all)'}
+          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          data-testid="webhook-verification-username"
+        />
+        <input
+          type="number"
+          min={1}
+          max={1440}
+          value={sinceMinutes}
+          onChange={(e) => setSinceMinutes(e.target.value)}
+          placeholder="since_minutes (default 10)"
+          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          data-testid="webhook-verification-since"
+        />
+        <input
+          type="text"
+          value={commentIdPartial}
+          onChange={(e) => setCommentIdPartial(e.target.value)}
+          placeholder="comment_id_partial (optional)"
+          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          data-testid="webhook-verification-comment-id"
+        />
+        <input
+          type="text"
+          value={mediaIdPartial}
+          onChange={(e) => setMediaIdPartial(e.target.value)}
+          placeholder="media_id_partial (optional)"
+          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          data-testid="webhook-verification-media-id"
+        />
+      </div>
+
+      {state === 'loading' && <AdminSkeleton rows={3} />}
+      {error && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3">
+          {error}
+        </div>
+      )}
+      {state === 'forbidden' && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">
+          {ar
+            ? 'حسابك لا يملك صلاحية admin.users.view المطلوبة.'
+            : 'Your account does not have the required admin.users.view permission.'}
+        </div>
+      )}
+
+      {/* Summary block */}
+      {state === 'success' && summary && (
+        <div
+          className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs mb-3"
+          data-testid="webhook-verification-summary"
+        >
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {[
+              ['webhook_comment_events_seen_count',
+                ar ? 'تعليقات webhook ظهرت' : 'Webhook comments seen'],
+              ['webhook_comments_mapped_count',
+                ar ? 'webhook تم تعيينه' : 'Webhook mapped'],
+              ['webhook_comments_unmapped_count',
+                ar ? 'webhook فشل تعيينه' : 'Webhook unmapped'],
+              ['webhook_comments_reached_handle_count',
+                ar ? 'وصل _handle_new_comment' : 'Reached handler'],
+              ['webhook_comments_success_count',
+                ar ? 'نجاح عبر webhook' : 'Webhook success'],
+              ['polling_success_count',
+                ar ? 'نجاح عبر polling' : 'Polling success'],
+              ['phase2c_b_fallback_used_count',
+                ar ? 'استُخدم media-owner fallback' : 'Media-owner fallback used'],
+              ['alias_self_heal_count',
+                ar ? 'تم حفظ alias' : 'Alias self-heal'],
+            ].map(([key, label]) => (
+              <div key={key}>
+                <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                  {label}
+                </div>
+                <div className="font-mono text-sm">
+                  {summary?.[key] ?? 0}
+                </div>
+              </div>
+            ))}
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'آخر webhook' : 'latest_webhook_comment_at'}
+              </div>
+              <div className="break-words">
+                {fmtDateTime(summary.latest_webhook_comment_at) || '—'}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'آخر نجاح polling' : 'latest_polling_success_at'}
+              </div>
+              <div className="break-words">
+                {fmtDateTime(summary.latest_polling_success_at) || '—'}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'النافذة (دقائق)' : 'since_minutes'}
+              </div>
+              <div className="font-mono">{summary.since_minutes ?? '—'}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-slate-500 text-[10px] font-semibold">
+                {ar ? 'الحساب' : 'username'}
+              </div>
+              <div className="break-words font-mono">{summary.username || (ar ? 'الكل' : 'all')}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Events table */}
+      {state === 'success' && (
+        <div className="overflow-x-auto" data-testid="webhook-verification-events">
+          <table className="min-w-full text-xs border border-slate-200 rounded-md">
+            <thead className="bg-slate-100 text-slate-600">
+              <tr>
+                <th className="text-start px-2 py-1">created_at</th>
+                <th className="text-start px-2 py-1">source</th>
+                <th className="text-start px-2 py-1">stage</th>
+                <th className="text-start px-2 py-1">username_key</th>
+                <th className="text-start px-2 py-1">media_id</th>
+                <th className="text-start px-2 py-1">comment_id</th>
+                <th className="text-start px-2 py-1">skip_reason</th>
+                <th className="text-start px-2 py-1">via / probe</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="px-2 py-2 text-slate-500">
+                    {ar
+                      ? 'لا توجد أحداث في النافذة الزمنية.'
+                      : 'No events in the selected window.'}
+                  </td>
+                </tr>
+              )}
+              {events.map((ev, idx) => {
+                const extra = (ev && ev.extra) || {};
+                const viaOrProbe = extra.via || extra.probe_outcome || '—';
+                return (
+                  <tr key={idx} className="border-t border-slate-200 align-top">
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{fmtDateTime(ev.created_at) || ev.created_at || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">{ev.source || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.stage || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">{ev.username_key || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.media_id_partial || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.comment_id_partial || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">{ev.skip_reason || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{viaOrProbe}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+
 function FlightRecorderTab() {
   const [accountsState, setAccountsState] = useState('idle');
   const [accounts, setAccounts] = useState([]);
@@ -3209,6 +3527,16 @@ export default function AdminConsole() {
         )}
         {canViewUsers && (
           <Button
+            variant={tab === 'webhook-verification' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => { setTab('webhook-verification'); setSelectedUserId(null); }}
+            data-testid="admin-tab-webhook-verification"
+          >
+            <Activity className="w-4 h-4 me-2" /> {ar ? 'تحقّق الـ Webhook' : 'Webhook Verification'}
+          </Button>
+        )}
+        {canViewUsers && (
+          <Button
             variant={tab === 'flight-recorder' ? 'default' : 'outline'}
             size="sm"
             onClick={() => { setTab('flight-recorder'); setSelectedUserId(null); }}
@@ -3264,6 +3592,11 @@ export default function AdminConsole() {
       {tab === 'webhook-health' && canViewUsers && (
         <AdminSectionErrorBoundary name="webhook-health" resetKey="webhook-health">
           <WebhookHealthTab />
+        </AdminSectionErrorBoundary>
+      )}
+      {tab === 'webhook-verification' && canViewUsers && (
+        <AdminSectionErrorBoundary name="webhook-verification" resetKey="webhook-verification">
+          <WebhookVerificationTab />
         </AdminSectionErrorBoundary>
       )}
       {tab === 'flight-recorder' && canViewUsers && (
