@@ -310,9 +310,10 @@ Webhook status:
 
 - Webhook handlers exist.
 - Account resolver is designed to map event payloads to the correct Instagram account.
-- There has been a known production issue where comment webhooks are globally observed but not mapped to the target accounts.
-- This is likely related to Meta subscription / permissions / Advanced Access rather than necessarily MyChat logic.
-- Polling fallback has compensated in real tests.
+- There has been a known production issue where comment webhooks are globally observed but not mapped to the target accounts by `entry.id`.
+- Phase 2C-B adds a fail-closed media-owner fallback for unresolved comment webhooks; live validation is still required before marking it known-good.
+- Meta subscription / permissions / Advanced Access can still affect whether comment webhooks arrive at all.
+- Polling fallback has compensated in real tests and remains unchanged.
 
 Polling status:
 
@@ -627,6 +628,68 @@ Unchanged:
 - quick reply copy
 - Dashboard/frontend
 - username/account-specific behavior
+
+---
+
+## 7D. Phase 2C-B webhook media-owner resolver
+
+Goal:
+
+```text
+When Instagram sends a comment webhook, resolve the connected Instagram
+account quickly and call _handle_new_comment(..., source="webhook")
+instead of waiting for polling fallback.
+```
+
+Primary resolver contract:
+
+```text
+_find_user_doc_for_instagram_account_id(entry.id)
+```
+
+must remain first. If it resolves through the stored identity fields, do not probe and do not change behavior.
+
+Fallback contract for unresolved comment webhooks only:
+
+```text
+extract media id from value.media.id / value.media_id / value.post_id / aliases
+probe active valid connected instagram_accounts with tokens
+exactly one account can read media -> resolved owner
+zero owners -> fail closed
+multiple owners -> fail closed as ambiguous_media_owner_resolution
+invalid/expired token -> skip that account and continue
+```
+
+Successful fallback:
+
+- continues normal comment webhook parsing;
+- calls `_handle_new_comment(..., source="webhook")`;
+- idempotently adds the incoming `entry.id` to `instagram_accounts.webhookEntryIdAliases`;
+- future webhooks using that same `entry.id` resolve through the primary alias path without probing.
+
+Failure diagnostics:
+
+- log `account_resolution_failed` or `ambiguous_media_owner_resolution`;
+- include only partial identifiers and bounded connected-account identity samples;
+- never log tokens, secrets, full ids, full payloads, or usernames as routing rules.
+
+Unchanged:
+
+- polling fallback
+- HMAC verification
+- Billing
+- dedupe semantics, including Phase 2D opening-DM cooldown
+- rate limits / send pacing
+- quick reply copy
+- Dashboard/frontend
+- username/account-specific behavior
+
+Known-good status:
+
+```text
+Do not add Phase 2C-B to 02_KNOWN_GOOD_VERSIONS.md until live webhook
+fast-reply validation passes.
+```
 
 ---
 

@@ -60,6 +60,7 @@ from app.services.instagram.account_resolver import (
     get_active_instagram_account as _get_active_instagram_account_impl,
     _find_user_doc_for_instagram_account_id as _find_user_doc_for_instagram_account_id_impl,
     _active_instagram_account_owner as _active_instagram_account_owner_impl,
+    INSTAGRAM_ACCOUNT_IDENTITY_FIELDS,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -13699,11 +13700,21 @@ async def _ensure_automation_account_scope_for_user(user_doc: dict) -> int:
 
 
 async def _find_user_doc_for_instagram_account_id(instagram_account_id: str) -> tuple:
-    return await _find_user_doc_for_instagram_account_id_impl(
+    user_doc, mapping_via = await _find_user_doc_for_instagram_account_id_impl(
         instagram_account_id,
         db=db,
         logger=logger,
     )
+    if user_doc or not instagram_account_id:
+        return user_doc, mapping_via
+    alias_account = await _find_account_by_webhook_alias(instagram_account_id)
+    if alias_account:
+        owner = await db.users.find_one({
+            'id': alias_account.get('userId') or alias_account.get('user_id')
+        })
+        if owner:
+            return _with_instagram_account_context(owner, alias_account), 'webhook_entry_id_alias'
+    return None, None
 
 
 async def _active_instagram_account_owner(instagram_account_id: str) -> Optional[dict]:
@@ -20413,6 +20424,265 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                 'rule_id': rule_id, 'log_id': log_doc['id'], 'error': err}
 
 
+_WEBHOOK_MEDIA_OWNER_PROBE_CACHE: dict = {}
+_WEBHOOK_MEDIA_OWNER_PROBE_TTL_SEC = 300
+_WEBHOOK_MEDIA_OWNER_PROBE_MAX_ACCOUNTS = 25
+
+
+def _webhook_media_owner_probe_cache_get(key: str):
+    if not key:
+        return None
+    entry = _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.get(key)
+    if not entry:
+        return None
+    ts, account_db_id, mapping_via = entry
+    if not isinstance(ts, datetime):
+        _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.pop(key, None)
+        return None
+    if (datetime.utcnow() - ts).total_seconds() > _WEBHOOK_MEDIA_OWNER_PROBE_TTL_SEC:
+        _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.pop(key, None)
+        return None
+    return account_db_id, mapping_via
+
+
+def _webhook_media_owner_probe_cache_set(key: str, account_db_id: str,
+                                         mapping_via: str) -> None:
+    if not key or not account_db_id:
+        return
+    _WEBHOOK_MEDIA_OWNER_PROBE_CACHE[key] = (
+        datetime.utcnow(),
+        str(account_db_id),
+        mapping_via or 'media_owner_probe',
+    )
+    if len(_WEBHOOK_MEDIA_OWNER_PROBE_CACHE) > 1024:
+        try:
+            oldest = min(
+                _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.items(),
+                key=lambda kv: kv[1][0],
+            )[0]
+            _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.pop(oldest, None)
+        except Exception:
+            pass
+
+
+def _comment_webhook_change_media_id(change: dict) -> Optional[str]:
+    value = (change or {}).get('value') or {}
+    media_obj = value.get('media') or {}
+    return (
+        media_obj.get('id')
+        or media_obj.get('media_id')
+        or value.get('media_id')
+        or value.get('post_id')
+        or value.get('postId')
+        or value.get('mediaId')
+        or value.get('ig_media_id')
+    )
+
+
+def _is_comment_field_change(change: dict) -> bool:
+    field = (change or {}).get('field')
+    value = (change or {}).get('value') or {}
+    return field == 'comments' or (field == 'feed' and value.get('item') == 'comment')
+
+
+def _first_comment_webhook_change(entry: dict) -> Optional[dict]:
+    for change in (entry or {}).get('changes', []) or []:
+        if _is_comment_field_change(change):
+            return change
+    return None
+
+
+async def _sample_connected_account_identity_matrix(limit: int = 10) -> list:
+    try:
+        cursor = db.instagram_accounts.find(
+            {'isActive': {'$ne': False}, 'connectionValid': {'$ne': False}},
+            {
+                'accessToken': 0, 'access_token': 0, 'refreshToken': 0,
+                'refresh_token': 0, 'token': 0, 'authorization': 0,
+            },
+        ).limit(max(1, min(int(limit or 10), 50)))
+        rows = await cursor.to_list(50)
+    except Exception:
+        rows = []
+    samples = []
+    identity_fields = tuple(INSTAGRAM_ACCOUNT_IDENTITY_FIELDS) + ('webhookEntryIdAliases',)
+    for row in rows:
+        identity = {}
+        for field in identity_fields:
+            value = row.get(field)
+            if isinstance(value, list):
+                partials = [
+                    _safe_partial_identifier(v)
+                    for v in value[:5] if str(v or '').strip()
+                ]
+                if partials:
+                    identity[field] = partials
+            elif str(value or '').strip():
+                identity[field] = _safe_partial_identifier(value)
+        if not identity:
+            continue
+        samples.append({
+            'account_id_partial': _safe_partial_identifier(row.get('id')),
+            'username': _automation_flight_safe_text(
+                row.get('username') or row.get('instagramHandle') or '',
+                80,
+            ),
+            'connection_valid': bool(row.get('connectionValid')),
+            'identity_partials': identity,
+        })
+    return samples
+
+
+async def _find_account_by_webhook_alias(entry_id: str) -> Optional[dict]:
+    entry_id = str(entry_id or '').strip()
+    if not entry_id:
+        return None
+    try:
+        return await db.instagram_accounts.find_one({
+            'webhookEntryIdAliases': entry_id,
+            'isActive': {'$ne': False},
+        })
+    except Exception:
+        return None
+
+
+async def _record_webhook_alias_for_account(account_db_id: str,
+                                            entry_id: str) -> None:
+    account_db_id = str(account_db_id or '').strip()
+    entry_id = str(entry_id or '').strip()
+    if not account_db_id or not entry_id:
+        return
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': account_db_id},
+            {
+                '$addToSet': {'webhookEntryIdAliases': entry_id},
+                '$set': {'webhookEntryIdAliasesUpdatedAt': datetime.utcnow()},
+            },
+        )
+    except Exception as exc:
+        logger.info(
+            'webhook_alias_self_heal_failed account_id_partial=%s err=%s',
+            _safe_partial_identifier(account_db_id),
+            type(exc).__name__,
+        )
+
+
+async def _resolve_comment_webhook_by_media_owner(
+    entry_id: str,
+    media_id: Optional[str],
+) -> tuple[Optional[dict], Optional[str], str]:
+    media_id = str(media_id or '').strip()
+    if not media_id:
+        return None, None, 'none'
+    cache_key = f'entry={entry_id or ""}|media={media_id}'
+    cached = _webhook_media_owner_probe_cache_get(cache_key)
+    if cached:
+        account_db_id, mapping_via = cached
+        try:
+            account = await db.instagram_accounts.find_one({
+                'id': account_db_id,
+                'isActive': {'$ne': False},
+            })
+        except Exception:
+            account = None
+        if account:
+            owner = await db.users.find_one({
+                'id': account.get('userId') or account.get('user_id')
+            })
+            if owner:
+                return _with_instagram_account_context(owner, account), mapping_via, 'ok'
+        _WEBHOOK_MEDIA_OWNER_PROBE_CACHE.pop(cache_key, None)
+
+    try:
+        cursor = db.instagram_accounts.find(
+            {'isActive': {'$ne': False}, 'connectionValid': {'$ne': False}},
+        ).limit(_WEBHOOK_MEDIA_OWNER_PROBE_MAX_ACCOUNTS)
+        accounts = await cursor.to_list(_WEBHOOK_MEDIA_OWNER_PROBE_MAX_ACCOUNTS)
+    except Exception:
+        accounts = []
+
+    matched_accounts = []
+    async with httpx.AsyncClient(timeout=8) as c:
+        for account in accounts:
+            token = str(
+                account.get('accessToken')
+                or account.get('access_token')
+                or ''
+            ).strip()
+            if not token:
+                continue
+            try:
+                r = await c.get(
+                    f'https://graph.instagram.com/{media_id}',
+                    params={'fields': 'id', 'access_token': token},
+                )
+            except Exception:
+                continue
+            if r.status_code == 200:
+                matched_accounts.append(account)
+                if len(matched_accounts) > 1:
+                    break
+
+    if not matched_accounts:
+        return None, None, 'none'
+    if len(matched_accounts) > 1:
+        return None, None, 'ambiguous'
+
+    account = matched_accounts[0]
+    owner = await db.users.find_one({
+        'id': account.get('userId') or account.get('user_id')
+    })
+    if not owner:
+        return None, None, 'none'
+    mapping_via = 'media_owner_probe'
+    _webhook_media_owner_probe_cache_set(cache_key, account.get('id'), mapping_via)
+    return _with_instagram_account_context(owner, account), mapping_via, 'ok'
+
+
+async def _build_webhook_failure_identifier_matrix(entry: dict) -> dict:
+    changes = (entry or {}).get('changes') or []
+    messaging = (entry or {}).get('messaging') or []
+    change_fields = sorted({
+        str(c.get('field'))[:40] for c in changes if c.get('field')
+    })
+    comment_change = _first_comment_webhook_change(entry or {})
+    value = (comment_change or {}).get('value') or {}
+    media_obj = value.get('media') or {}
+    from_obj = value.get('from') or {}
+    sample_recipient_id = None
+    sample_sender_id = None
+    for ev in messaging:
+        if not isinstance(ev, dict):
+            continue
+        if not sample_recipient_id:
+            sample_recipient_id = _safe_partial_identifier(
+                (ev.get('recipient') or {}).get('id')
+            )
+        if not sample_sender_id:
+            sample_sender_id = _safe_partial_identifier(
+                (ev.get('sender') or {}).get('id')
+            )
+        if sample_recipient_id and sample_sender_id:
+            break
+    return {
+        'entry_id_partial': _safe_partial_identifier((entry or {}).get('id')),
+        'change_fields': change_fields,
+        'has_comment_field': comment_change is not None,
+        'has_messaging': bool(messaging),
+        'sample_value_id_partial': _safe_partial_identifier(
+            value.get('id') or value.get('comment_id')
+        ),
+        'sample_value_media_id_partial': _safe_partial_identifier(
+            media_obj.get('id') or _comment_webhook_change_media_id(comment_change or {})
+        ),
+        'sample_value_from_id_partial': _safe_partial_identifier(from_obj.get('id')),
+        'sample_recipient_id_partial': sample_recipient_id,
+        'sample_sender_id_partial': sample_sender_id,
+        'connected_account_samples': await _sample_connected_account_identity_matrix(limit=10),
+    }
+
+
 
 async def _process_webhook(payload: dict):
     """Process Instagram webhook events asynchronously."""
@@ -20450,6 +20720,30 @@ async def _process_webhook(payload: dict):
                             mapping_via = f'recipient.id:{account_mapping_via}'
                             ig_account_id = rid
                             break
+            comment_change_for_resolution = _first_comment_webhook_change(entry)
+            media_owner_probe_outcome = None
+            media_owner_probe_id = None
+            if not user_doc and comment_change_for_resolution:
+                media_owner_probe_id = _comment_webhook_change_media_id(
+                    comment_change_for_resolution
+                )
+                if media_owner_probe_id:
+                    probe_user_doc, probe_mapping_via, media_owner_probe_outcome = (
+                        await _resolve_comment_webhook_by_media_owner(
+                            entry_id=str(entry.get('id') or ''),
+                            media_id=media_owner_probe_id,
+                        )
+                    )
+                    if probe_user_doc and media_owner_probe_outcome == 'ok':
+                        user_doc = probe_user_doc
+                        mapping_via = probe_mapping_via
+                        ig_account_id = user_doc.get('ig_user_id') or ig_account_id
+                        await _record_webhook_alias_for_account(
+                            user_doc.get('active_instagram_account_id') or '',
+                            str(entry.get('id') or ''),
+                        )
+                else:
+                    media_owner_probe_outcome = 'no_media_id'
             # Last-resort fallback for single-tenant deployments: if exactly
             # one user has an IG account connected, attribute the event to it.
             #
@@ -20460,7 +20754,11 @@ async def _process_webhook(payload: dict):
             # via INSTAGRAM_SINGLE_TENANT_FALLBACK=1. In non-production
             # environments the fallback still activates by default so local
             # / preview deploys keep working without configuration.
-            if not user_doc and _SINGLE_TENANT_FALLBACK_ENABLED:
+            if (
+                not user_doc
+                and not comment_change_for_resolution
+                and _SINGLE_TENANT_FALLBACK_ENABLED
+            ):
                 connected_accounts = await db.instagram_accounts.find(
                     {'isActive': {'$ne': False}, 'connectionValid': {'$ne': False}}
                 ).limit(2).to_list(2)
@@ -20472,15 +20770,36 @@ async def _process_webhook(payload: dict):
                         mapping_via = 'single_tenant_instagram_account_fallback'
                         ig_account_id = account_doc.get('instagramAccountId') or account_doc.get('igUserId') or ig_account_id
             if not user_doc:
-                logger.warning(
-                    'account_resolution_failed event_type=webhook_entry entry_id=%s reason=no_matching_instagram_account',
-                    _safe_partial_identifier(entry.get('id')),
+                failure_reason = (
+                    'ambiguous_media_owner_resolution'
+                    if media_owner_probe_outcome == 'ambiguous'
+                    else 'no_matching_instagram_account'
                 )
+                logger.warning(
+                    'account_resolution_failed event_type=webhook_entry entry_id=%s reason=%s',
+                    _safe_partial_identifier(entry.get('id')),
+                    failure_reason,
+                )
+                extra = None
+                if comment_change_for_resolution:
+                    try:
+                        extra = await _build_webhook_failure_identifier_matrix(entry)
+                        extra['object_field'] = (payload or {}).get('object')
+                        extra['probe_media_id_partial'] = _safe_partial_identifier(
+                            media_owner_probe_id
+                        )
+                        extra['probe_outcome'] = media_owner_probe_outcome or 'not_attempted'
+                    except Exception:
+                        extra = {
+                            'entry_id_partial': _safe_partial_identifier(entry.get('id')),
+                            'probe_outcome': media_owner_probe_outcome or 'not_attempted',
+                        }
                 await _record_instagram_automation_event(
                     'account_resolution_failed',
                     source='webhook',
                     instagram_account_id=entry.get('id'),
-                    skip_reason='no_matching_instagram_account',
+                    skip_reason=failure_reason,
+                    extra=extra,
                 )
                 logger.warning('dm_user_mapping_failed entry_id=%s', entry.get('id'))
                 continue

@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Comment Webhooks Arrived With Unmapped Entry Ids
+
+- Date/time: 2026-05-28
+- Symptom: Fresh Instagram comments could be delayed because comment webhook events were observed globally but did not always map to the connected Instagram account by `entry.id`. Polling fallback eventually found comments, but real-time webhook handling did not consistently call `_handle_new_comment(..., source='webhook')`.
+- Affected area: Instagram webhook account resolution in `_process_webhook`.
+- Root cause: The primary resolver only trusted known Instagram account identity fields. Some Meta comment webhook payloads can identify the webhook entry with an id that is not already present on the stored `instagram_accounts` row, even though the payload references media owned by one of the connected accounts.
+- Fix commit: pending (this commit). Preserve the primary `entry.id` resolver first. For unresolved comment webhook changes only, extract the media id and run a bounded account-agnostic owner probe across active/valid connected accounts with tokens. Exactly one readable owner resolves the account and continues the normal webhook comment pipeline; zero or multiple owners fail closed. Successful fallback stores the incoming `entry.id` in `webhookEntryIdAliases` idempotently so later events route without probing. Failure logs contain only sanitized identifier matrices and bounded connected-account identity samples.
+- Tests: normal entry.id mapping still works; unmapped comment webhook resolves by media owner; resolved fallback calls `_handle_new_comment` with `source='webhook'`; alias self-heal is idempotent; later webhook resolves through alias without probing; unowned and ambiguous media fail closed; invalid token does not crash; sibling accounts select the correct owner; polling fallback unchanged; HMAC/dedupe/Phase 2D cooldown/no-username-specific checks. `test_phase2c_b_webhook_media_owner.py` 14 passed; `test_multi_account_automation_routing.py` 157 passed; `test_phase2_media_catalog_round_robin.py` 7 passed; full backend suite 737 passed.
+- Deploy status: Local, deploy required. Do not mark known-good until live webhook fast-reply testing confirms a fresh comment reaches the webhook path quickly and no ambiguous/no-owner failures appear for valid owned media.
+- Lesson learned: Webhook account resolution needs a fail-closed secondary proof path for comment media ownership. Never guess by username, active UI account, or single-tenant fallback for unresolved comment webhooks.
+- Preventive test added: Yes.
+
 ### Repeated Comments Could Trigger Repeated Opening DMs
 
 - Date/time: 2026-05-27
