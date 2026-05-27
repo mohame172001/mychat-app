@@ -24252,8 +24252,16 @@ async def admin_instagram_webhook_verification(
         ),
     )
     safe_limit = max(1, min(int(limit or 200), 1000))
-    since = datetime.utcnow() - timedelta(minutes=safe_since)
+    now_utc = datetime.utcnow()
+    since = now_utc - timedelta(minutes=safe_since)
     username_key = _automation_flight_username_key(username) if username else ''
+    applied_filters = {
+        'username': username_key or None,
+        'since_minutes': safe_since,
+        'comment_id_partial': (comment_id_partial or '').strip() or None,
+        'media_id_partial': (media_id_partial or '').strip() or None,
+        'limit': safe_limit,
+    }
 
     relevant_stages = [
         'webhook_received',
@@ -24468,6 +24476,10 @@ async def admin_instagram_webhook_verification(
 
     return {
         'ok': True,
+        'server_now_utc': now_utc.isoformat(),
+        'window_start_utc': since.isoformat(),
+        'window_end_utc': now_utc.isoformat(),
+        'applied_filters': applied_filters,
         'summary': summary,
         'events': serialized_events,
     }

@@ -468,6 +468,33 @@ def test_endpoint_does_not_call_send_or_dedupe_paths():
 # ---------------------------------------------------------------------------
 
 
+def test_response_carries_diagnostic_metadata(monkeypatch):
+    """Phase 2C-C frontend needs `server_now_utc`, `window_start_utc`,
+    `window_end_utc`, and `applied_filters` to render the active
+    query above the table and to convert timestamps to local time
+    without server-clock drift."""
+    db = _DB()
+    _install(monkeypatch, db)
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA', since_minutes=15,
+        comment_id_partial=' c-x ', media_id_partial='m-x',
+        limit=42, user_id='admin',
+    ))
+    for key in (
+        'server_now_utc', 'window_start_utc',
+        'window_end_utc', 'applied_filters',
+    ):
+        assert key in result, f'missing top-level {key!r}'
+    af = result['applied_filters']
+    # Username is normalised via _automation_flight_username_key (lowercased,
+    # stripped). comment_id_partial trims whitespace.
+    assert af['username'] == 'acca'
+    assert af['since_minutes'] == 15
+    assert af['comment_id_partial'] == 'c-x'
+    assert af['media_id_partial'] == 'm-x'
+    assert af['limit'] == 42
+
+
 def test_no_username_specific_logic_in_endpoint():
     src = Path(server.__file__).read_text(encoding='utf-8')
     anchor = 'async def admin_instagram_webhook_verification('

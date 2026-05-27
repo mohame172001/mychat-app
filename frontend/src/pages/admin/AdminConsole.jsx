@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Badge } from '../../components/ui/badge';
@@ -2683,9 +2683,80 @@ function classifyFlightRecorderEvents(events) {
  * Same admin gate as the other diagnostic tabs: `canViewUsers` →
  * backend `PERM_USERS_VIEW`. No new permission introduced.
  */
+// Shared input class so every filter input renders identically.
+const WV_INPUT_CLASS =
+  'text-xs h-8 px-2 border border-slate-300 rounded-md ' +
+  'bg-white text-slate-800 focus:outline-none focus:ring-1 ' +
+  'focus:ring-blue-300 focus:border-blue-400';
+
+// Quick-range buttons offered above the since_minutes field. Each
+// triggers an immediate Reload with the new window.
+const WV_QUICK_RANGES_MIN = [10, 30, 60, 120];
+
+// Default username is muhammad_gehad — this is a UI default for the
+// operator's most-frequently-tested account. It is NOT username-
+// specific automation logic: the input is editable, the backend
+// endpoint applies no special-casing, and any other username works
+// identically. (Audited per project rule: no automation branching
+// on username.)
+const WV_DEFAULT_USERNAME = 'muhammad_gehad';
+
+function wvFormatLocal(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch (_) {
+    return String(ts);
+  }
+}
+
+function wvBadgeClasses(kind) {
+  // Subtle Tailwind palette per badge kind. Visual-only.
+  switch (kind) {
+    case 'webhook':
+      return 'bg-sky-100 text-sky-700';
+    case 'polling':
+      return 'bg-amber-100 text-amber-700';
+    case 'automation_success':
+      return 'bg-emerald-100 text-emerald-700';
+    case 'webhook_comment_detected':
+      return 'bg-blue-100 text-blue-700';
+    case 'already_replied_success':
+      return 'bg-slate-200 text-slate-600';
+    case 'bot_own_reply':
+      return 'bg-purple-100 text-purple-700';
+    case 'historical':
+    case 'stale':
+      return 'bg-orange-100 text-orange-700';
+    case 'failed':
+      return 'bg-rose-100 text-rose-700';
+    default:
+      return 'bg-slate-100 text-slate-600';
+  }
+}
+
+function WvBadge({ kind, children, title }) {
+  return (
+    <span
+      className={
+        'inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ' +
+        wvBadgeClasses(kind)
+      }
+      title={title || undefined}
+    >
+      {children}
+    </span>
+  );
+}
+
 function WebhookVerificationTab() {
   const ar = isAr();
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState(WV_DEFAULT_USERNAME);
   const [sinceMinutes, setSinceMinutes] = useState(10);
   const [commentIdPartial, setCommentIdPartial] = useState('');
   const [mediaIdPartial, setMediaIdPartial] = useState('');
@@ -2693,26 +2764,44 @@ function WebhookVerificationTab() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [copyStatus, setCopyStatus] = useState('idle');
+  const [refreshedAt, setRefreshedAt] = useState(null);
+  // Display filters (do not modify the backend response).
+  const [showWebhookOnly, setShowWebhookOnly] = useState(false);
+  const [showSuccessesOnly, setShowSuccessesOnly] = useState(false);
+  const [hideRescans, setHideRescans] = useState(false);
 
-  const load = useCallback(async () => {
+  const browserTz = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch (_) {
+      return 'UTC';
+    }
+  }, []);
+
+  const load = useCallback(async (overrides = {}) => {
     setState('loading');
     setError(null);
     setCopyStatus('idle');
+    const activeUsername = overrides.username !== undefined ? overrides.username : username;
+    const activeSince = overrides.sinceMinutes !== undefined ? overrides.sinceMinutes : sinceMinutes;
+    const activeComment = overrides.commentIdPartial !== undefined ? overrides.commentIdPartial : commentIdPartial;
+    const activeMedia = overrides.mediaIdPartial !== undefined ? overrides.mediaIdPartial : mediaIdPartial;
     try {
       const params = new URLSearchParams();
-      const u = (username || '').trim();
+      const u = (activeUsername || '').trim();
       if (u) params.set('username', u);
-      const s = parseInt(sinceMinutes, 10);
+      const s = parseInt(activeSince, 10);
       if (Number.isFinite(s) && s > 0) params.set('since_minutes', String(s));
-      const cid = (commentIdPartial || '').trim();
+      const cid = (activeComment || '').trim();
       if (cid) params.set('comment_id_partial', cid);
-      const mid = (mediaIdPartial || '').trim();
+      const mid = (activeMedia || '').trim();
       if (mid) params.set('media_id_partial', mid);
       const qs = params.toString();
       const r = await api.get(
         `/admin/instagram/webhook-verification${qs ? `?${qs}` : ''}`,
       );
       setData(r.data);
+      setRefreshedAt(new Date());
       setState('success');
     } catch (err) {
       const status = err?.response?.status;
@@ -2722,18 +2811,76 @@ function WebhookVerificationTab() {
     }
   }, [username, sinceMinutes, commentIdPartial, mediaIdPartial]);
 
-  // Auto-load once on mount with defaults so the operator sees the
-  // current state immediately. Subsequent loads are explicit via the
-  // Reload button.
+  // Auto-load once on mount with the default username so the operator
+  // sees the current state immediately. Subsequent loads are explicit
+  // via the Reload button or quick-range chips.
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const setQuickRange = useCallback((m) => {
+    setSinceMinutes(m);
+    load({ sinceMinutes: m });
+  }, [load]);
+
+  const summary = data?.summary || null;
+  const allEvents = Array.isArray(data?.events) ? data.events : [];
+  const appliedFilters = data?.applied_filters || null;
+  const serverNowUtc = data?.server_now_utc || null;
+  const windowStartUtc = data?.window_start_utc || null;
+  const windowEndUtc = data?.window_end_utc || null;
+
+  const visibleEvents = useMemo(() => {
+    let out = allEvents;
+    if (showWebhookOnly) {
+      out = out.filter((e) => e.source === 'webhook');
+    }
+    if (showSuccessesOnly) {
+      out = out.filter((e) =>
+        e.stage === 'automation_success'
+        || e.stage === 'public_reply_success'
+        || e.stage === 'public_reply_sent'
+        || e.stage === 'opening_dm_success'
+        || e.stage === 'opening_dm_sent'
+        || e.stage === 'webhook_comment_detected'
+        || e.stage === 'rule_match_success'
+      );
+    }
+    if (hideRescans) {
+      out = out.filter((e) =>
+        e.skip_reason !== 'already_replied_success'
+        && e.skip_reason !== 'bot_own_reply'
+        && e.skip_reason !== 'historical'
+        && e.skip_reason !== 'historical_before_rule_activation'
+      );
+    }
+    return out;
+  }, [allEvents, showWebhookOnly, showSuccessesOnly, hideRescans]);
+
   const onCopyJson = useCallback(async () => {
     if (!data) return;
+    // Wrap backend payload with client-side metadata so a paste into
+    // chat carries the active filters and the user's local timezone.
+    // Backend payload itself is untouched.
+    const wrapper = {
+      copied_at_local: new Date().toISOString(),
+      browser_timezone: browserTz,
+      active_filters: {
+        username: (username || '').trim() || null,
+        since_minutes: Number(sinceMinutes) || null,
+        comment_id_partial: (commentIdPartial || '').trim() || null,
+        media_id_partial: (mediaIdPartial || '').trim() || null,
+      },
+      ui_view_filters: {
+        show_webhook_only: showWebhookOnly,
+        show_successes_only: showSuccessesOnly,
+        hide_rescans: hideRescans,
+      },
+      backend_response: data,
+    };
     try {
-      const text = JSON.stringify(data, null, 2);
+      const text = JSON.stringify(wrapper, null, 2);
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
       } else {
@@ -2753,10 +2900,10 @@ function WebhookVerificationTab() {
       setCopyStatus('error');
       setTimeout(() => setCopyStatus('idle'), 1500);
     }
-  }, [data]);
+  }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial,
+      showWebhookOnly, showSuccessesOnly, hideRescans, browserTz]);
 
-  const summary = data?.summary || null;
-  const events = Array.isArray(data?.events) ? data.events : [];
+  const events = visibleEvents;
 
   return (
     <section data-testid="admin-webhook-verification">
@@ -2814,44 +2961,173 @@ function WebhookVerificationTab() {
 
       {/* Filter controls */}
       <div
-        className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-3"
+        className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-2"
         data-testid="webhook-verification-filters"
       >
         <input
           type="text"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder={ar ? 'username (افتراضي: كل الحسابات)' : 'username (blank = all)'}
-          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          placeholder={ar ? 'username (افتراضي: muhammad_gehad)' : 'username (default: muhammad_gehad)'}
+          className={WV_INPUT_CLASS}
           data-testid="webhook-verification-username"
         />
         <input
           type="number"
+          inputMode="numeric"
           min={1}
           max={1440}
+          step={1}
           value={sinceMinutes}
-          onChange={(e) => setSinceMinutes(e.target.value)}
-          placeholder="since_minutes (default 10)"
-          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          onChange={(e) => {
+            const next = e.target.value;
+            const parsed = parseInt(next, 10);
+            // Allow empty string while typing; commit numeric value
+            // back via parseInt on Reload. Display always shows the
+            // numeric input, never a stray character.
+            setSinceMinutes(Number.isFinite(parsed) ? parsed : next);
+          }}
+          placeholder={ar ? 'الدقائق الأخيرة (10)' : 'since_minutes (10)'}
+          className={WV_INPUT_CLASS}
           data-testid="webhook-verification-since"
         />
         <input
           type="text"
           value={commentIdPartial}
           onChange={(e) => setCommentIdPartial(e.target.value)}
-          placeholder="comment_id_partial (optional)"
-          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          placeholder={ar ? 'comment_id جزئي (اختياري)' : 'comment_id_partial (optional)'}
+          className={WV_INPUT_CLASS}
           data-testid="webhook-verification-comment-id"
         />
         <input
           type="text"
           value={mediaIdPartial}
           onChange={(e) => setMediaIdPartial(e.target.value)}
-          placeholder="media_id_partial (optional)"
-          className="text-xs px-2 py-1 border border-slate-300 rounded-md"
+          placeholder={ar ? 'media_id جزئي (اختياري)' : 'media_id_partial (optional)'}
+          className={WV_INPUT_CLASS}
           data-testid="webhook-verification-media-id"
         />
       </div>
+
+      {/* Quick range chips + helper note */}
+      <div className="flex flex-wrap items-center gap-2 mb-2" data-testid="webhook-verification-quick-ranges">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold">
+          {ar ? 'نافذة سريعة' : 'Quick window'}
+        </span>
+        {WV_QUICK_RANGES_MIN.map((m) => (
+          <Button
+            key={m}
+            size="sm"
+            variant={Number(sinceMinutes) === m ? 'default' : 'outline'}
+            onClick={() => setQuickRange(m)}
+            disabled={state === 'loading'}
+            data-testid={`webhook-verification-range-${m}`}
+            className="h-7 px-2 text-xs"
+          >
+            {m} {ar ? 'د' : 'min'}
+          </Button>
+        ))}
+        <div className="text-[11px] text-slate-500 ms-2">
+          {ar
+            ? 'بعد إرسال تعليق جديد على Instagram، انتظر 10-30 ثانية ثم اضغط تحديث.'
+            : 'After posting a fresh Instagram comment, wait 10–30 seconds, then click Reload.'}
+        </div>
+      </div>
+
+      {/* No-username warning */}
+      {!username.trim() && state !== 'loading' && (
+        <div
+          className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2 mb-2"
+          data-testid="webhook-verification-no-username-warning"
+        >
+          {ar
+            ? 'لا يوجد فلتر username — قد تظهر أحداث غير ذات صلة أو قديمة.'
+            : 'No username filter selected — results may include unrelated or older events.'}
+        </div>
+      )}
+
+      {/* Active filters + timestamp bar */}
+      {state === 'success' && (
+        <div
+          className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-md p-2 mb-3"
+          data-testid="webhook-verification-active-filters"
+        >
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <div>
+              <span className="font-semibold text-slate-500 me-1">{ar ? 'الحساب' : 'username'}:</span>
+              <span className="font-mono">{(appliedFilters?.username) || (ar ? 'الكل' : 'all')}</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500 me-1">since_minutes:</span>
+              <span className="font-mono">{appliedFilters?.since_minutes ?? '—'}</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500 me-1">comment_id_partial:</span>
+              <span className="font-mono">{appliedFilters?.comment_id_partial || '—'}</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500 me-1">media_id_partial:</span>
+              <span className="font-mono">{appliedFilters?.media_id_partial || '—'}</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+            <div title={refreshedAt ? refreshedAt.toISOString() : undefined}>
+              <span className="font-semibold text-slate-500 me-1">{ar ? 'آخر تحديث' : 'Last refreshed at'}:</span>
+              <span className="font-mono">{refreshedAt ? wvFormatLocal(refreshedAt) : '—'}</span>
+            </div>
+            <div title={windowStartUtc ? `start UTC ${windowStartUtc}\nend UTC ${windowEndUtc}` : undefined}>
+              <span className="font-semibold text-slate-500 me-1">{ar ? 'النافذة' : 'Window'}:</span>
+              <span className="font-mono">
+                {wvFormatLocal(windowStartUtc)} → {wvFormatLocal(windowEndUtc)}
+              </span>
+            </div>
+            <div title={serverNowUtc || undefined}>
+              <span className="font-semibold text-slate-500 me-1">{ar ? 'الآن في الخادم' : 'Server now'}:</span>
+              <span className="font-mono">{wvFormatLocal(serverNowUtc)}</span>
+            </div>
+            <div>
+              <span className="font-semibold text-slate-500 me-1">{ar ? 'منطقة المتصفح' : 'browser tz'}:</span>
+              <span className="font-mono">{browserTz}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* View toggles */}
+      {state === 'success' && (
+        <div className="flex flex-wrap items-center gap-3 mb-2 text-xs" data-testid="webhook-verification-toggles">
+          <label className="inline-flex items-center gap-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showWebhookOnly}
+              onChange={(e) => setShowWebhookOnly(e.target.checked)}
+              data-testid="webhook-verification-toggle-webhook-only"
+            />
+            <span>{ar ? 'webhook فقط' : 'Show webhook only'}</span>
+          </label>
+          <label className="inline-flex items-center gap-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showSuccessesOnly}
+              onChange={(e) => setShowSuccessesOnly(e.target.checked)}
+              data-testid="webhook-verification-toggle-success-only"
+            />
+            <span>{ar ? 'النجاحات فقط' : 'Show successes only'}</span>
+          </label>
+          <label className="inline-flex items-center gap-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={hideRescans}
+              onChange={(e) => setHideRescans(e.target.checked)}
+              data-testid="webhook-verification-toggle-hide-rescans"
+            />
+            <span>{ar ? 'إخفاء إعادة الفحص' : 'Hide re-scans / already_replied_success'}</span>
+          </label>
+          <div className="ms-auto text-[11px] text-slate-500">
+            {ar ? 'يعرض' : 'showing'} {visibleEvents.length} / {allEvents.length}
+          </div>
+        </div>
+      )}
 
       {state === 'loading' && <AdminSkeleton rows={3} />}
       {error && (
@@ -2964,13 +3240,37 @@ function WebhookVerificationTab() {
                 const viaOrProbe = extra.via || extra.probe_outcome || '—';
                 return (
                   <tr key={idx} className="border-t border-slate-200 align-top">
-                    <td className="px-2 py-1 whitespace-nowrap font-mono">{fmtDateTime(ev.created_at) || ev.created_at || '—'}</td>
-                    <td className="px-2 py-1 whitespace-nowrap">{ev.source || '—'}</td>
-                    <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.stage || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono" title={ev.created_at || ''}>
+                      {wvFormatLocal(ev.created_at)}
+                    </td>
+                    <td className="px-2 py-1 whitespace-nowrap">
+                      {ev.source ? (
+                        <WvBadge kind={ev.source === 'webhook' ? 'webhook' : 'polling'}>
+                          {ev.source}
+                        </WvBadge>
+                      ) : '—'}
+                    </td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">
+                      {ev.stage === 'automation_success' ? (
+                        <WvBadge kind="automation_success">{ev.stage}</WvBadge>
+                      ) : ev.stage === 'webhook_comment_detected' ? (
+                        <WvBadge kind="webhook_comment_detected">{ev.stage}</WvBadge>
+                      ) : (ev.stage || '—')}
+                    </td>
                     <td className="px-2 py-1 whitespace-nowrap">{ev.username_key || '—'}</td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.media_id_partial || '—'}</td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.comment_id_partial || '—'}</td>
-                    <td className="px-2 py-1 whitespace-nowrap">{ev.skip_reason || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap">
+                      {ev.skip_reason === 'already_replied_success' ? (
+                        <WvBadge kind="already_replied_success">{ev.skip_reason}</WvBadge>
+                      ) : ev.skip_reason === 'bot_own_reply' ? (
+                        <WvBadge kind="bot_own_reply">{ev.skip_reason}</WvBadge>
+                      ) : ev.skip_reason === 'historical' || ev.skip_reason === 'historical_before_rule_activation' ? (
+                        <WvBadge kind="historical">{ev.skip_reason}</WvBadge>
+                      ) : ev.skip_reason?.endsWith('_failed') || ev.skip_reason === 'no_matching_instagram_account' ? (
+                        <WvBadge kind="failed">{ev.skip_reason}</WvBadge>
+                      ) : (ev.skip_reason || '—')}
+                    </td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{viaOrProbe}</td>
                   </tr>
                 );
