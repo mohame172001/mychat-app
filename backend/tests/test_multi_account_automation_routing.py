@@ -865,12 +865,20 @@ def test_same_commenter_same_post_rule_does_not_restart_opening_flow(monkeypatch
     ))
 
     assert first['matched'] is True
-    assert second['already_processed'] is True
-    assert second['classified_reason'] == 'same_commenter_same_post_same_rule'
-    assert len(reply_calls) == 1
+    assert second['matched'] is True
+    assert second.get('already_processed') is not True
+    assert len(reply_calls) == 2
     assert len(dm_calls) == 1
-    assert len(db.comments.docs) == 1
-    assert db.comments.docs[0]['opening_dedupe_key']
+    assert len(db.comments.docs) == 2
+    first_doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'comment-b-1')
+    second_doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'comment-b-2')
+    assert first_doc['opening_dedupe_key']
+    assert second_doc['opening_dedupe_key'] is None
+    assert second_doc['reply_status'] == 'success'
+    assert second_doc['dm_status'] == 'skipped'
+    assert second_doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+    stages = [e['stage'] for e in db.instagram_automation_events.docs]
+    assert 'opening_dm_skipped' in stages
 
 
 def test_same_commenter_different_post_general_rule_triggers_again(monkeypatch):
@@ -913,6 +921,154 @@ def test_same_commenter_different_post_general_rule_triggers_again(monkeypatch):
     assert len(dm_calls) == 2
     assert len(db.comments.docs) == 2
     assert db.comments.docs[0]['opening_dedupe_key'] != db.comments.docs[1]['opening_dedupe_key']
+
+
+def test_same_commenter_three_comments_same_post_only_one_opening_dm(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    for idx in range(3):
+        result = _run(server._handle_new_comment(
+            owner_b,
+            {
+                'ig_comment_id': f'comment-b-repeat-{idx}',
+                'media_id': 'mediaB',
+                'commenter_id': 'external-repeat',
+                'commenter_username': 'external',
+                'text': f'test {idx}',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            },
+            source='webhook',
+        ))
+        assert result['matched'] is True
+        assert result.get('already_processed') is not True
+
+    assert len(reply_calls) == 3
+    assert len(dm_calls) == 1
+    docs = sorted(db.comments.docs, key=lambda c: c['ig_comment_id'])
+    assert [d['reply_status'] for d in docs] == ['success', 'success', 'success']
+    assert [d['dm_status'] for d in docs] == ['success', 'skipped', 'skipped']
+    assert [d.get('dm_skip_reason') for d in docs[1:]] == [
+        'opening_dm_already_sent_for_commenter_media',
+        'opening_dm_already_sent_for_commenter_media',
+    ]
+
+
+def test_same_commenter_dm_reply_then_comment_after_15_minutes_skips_opening_dm(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    first = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-before-dm-reply',
+            'media_id': 'mediaB',
+            'commenter_id': 'external-replied',
+            'commenter_username': 'external',
+            'text': 'test',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+    assert first['matched'] is True
+    assert len(dm_calls) == 1
+
+    session = next(s for s in db.comment_dm_sessions.docs if s['commenter_id'] == 'external-replied')
+    replied_at = datetime.utcnow() - timedelta(minutes=15)
+    session.update({
+        'status': 'replied',
+        'stage': 'user_replied',
+        'repliedAt': replied_at,
+        'updated': replied_at,
+    })
+
+    second = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'comment-after-dm-reply',
+            'media_id': 'mediaB',
+            'commenter_id': 'external-replied',
+            'commenter_username': 'external',
+            'text': 'test again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='webhook',
+    ))
+
+    assert second['matched'] is True
+    assert len(reply_calls) == 2
+    assert len(dm_calls) == 1
+    doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'comment-after-dm-reply')
+    assert doc['reply_status'] == 'success'
+    assert doc['dm_status'] == 'skipped'
+    assert doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+
+
+def test_same_commenter_same_media_opening_cooldown_matches_webhook_and_polling(monkeypatch):
+    for source in ('webhook', 'polling'):
+        db = _install_multi_account_db(monkeypatch)
+        reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+        owner_b = server._with_instagram_account_context(
+            db.users.docs[0],
+            db.instagram_accounts.docs[1],
+        )
+
+        for idx in range(2):
+            result = _run(server._handle_new_comment(
+                owner_b,
+                {
+                    'ig_comment_id': f'{source}-cooldown-{idx}',
+                    'media_id': 'mediaB',
+                    'commenter_id': 'external-parity',
+                    'commenter_username': 'external',
+                    'text': f'test {idx}',
+                    'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+                },
+                source=source,
+            ))
+            assert result['matched'] is True
+
+        assert len(reply_calls) == 2
+        assert len(dm_calls) == 1
+        second_doc = next(c for c in db.comments.docs if c['ig_comment_id'] == f'{source}-cooldown-1')
+        assert second_doc['dm_status'] == 'skipped'
+        assert second_doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+
+
+def test_different_commenters_same_post_each_get_opening_dm(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[1],
+    )
+    for commenter_id in ('external-one', 'external-two'):
+        result = _run(server._handle_new_comment(
+            owner_b,
+            {
+                'ig_comment_id': f'comment-{commenter_id}',
+                'media_id': 'mediaB',
+                'commenter_id': commenter_id,
+                'commenter_username': commenter_id,
+                'text': 'test',
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+            },
+            source='polling',
+        ))
+        assert result['matched'] is True
+
+    assert len(reply_calls) == 2
+    assert len(dm_calls) == 2
+    assert {c['dm_status'] for c in db.comments.docs} == {'success'}
 
 
 def test_already_replied_success_from_other_media_does_not_block_new_post(monkeypatch):
@@ -3724,7 +3880,7 @@ def test_stale_pending_session_does_not_permanently_block_reopen(monkeypatch):
     assert stale_row['opening_dedupe_key'] is None
 
 
-def test_recent_completed_session_still_blocks_within_ttl(monkeypatch):
+def test_recent_completed_session_skips_opening_dm_inside_cooldown(monkeypatch):
     """The relaxation only fires for PENDING sessions. A completed
     flow within the TTL window must still block — that's the
     anti-spam contract."""
@@ -3752,11 +3908,16 @@ def test_recent_completed_session_still_blocks_within_ttl(monkeypatch):
         'updated': datetime.utcnow() - timedelta(minutes=5),
     })
 
+    reply_calls = []
+    dm_calls = []
+
     async def reply_ok(access_token, comment_id, text):
+        reply_calls.append({'access_token': access_token, 'comment_id': comment_id})
         return _reply_provider_ok()
 
     async def send_message_ok(access_token, ig_user_id, recipient_id, message,
                               allow_workspace_recipient=False):
+        dm_calls.append({'access_token': access_token, 'ig_user_id': ig_user_id})
         return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid'}}
 
     monkeypatch.setattr(server, 'reply_to_ig_comment_detailed', reply_ok)
@@ -3776,8 +3937,69 @@ def test_recent_completed_session_still_blocks_within_ttl(monkeypatch):
         },
         source='webhook',
     ))
-    assert result.get('already_processed') is True
-    assert result.get('classified_reason') == 'same_commenter_same_post_same_rule'
+    assert result['matched'] is True
+    assert result.get('already_processed') is not True
+    assert reply_calls == [{'access_token': 'token-b', 'comment_id': 'spam-after-completed'}]
+    assert dm_calls == []
+    doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'spam-after-completed')
+    assert doc['reply_status'] == 'success'
+    assert doc['dm_status'] == 'skipped'
+    assert doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+
+
+def test_completed_session_after_legacy_reopen_ttl_still_skips_opening_dm(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    rule = _comment_rule('accB', 'igB', 'ruleB-completed-legacy-ttl')
+    rule['activationStartedAt'] = datetime.utcnow() - timedelta(days=2)
+    db.automations.docs = [rule]
+    prior = datetime.utcnow() - timedelta(
+        seconds=server._COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS + 60,
+    )
+    db.comment_dm_sessions.docs.append({
+        'id': 'sess-completed-legacy-ttl',
+        'user_id': 'u1',
+        'instagramAccountId': 'igB',
+        'igUserId': 'igB',
+        'ig_user_id': 'igB',
+        'automation_id': 'ruleB-completed-legacy-ttl',
+        'media_id': 'mediaB',
+        'recipient_id': 'igsid-repeat',
+        'commenter_id': 'igsid-repeat',
+        'opening_dedupe_key': server._comment_opening_dedupe_key(
+            'u1', 'igB', 'ruleB-completed-legacy-ttl', 'mediaB', 'igsid-repeat',
+        ),
+        'status': 'completed',
+        'stage': 'final_sent',
+        'finalDmSentAt': prior,
+        'created': prior,
+        'updated': prior,
+    })
+    reply_calls, dm_calls = _install_successful_comment_sends(monkeypatch)
+
+    owner_b = server._with_instagram_account_context(
+        db.users.docs[0], db.instagram_accounts.docs[1],
+    )
+    result = _run(server._handle_new_comment(
+        owner_b,
+        {
+            'ig_comment_id': 'after-legacy-completed-ttl',
+            'media_id': 'mediaB',
+            'commenter_id': 'igsid-repeat',
+            'text': 'send me again',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        },
+        source='polling',
+    ))
+
+    assert result['matched'] is True
+    assert len(reply_calls) == 1
+    assert dm_calls == []
+    doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'after-legacy-completed-ttl')
+    assert doc['dm_status'] == 'skipped'
+    assert doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+    prior_session = next(s for s in db.comment_dm_sessions.docs if s['id'] == 'sess-completed-legacy-ttl')
+    assert prior_session['opening_dedupe_key'] is not None
+    assert prior_session['status'] == 'completed'
 
 
 def test_old_completed_session_does_not_block_fresh_comment_forever(monkeypatch):
@@ -3789,7 +4011,7 @@ def test_old_completed_session_does_not_block_fresh_comment_forever(monkeypatch)
     rule['activationStartedAt'] = datetime.utcnow() - timedelta(days=2)
     db.automations.docs = [rule]
     old = datetime.utcnow() - timedelta(
-        seconds=server._COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS + 60,
+        seconds=server._COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS + 60,
     )
     db.comment_dm_sessions.docs.append({
         'id': 'sess-old-completed',
@@ -4029,8 +4251,11 @@ def test_after_reset_dedupe_still_blocks_immediate_repeat_on_same_new_comment(mo
         },
         source='webhook',
     ))
-    assert second.get('already_processed') is True
-    assert second.get('classified_reason') == 'same_commenter_same_post_same_rule'
+    assert second['matched'] is True
+    assert second.get('already_processed') is not True
+    second_doc = next(c for c in db.comments.docs if c['ig_comment_id'] == 'fresh-2')
+    assert second_doc['dm_status'] == 'skipped'
+    assert second_doc['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
 
 
 # ---------------------------------------------------------------------------

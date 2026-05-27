@@ -3460,6 +3460,12 @@ _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS = int(
 _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS = int(
     os.environ.get('COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS', '900')
 )
+_COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS = _env_int_clamped(
+    'COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS',
+    86400,
+    3600,
+    604800,
+)
 
 # Fallback-continuation TTL. When the opening DM was successfully
 # delivered (the user sees it in Instagram), but Meta has not sent us
@@ -4479,6 +4485,36 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
         if ntype == 'message':
             msg_text = data.get('text') or data.get('message', '')
             if msg_text and sender_ig_id:
+                opening_dm_skip_reason = (
+                    (comment_context or {}).get('opening_dm_skip_reason')
+                    if comment_context else None
+                )
+                if opening_dm_skip_reason:
+                    now = datetime.utcnow()
+                    flow_results['dm_status'] = 'skipped'
+                    flow_results['dm_failure_reason'] = None
+                    flow_results['dm_skip_reason'] = opening_dm_skip_reason
+                    if comment_context and comment_context.get('comment_doc_id'):
+                        await db.comments.update_one(
+                            {'id': comment_context['comment_doc_id']},
+                            {'$set': {
+                                'dm_status': 'skipped',
+                                'dmStatus': 'skipped',
+                                'dm_skip_reason': opening_dm_skip_reason,
+                                'dmSkipReason': opening_dm_skip_reason,
+                                'last_attempt_at': now,
+                                'updated': now,
+                            }},
+                        )
+                    logger.info(
+                        'automation_step_diagnostics comment_id=%s matched_rule_id=%s dm_attempted=%s dm_skip_reason=%s',
+                        flow_comment_id, automation.get('id'), False, opening_dm_skip_reason
+                    )
+                    logger.info(
+                        'comment_opening_dm_skipped reason=%s comment_id=%s rule_id=%s',
+                        opening_dm_skip_reason, flow_comment_id, automation.get('id')
+                    )
+                    continue
                 action_attempted = True
                 dm_failure_reason = None
                 # Reset the contextvar so we read THIS send's reason, not
@@ -18369,6 +18405,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
     rule_id = matched_rule.get('id') if matched_rule else (cutoff_rule.get('id') if cutoff_rule else None)
     matched = bool(matched_rule)
     opening_dedupe_key = None
+    opening_dm_skip_reason = None
     if matched:
         logger.info('rule_matched source=%s ig_comment_id=%s rule_id=%s user=%s',
                     source, ig_comment_id, rule_id, user_doc.get('email'))
@@ -18429,15 +18466,21 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     # COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS (default
                     # 24h) shouldn't block a legitimate retry forever —
                     # otherwise a single failed test makes the flow look
-                    # permanently broken to the operator. Completed
-                    # flows still block as before. Stale-expired rows
-                    # get tagged so the diagnostic UI can surface them
-                    # and the opener proceeds to create a fresh session.
+                    # permanently broken to the operator. Completed and
+                    # pending flows must still block opening DMs inside
+                    # COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS, even if
+                    # the shorter continuation/reopen TTL has elapsed.
+                    # Expired rows get tagged so the diagnostic UI can
+                    # surface them and the opener proceeds to create a
+                    # fresh session.
                     is_stale_pending = False
                     is_stale_completed = False
                     existing_created = existing_flow.get('created')
                     existing_updated = (
-                        existing_flow.get('finalDmSentAt')
+                        existing_flow.get('dm_sent_at')
+                        or existing_flow.get('dmSentAt')
+                        or existing_flow.get('openingDmSentAt')
+                        or existing_flow.get('finalDmSentAt')
                         or existing_flow.get('updated')
                         or existing_flow.get('replied_at')
                         or existing_created
@@ -18446,14 +18489,20 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                         stale_age = (datetime.utcnow() - existing_created).total_seconds()
                         if (
                             not flow_completed
-                            and stale_age > _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS
+                            and stale_age > max(
+                                _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS,
+                                _COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS,
+                            )
                         ):
                             is_stale_pending = True
                     if isinstance(existing_updated, datetime):
                         completed_age = (datetime.utcnow() - existing_updated).total_seconds()
                         if (
                             flow_completed
-                            and completed_age > _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS
+                            and completed_age > max(
+                                _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS,
+                                _COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS,
+                            )
                         ):
                             is_stale_completed = True
                     if is_stale_pending or is_stale_completed:
@@ -18517,15 +18566,22 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                             int((datetime.utcnow() - reopen_age_base).total_seconds())
                                 if isinstance(reopen_age_base, datetime) else None,
                             (
-                                _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS
+                                max(
+                                    _COMMENT_DM_STALE_FLOW_REOPEN_TTL_SECONDS,
+                                    _COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS,
+                                )
                                 if is_stale_pending
-                                else _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS
+                                else max(
+                                    _COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS,
+                                    _COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS,
+                                )
                             ),
                         )
                         # Fall through to the normal opening path —
                         # do NOT skip.
                     else:
-                        reason = 'flow_already_completed' if flow_completed else 'flow_already_started'
+                        reason = 'opening_dm_already_sent_for_commenter_media'
+                        opening_dm_skip_reason = reason
                         logger.info(
                             'comment_opening_flow_duplicate_skipped reason=%s user_id=%s '
                             'instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s '
@@ -18543,7 +18599,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                             existing_flow.get('id') if existing_session else None,
                         )
                         logger.info(
-                            'automation_duplicate_opening_skipped reason=same_commenter_same_post_same_rule '
+                            'automation_duplicate_opening_skipped reason=same_commenter_same_media_rule_account '
                             'user_id=%s instagram_account_id=%s automation_id=%s media_id=%s commenter_id=%s',
                             user_id,
                             _safe_partial_identifier(ig_account_id),
@@ -18561,13 +18617,11 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                             rule_id=rule_id,
                             rule_type=_automation_flight_rule_type(matched_rule),
                             skip_reason=reason,
-                            extra={'dedupe_reason': 'same_commenter_same_post_same_rule'},
+                            extra={
+                                'dedupe_reason': 'same_commenter_same_media_rule_account',
+                                'opening_dedupe_key_partial': _safe_partial_identifier(opening_dedupe_key),
+                            },
                         )
-                        return {'processed': False, 'already_processed': True, 'matched': True,
-                                'action_status': 'skipped',
-                                'reason': reason,
-                                'classified_reason': 'same_commenter_same_post_same_rule',
-                                'rule_id': rule_id}
     elif cutoff_skip_reason:
         logger.info('rule_skipped_by_activation_cutoff ig_comment_id=%s rule_id=%s reason=%s user=%s',
                     ig_comment_id, rule_id, cutoff_skip_reason, user_doc.get('email'))
@@ -18627,6 +18681,7 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         matched_rule or cutoff_rule or {},
         media_id,
     )
+    doc_opening_dedupe_key = None if opening_dm_skip_reason else opening_dedupe_key
     action_status = 'pending' if matched else 'skipped'
     legacy_reply_repair = retry_reason == 'legacy_success_without_provider_confirmation'
     existing_reply_status = (
@@ -18650,8 +18705,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
         'media_id': media_id,
         'mediaId': media_id,
         'commenter_id': commenter_id,
-        'opening_dedupe_key': opening_dedupe_key,
-        'openingDedupeKey': opening_dedupe_key,
+        'opening_dedupe_key': doc_opening_dedupe_key,
+        'openingDedupeKey': doc_opening_dedupe_key,
         'commenter_username': commenter_username,
         'text': comment_text,
         'replied': False if legacy_reply_repair else (
@@ -18676,6 +18731,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
             if legacy_reply_repair else (existing.get('reply_failure_reason') if retry_existing and existing else None)
         ),
         'dm_failure_reason': existing.get('dm_failure_reason') if retry_existing and existing else None,
+        'dm_skip_reason': opening_dm_skip_reason,
+        'dmSkipReason': opening_dm_skip_reason,
         'reply_failure_retryable': True if legacy_reply_repair else (
             existing.get('reply_failure_retryable') if retry_existing and existing else False
         ),
@@ -18849,7 +18906,8 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 user_doc, matched_rule, commenter_id, comment_text,
                 comment_doc_id=doc['id'], ig_comment_id=ig_comment_id,
                 source=source, received_monotonic=processing_started,
-                media_id=media_id, opening_dedupe_key=opening_dedupe_key,
+                media_id=media_id, opening_dedupe_key=doc_opening_dedupe_key,
+                opening_dm_skip_reason=opening_dm_skip_reason,
             )
             if isinstance(ok, dict):
                 action_status = ok.get('action_status') or ('success' if ok.get('ok') else 'failed')
@@ -18937,7 +18995,8 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                                  source: str = 'webhook',
                                  received_monotonic: Optional[float] = None,
                                  media_id: Optional[str] = None,
-                                 opening_dedupe_key: Optional[str] = None):
+                                 opening_dedupe_key: Optional[str] = None,
+                                 opening_dm_skip_reason: Optional[str] = None):
     """Wrap execute_flow so we record success/failure on the comment doc.
 
     Persists per-step outcomes (reply_status, dm_status, action_status,
@@ -18957,6 +19016,7 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                 'media_id': media_id,
                 'commenter_id': commenter_id,
                 'opening_dedupe_key': opening_dedupe_key,
+                'opening_dm_skip_reason': opening_dm_skip_reason,
                 'source': source,
                 'received_monotonic': received_monotonic,
             },
@@ -19010,6 +19070,26 @@ async def _run_and_record_action(user_doc, automation, commenter_id, comment_tex
                 rule_type=_automation_flight_rule_type(automation),
                 skip_reason=None if _status_is_success(dm_status) else dm_status,
                 error_message=saved.get('dm_failure_reason'),
+            )
+        dm_skip_reason = saved.get('dm_skip_reason') or saved.get('dmSkipReason')
+        if (
+            str(dm_status or '').lower() == 'skipped'
+            and dm_skip_reason == 'opening_dm_already_sent_for_commenter_media'
+        ):
+            await _record_instagram_automation_event(
+                'opening_dm_skipped',
+                source=source,
+                user_doc=user_doc,
+                media_id=media_id,
+                comment_id=ig_comment_id,
+                commenter_id=commenter_id,
+                rule_id=automation.get('id'),
+                rule_type=_automation_flight_rule_type(automation),
+                skip_reason=dm_skip_reason,
+                extra={
+                    'dedupe_reason': 'same_commenter_same_media_rule_account',
+                    'opening_dedupe_key_partial': _safe_partial_identifier(opening_dedupe_key),
+                },
             )
         # Hard invariant: if the matched rule is configured with a public
         # reply, an unattempted public reply is illegal. Convert
@@ -20331,6 +20411,7 @@ async def _handle_new_dm_message(user_doc: dict, event: dict, source: str = 'web
                        rule_id, dedup_key, err)
         return {'processed': True, 'matched': True, 'status': 'failed',
                 'rule_id': rule_id, 'log_id': log_doc['id'], 'error': err}
+
 
 
 async def _process_webhook(payload: dict):

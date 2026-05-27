@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Repeated Comments Could Trigger Repeated Opening DMs
+
+- Date/time: 2026-05-27
+- Symptom: One Instagram user commented multiple times on the same post. Public replies were allowed per physical comment, but the same DM conversation could receive a second opening automation message after the user replied in DM and then commented again.
+- Affected area: Instagram comment-to-DM opening-flow cooldown in `_handle_new_comment` / `execute_flow`.
+- Root cause: The business opening-DM dedupe key was already scoped to commenter + media + rule/account, but the shorter completed-flow reopen TTL could reopen opening-DM eligibility before the desired same-user/media/rule cooldown window elapsed.
+- Fix commit: pending (this commit). Add `COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS` (default 86400, clamped 3600-604800) and ensure completed/pending sessions cannot allow a second opening DM inside that window. Repeated comments inside the window still run comment-level public reply logic, but opening DM is skipped with `opening_dm_already_sent_for_commenter_media`.
+- Tests: same commenter same media three comments sends one opening DM; same commenter replies in DM then comments after 15 minutes still skips opening DM; after 24 hours can reopen if policy allows; different commenters get their own DM; same commenter different media gets own DM; webhook and polling parity. `test_multi_account_automation_routing.py` 157 passed; `test_phase2_media_catalog_round_robin.py` 7 passed; full backend suite 723 passed.
+- Deploy status: Local, deploy required. Do not mark known-good until live Instagram test confirms same user 3 comments on one post sends one opening DM within 24 hours.
+- Lesson learned: Exact-comment dedupe and business opening-DM cooldown are separate contracts. Public replies can be per comment while opening DMs must be governed by commenter/media/rule/account cooldown.
+- Preventive test added: Yes.
+
 ### Phase 2 Polling Produced Deep Automation Logs For Old Comments
 
 - Date/time: 2026-05-26

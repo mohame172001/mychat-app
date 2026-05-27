@@ -257,6 +257,29 @@ This must stay strict.
 
 Do not weaken dedupe globally unless a real false-success bug is proven.
 
+Phase 2D - Opening DM Same-User Cooldown:
+
+```text
+COMMENT_DM_OPENING_DEDUPE_WINDOW_SECONDS defaults to 86400 seconds
+and is clamped to 3600..604800.
+
+The opening DM dedupe key remains:
+user_id + instagram_account_id + automation_id/rule_id + media_id + commenter_id
+
+Within that cooldown, repeated physical comments from the same commenter
+on the same media/rule/account may still receive public replies according
+to existing comment-level policy, but opening DM is skipped with:
+opening_dm_already_sent_for_commenter_media
+```
+
+Important:
+
+- `COMMENT_DM_COMPLETED_FLOW_REOPEN_TTL_SECONDS` is only for internal continuation/reopen logic and must not permit a second opening DM inside the opening cooldown.
+- Different commenters on the same media can still receive their own opening DM.
+- The same commenter on a different media can still receive an opening DM if existing product policy allows.
+- Webhook and polling paths must behave the same.
+- Billing, HMAC, exact-comment dedupe, rate limits, quick reply copy, Dashboard/frontend, and username-specific behavior are unchanged.
+
 ### 5.3 Early returns before rule loading
 
 `_handle_new_comment` can exit before rule loading when the comment is:
