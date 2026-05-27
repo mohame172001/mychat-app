@@ -24185,6 +24185,294 @@ async def admin_instagram_automation_stop_point(
     }
 
 
+@api.get('/admin/instagram/webhook-verification')
+async def admin_instagram_webhook_verification(
+    username: Optional[str] = None,
+    since_minutes: int = 30,
+    comment_id_partial: Optional[str] = None,
+    media_id_partial: Optional[str] = None,
+    limit: int = 200,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2C-C — safe admin diagnostic for verifying whether Meta's
+    comment webhooks are arriving, mapping, parsing, and calling
+    ``_handle_new_comment(source='webhook')``.
+
+    This endpoint is read-only, admin-protected, and returns ONLY the
+    redacted/partial identifier fields that the underlying flight
+    recorder already stores. It never reads access tokens, full
+    webhook payloads, full message text, or full identity ids — those
+    fields are excluded by the existing
+    ``_record_instagram_automation_event`` writer.
+
+    Filters:
+      - ``username`` — restrict to one Instagram username's events.
+      - ``since_minutes`` — lookback window (default 30, clamped 1-1440).
+      - ``comment_id_partial`` — substring match against
+        ``comment_id_partial`` (already first-3/last-3 form).
+      - ``media_id_partial`` — substring match against
+        ``media_id_partial``.
+      - ``limit`` — cap on returned events (default 200, max 1000).
+
+    Response summary counters:
+      - webhook_comment_events_seen_count: distinct comment_id_partial
+        values with stage=webhook_comment_detected.
+      - webhook_comments_mapped_count: distinct comment_id_partial
+        values that reached account_resolution_success AND
+        webhook_comment_detected.
+      - webhook_comments_unmapped_count: webhook entries that ended in
+        account_resolution_failed.
+      - webhook_comments_reached_handle_count: distinct
+        comment_id_partial values with both webhook_comment_detected
+        and a subsequent dedupe_checked / rule_loading_started /
+        rule_match_success / automation_skipped — proves
+        _handle_new_comment was invoked from the webhook source.
+      - webhook_comments_success_count: distinct comment_id_partial
+        values with source=webhook AND automation_success.
+      - polling_success_count: distinct comment_id_partial values with
+        source=polling AND automation_success in the window.
+      - phase2c_b_fallback_used_count: account_resolution_success
+        events whose extra.via='media_owner_probe'.
+      - alias_self_heal_count: account_resolution_success events whose
+        extra.via='webhook_entry_id_alias'.
+      - latest_webhook_comment_at / latest_polling_success_at: ISO
+        strings of the most recent qualifying event.
+
+    Phase 2C-C does NOT change sending behavior, dedupe, HMAC,
+    rate limits, quick-reply copy, polling pipeline, Billing,
+    Dashboard. The endpoint only reads what the recorder already
+    stored. Operator-only — no frontend page exposes it.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    safe_since = max(
+        1,
+        min(
+            int(since_minutes if since_minutes is not None else 30),
+            1440,
+        ),
+    )
+    safe_limit = max(1, min(int(limit or 200), 1000))
+    since = datetime.utcnow() - timedelta(minutes=safe_since)
+    username_key = _automation_flight_username_key(username) if username else ''
+
+    relevant_stages = [
+        'webhook_received',
+        'account_resolution_started',
+        'account_resolution_success',
+        'account_resolution_failed',
+        'webhook_comment_detected',
+        'webhook_media_owner_probe_started',
+        'webhook_media_owner_probe_success',
+        'webhook_media_owner_probe_failed',
+        'ambiguous_media_owner_resolution',
+        'rule_loading_started',
+        'rule_loading_finished',
+        'rule_match_success',
+        'rule_match_failed',
+        'public_reply_sent',
+        'public_reply_success',
+        'opening_dm_sent',
+        'opening_dm_success',
+        'automation_success',
+        'automation_skipped',
+        'dedupe_checked',
+        'poller_comment_seen',
+    ]
+    query: Dict[str, Any] = {
+        'stage': {'$in': relevant_stages},
+        'created_at': {'$gte': since},
+    }
+    if username_key:
+        query['username_key'] = username_key
+    try:
+        cursor = db.instagram_automation_events.find(
+            query, {'_id': 0},
+        ).sort('created_at', -1).limit(safe_limit)
+        rows = await cursor.to_list(safe_limit)
+    except Exception:
+        rows = []
+
+    # Optional partial-id substring filters (post-query so a single
+    # Mongo query covers all paths).
+    if comment_id_partial:
+        rows = [r for r in rows
+                if (r.get('comment_id_partial') or '')
+                .find(str(comment_id_partial)) >= 0]
+    if media_id_partial:
+        rows = [r for r in rows
+                if (r.get('media_id_partial') or '')
+                .find(str(media_id_partial)) >= 0]
+
+    def _iso(value):
+        return value.isoformat() if isinstance(value, datetime) else value
+
+    # Counters
+    webhook_comment_ids: set = set()
+    mapped_comment_ids: set = set()
+    reached_handle_ids: set = set()
+    webhook_success_ids: set = set()
+    polling_success_ids: set = set()
+    unmapped_webhook_entries = 0
+    fallback_used_count = 0
+    alias_self_heal_count = 0
+    latest_webhook_comment_at: Optional[datetime] = None
+    latest_polling_success_at: Optional[datetime] = None
+
+    # Index by comment_id_partial so we can reason about end-to-end
+    # progression. Rows are newest-first.
+    for r in rows:
+        stage = r.get('stage')
+        source = r.get('source')
+        cid = r.get('comment_id_partial') or ''
+        created = r.get('created_at')
+        extra = r.get('extra') or {}
+        if stage == 'webhook_comment_detected':
+            if cid:
+                webhook_comment_ids.add(cid)
+            if isinstance(created, datetime):
+                if (latest_webhook_comment_at is None
+                        or created > latest_webhook_comment_at):
+                    latest_webhook_comment_at = created
+        elif stage == 'account_resolution_success':
+            via = (extra.get('via') if isinstance(extra, dict) else None)
+            if via == 'media_owner_probe':
+                fallback_used_count += 1
+            elif via == 'webhook_entry_id_alias':
+                alias_self_heal_count += 1
+            # Pair with later webhook_comment_detected via username scope
+            # — we count it as `mapped` if the same username has a
+            # webhook_comment_detected later in the same window.
+        elif stage == 'account_resolution_failed' and source == 'webhook':
+            unmapped_webhook_entries += 1
+        elif stage == 'automation_success':
+            if source == 'webhook' and cid:
+                webhook_success_ids.add(cid)
+            elif source == 'polling' and cid:
+                polling_success_ids.add(cid)
+                if isinstance(created, datetime):
+                    if (latest_polling_success_at is None
+                            or created > latest_polling_success_at):
+                        latest_polling_success_at = created
+
+    # Second pass to derive "reached_handle" — webhook_comment_detected
+    # for comment X PLUS any downstream stage scoped to the same
+    # comment_id_partial.
+    downstream_stages = {
+        'dedupe_checked', 'rule_loading_started', 'rule_loading_finished',
+        'rule_match_success', 'rule_match_failed', 'automation_skipped',
+        'public_reply_sent', 'opening_dm_sent', 'automation_success',
+    }
+    downstream_ids_by_comment: set = set()
+    for r in rows:
+        if r.get('stage') in downstream_stages:
+            cid = r.get('comment_id_partial') or ''
+            if cid and cid in webhook_comment_ids:
+                downstream_ids_by_comment.add(cid)
+    reached_handle_ids = downstream_ids_by_comment
+    # `mapped` is a superset of `reached_handle` for webhook comments —
+    # if webhook_comment_detected was written, account resolution
+    # already succeeded.
+    mapped_comment_ids = set(webhook_comment_ids)
+
+    summary = {
+        'since_minutes': safe_since,
+        'username': username_key or None,
+        'webhook_comment_events_seen_count': len(webhook_comment_ids),
+        'webhook_comments_mapped_count': len(mapped_comment_ids),
+        'webhook_comments_unmapped_count': unmapped_webhook_entries,
+        'webhook_comments_reached_handle_count': len(reached_handle_ids),
+        'webhook_comments_success_count': len(webhook_success_ids),
+        'polling_success_count': len(polling_success_ids),
+        'phase2c_b_fallback_used_count': fallback_used_count,
+        'alias_self_heal_count': alias_self_heal_count,
+        'latest_webhook_comment_at': _iso(latest_webhook_comment_at),
+        'latest_polling_success_at': _iso(latest_polling_success_at),
+        'total_events_in_window': len(rows),
+    }
+
+    # Per-event sanitized view. Only carry the explicit safe fields the
+    # spec asks for — any other key on the row is dropped.
+    SAFE_EVENT_FIELDS = (
+        'created_at', 'source', 'stage', 'username_key',
+        'instagram_account_id_partial', 'media_id_partial',
+        'comment_id_partial', 'commenter_id_partial',
+        'skip_reason', 'error_code',
+    )
+    SAFE_EXTRA_KEYS = {
+        # B1 diagnostic matrix keys
+        'entry_id_partial', 'object_field', 'change_fields',
+        'has_comment_field', 'has_messaging',
+        'sample_value_id_partial', 'sample_value_media_id_partial',
+        'sample_value_from_id_partial', 'sample_recipient_id_partial',
+        'sample_sender_id_partial', 'probe_media_id_partial',
+        'probe_outcome',
+        # account_resolution_success metadata
+        'via',
+        # rule_loading_finished count
+        'rules_count', 'rules_loaded_count',
+        # poller diagnostics
+        'target_media_count', 'recent_media_limit',
+        'round_robin_batch_size', 'round_robin_cursor_position',
+        # historical / freshness markers
+        'classified_reason', 'before_rule_activation',
+        # bot-own / dedupe namespace markers
+        'namespace',
+        # timestamp safe metadata
+        'timestamp_source', 'effective_timestamp',
+    }
+    serialized_events: list = []
+    for r in rows:
+        out: Dict[str, Any] = {}
+        for f in SAFE_EVENT_FIELDS:
+            v = r.get(f)
+            if isinstance(v, datetime):
+                out[f] = v.isoformat()
+            else:
+                out[f] = v
+        # Extra: pick only safe keys + scrub identity-alias samples to
+        # partials (they already are from the recorder, but defensive).
+        src_extra = r.get('extra') if isinstance(r.get('extra'), dict) else {}
+        safe_extra: Dict[str, Any] = {}
+        for k, v in src_extra.items():
+            if k in SAFE_EXTRA_KEYS:
+                if k == 'connected_account_samples':
+                    # Should not be in SAFE_EXTRA_KEYS, but defense-in-
+                    # depth: never include this large structure here.
+                    continue
+                safe_extra[k] = v
+        # Connected-account-samples is bounded but contains a list of
+        # partials; only expose when present and explicitly safe.
+        if 'connected_account_samples' in src_extra:
+            samples = src_extra.get('connected_account_samples') or []
+            if isinstance(samples, list):
+                # Each sample is already partial. Cap to 10 and keep
+                # only the four fields the spec authorises.
+                cleaned: list = []
+                for s in samples[:10]:
+                    if not isinstance(s, dict):
+                        continue
+                    cleaned.append({
+                        'account_id_partial': s.get('account_id_partial'),
+                        'username': s.get('username'),
+                        'connection_valid': s.get('connection_valid'),
+                        'identity_partials': (
+                            s.get('identity_partials')
+                            if isinstance(s.get('identity_partials'), dict)
+                            else {}
+                        ),
+                    })
+                safe_extra['connected_account_samples'] = cleaned
+        if safe_extra:
+            out['extra'] = safe_extra
+        serialized_events.append(out)
+
+    return {
+        'ok': True,
+        'summary': summary,
+        'events': serialized_events,
+    }
+
+
 @api.get('/admin/instagram/rule-coverage-inspector')
 async def admin_instagram_rule_coverage_inspector(
     username: Optional[str] = None,
