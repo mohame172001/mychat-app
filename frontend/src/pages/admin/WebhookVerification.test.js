@@ -140,6 +140,28 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).not.toMatch(/new Date\(ts\)/);
   });
 
+  test('Phase 2F: subscription_status panel renders and is gated by data', () => {
+    expect(source).toContain('webhook-verification-subscription');
+    expect(source).toContain('subscriptionStatus.overall_ready');
+    expect(source).toContain('expected_fields');
+    expect(source).toContain('webhook_comment_delivery_configured');
+    expect(source).toContain('missing_fields');
+    expect(source).toContain('last_webhook_repair_attempt_at');
+  });
+
+  test('Phase 2F: Repair button calls the admin repair endpoint', () => {
+    expect(source).toContain('webhook-verification-repair');
+    expect(source).toContain('/admin/instagram/repair-comment-webhooks');
+    // Reload after repair so the operator sees the new state.
+    expect(source).toMatch(/onRepairWebhooks[\s\S]{0,1500}await load\(\)/);
+  });
+
+  test('Phase 2F: Repair result block renders actionable_error', () => {
+    expect(source).toContain('webhook-verification-repair-result');
+    expect(source).toContain('repairResult.actionable_error');
+    expect(source).toContain('subscribe_status');
+  });
+
   test('does not introduce any username-specific automation logic', () => {
     // Allowed: ui default WV_DEFAULT_USERNAME = 'muhammad_gehad'; the
     // placeholder string; and the input value default. Forbidden:

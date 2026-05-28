@@ -24227,6 +24227,270 @@ async def admin_instagram_automation_stop_point(
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 2F — webhook subscription status + admin repair helpers.
+#
+# The plumbing for subscribing a single IG account to webhook fields
+# already exists (`_subscribe_instagram_account_to_webhooks`,
+# `_verify_and_heal_ig_subscription_async`, the periodic heal loop, and
+# the per-user `/api/instagram/subscribe-webhook-all`). What was missing
+# was an operator-facing repair button scoped to a single username from
+# the admin console, and a sanitized subscription_status block surfaced
+# alongside the Webhook Verification events. This block adds both.
+#
+# Account-agnostic — no username branching in code paths. The
+# `username` query param simply selects the account row to act on, and
+# any username works identically.
+# ---------------------------------------------------------------------------
+
+
+async def _compute_webhook_subscription_status(
+    *,
+    username_key: str,
+    caller_user_id: str,
+) -> dict:
+    """Read-only summary of Meta webhook subscription state per account.
+
+    Reads only the cached fields previously written by
+    `_verify_and_heal_ig_subscription_async` and the OAuth callback
+    path. No tokens read, no Graph call from this function — the
+    Repair endpoint below is the explicit operator action that
+    triggers a Graph subscribe.
+
+    Scope:
+      - If `username_key` is set: limit to the matching account row.
+      - Otherwise: every active account on the caller's `user_id`.
+
+    Returns a dict with `expected_fields`, `accounts[]` (each with
+    `username`, `instagram_account_id_partial`, `subscribed_fields`,
+    `missing_fields`, cached repair timestamps + result, and a derived
+    `webhook_comment_delivery_configured` boolean), and an
+    `overall_ready` boolean across all matched accounts.
+    """
+    expected = sorted(WEBHOOK_REQUIRED_FIELDS)
+    accounts_out: list = []
+    overall_ready = False
+    try:
+        query: Dict[str, Any] = {
+            'isActive': {'$ne': False},
+        }
+        if username_key:
+            query['$or'] = [
+                {'username': username_key},
+                {'instagramHandle': username_key},
+            ]
+        else:
+            query['userId'] = caller_user_id
+        cursor = db.instagram_accounts.find(
+            query,
+            {
+                'accessToken': 0, 'refreshToken': 0,
+                'access_token': 0, 'refresh_token': 0, 'token': 0,
+            },
+        ).limit(20)
+        rows = await cursor.to_list(20)
+    except Exception:
+        rows = []
+    for row in rows:
+        cached_present = row.get('webhookSubscriptionFields') or row.get('subscribed_fields') or []
+        if not isinstance(cached_present, list):
+            cached_present = []
+        cached_missing = row.get('webhookSubscriptionMissing') or []
+        if not isinstance(cached_missing, list):
+            cached_missing = sorted(set(expected) - set(cached_present))
+        comments_subscribed = (
+            'comments' in cached_present or 'live_comments' in cached_present
+        )
+        ready = comments_subscribed and not (set(expected) - set(cached_present))
+        if ready:
+            overall_ready = True
+        accounts_out.append({
+            'instagram_account_id_partial': _safe_partial_identifier(
+                row.get('instagramAccountId') or row.get('igUserId')
+            ),
+            'username': row.get('username') or row.get('instagramHandle'),
+            'connection_valid': bool(row.get('connectionValid')),
+            'subscribed_fields': sorted(set(str(f) for f in cached_present)),
+            'missing_fields': sorted(set(str(f) for f in cached_missing)),
+            'comments_subscribed': comments_subscribed,
+            'webhook_comment_delivery_configured': ready,
+            'last_subscription_check_at': (
+                row.get('webhookSubscriptionLastCheckedAt').isoformat() + 'Z'
+                if isinstance(row.get('webhookSubscriptionLastCheckedAt'), datetime)
+                else None
+            ),
+            'last_webhook_repair_attempt_at': (
+                row.get('lastWebhookRepairAttemptAt').isoformat() + 'Z'
+                if isinstance(row.get('lastWebhookRepairAttemptAt'), datetime)
+                else None
+            ),
+            'last_webhook_repair_result': row.get('lastWebhookRepairResult'),
+            'last_webhook_repair_error': _automation_flight_safe_text(
+                row.get('lastWebhookRepairError'), 160,
+            ),
+        })
+    return {
+        'expected_fields': expected,
+        'overall_ready': overall_ready,
+        'accounts': accounts_out,
+        'note': (
+            'These values are CACHED by the periodic webhook subscription heal '
+            'loop and the OAuth callback path. To force a fresh Graph subscribe '
+            'POST to /api/admin/instagram/repair-comment-webhooks?username=<...>'
+        ),
+    }
+
+
+@api.post('/admin/instagram/repair-comment-webhooks')
+async def admin_instagram_repair_comment_webhooks(
+    username: str,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2F admin action: force a fresh Graph subscribe for the
+    specified Instagram account so Meta delivers comment + messaging
+    webhooks again. Wraps the existing
+    `_subscribe_instagram_account_to_webhooks` helper for a single
+    `username` selected by the operator from the admin console.
+
+    Reads admin permission `PERM_USERS_VIEW` (same as the rest of the
+    Instagram diagnostics surface). Never logs tokens. Stores
+    sanitized result on the row so subsequent verification calls can
+    show repair history.
+
+    Returns either a sanitized success object OR an actionable error
+    object so the operator can distinguish "Meta accepted the
+    subscribe" from "Meta refused for app-mode/permission reasons".
+    Account-agnostic — no username branching in code.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    username_key = _automation_flight_username_key(username) if username else ''
+    if not username_key:
+        return {
+            'ok': False,
+            'error': 'missing_username',
+            'message': 'A non-empty username is required.',
+        }
+    # Lookup the account row by username — account-agnostic.
+    account = await db.instagram_accounts.find_one(
+        {
+            'isActive': {'$ne': False},
+            '$or': [
+                {'username': username_key},
+                {'instagramHandle': username_key},
+            ],
+        },
+    )
+    if not account:
+        return {
+            'ok': False,
+            'error': 'account_not_found',
+            'username': username_key,
+            'message': (
+                'No active instagram_accounts row matches that username. '
+                'Reconnect the Instagram account before retrying repair.'
+            ),
+        }
+    ig_user_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    access_token = account.get('accessToken') or ''
+    if not ig_user_id or not access_token:
+        return {
+            'ok': False,
+            'error': 'missing_id_or_token',
+            'username': username_key,
+            'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+            'message': (
+                'The account row is missing instagramAccountId or accessToken. '
+                'Operator should reconnect the Instagram account from the UI.'
+            ),
+        }
+    # Delegate to the existing idempotent helper. It returns
+    # `{ok, subscribe_status, verify_status, subscribed_fields}` and
+    # NEVER returns the access token.
+    result = await _subscribe_instagram_account_to_webhooks(ig_user_id, access_token)
+    sanitized_result = {
+        'ok': bool(result.get('ok')),
+        'subscribe_status': result.get('subscribe_status'),
+        'verify_status': result.get('verify_status'),
+        'subscribed_fields': sorted(set(result.get('subscribed_fields') or [])),
+        'missing_fields': sorted(
+            set(WEBHOOK_REQUIRED_FIELDS) - set(result.get('subscribed_fields') or []),
+        ),
+        'reason': result.get('reason'),
+    }
+    # Persist sanitized history on the account row so the verification
+    # endpoint can surface it without a fresh Graph call.
+    now = datetime.utcnow()
+    set_fields = {
+        'lastWebhookRepairAttemptAt': now,
+        'lastWebhookRepairResult': 'success' if sanitized_result['ok'] else 'failed',
+    }
+    if sanitized_result['ok']:
+        set_fields['webhookSubscriptionFields'] = sanitized_result['subscribed_fields']
+        set_fields['webhookSubscriptionMissing'] = sanitized_result['missing_fields']
+        set_fields['webhookSubscriptionLastCheckedAt'] = now
+        set_fields['lastWebhookRepairError'] = None
+    else:
+        # Surface an actionable error string but never include the
+        # raw Graph body (could contain identifying info).
+        actionable = (
+            sanitized_result.get('reason')
+            or f"subscribe_status={sanitized_result.get('subscribe_status')!r}"
+        )
+        set_fields['lastWebhookRepairError'] = str(actionable)[:200]
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': account.get('id')},
+            {'$set': set_fields},
+        )
+    except Exception as exc:
+        logger.info(
+            'repair_comment_webhooks_persist_failed username=%s err=%s',
+            username_key, type(exc).__name__,
+        )
+    # Operator-facing actionable mapping for known Meta-side failures.
+    actionable_error = None
+    if not sanitized_result['ok']:
+        sc = sanitized_result.get('subscribe_status')
+        reason = sanitized_result.get('reason') or ''
+        if sc == 400:
+            actionable_error = (
+                'Meta rejected the subscribe (HTTP 400). Most often: the app '
+                'is in Development Mode and the IG account is not a registered '
+                'tester, OR the access token is missing instagram_manage_messages '
+                '/ instagram_manage_comments / pages_messaging permissions.'
+            )
+        elif sc in (401, 403, 190):
+            actionable_error = (
+                'Meta refused the subscribe (auth). The access token is '
+                'expired or the user revoked permissions. Reconnect the '
+                'Instagram account from the UI.'
+            )
+        elif sc == 404:
+            actionable_error = (
+                'Meta returned 404. The IG Business Account id may be wrong '
+                'or the account is no longer linked to a Facebook Page that '
+                'the app is allowed to access.'
+            )
+        elif reason and reason != 'missing_id_or_token':
+            actionable_error = f'Graph subscribe raised {reason}.'
+    return {
+        'ok': sanitized_result['ok'],
+        'username': username_key,
+        'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+        'subscribe_status': sanitized_result['subscribe_status'],
+        'verify_status': sanitized_result['verify_status'],
+        'subscribed_fields': sanitized_result['subscribed_fields'],
+        'missing_fields': sanitized_result['missing_fields'],
+        'attempted_at': now.isoformat() + 'Z',
+        'actionable_error': actionable_error,
+        'note': (
+            'If Meta\'s app is in Development Mode, only registered testers '
+            'will receive webhooks. Promote the app to Live Mode for general '
+            'comment-webhook delivery.'
+        ),
+    }
+
+
 @api.get('/admin/instagram/webhook-verification')
 async def admin_instagram_webhook_verification(
     username: Optional[str] = None,
@@ -24333,6 +24597,16 @@ async def admin_instagram_webhook_verification(
         'automation_skipped',
         'dedupe_checked',
         'poller_comment_seen',
+        # Phase 2F: surface the polling tick events so the operator can
+        # tell whether polling even ran, which media were scanned, and
+        # what the Phase 2C-A prefilter rolled up. Without these, a
+        # silent "I posted a comment and nothing visible happened"
+        # looks identical regardless of root cause.
+        'polling_scan_summary',
+        'poller_account_scan_started',
+        'poller_media_scan_started',
+        'historical_catchup_allowed',
+        'existing_comment_unknown_state_reprocess',
     ]
     query: Dict[str, Any] = {
         'stage': {'$in': relevant_stages},
@@ -24820,6 +25094,17 @@ async def admin_instagram_webhook_verification(
         'namespace',
         # timestamp safe metadata
         'timestamp_source', 'effective_timestamp',
+        # Phase 2F: polling_scan_summary counters so the operator can
+        # tell at a glance whether polling ran, scanned, and what each
+        # tick's prefilter saw vs. what reached _handle_new_comment.
+        'media_checked', 'comments_seen',
+        'fresh_candidates', 'historical_skipped',
+        'stale_skipped', 'bot_own_skipped',
+        'already_processed_skipped',
+        'comments_sent_to_handle_new_comment',
+        'automation_success_count', 'errors_count',
+        'total_known_media_count', 'reply_cap',
+        'target_media_partials',
     }
     serialized_events: list = []
     for r in rows:
@@ -24882,6 +25167,21 @@ async def admin_instagram_webhook_verification(
                     out[k] = proof[k]
         serialized_events.append(out)
 
+    # Phase 2F: surface webhook subscription status directly in the
+    # verification response so the operator can answer "is Meta even
+    # configured to send this account's comment webhooks?" without
+    # leaving the page. Reads only the cached values previously
+    # written by `_verify_and_heal_ig_subscription_async` and the
+    # OAuth callback path — NO fresh Graph call from this endpoint
+    # (the Repair button below is the explicit operator action that
+    # triggers a Graph subscribe). Scoped to the queried username if
+    # set; otherwise to every active account on the caller's user_id
+    # so a workspace-wide read still works.
+    subscription_status = await _compute_webhook_subscription_status(
+        username_key=username_key,
+        caller_user_id=user_id,
+    )
+
     return {
         'ok': True,
         'server_now_utc': _utc_iso(now_utc),
@@ -24889,6 +25189,7 @@ async def admin_instagram_webhook_verification(
         'window_end_utc': _utc_iso(now_utc),
         'applied_filters': applied_filters,
         'summary': summary,
+        'subscription_status': subscription_status,
         'events': serialized_events,
     }
 

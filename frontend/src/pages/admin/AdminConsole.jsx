@@ -2870,6 +2870,42 @@ function WebhookVerificationTab() {
   const serverNowUtc = data?.server_now_utc || null;
   const windowStartUtc = data?.window_start_utc || null;
   const windowEndUtc = data?.window_end_utc || null;
+  const subscriptionStatus = data?.subscription_status || null;
+
+  // Phase 2F: per-username admin repair button. Calls the new
+  // /api/admin/instagram/repair-comment-webhooks endpoint, then
+  // reloads the verification view so the operator sees the updated
+  // subscription_status block + any new attempt history.
+  const [repairState, setRepairState] = useState('idle');
+  const [repairResult, setRepairResult] = useState(null);
+  const onRepairWebhooks = useCallback(async () => {
+    const u = (username || '').trim();
+    if (!u) {
+      setRepairResult({
+        ok: false,
+        actionable_error: ar
+          ? 'يجب اختيار حساب username قبل الإصلاح.'
+          : 'Pick a username before repairing.',
+      });
+      return;
+    }
+    setRepairState('loading');
+    setRepairResult(null);
+    try {
+      const r = await api.post(
+        `/admin/instagram/repair-comment-webhooks?username=${encodeURIComponent(u)}`,
+      );
+      setRepairResult(r.data || null);
+      setRepairState(r.data?.ok ? 'success' : 'failed');
+      // Reload to pick up the new subscription_status counters +
+      // last_webhook_repair_* fields.
+      await load();
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Repair failed';
+      setRepairResult({ ok: false, actionable_error: String(detail).slice(0, 240) });
+      setRepairState('failed');
+    }
+  }, [username, ar, load]);
 
   const visibleEvents = useMemo(() => {
     let out = allEvents;
@@ -3039,6 +3075,22 @@ function WebhookVerificationTab() {
               ? (ar ? 'فشل النسخ' : 'Copy failed')
               : (ar ? 'نسخ JSON' : 'Copy JSON')}
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onRepairWebhooks}
+          disabled={state === 'loading' || repairState === 'loading' || !(username || '').trim()}
+          data-testid="webhook-verification-repair"
+          title={
+            ar
+              ? 'يستدعي Meta لإعادة الاشتراك في حقول webhook التعليقات/الرسائل للحساب المختار.'
+              : 'Calls Meta to re-subscribe this account to comment + messaging webhook fields.'
+          }
+        >
+          {repairState === 'loading'
+            ? (ar ? 'جاري الإصلاح…' : 'Repairing…')
+            : (ar ? 'إصلاح اشتراك Webhook' : 'Repair comment webhooks')}
+        </Button>
       </header>
 
       {/* Filter controls */}
@@ -3202,6 +3254,97 @@ function WebhookVerificationTab() {
               <span className="font-mono">{browserTz}</span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Phase 2F: subscription status panel + repair result */}
+      {state === 'success' && subscriptionStatus && (
+        <div
+          className={
+            'border rounded-md p-2 mb-2 text-[11px] ' +
+            (subscriptionStatus.overall_ready
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-amber-200 bg-amber-50 text-amber-900')
+          }
+          data-testid="webhook-verification-subscription"
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="font-semibold">
+              {ar ? 'حالة الاشتراك (Meta)' : 'Meta subscription state'}:
+            </span>
+            <span className="font-mono">
+              {subscriptionStatus.overall_ready
+                ? (ar ? 'جاهز' : 'ready')
+                : (ar ? 'غير جاهز — اضغط إصلاح' : 'not ready — click Repair')}
+            </span>
+            <span className="text-slate-500">
+              {ar ? 'الحقول المطلوبة:' : 'expected:'}
+            </span>
+            <span className="font-mono">
+              {(subscriptionStatus.expected_fields || []).join(', ')}
+            </span>
+          </div>
+          {(subscriptionStatus.accounts || []).map((acc, idx) => (
+            <div key={idx} className="ms-2 mb-1">
+              <span className="font-mono font-semibold me-1">
+                {acc.username || acc.instagram_account_id_partial || '—'}
+              </span>
+              <span className="me-1">
+                {acc.webhook_comment_delivery_configured
+                  ? '✓'
+                  : (ar ? '⚠ مفقود' : '⚠ missing')}
+              </span>
+              {acc.missing_fields && acc.missing_fields.length > 0 && (
+                <span className="text-rose-700 font-mono">
+                  {ar ? 'مفقود: ' : 'missing: '}
+                  {acc.missing_fields.join(', ')}
+                </span>
+              )}
+              {acc.last_webhook_repair_attempt_at && (
+                <span className="ms-2 text-slate-500">
+                  {ar ? 'آخر إصلاح: ' : 'last repair: '}
+                  {wvFormatLocal(acc.last_webhook_repair_attempt_at)} (
+                  {acc.last_webhook_repair_result || '—'})
+                </span>
+              )}
+              {acc.last_webhook_repair_error && (
+                <span className="ms-2 text-rose-700">
+                  {acc.last_webhook_repair_error}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {repairResult && (
+        <div
+          className={
+            'border rounded-md p-2 mb-2 text-[11px] ' +
+            (repairResult.ok
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-rose-200 bg-rose-50 text-rose-800')
+          }
+          data-testid="webhook-verification-repair-result"
+        >
+          <div className="font-semibold mb-1">
+            {repairResult.ok
+              ? (ar ? 'الإصلاح نجح' : 'Repair succeeded')
+              : (ar ? 'فشل الإصلاح' : 'Repair failed')}
+            {' · '}
+            HTTP {repairResult.subscribe_status ?? '—'}
+          </div>
+          {repairResult.subscribed_fields && (
+            <div className="font-mono">
+              {ar ? 'مشترك الآن: ' : 'subscribed now: '}
+              {(repairResult.subscribed_fields || []).join(', ') || '—'}
+            </div>
+          )}
+          {repairResult.actionable_error && (
+            <div className="mt-1">{repairResult.actionable_error}</div>
+          )}
+          {repairResult.note && (
+            <div className="mt-1 text-slate-500">{repairResult.note}</div>
+          )}
         </div>
       )}
 
