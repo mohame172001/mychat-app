@@ -55,11 +55,40 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toMatch(/case 'webhook':/);
     expect(source).toMatch(/case 'polling':/);
     expect(source).toMatch(/case 'automation_success':/);
+    expect(source).toMatch(/case 'public_reply_attempted':/);
+    expect(source).toMatch(/case 'opening_dm_attempted':/);
+    expect(source).toMatch(/case 'public_reply_failed':/);
+    expect(source).toMatch(/case 'opening_dm_failed':/);
+    expect(source).toMatch(/case 'opening_dm_skipped':/);
+    expect(source).toMatch(/case 'opening_dm_already_sent_for_commenter_media':/);
     expect(source).toMatch(/case 'already_replied_success':/);
     expect(source).toMatch(/case 'bot_own_reply':/);
     expect(source).toMatch(/case 'webhook_comment_detected':/);
     // Source badge inline conditional.
     expect(source).toContain("ev.source === 'webhook'");
+  });
+
+  test('renders reply and dm provider proof fields', () => {
+    for (const token of [
+      'reply_provider_comment_id_partial',
+      'provider_reply_id_partial',
+      'reply_provider_response_ok',
+      'opening_message_id_partial',
+      'provider_message_id_partial',
+      'dm_provider_response_ok',
+      'reply_status',
+      'dm_status',
+      'action_status',
+      'last_public_reply_error',
+      'last_dm_error',
+      'dm_skip_reason',
+    ]) {
+      expect(source).toContain(token);
+    }
+    expect(source).toContain('provider proof');
+    expect(source).toContain('error / skip');
+    expect(source).toContain('reply_id:');
+    expect(source).toContain('dm_id:');
   });
 
   test('Copy JSON wraps backend response with active_filters + browser_timezone + copied_at_local', () => {
@@ -68,6 +97,10 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('active_filters');
     expect(source).toContain('ui_view_filters');
     expect(source).toContain('backend_response');
+    // The backend response is copied intact, including provider-proof
+    // fields once the endpoint returns them.
+    expect(source).toContain('reply_provider_comment_id_partial');
+    expect(source).toContain('provider_message_id_partial');
   });
 
   test('renders event created_at via local-time formatter with UTC tooltip', () => {

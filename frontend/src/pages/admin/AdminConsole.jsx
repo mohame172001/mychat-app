@@ -2753,6 +2753,15 @@ function wvBadgeClasses(kind) {
       return 'bg-emerald-100 text-emerald-700';
     case 'webhook_comment_detected':
       return 'bg-blue-100 text-blue-700';
+    case 'public_reply_attempted':
+    case 'opening_dm_attempted':
+      return 'bg-indigo-100 text-indigo-700';
+    case 'public_reply_failed':
+    case 'opening_dm_failed':
+      return 'bg-rose-100 text-rose-700';
+    case 'opening_dm_skipped':
+    case 'opening_dm_already_sent_for_commenter_media':
+      return 'bg-amber-100 text-amber-800';
     case 'already_replied_success':
       return 'bg-slate-200 text-slate-600';
     case 'bot_own_reply':
@@ -2868,8 +2877,10 @@ function WebhookVerificationTab() {
         e.stage === 'automation_success'
         || e.stage === 'public_reply_success'
         || e.stage === 'public_reply_sent'
+        || e.stage === 'public_reply_attempted'
         || e.stage === 'opening_dm_success'
         || e.stage === 'opening_dm_sent'
+        || e.stage === 'opening_dm_attempted'
         || e.stage === 'webhook_comment_detected'
         || e.stage === 'rule_match_success'
       );
@@ -3250,12 +3261,15 @@ function WebhookVerificationTab() {
                 <th className="text-start px-2 py-1">comment_id</th>
                 <th className="text-start px-2 py-1">skip_reason</th>
                 <th className="text-start px-2 py-1">via / probe</th>
+                <th className="text-start px-2 py-1">statuses</th>
+                <th className="text-start px-2 py-1">provider proof</th>
+                <th className="text-start px-2 py-1">error / skip</th>
               </tr>
             </thead>
             <tbody>
               {events.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-2 py-2 text-slate-500">
+                  <td colSpan={11} className="px-2 py-2 text-slate-500">
                     {ar
                       ? 'لا توجد أحداث في النافذة الزمنية.'
                       : 'No events in the selected window.'}
@@ -3265,6 +3279,16 @@ function WebhookVerificationTab() {
               {events.map((ev, idx) => {
                 const extra = (ev && ev.extra) || {};
                 const viaOrProbe = extra.via || extra.probe_outcome || '—';
+                const stageKind = (
+                  ev.stage === 'automation_success'
+                  || ev.stage === 'webhook_comment_detected'
+                  || ev.stage === 'public_reply_attempted'
+                  || ev.stage === 'public_reply_failed'
+                  || ev.stage === 'opening_dm_attempted'
+                  || ev.stage === 'opening_dm_failed'
+                  || ev.stage === 'opening_dm_skipped'
+                  || ev.stage === 'opening_dm_already_sent_for_commenter_media'
+                ) ? ev.stage : null;
                 return (
                   <tr key={idx} className="border-t border-slate-200 align-top">
                     <td className="px-2 py-1 whitespace-nowrap font-mono" title={ev.created_at || ''}>
@@ -3278,6 +3302,9 @@ function WebhookVerificationTab() {
                       ) : '—'}
                     </td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">
+                      {stageKind && ev.stage !== 'automation_success' && ev.stage !== 'webhook_comment_detected' ? (
+                        <WvBadge kind={stageKind}>{ev.stage}</WvBadge>
+                      ) : null}
                       {ev.stage === 'automation_success' ? (
                         <WvBadge kind="automation_success">{ev.stage}</WvBadge>
                       ) : ev.stage === 'webhook_comment_detected' ? (
@@ -3299,6 +3326,29 @@ function WebhookVerificationTab() {
                       ) : (ev.skip_reason || '—')}
                     </td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{viaOrProbe}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">
+                      <div>reply: {ev.reply_status || '-'}</div>
+                      <div>dm: {ev.dm_status || '-'}</div>
+                      <div>action: {ev.action_status || '-'}</div>
+                    </td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">
+                      <div title={ev.reply_provider_comment_id_partial || ev.provider_reply_id_partial || ''}>
+                        reply_id: {ev.reply_provider_comment_id_partial || ev.provider_reply_id_partial || '-'}
+                      </div>
+                      <div>
+                        reply_ok: {ev.reply_provider_response_ok === true ? 'true' : ev.reply_provider_response_ok === false ? 'false' : '-'}
+                      </div>
+                      <div title={ev.opening_message_id_partial || ev.provider_message_id_partial || ''}>
+                        dm_id: {ev.opening_message_id_partial || ev.provider_message_id_partial || '-'}
+                      </div>
+                      <div>
+                        dm_ok: {ev.dm_provider_response_ok === true ? 'true' : ev.dm_provider_response_ok === false ? 'false' : '-'}
+                      </div>
+                    </td>
+                    <td className="px-2 py-1 whitespace-nowrap">
+                      <div>{ev.last_public_reply_error || '-'}</div>
+                      <div>{ev.last_dm_error || ev.dm_skip_reason || '-'}</div>
+                    </td>
                   </tr>
                 );
               })}

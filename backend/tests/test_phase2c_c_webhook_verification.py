@@ -93,15 +93,33 @@ class _Cursor:
 class _Coll:
     def __init__(self, docs=None):
         self.docs = list(docs or [])
+        self.writes = []
 
     def find(self, query=None, projection=None):
         rows = [d for d in self.docs if not query or _match(d, query)]
         return _Cursor(rows)
 
+    async def insert_one(self, doc):
+        self.writes.append(('insert_one', doc))
+        raise AssertionError('webhook verification diagnostics must be read-only')
+
+    async def update_one(self, *args, **kwargs):
+        self.writes.append(('update_one', args, kwargs))
+        raise AssertionError('webhook verification diagnostics must be read-only')
+
+    async def delete_one(self, *args, **kwargs):
+        self.writes.append(('delete_one', args, kwargs))
+        raise AssertionError('webhook verification diagnostics must be read-only')
+
+    async def delete_many(self, *args, **kwargs):
+        self.writes.append(('delete_many', args, kwargs))
+        raise AssertionError('webhook verification diagnostics must be read-only')
+
 
 class _DB:
     def __init__(self):
         self.instagram_automation_events = _Coll()
+        self.comments = _Coll()
 
 
 def _seed(db, **kwargs):
@@ -311,6 +329,103 @@ def test_filter_by_comment_and_media(monkeypatch):
         media_id_partial='m-keep', user_id='admin',
     ))
     assert {e['media_id_partial'] for e in by_media['events']} == {'m-keep'}
+
+
+def test_endpoint_includes_attempted_failed_and_skipped_send_stages(monkeypatch):
+    db = _DB()
+    now = datetime.utcnow()
+    stages = (
+        'public_reply_attempted',
+        'public_reply_failed',
+        'opening_dm_attempted',
+        'opening_dm_failed',
+        'opening_dm_skipped',
+        'opening_dm_already_sent_for_commenter_media',
+    )
+    for idx, stage in enumerate(stages):
+        _seed(db, **_ev(
+            stage,
+            when=now + timedelta(seconds=idx),
+            comment=f'c-{idx}',
+            media='m-proof',
+            skip_reason=(
+                'opening_dm_already_sent_for_commenter_media'
+                if stage == 'opening_dm_skipped'
+                else None
+            ),
+        ))
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(user_id='admin'))
+    returned = {e['stage'] for e in result['events']}
+    for stage in stages:
+        assert stage in returned
+
+
+def test_provider_proof_enrichment_is_redacted_and_read_only(monkeypatch):
+    db = _DB()
+    now = datetime.utcnow()
+    full_comment_id = '181123456639'
+    full_media_id = '180123456892'
+    full_reply_id = '178999999111'
+    full_message_id = 'mid_abcdef1234567890'
+    comment_partial = server._safe_partial_identifier(full_comment_id)
+    media_partial = server._safe_partial_identifier(full_media_id)
+    _seed(db, **_ev(
+        'public_reply_success',
+        when=now,
+        comment=comment_partial,
+        media=media_partial,
+    ))
+    db.comments.docs.append({
+        'ig_comment_id': full_comment_id,
+        'media_id': full_media_id,
+        'reply_provider_comment_id': full_reply_id,
+        'provider_message_id': full_message_id,
+        'reply_provider_response_ok': True,
+        'dm_provider_response_ok': False,
+        'reply_status': 'success',
+        'dm_status': 'skipped',
+        'action_status': 'success',
+        'reply_failure_reason': 'Graph said access_token SHOULD-NOT-LEAK',
+        'dm_failure_reason': 'Provider token SHOULD-NOT-LEAK',
+        'dm_skip_reason': 'opening_dm_already_sent_for_commenter_media',
+        'full_provider_payload': {'id': full_reply_id, 'token': 'SHOULD-NOT-LEAK'},
+        'access_token': 'SHOULD-NOT-LEAK',
+        'raw_message_text': 'private text SHOULD-NOT-LEAK',
+        'last_attempt_at': now,
+    })
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        comment_id_partial=comment_partial,
+        media_id_partial=media_partial,
+        user_id='admin',
+    ))
+    assert db.comments.writes == []
+    event = result['events'][0]
+    assert event['reply_provider_comment_id_partial'] == server._safe_partial_identifier(full_reply_id)
+    assert event['provider_reply_id_partial'] == server._safe_partial_identifier(full_reply_id)
+    assert event['provider_message_id_partial'] == server._safe_partial_identifier(full_message_id)
+    assert event['reply_provider_response_ok'] is True
+    assert event['dm_provider_response_ok'] is False
+    assert event['reply_status'] == 'success'
+    assert event['dm_status'] == 'skipped'
+    assert event['action_status'] == 'success'
+    assert event['dm_skip_reason'] == 'opening_dm_already_sent_for_commenter_media'
+
+    blob = repr(result)
+    for forbidden in (
+        full_comment_id,
+        full_media_id,
+        full_reply_id,
+        full_message_id,
+        'SHOULD-NOT-LEAK',
+        'private text',
+        'full_provider_payload',
+        'access_token',
+    ):
+        assert forbidden not in blob
 
 
 # ---------------------------------------------------------------------------

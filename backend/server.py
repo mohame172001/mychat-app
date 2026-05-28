@@ -24277,8 +24277,14 @@ async def admin_instagram_webhook_verification(
         'rule_loading_finished',
         'rule_match_success',
         'rule_match_failed',
+        'public_reply_attempted',
+        'public_reply_failed',
         'public_reply_sent',
         'public_reply_success',
+        'opening_dm_attempted',
+        'opening_dm_failed',
+        'opening_dm_skipped',
+        'opening_dm_already_sent_for_commenter_media',
         'opening_dm_sent',
         'opening_dm_success',
         'automation_success',
@@ -24428,6 +24434,204 @@ async def admin_instagram_webhook_verification(
         'comment_id_partial', 'commenter_id_partial',
         'skip_reason', 'error_code',
     )
+    SAFE_COMMENT_PROOF_FIELDS = (
+        'reply_provider_comment_id_partial',
+        'provider_reply_id_partial',
+        'reply_provider_response_ok',
+        'opening_message_id_partial',
+        'provider_message_id_partial',
+        'dm_provider_response_ok',
+        'reply_status',
+        'dm_status',
+        'action_status',
+        'last_public_reply_error',
+        'last_dm_error',
+        'dm_skip_reason',
+    )
+
+    def _status_text(value: Any) -> Optional[str]:
+        return _automation_flight_safe_text(value, 80)
+
+    def _safe_error_text(value: Any) -> Optional[str]:
+        safe = _automation_flight_safe_text(value, 180)
+        if not safe:
+            return safe
+        if re.search(r'(?i)\b(access[_-]?token|token|bearer|secret|password)\b', safe):
+            return '[redacted]'
+        return safe
+
+    def _comment_id_partials(comment_doc: dict) -> set:
+        ids = set()
+        for field in (
+            'ig_comment_id', 'comment_id', 'commentId',
+            'source_comment_id', 'sourceCommentId',
+            'provider_comment_id', 'reply_provider_comment_id',
+            'reply_id',
+        ):
+            raw = comment_doc.get(field)
+            if raw:
+                ids.add(_safe_partial_identifier(raw))
+                ids.add(str(raw))
+        return {v for v in ids if v}
+
+    def _media_id_partials(comment_doc: dict) -> set:
+        ids = set()
+        for field in ('media_id', 'mediaId', 'ig_media_id', 'igMediaId'):
+            raw = comment_doc.get(field)
+            if raw:
+                ids.add(_safe_partial_identifier(raw))
+                ids.add(str(raw))
+        return {v for v in ids if v}
+
+    def _proof_from_comment_doc(comment_doc: dict) -> dict:
+        # Read-only admin enrichment. Keep every identifier partial-only
+        # and every error sanitized through the flight-recorder text guard.
+        provider_reply_id = (
+            comment_doc.get('reply_provider_comment_id')
+            or comment_doc.get('provider_reply_id')
+            or comment_doc.get('reply_id')
+        )
+        opening_message_id = (
+            comment_doc.get('opening_message_id')
+            or comment_doc.get('openingMessageId')
+            or comment_doc.get('opening_dm_message_id')
+        )
+        provider_message_id = (
+            comment_doc.get('provider_message_id')
+            or comment_doc.get('dm_provider_message_id')
+            or comment_doc.get('message_id')
+        )
+        proof = {
+            'reply_provider_comment_id_partial': _safe_partial_identifier(
+                comment_doc.get('reply_provider_comment_id')
+            ),
+            'provider_reply_id_partial': _safe_partial_identifier(provider_reply_id),
+            'reply_provider_response_ok': (
+                bool(comment_doc.get('reply_provider_response_ok') is True)
+                if comment_doc.get('reply_provider_response_ok') is not None
+                else None
+            ),
+            'opening_message_id_partial': _safe_partial_identifier(opening_message_id),
+            'provider_message_id_partial': _safe_partial_identifier(provider_message_id),
+            'dm_provider_response_ok': (
+                bool(comment_doc.get('dm_provider_response_ok') is True)
+                if comment_doc.get('dm_provider_response_ok') is not None
+                else None
+            ),
+            'reply_status': _status_text(
+                comment_doc.get('reply_status') or comment_doc.get('replyStatus')
+            ),
+            'dm_status': _status_text(
+                comment_doc.get('dm_status') or comment_doc.get('dmStatus')
+            ),
+            'action_status': _status_text(
+                comment_doc.get('action_status') or comment_doc.get('actionStatus')
+            ),
+            'last_public_reply_error': _safe_error_text(
+                comment_doc.get('reply_failure_reason')
+                or comment_doc.get('last_public_reply_error')
+                or comment_doc.get('public_reply_error')
+            ),
+            'last_dm_error': _safe_error_text(
+                comment_doc.get('dm_failure_reason')
+                or comment_doc.get('last_dm_error')
+                or comment_doc.get('opening_dm_error')
+            ),
+            'dm_skip_reason': _status_text(
+                comment_doc.get('dm_skip_reason') or comment_doc.get('dmSkipReason')
+            ),
+        }
+        return {k: v for k, v in proof.items() if v not in (None, '')}
+
+    proof_by_event_key: Dict[tuple, dict] = {}
+    try:
+        comment_coll = getattr(db, 'comments', None)
+        wanted_comment_partials = {
+            str(r.get('comment_id_partial') or '')
+            for r in rows
+            if r.get('comment_id_partial')
+        }
+        wanted_media_partials = {
+            str(r.get('media_id_partial') or '')
+            for r in rows
+            if r.get('media_id_partial')
+        }
+        if comment_coll is not None and (wanted_comment_partials or wanted_media_partials):
+            comment_query: Dict[str, Any] = {}
+            # Bound the read to the same diagnostic window for normal
+            # window scans. If the operator explicitly filters by a
+            # partial comment/media id, use a bounded latest-doc scan
+            # instead so old already-processed comments can still be
+            # enriched for provider-proof triage.
+            if not (comment_id_partial or media_id_partial):
+                comment_query['$or'] = [
+                    {'created': {'$gte': since}},
+                    {'created_at': {'$gte': since}},
+                    {'last_attempt_at': {'$gte': since}},
+                    {'updated': {'$gte': since}},
+                ]
+            comment_cursor = comment_coll.find(comment_query, {
+                '_id': 0,
+                'id': 1,
+                'ig_comment_id': 1,
+                'comment_id': 1,
+                'commentId': 1,
+                'source_comment_id': 1,
+                'sourceCommentId': 1,
+                'media_id': 1,
+                'mediaId': 1,
+                'ig_media_id': 1,
+                'igMediaId': 1,
+                'reply_provider_comment_id': 1,
+                'provider_reply_id': 1,
+                'reply_id': 1,
+                'reply_provider_response_ok': 1,
+                'opening_message_id': 1,
+                'openingMessageId': 1,
+                'opening_dm_message_id': 1,
+                'provider_message_id': 1,
+                'dm_provider_message_id': 1,
+                'message_id': 1,
+                'dm_provider_response_ok': 1,
+                'reply_status': 1,
+                'replyStatus': 1,
+                'dm_status': 1,
+                'dmStatus': 1,
+                'action_status': 1,
+                'actionStatus': 1,
+                'reply_failure_reason': 1,
+                'last_public_reply_error': 1,
+                'public_reply_error': 1,
+                'dm_failure_reason': 1,
+                'last_dm_error': 1,
+                'opening_dm_error': 1,
+                'dm_skip_reason': 1,
+                'dmSkipReason': 1,
+                'created': 1,
+                'created_at': 1,
+                'last_attempt_at': 1,
+                'updated': 1,
+            }).sort('last_attempt_at', -1).limit(500)
+            comment_rows = await comment_cursor.to_list(500)
+            for c in comment_rows:
+                c_comment_ids = _comment_id_partials(c)
+                c_media_ids = _media_id_partials(c)
+                matched_comment_partials = wanted_comment_partials & c_comment_ids
+                matched_media_partials = wanted_media_partials & c_media_ids
+                if not matched_comment_partials and not matched_media_partials:
+                    continue
+                proof = _proof_from_comment_doc(c)
+                if not proof:
+                    continue
+                for cid in matched_comment_partials or {''}:
+                    for mid in matched_media_partials or {''}:
+                        proof_by_event_key[(cid, mid)] = proof
+                for cid in matched_comment_partials:
+                    proof_by_event_key[(cid, '')] = proof
+                for mid in matched_media_partials:
+                    proof_by_event_key[('', mid)] = proof
+    except Exception:
+        proof_by_event_key = {}
     SAFE_EXTRA_KEYS = {
         # B1 diagnostic matrix keys
         'entry_id_partial', 'object_field', 'change_fields',
@@ -24498,6 +24702,17 @@ async def admin_instagram_webhook_verification(
                 safe_extra['connected_account_samples'] = cleaned
         if safe_extra:
             out['extra'] = safe_extra
+        cid = str(out.get('comment_id_partial') or '')
+        mid = str(out.get('media_id_partial') or '')
+        proof = (
+            proof_by_event_key.get((cid, mid))
+            or proof_by_event_key.get((cid, ''))
+            or proof_by_event_key.get(('', mid))
+        )
+        if proof:
+            for k in SAFE_COMMENT_PROOF_FIELDS:
+                if k in proof:
+                    out[k] = proof[k]
         serialized_events.append(out)
 
     return {
