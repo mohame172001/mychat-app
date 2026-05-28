@@ -28,6 +28,21 @@ def build_opening_dm_with_fallback(message: str, quick_reply_buttons: Optional[L
     return str(message or '').strip()
 
 
+def _provider_message_id_from_result(result: Optional[dict]) -> Optional[str]:
+    body = (result or {}).get('body') if isinstance((result or {}).get('body'), dict) else {}
+    value = (
+        body.get('message_id')
+        or body.get('mid')
+        or body.get('id')
+    )
+    return str(value) if value else None
+
+
+def _provider_response_shape(result: Optional[dict]) -> List[str]:
+    body = (result or {}).get('body') if isinstance((result or {}).get('body'), dict) else {}
+    return sorted(str(k)[:60] for k in body.keys())[:20]
+
+
 def _comment_dm_flow_enabled(automation: dict) -> bool:
     return bool(normalize_comment_dm_rule(automation).get('enabled'))
 
@@ -298,12 +313,24 @@ async def _send_comment_dm_flow_entry(
             allow_workspace_recipient=True,
         )
         if result.get('ok'):
-            body = result.get('body') if isinstance(result.get('body'), dict) else {}
-            opening_message_id = (
-                body.get('message_id')
-                or body.get('mid')
-                or body.get('id')
-            )
+            opening_message_id = _provider_message_id_from_result(result)
+            proof_update = {
+                'dm_provider_response_ok': True,
+                'dm_provider_response_shape': _provider_response_shape(result),
+                'dm_provider_message_id_missing': not bool(opening_message_id),
+                'dm_status': 'success',
+                'dmStatus': 'success',
+                'dm_sent_at': datetime.utcnow(),
+                'dmSentAt': datetime.utcnow(),
+                'updated': datetime.utcnow(),
+            }
+            if opening_message_id:
+                proof_update.update({
+                    'opening_message_id': str(opening_message_id),
+                    'openingMessageId': str(opening_message_id),
+                    'provider_message_id': str(opening_message_id),
+                    'dm_provider_message_id': str(opening_message_id),
+                })
             if opening_message_id:
                 try:
                     await db.comment_dm_sessions.update_one(
@@ -317,6 +344,18 @@ async def _send_comment_dm_flow_entry(
                     logger.info(
                         'comment_dm_opening_message_id_store_failed session_id=%s exception=%s',
                         session.get('id'),
+                        type(exc).__name__,
+                    )
+            if (comment_context or {}).get('comment_doc_id'):
+                try:
+                    await db.comments.update_one(
+                        {'id': (comment_context or {}).get('comment_doc_id')},
+                        {'$set': proof_update},
+                    )
+                except Exception as exc:
+                    logger.info(
+                        'comment_dm_opening_proof_store_failed comment_doc_id=%s exception=%s',
+                        (comment_context or {}).get('comment_doc_id'),
                         type(exc).__name__,
                     )
             logger.info('comment_dm_opening_quick_reply_sent rule_id=%s recipient=%s',

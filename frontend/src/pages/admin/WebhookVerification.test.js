@@ -75,7 +75,10 @@ describe('Webhook Verification tab structural contract', () => {
       'reply_provider_response_ok',
       'opening_message_id_partial',
       'provider_message_id_partial',
+      'dm_provider_message_id_partial',
       'dm_provider_response_ok',
+      'dm_provider_message_id_missing',
+      'dm_provider_response_shape',
       'reply_status',
       'dm_status',
       'action_status',
@@ -89,6 +92,18 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('error / skip');
     expect(source).toContain('reply_id:');
     expect(source).toContain('dm_id:');
+    expect(source).toContain('dm_success_without_provider_id');
+    expect(source).toContain('graph_visibility_unknown');
+  });
+
+  test('renders read-only Graph reply visibility diagnostic control', () => {
+    expect(source).toContain('webhook-verification-graph-check');
+    expect(source).toContain('webhook-verification-graph-result');
+    expect(source).toContain('webhook-verification-graph-error');
+    expect(source).toContain('/admin/instagram/webhook-verification/reply-visibility');
+    expect(source).toContain('Check Graph reply');
+    expect(source).toContain('graph_reply_direct_fetch_ok');
+    expect(source).toContain('graph_reply_found_under_original_comment');
   });
 
   test('Copy JSON wraps backend response with active_filters + browser_timezone + copied_at_local', () => {
@@ -101,6 +116,8 @@ describe('Webhook Verification tab structural contract', () => {
     // fields once the endpoint returns them.
     expect(source).toContain('reply_provider_comment_id_partial');
     expect(source).toContain('provider_message_id_partial');
+    expect(source).toContain('dm_provider_message_id_partial');
+    expect(source).toContain('dm_provider_message_id_missing');
   });
 
   test('renders event created_at via local-time formatter with UTC tooltip', () => {

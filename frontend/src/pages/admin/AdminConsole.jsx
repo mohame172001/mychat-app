@@ -2801,6 +2801,9 @@ function WebhookVerificationTab() {
   const [error, setError] = useState(null);
   const [copyStatus, setCopyStatus] = useState('idle');
   const [refreshedAt, setRefreshedAt] = useState(null);
+  const [visibilityState, setVisibilityState] = useState('idle');
+  const [visibilityResult, setVisibilityResult] = useState(null);
+  const [visibilityError, setVisibilityError] = useState(null);
   // Display filters (do not modify the backend response).
   const [showWebhookOnly, setShowWebhookOnly] = useState(false);
   const [showSuccessesOnly, setShowSuccessesOnly] = useState(false);
@@ -2818,6 +2821,7 @@ function WebhookVerificationTab() {
     setState('loading');
     setError(null);
     setCopyStatus('idle');
+    setVisibilityError(null);
     const activeUsername = overrides.username !== undefined ? overrides.username : username;
     const activeSince = overrides.sinceMinutes !== undefined ? overrides.sinceMinutes : sinceMinutes;
     const activeComment = overrides.commentIdPartial !== undefined ? overrides.commentIdPartial : commentIdPartial;
@@ -2941,6 +2945,36 @@ function WebhookVerificationTab() {
   }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial,
       showWebhookOnly, showSuccessesOnly, hideRescans, browserTz]);
 
+  const canCheckReplyVisibility = Boolean(
+    (username || '').trim()
+    && ((commentIdPartial || '').trim() || (mediaIdPartial || '').trim())
+  );
+
+  const onCheckReplyVisibility = useCallback(async () => {
+    if (!canCheckReplyVisibility) return;
+    setVisibilityState('loading');
+    setVisibilityError(null);
+    setVisibilityResult(null);
+    try {
+      const params = new URLSearchParams();
+      const u = (username || '').trim();
+      const cid = (commentIdPartial || '').trim();
+      const mid = (mediaIdPartial || '').trim();
+      if (u) params.set('username', u);
+      if (cid) params.set('comment_id_partial', cid);
+      if (mid) params.set('media_id_partial', mid);
+      const r = await api.get(
+        `/admin/instagram/webhook-verification/reply-visibility?${params.toString()}`,
+      );
+      setVisibilityResult(r.data);
+      setVisibilityState('success');
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Request failed';
+      setVisibilityError(String(detail).slice(0, 240));
+      setVisibilityState('error');
+    }
+  }, [canCheckReplyVisibility, username, commentIdPartial, mediaIdPartial]);
+
   const events = visibleEvents;
 
   return (
@@ -2981,6 +3015,16 @@ function WebhookVerificationTab() {
         >
           <RefreshCw className={`w-4 h-4 me-2 ${state === 'loading' ? 'animate-spin' : ''}`} />
           {ar ? 'تحديث' : 'Reload'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onCheckReplyVisibility}
+          disabled={!canCheckReplyVisibility || visibilityState === 'loading'}
+          data-testid="webhook-verification-graph-check"
+        >
+          <Search className={`w-4 h-4 me-2 ${visibilityState === 'loading' ? 'animate-pulse' : ''}`} />
+          {ar ? 'Graph check' : 'Check Graph reply'}
         </Button>
         <Button
           size="sm"
@@ -3081,6 +3125,36 @@ function WebhookVerificationTab() {
           {ar
             ? 'لا يوجد فلتر username — قد تظهر أحداث غير ذات صلة أو قديمة.'
             : 'No username filter selected — results may include unrelated or older events.'}
+        </div>
+      )}
+
+      {visibilityError && (
+        <div
+          className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md p-2 mb-3"
+          data-testid="webhook-verification-graph-error"
+        >
+          {visibilityError}
+        </div>
+      )}
+      {visibilityResult && (
+        <div
+          className="text-xs text-slate-700 bg-white border border-slate-200 rounded-md p-2 mb-3"
+          data-testid="webhook-verification-graph-result"
+        >
+          <div className="font-semibold text-slate-700 mb-1">
+            {ar ? 'Graph Reply Visibility' : 'Graph Reply Visibility'}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 font-mono">
+            <div>reply_id: {visibilityResult.reply_provider_comment_id_partial || '-'}</div>
+            <div>direct_ok: {visibilityResult.graph_reply_direct_fetch_ok === true ? 'true' : visibilityResult.graph_reply_direct_fetch_ok === false ? 'false' : '-'}</div>
+            <div>under_original: {visibilityResult.graph_reply_found_under_original_comment === true ? 'true' : visibilityResult.graph_reply_found_under_original_comment === false ? 'false' : '-'}</div>
+            <div>reason: {visibilityResult.reason || visibilityResult.graph_error_code || '-'}</div>
+          </div>
+          {visibilityResult.graph_error_message && (
+            <div className="mt-1 text-amber-700">
+              graph_error: {visibilityResult.graph_error_message}
+            </div>
+          )}
         </div>
       )}
 
@@ -3279,6 +3353,9 @@ function WebhookVerificationTab() {
               {events.map((ev, idx) => {
                 const extra = (ev && ev.extra) || {};
                 const viaOrProbe = extra.via || extra.probe_outcome || '—';
+                const dmProofId = ev.opening_message_id_partial || ev.provider_message_id_partial || ev.dm_provider_message_id_partial;
+                const dmSuccessWithoutProof = ev.dm_status === 'success' && !dmProofId;
+                const replySuccessVisibilityUnknown = ev.reply_status === 'success' && !visibilityResult;
                 const stageKind = (
                   ev.stage === 'automation_success'
                   || ev.stage === 'webhook_comment_detected'
@@ -3338,12 +3415,26 @@ function WebhookVerificationTab() {
                       <div>
                         reply_ok: {ev.reply_provider_response_ok === true ? 'true' : ev.reply_provider_response_ok === false ? 'false' : '-'}
                       </div>
-                      <div title={ev.opening_message_id_partial || ev.provider_message_id_partial || ''}>
-                        dm_id: {ev.opening_message_id_partial || ev.provider_message_id_partial || '-'}
+                      <div title={dmProofId || ''}>
+                        dm_id: {dmProofId || '-'}
                       </div>
                       <div>
                         dm_ok: {ev.dm_provider_response_ok === true ? 'true' : ev.dm_provider_response_ok === false ? 'false' : '-'}
                       </div>
+                      {ev.dm_provider_message_id_missing === true && (
+                        <div className="text-amber-700">dm_id_missing: true</div>
+                      )}
+                      {Array.isArray(ev.dm_provider_response_shape) && ev.dm_provider_response_shape.length > 0 && (
+                        <div title={ev.dm_provider_response_shape.join(', ')}>
+                          dm_shape: {ev.dm_provider_response_shape.join(', ')}
+                        </div>
+                      )}
+                      {dmSuccessWithoutProof && (
+                        <div className="text-amber-700">warning: dm_success_without_provider_id</div>
+                      )}
+                      {replySuccessVisibilityUnknown && (
+                        <div className="text-amber-700">warning: graph_visibility_unknown</div>
+                      )}
                     </td>
                     <td className="px-2 py-1 whitespace-nowrap">
                       <div>{ev.last_public_reply_error || '-'}</div>

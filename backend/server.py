@@ -2280,6 +2280,47 @@ def _send_failure_fields(prefix: str, result: dict) -> dict:
     }
 
 
+def _provider_message_id_from_send_result(result: Optional[dict]) -> Optional[str]:
+    body = (result or {}).get('body') if isinstance((result or {}).get('body'), dict) else {}
+    value = (
+        body.get('message_id')
+        or body.get('mid')
+        or body.get('id')
+    )
+    return str(value) if value else None
+
+
+def _provider_response_shape_from_send_result(result: Optional[dict]) -> List[str]:
+    body = (result or {}).get('body') if isinstance((result or {}).get('body'), dict) else {}
+    return sorted(str(k)[:60] for k in body.keys())[:20]
+
+
+def _dm_provider_proof_update(result: Optional[dict], now: Optional[datetime] = None) -> dict:
+    now = now or datetime.utcnow()
+    message_id = _provider_message_id_from_send_result(result)
+    update = {
+        'dm_provider_response_ok': bool((result or {}).get('ok')),
+        'dm_provider_response_shape': _provider_response_shape_from_send_result(result),
+        'dm_provider_message_id_missing': bool((result or {}).get('ok') and not message_id),
+        'updated': now,
+    }
+    if (result or {}).get('ok'):
+        update.update({
+            'dm_status': 'success',
+            'dmStatus': 'success',
+            'dm_sent_at': now,
+            'dmSentAt': now,
+        })
+    if message_id:
+        update.update({
+            'opening_message_id': message_id,
+            'openingMessageId': message_id,
+            'provider_message_id': message_id,
+            'dm_provider_message_id': message_id,
+        })
+    return update
+
+
 def _status_is_success(value: Any) -> bool:
     return str(value or '').lower() in ('success', 'sent', 'replied')
 
@@ -4704,6 +4745,7 @@ async def execute_flow(user: dict, automation: dict, sender_ig_id: str,
                     if ok:
                         update['dm_sent_at'] = now
                         update['dmSentAt'] = now
+                        update.update(_dm_provider_proof_update(dm_result, now))
                     await db.comments.update_one(
                         {'id': comment_context['comment_doc_id']},
                         {'$set': update},
@@ -24440,7 +24482,10 @@ async def admin_instagram_webhook_verification(
         'reply_provider_response_ok',
         'opening_message_id_partial',
         'provider_message_id_partial',
+        'dm_provider_message_id_partial',
         'dm_provider_response_ok',
+        'dm_provider_message_id_missing',
+        'dm_provider_response_shape',
         'reply_status',
         'dm_status',
         'action_status',
@@ -24512,6 +24557,21 @@ async def admin_instagram_webhook_verification(
             or comment_doc.get('dm_provider_message_id')
             or comment_doc.get('message_id')
         )
+        dm_provider_message_id = (
+            comment_doc.get('dm_provider_message_id')
+            or comment_doc.get('provider_message_id')
+            or comment_doc.get('opening_message_id')
+            or comment_doc.get('openingMessageId')
+            or comment_doc.get('message_id')
+        )
+        response_shape = comment_doc.get('dm_provider_response_shape')
+        safe_response_shape = None
+        if isinstance(response_shape, list):
+            safe_response_shape = [
+                _automation_flight_safe_text(item, 60)
+                for item in response_shape[:20]
+                if _automation_flight_safe_text(item, 60)
+            ]
         proof = {
             'reply_provider_comment_id_partial': _safe_partial_identifier(
                 comment_doc.get('reply_provider_comment_id')
@@ -24524,11 +24584,18 @@ async def admin_instagram_webhook_verification(
             ),
             'opening_message_id_partial': _safe_partial_identifier(opening_message_id),
             'provider_message_id_partial': _safe_partial_identifier(provider_message_id),
+            'dm_provider_message_id_partial': _safe_partial_identifier(dm_provider_message_id),
             'dm_provider_response_ok': (
                 bool(comment_doc.get('dm_provider_response_ok') is True)
                 if comment_doc.get('dm_provider_response_ok') is not None
                 else None
             ),
+            'dm_provider_message_id_missing': (
+                bool(comment_doc.get('dm_provider_message_id_missing'))
+                if comment_doc.get('dm_provider_message_id_missing') is not None
+                else None
+            ),
+            'dm_provider_response_shape': safe_response_shape,
             'reply_status': _status_text(
                 comment_doc.get('reply_status') or comment_doc.get('replyStatus')
             ),
@@ -24584,6 +24651,8 @@ async def admin_instagram_webhook_verification(
         'dm_provider_message_id': 1,
         'message_id': 1,
         'dm_provider_response_ok': 1,
+        'dm_provider_message_id_missing': 1,
+        'dm_provider_response_shape': 1,
         'reply_status': 1,
         'replyStatus': 1,
         'dm_status': 1,
@@ -24822,6 +24891,282 @@ async def admin_instagram_webhook_verification(
         'summary': summary,
         'events': serialized_events,
     }
+
+
+@api.get('/admin/instagram/webhook-verification/reply-visibility')
+async def admin_instagram_webhook_reply_visibility(
+    username: Optional[str] = None,
+    comment_id_partial: Optional[str] = None,
+    media_id_partial: Optional[str] = None,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Read-only Graph visibility check for a stored public reply.
+
+    The endpoint locates a comment doc from partial identifiers, then
+    checks whether the stored reply_provider_comment_id can be fetched
+    directly or found under the original comment. It returns only
+    redacted partial IDs, booleans, and bounded Graph error metadata.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    username_key = _automation_flight_username_key(username) if username else ''
+    comment_partial = str(comment_id_partial or '').strip()
+    media_partial = str(media_id_partial or '').strip()
+    if not comment_partial and not media_partial:
+        raise HTTPException(
+            status_code=400,
+            detail='comment_id_partial or media_id_partial is required',
+        )
+
+    def _partial_identifier_regex(partial: Any) -> Optional[re.Pattern]:
+        text = str(partial or '').strip()
+        if not text:
+            return None
+        if '...' not in text:
+            return re.compile(re.escape(text))
+        first, last = text.split('...', 1)
+        first = re.escape(first.strip())
+        last = re.escape(last.strip())
+        if not first or not last:
+            return None
+        return re.compile(f'^{first}.*{last}$')
+
+    def _safe_graph_error_text(value: Any) -> Optional[str]:
+        safe = _automation_flight_safe_text(value, 180)
+        if not safe:
+            return safe
+        if re.search(r'(?i)\b(access[_-]?token|token|bearer|secret|password)\b', safe):
+            return '[redacted]'
+        return safe
+
+    def _graph_error_from_response(response: Any) -> dict:
+        code = None
+        message = None
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict):
+            error = body.get('error') if isinstance(body.get('error'), dict) else {}
+            code = error.get('code') or error.get('type')
+            message = error.get('message') or body.get('message')
+        if not message:
+            message = getattr(response, 'text', None)
+        return {
+            'graph_error_code': _automation_flight_safe_text(code, 80),
+            'graph_error_message': _safe_graph_error_text(message),
+        }
+
+    query_parts: List[dict] = []
+    comment_re = _partial_identifier_regex(comment_partial)
+    media_re = _partial_identifier_regex(media_partial)
+    if comment_re:
+        query_parts.append({'$or': [
+            {'ig_comment_id': comment_re},
+            {'igCommentId': comment_re},
+            {'comment_id': comment_re},
+            {'commentId': comment_re},
+            {'source_comment_id': comment_re},
+            {'sourceCommentId': comment_re},
+        ]})
+    if media_re:
+        query_parts.append({'$or': [
+            {'media_id': media_re},
+            {'mediaId': media_re},
+            {'ig_media_id': media_re},
+            {'igMediaId': media_re},
+        ]})
+    if username_key:
+        query_parts.append({'$or': [
+            {'username_key': username_key},
+            {'instagramUsername': username_key},
+        ]})
+    comment_query = {'$and': query_parts} if len(query_parts) > 1 else query_parts[0]
+    comment_projection = {
+        '_id': 0,
+        'id': 1,
+        'user_id': 1,
+        'userId': 1,
+        'username_key': 1,
+        'instagramUsername': 1,
+        'instagramAccountId': 1,
+        'igUserId': 1,
+        'ig_comment_id': 1,
+        'igCommentId': 1,
+        'comment_id': 1,
+        'commentId': 1,
+        'source_comment_id': 1,
+        'sourceCommentId': 1,
+        'media_id': 1,
+        'mediaId': 1,
+        'ig_media_id': 1,
+        'igMediaId': 1,
+        'reply_provider_comment_id': 1,
+        'provider_reply_id': 1,
+        'reply_id': 1,
+    }
+    try:
+        cursor = db.comments.find(comment_query, comment_projection).sort('updated', -1).limit(5)
+        comment_rows = await cursor.to_list(5)
+    except Exception:
+        comment_rows = []
+    comment_doc = comment_rows[0] if comment_rows else None
+    if not comment_doc:
+        return {
+            'ok': True,
+            'found_comment_doc': False,
+            'reason': 'comment_doc_not_found',
+            'reply_provider_comment_id_partial': None,
+            'graph_reply_direct_fetch_ok': None,
+            'graph_reply_found_under_original_comment': None,
+        }
+
+    reply_provider_comment_id = (
+        comment_doc.get('reply_provider_comment_id')
+        or comment_doc.get('provider_reply_id')
+        or comment_doc.get('reply_id')
+    )
+    original_comment_id = (
+        comment_doc.get('ig_comment_id')
+        or comment_doc.get('igCommentId')
+        or comment_doc.get('comment_id')
+        or comment_doc.get('commentId')
+        or comment_doc.get('source_comment_id')
+        or comment_doc.get('sourceCommentId')
+    )
+    if not reply_provider_comment_id:
+        return {
+            'ok': True,
+            'found_comment_doc': True,
+            'reason': 'missing_reply_provider_comment_id',
+            'reply_provider_comment_id_partial': None,
+            'graph_reply_direct_fetch_ok': None,
+            'graph_reply_found_under_original_comment': None,
+        }
+
+    account_ig_id = comment_doc.get('instagramAccountId') or comment_doc.get('igUserId')
+    doc_user_id = comment_doc.get('user_id') or comment_doc.get('userId')
+    account_query_parts: List[dict] = []
+    if account_ig_id:
+        account_query_parts.append({'$or': [
+            {'instagramAccountId': account_ig_id},
+            {'igUserId': account_ig_id},
+        ]})
+    if doc_user_id:
+        account_query_parts.append({'$or': [
+            {'userId': doc_user_id},
+            {'user_id': doc_user_id},
+            {'ownerUserId': doc_user_id},
+        ]})
+    if username_key:
+        account_query_parts.append({'username': username_key})
+
+    access_token = None
+    try:
+        account_query = (
+            {'$and': account_query_parts}
+            if len(account_query_parts) > 1
+            else account_query_parts[0]
+            if account_query_parts
+            else {}
+        )
+        account_rows = await db.instagram_accounts.find(
+            account_query,
+            {
+                '_id': 0,
+                'accessToken': 1,
+                'access_token': 1,
+                'longLivedAccessToken': 1,
+                'token': 1,
+            },
+        ).limit(5).to_list(5)
+        for account in account_rows:
+            access_token = (
+                account.get('accessToken')
+                or account.get('access_token')
+                or account.get('longLivedAccessToken')
+                or account.get('token')
+            )
+            if access_token:
+                break
+    except Exception:
+        access_token = None
+    if not access_token and doc_user_id:
+        try:
+            user_rows = await db.users.find(
+                {'id': doc_user_id},
+                {'_id': 0, 'meta_access_token': 1, 'accessToken': 1, 'access_token': 1},
+            ).limit(1).to_list(1)
+            if user_rows:
+                access_token = (
+                    user_rows[0].get('meta_access_token')
+                    or user_rows[0].get('accessToken')
+                    or user_rows[0].get('access_token')
+                )
+        except Exception:
+            access_token = None
+    if not access_token:
+        return {
+            'ok': True,
+            'found_comment_doc': True,
+            'reason': 'missing_access_token',
+            'reply_provider_comment_id_partial': _safe_partial_identifier(reply_provider_comment_id),
+            'graph_reply_direct_fetch_ok': None,
+            'graph_reply_found_under_original_comment': None,
+        }
+
+    direct_ok = False
+    found_under_original = False
+    graph_error: dict = {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            direct_response = await c.get(
+                f'https://graph.instagram.com/{reply_provider_comment_id}',
+                params={'fields': 'id,parent_id,timestamp', 'access_token': access_token},
+            )
+            if 200 <= getattr(direct_response, 'status_code', 0) < 300:
+                try:
+                    direct_body = direct_response.json()
+                except Exception:
+                    direct_body = {}
+                direct_ok = str((direct_body or {}).get('id') or '') == str(reply_provider_comment_id)
+            else:
+                graph_error = _graph_error_from_response(direct_response)
+            if original_comment_id:
+                replies_response = await c.get(
+                    f'https://graph.instagram.com/{original_comment_id}/replies',
+                    params={'fields': 'id,timestamp', 'limit': 100, 'access_token': access_token},
+                )
+                if 200 <= getattr(replies_response, 'status_code', 0) < 300:
+                    try:
+                        replies_body = replies_response.json()
+                    except Exception:
+                        replies_body = {}
+                    data = replies_body.get('data') if isinstance(replies_body, dict) else []
+                    if isinstance(data, list):
+                        found_under_original = any(
+                            str((item or {}).get('id') or '') == str(reply_provider_comment_id)
+                            for item in data
+                            if isinstance(item, dict)
+                        )
+                elif not graph_error:
+                    graph_error = _graph_error_from_response(replies_response)
+    except Exception as exc:
+        graph_error = {
+            'graph_error_code': type(exc).__name__,
+            'graph_error_message': _safe_graph_error_text(str(exc)),
+        }
+
+    result = {
+        'ok': True,
+        'found_comment_doc': True,
+        'reply_provider_comment_id_partial': _safe_partial_identifier(reply_provider_comment_id),
+        'graph_reply_direct_fetch_ok': bool(direct_ok),
+        'graph_reply_found_under_original_comment': bool(found_under_original),
+    }
+    for key in ('graph_error_code', 'graph_error_message'):
+        if graph_error.get(key):
+            result[key] = graph_error[key]
+    return result
 
 
 @api.get('/admin/instagram/rule-coverage-inspector')

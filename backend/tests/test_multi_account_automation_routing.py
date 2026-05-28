@@ -1614,6 +1614,81 @@ def test_opening_dm_with_quick_reply_does_not_append_english_browser_fallback(mo
     assert 'reply with:' not in dm_calls[0]['text']
 
 
+def test_opening_dm_success_persists_provider_proof(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.comments.docs.append({'id': 'doc-proof'})
+    dm_calls = []
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        dm_calls.append(message)
+        return {'ok': True, 'status_code': 200, 'body': {'message_id': 'mid-proof-123'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    automation = _comment_rule('accA', 'igA', 'ruleA-dm-proof')
+    automation.update({
+        'opening_dm_text': 'Want the link?',
+        'opening_dm_button_text': 'send',
+        'dm_text': 'Want the link?',
+        'link_dm_text': 'Here is the link',
+    })
+
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_a,
+        automation,
+        'external-user',
+        {'media_id': 'mediaA', 'commenter_id': 'external-user',
+         'ig_comment_id': 'proof-comment', 'comment_doc_id': 'doc-proof'},
+    ))
+
+    assert ok is True
+    saved = db.comments.docs[0]
+    assert saved['dm_provider_response_ok'] is True
+    assert saved['opening_message_id'] == 'mid-proof-123'
+    assert saved['provider_message_id'] == 'mid-proof-123'
+    assert saved['dm_provider_message_id'] == 'mid-proof-123'
+    assert saved['dm_provider_message_id_missing'] is False
+    assert saved['dm_status'] == 'success'
+    assert 'message_id' in saved['dm_provider_response_shape']
+
+
+def test_opening_dm_success_without_message_id_marks_missing_provider_proof(monkeypatch):
+    db = _install_multi_account_db(monkeypatch)
+    db.comments.docs.append({'id': 'doc-no-message-id'})
+
+    async def send_message_ok(access_token, ig_user_id, recipient_id, message,
+                              allow_workspace_recipient=False):
+        return {'ok': True, 'status_code': 200, 'body': {'recipient_id': 'external-user'}}
+
+    monkeypatch.setattr(server, 'send_ig_message', send_message_ok)
+    owner_a = server._with_instagram_account_context(
+        db.users.docs[0],
+        db.instagram_accounts.docs[0],
+    )
+    automation = _comment_rule('accA', 'igA', 'ruleA-dm-proof-missing')
+
+    ok = _run(server._send_comment_dm_flow_entry(
+        owner_a,
+        automation,
+        'external-user',
+        {'media_id': 'mediaA', 'commenter_id': 'external-user',
+         'ig_comment_id': 'proof-missing-comment',
+         'comment_doc_id': 'doc-no-message-id'},
+    ))
+
+    assert ok is True
+    saved = db.comments.docs[0]
+    assert saved['dm_provider_response_ok'] is True
+    assert saved['dm_provider_message_id_missing'] is True
+    assert saved['dm_status'] == 'success'
+    assert 'opening_message_id' not in saved
+    assert saved['dm_provider_response_shape'] == ['recipient_id']
+
+
 def test_existing_creator_fallback_copy_is_not_removed_or_duplicated(monkeypatch):
     db = _install_multi_account_db(monkeypatch)
     dm_calls = []

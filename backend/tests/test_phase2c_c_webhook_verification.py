@@ -128,6 +128,8 @@ class _DB:
     def __init__(self):
         self.instagram_automation_events = _Coll()
         self.comments = _Coll()
+        self.instagram_accounts = _Coll()
+        self.users = _Coll()
 
 
 def _seed(db, **kwargs):
@@ -390,8 +392,11 @@ def test_provider_proof_enrichment_is_redacted_and_read_only(monkeypatch):
         'media_id': full_media_id,
         'reply_provider_comment_id': full_reply_id,
         'provider_message_id': full_message_id,
+        'dm_provider_message_id': full_message_id,
         'reply_provider_response_ok': True,
         'dm_provider_response_ok': False,
+        'dm_provider_message_id_missing': False,
+        'dm_provider_response_shape': ['message_id', 'recipient_id'],
         'reply_status': 'success',
         'dm_status': 'skipped',
         'action_status': 'success',
@@ -415,8 +420,11 @@ def test_provider_proof_enrichment_is_redacted_and_read_only(monkeypatch):
     assert event['reply_provider_comment_id_partial'] == server._safe_partial_identifier(full_reply_id)
     assert event['provider_reply_id_partial'] == server._safe_partial_identifier(full_reply_id)
     assert event['provider_message_id_partial'] == server._safe_partial_identifier(full_message_id)
+    assert event['dm_provider_message_id_partial'] == server._safe_partial_identifier(full_message_id)
     assert event['reply_provider_response_ok'] is True
     assert event['dm_provider_response_ok'] is False
+    assert event['dm_provider_message_id_missing'] is False
+    assert event['dm_provider_response_shape'] == ['message_id', 'recipient_id']
     assert event['reply_status'] == 'success'
     assert event['dm_status'] == 'skipped'
     assert event['action_status'] == 'success'
@@ -516,6 +524,180 @@ def test_provider_proof_enrichment_unmatched_comment_fails_safely(monkeypatch):
     assert event['comment_id_partial'] == '181...639'
     assert 'reply_provider_comment_id_partial' not in event
     assert 'reply_status' not in event
+
+
+class _GraphResponse:
+    def __init__(self, status_code=200, body=None, text=''):
+        self.status_code = status_code
+        self._body = body or {}
+        self.text = text
+
+    def json(self):
+        return self._body
+
+
+class _GraphClient:
+    responses = []
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, url, params=None):
+        self.__class__.calls.append((url, params or {}))
+        if self.__class__.responses:
+            return self.__class__.responses.pop(0)
+        return _GraphResponse(404, {'error': {'code': 10, 'message': 'missing'}})
+
+
+def _seed_visibility_doc(db, *, reply_id='178000000233', original_id='181000000639'):
+    db.comments.docs.append({
+        'id': 'doc-visible',
+        'user_id': 'u1',
+        'username_key': 'acca',
+        'instagramAccountId': '178000000615',
+        'ig_comment_id': original_id,
+        'media_id': '180000000892',
+        'reply_provider_comment_id': reply_id,
+        'updated': datetime.utcnow(),
+    })
+    db.instagram_accounts.docs.append({
+        'id': 'accA',
+        'userId': 'u1',
+        'username': 'acca',
+        'instagramAccountId': '178000000615',
+        'accessToken': 'TOKEN-SHOULD-NOT-LEAK',
+    })
+
+
+def test_reply_visibility_check_finds_reply_under_original_and_redacts(monkeypatch):
+    db = _DB()
+    _seed_visibility_doc(db)
+    _install(monkeypatch, db)
+    _GraphClient.responses = [
+        _GraphResponse(200, {'id': '178000000233', 'parent_id': '181000000639'}),
+        _GraphResponse(200, {'data': [{'id': '178000000233'}]}),
+    ]
+    _GraphClient.calls = []
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _GraphClient)
+
+    result = _run(server.admin_instagram_webhook_reply_visibility(
+        username='AccA',
+        comment_id_partial=server._safe_partial_identifier('181000000639'),
+        media_id_partial=server._safe_partial_identifier('180000000892'),
+        user_id='admin',
+    ))
+
+    assert result['ok'] is True
+    assert result['found_comment_doc'] is True
+    assert result['reply_provider_comment_id_partial'] == server._safe_partial_identifier('178000000233')
+    assert result['graph_reply_direct_fetch_ok'] is True
+    assert result['graph_reply_found_under_original_comment'] is True
+    blob = repr(result)
+    assert '178000000233' not in blob
+    assert '181000000639' not in blob
+    assert 'TOKEN-SHOULD-NOT-LEAK' not in blob
+    assert db.comments.writes == []
+    assert db.instagram_accounts.writes == []
+    assert _GraphClient.calls[0][1]['access_token'] == 'TOKEN-SHOULD-NOT-LEAK'
+
+
+def test_reply_visibility_check_reports_not_found_without_leaking_ids(monkeypatch):
+    db = _DB()
+    _seed_visibility_doc(db)
+    _install(monkeypatch, db)
+    _GraphClient.responses = [
+        _GraphResponse(200, {'id': '178000000233'}),
+        _GraphResponse(200, {'data': [{'id': '178000000999'}]}),
+    ]
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _GraphClient)
+
+    result = _run(server.admin_instagram_webhook_reply_visibility(
+        username='acca',
+        comment_id_partial='181...639',
+        media_id_partial='180...892',
+        user_id='admin',
+    ))
+
+    assert result['graph_reply_direct_fetch_ok'] is True
+    assert result['graph_reply_found_under_original_comment'] is False
+    assert '178000000999' not in repr(result)
+
+
+def test_reply_visibility_check_redacts_graph_error(monkeypatch):
+    db = _DB()
+    _seed_visibility_doc(db)
+    _install(monkeypatch, db)
+    _GraphClient.responses = [
+        _GraphResponse(
+            400,
+            {'error': {'code': 190, 'message': 'Bad access_token TOKEN-SHOULD-NOT-LEAK'}},
+        ),
+        _GraphResponse(400, {'error': {'code': 10, 'message': 'Denied'}}),
+    ]
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _GraphClient)
+
+    result = _run(server.admin_instagram_webhook_reply_visibility(
+        username='acca',
+        comment_id_partial='181...639',
+        media_id_partial='180...892',
+        user_id='admin',
+    ))
+
+    assert result['graph_reply_direct_fetch_ok'] is False
+    assert result['graph_reply_found_under_original_comment'] is False
+    assert result['graph_error_code'] == '190'
+    assert result['graph_error_message'] == '[redacted]'
+    assert 'TOKEN-SHOULD-NOT-LEAK' not in repr(result)
+
+
+def test_reply_visibility_check_fails_safely_when_unmatched(monkeypatch):
+    db = _DB()
+    _seed_visibility_doc(db)
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_reply_visibility(
+        username='acca',
+        comment_id_partial='181...000',
+        media_id_partial='180...000',
+        user_id='admin',
+    ))
+
+    assert result['ok'] is True
+    assert result['found_comment_doc'] is False
+    assert result['reason'] == 'comment_doc_not_found'
+
+
+def test_reply_visibility_endpoint_does_not_call_send_or_write_paths():
+    src = Path(server.__file__).read_text(encoding='utf-8')
+    anchor = 'async def admin_instagram_webhook_reply_visibility('
+    idx = src.find(anchor)
+    assert idx >= 0, 'reply visibility endpoint definition missing'
+    end_idx = src.find('@api.get(', idx + len(anchor))
+    if end_idx < 0:
+        end_idx = idx + 10000
+    body = src[idx:end_idx]
+    forbidden_calls = (
+        'reply_to_ig_comment_detailed(',
+        'send_ig_message(',
+        'send_ig_dm(',
+        'send_ig_quick_reply(',
+        'await _handle_new_comment(',
+        'execute_flow(',
+        'reserve_usage_limit(',
+        '.insert_one(',
+        '.update_one(',
+        '.delete_one(',
+        '.delete_many(',
+    )
+    for name in forbidden_calls:
+        assert name not in body
 
 
 # ---------------------------------------------------------------------------
