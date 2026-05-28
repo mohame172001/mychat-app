@@ -2871,6 +2871,7 @@ function WebhookVerificationTab() {
   const windowStartUtc = data?.window_start_utc || null;
   const windowEndUtc = data?.window_end_utc || null;
   const subscriptionStatus = data?.subscription_status || null;
+  const accountParity = data?.account_parity || null;
 
   // Phase 2F: per-username admin repair button. Calls the new
   // /api/admin/instagram/repair-comment-webhooks endpoint, then
@@ -3345,6 +3346,138 @@ function WebhookVerificationTab() {
           ))}
         </div>
       )}
+      {/* Phase 2H: per-account parity panel */}
+      {state === 'success' && accountParity && Array.isArray(accountParity.accounts) && accountParity.accounts.length > 0 && (
+        <div
+          className="border border-slate-200 rounded-md p-2 mb-2 text-[11px] bg-white"
+          data-testid="webhook-verification-account-parity"
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="font-semibold">
+              {ar ? 'مقارنة الحسابات (Phase 2H)' : 'Per-account parity'}
+            </span>
+            <span className="text-slate-500">
+              {ar
+                ? 'لماذا حساب يعمل عبر webhook والآخر لا؟'
+                : 'Why does one account work via webhook and another not?'}
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] border-collapse" data-testid="webhook-verification-account-parity-table">
+              <thead>
+                <tr className="text-slate-600">
+                  <th className="text-left p-1 border-b border-slate-200">username</th>
+                  <th className="text-left p-1 border-b border-slate-200">ig_id</th>
+                  <th className="text-left p-1 border-b border-slate-200">subscription</th>
+                  <th className="text-left p-1 border-b border-slate-200">conn</th>
+                  <th className="text-left p-1 border-b border-slate-200">rules</th>
+                  <th className="text-left p-1 border-b border-slate-200">aliases</th>
+                  <th className="text-left p-1 border-b border-slate-200">entry.ids seen</th>
+                  <th className="text-left p-1 border-b border-slate-200">last webhook</th>
+                  <th className="text-left p-1 border-b border-slate-200">last comment webhook</th>
+                  <th className="text-left p-1 border-b border-slate-200">last webhook success</th>
+                  <th className="text-left p-1 border-b border-slate-200">last polling seen</th>
+                  <th className="text-left p-1 border-b border-slate-200">latest source</th>
+                  <th className="text-left p-1 border-b border-slate-200">resolution paths</th>
+                  <th className="text-left p-1 border-b border-slate-200">blocker</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountParity.accounts.map((acc, idx) => {
+                  const blocker = acc.blocker_label || 'no_signal';
+                  const blockerColor =
+                    blocker === 'ok'
+                      ? 'bg-emerald-100 text-emerald-900'
+                      : blocker === 'no_signal'
+                      ? 'bg-slate-100 text-slate-700'
+                      : 'bg-rose-100 text-rose-900';
+                  const paths = acc.account_resolution_path_counts || {};
+                  return (
+                    <tr key={idx} className="align-top">
+                      <td className="p-1 border-b border-slate-100 font-mono font-semibold">
+                        {acc.username || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.instagram_account_id_partial || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100">
+                        {acc.subscription_ready
+                          ? <span className="text-emerald-700">ready</span>
+                          : <span className="text-rose-700">{(acc.missing_fields || []).join(',') || 'not ready'}</span>}
+                      </td>
+                      <td className="p-1 border-b border-slate-100">
+                        {acc.connection_valid
+                          ? <span className="text-emerald-700">valid</span>
+                          : <span className="text-rose-700">invalid</span>}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.active_rule_count ?? 0}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {(acc.webhook_entry_id_aliases_partials || []).join(' ') || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {(acc.entry_id_partials_seen || []).join(' ') || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.last_webhook_received_at
+                          ? wvFormatLocal(acc.last_webhook_received_at)
+                          : '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.last_comment_webhook_detected_at
+                          ? wvFormatLocal(acc.last_comment_webhook_detected_at)
+                          : '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.last_webhook_automation_success_at
+                          ? wvFormatLocal(acc.last_webhook_automation_success_at)
+                          : '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.last_polling_seen_at
+                          ? wvFormatLocal(acc.last_polling_seen_at)
+                          : '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {acc.latest_comment_source || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {Object.keys(paths).length === 0
+                          ? '—'
+                          : Object.entries(paths)
+                              .map(([k, v]) => `${k}:${v}`)
+                              .join(' ')}
+                      </td>
+                      <td className="p-1 border-b border-slate-100">
+                        <span
+                          className={'inline-block rounded px-1 font-mono ' + blockerColor}
+                          data-testid={`webhook-verification-account-parity-blocker-${idx}`}
+                        >
+                          {blocker}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {accountParity.unscoped_signal && (
+            <div className="mt-2 text-[11px] text-slate-600">
+              <span className="font-semibold me-1">
+                {ar ? 'إشارات خارج الحسابات:' : 'Unscoped webhook signals:'}
+              </span>
+              <span className="font-mono">
+                received={accountParity.unscoped_signal.webhook_received_count || 0}
+                {' '}comment_detected={accountParity.unscoped_signal.webhook_comment_detected_count || 0}
+                {' '}resolution_failed={accountParity.unscoped_signal.account_resolution_failed_count || 0}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {repairResult && (
         <div
           className={

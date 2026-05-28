@@ -174,6 +174,24 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('polling_interval_seconds');
   });
 
+  test('Phase 2H: account parity panel structural contract', () => {
+    expect(source).toContain('account_parity');
+    expect(source).toContain('webhook-verification-account-parity');
+    expect(source).toContain('webhook-verification-account-parity-table');
+    expect(source).toContain('webhook-verification-account-parity-blocker-');
+    expect(source).toContain('blocker_label');
+    expect(source).toContain('account_resolution_path_counts');
+    expect(source).toContain('webhook_entry_id_aliases_partials');
+    expect(source).toContain('entry_id_partials_seen');
+    expect(source).toContain('last_webhook_received_at');
+    expect(source).toContain('last_comment_webhook_detected_at');
+    expect(source).toContain('last_webhook_automation_success_at');
+    expect(source).toContain('last_polling_seen_at');
+    expect(source).toContain('latest_comment_source');
+    expect(source).toContain('active_rule_count');
+    expect(source).toContain('unscoped_signal');
+  });
+
   test('does not introduce any username-specific automation logic', () => {
     // Allowed: ui default WV_DEFAULT_USERNAME = 'muhammad_gehad'; the
     // placeholder string; and the input value default. Forbidden:

@@ -21200,7 +21200,17 @@ async def _process_webhook(payload: dict):
 # under a quarter of a minute while staying well below Meta's rate limits
 # (one /comments call per linked IG account per tick = trivial fan-out).
 IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
-IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
+# Phase 2H: polling is no longer the primary path. The production
+# default is OFF — when a brand-new environment boots without setting
+# `IG_POLL_ENABLED`, NO background polling loop runs, no
+# `poller_media_scan_started` / `polling_scan_summary` events are
+# emitted, and no replies/DMs are ever sent by polling. Webhook is the
+# sole sender. Polling can only be re-enabled as an explicit emergency
+# diagnostic by setting BOTH `IG_POLL_ENABLED=1` AND
+# `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1` (see
+# `_polling_mode()` below). Tests force this back ON via conftest.py so
+# the legacy polling-pipeline suite keeps passing.
+IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '0') == '1'
 
 
 def _is_polling_send_enabled() -> bool:
@@ -24461,6 +24471,358 @@ async def _compute_webhook_subscription_status(
     }
 
 
+async def _compute_webhook_account_parity(
+    *,
+    rows: list,
+    subscription_accounts: list,
+    username_key: str,
+    caller_user_id: str,
+    utc_iso,
+) -> dict:
+    """Phase 2H — per-account parity panel for the Webhook Verification UI.
+
+    Combines cached subscription state (already in ``subscription_accounts``)
+    with derived signals from the in-window flight-recorder rows so the
+    operator can compare a working account vs. a broken account side-by-
+    side. Account-agnostic: no username branching. All identifiers stay
+    partial.
+
+    For each account we emit:
+
+      - ``username`` / ``instagram_account_id_partial`` — primary keys
+        (mirrored from the subscription row).
+      - subscription state (``subscription_ready``, ``subscribed_fields``,
+        ``missing_fields``, ``comments_subscribed``).
+      - ``webhook_entry_id_aliases_partials`` — distinct partial aliases
+        currently stored on the account row by the alias self-heal path.
+      - ``entry_id_partials_seen`` — distinct partial entry.ids carried on
+        any in-window event scoped to this username (from
+        ``extra.entry_id_partial``).
+      - ``last_webhook_received_at`` — most recent ``webhook_received``
+        for this account in the window.
+      - ``last_comment_webhook_detected_at`` — most recent
+        ``webhook_comment_detected`` for this account.
+      - ``last_webhook_automation_success_at`` — most recent
+        ``automation_success`` (source=webhook) for this account.
+      - ``last_polling_seen_at`` — most recent ``poller_comment_seen`` /
+        ``polling_scan_summary`` for this account.
+      - ``account_resolution_path_counts`` — counts of
+        ``account_resolution_success`` keyed by ``extra.via``
+        (instagram_accounts / webhook_entry_id_alias / media_owner_probe /
+        single_tenant_fallback / users.ig_user_id).
+      - ``latest_comment_source`` — ``webhook`` or ``polling`` based on
+        the latest comment-bearing event (webhook_comment_detected wins).
+      - ``active_rule_count`` — count of ``status=active`` automations
+        scoped to the account's owner user_id + instagramAccountId.
+      - ``blocker_label`` — one of:
+          * ``account_specific_webhook_delivery_missing`` — subscription
+            ready BUT no ``webhook_received`` AND no
+            ``webhook_comment_detected`` in window AND polling sees
+            comments (Meta is not delivering this account's webhooks).
+          * ``account_resolution_mapping_mismatch`` —
+            ``webhook_received`` arrived but ``account_resolution_failed``
+            or no downstream events bound to this account.
+          * ``subscription_ready_but_no_comment_webhook_delivery`` —
+            subscription ready, ``webhook_received`` present, but no
+            ``webhook_comment_detected`` in window (only messaging etc.
+            arrived).
+          * ``subscription_not_ready`` — subscribed_fields missing
+            ``comments`` / ``live_comments``.
+          * ``account_disconnected`` — ``connection_valid`` is False.
+          * ``no_signal`` — window has no events for this account
+            (nothing to diagnose yet).
+          * ``ok`` — at least one ``automation_success`` source=webhook
+            for this account in the window.
+
+    The whole panel is bounded: we cap the number of accounts at 20
+    (mirrors the subscription helper) and the alias/entry partials at 16.
+    """
+
+    # Index events by username_key (account-agnostic key the recorder
+    # already writes). We also bucket the unknown-username events under
+    # a single sentinel so the operator can see "unscoped webhook"
+    # signals in the panel — these typically indicate
+    # ``account_resolution_failed`` paths.
+    per_account: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(key: str) -> Dict[str, Any]:
+        bucket = per_account.get(key)
+        if bucket is None:
+            bucket = {
+                'last_webhook_received_at': None,
+                'last_comment_webhook_detected_at': None,
+                'last_webhook_automation_success_at': None,
+                'last_polling_seen_at': None,
+                'entry_id_partials_seen': set(),
+                'resolution_path_counts': {},
+                'latest_comment_source_at': None,
+                'latest_comment_source': None,
+                'webhook_received_count': 0,
+                'webhook_comment_detected_count': 0,
+                'account_resolution_failed_count': 0,
+                'polling_seen_count': 0,
+                'webhook_success_count': 0,
+            }
+            per_account[key] = bucket
+        return bucket
+
+    def _bump(bucket: Dict[str, Any], field: str, created):
+        if not isinstance(created, datetime):
+            return
+        current = bucket.get(field)
+        if current is None or created > current:
+            bucket[field] = created
+
+    for r in rows:
+        u = (r.get('username_key') or '') or '__unscoped__'
+        bucket = _bucket(u)
+        stage = r.get('stage')
+        source = r.get('source')
+        created = r.get('created_at')
+        extra = r.get('extra') if isinstance(r.get('extra'), dict) else {}
+        entry_partial = extra.get('entry_id_partial') if isinstance(extra, dict) else None
+        if entry_partial and len(bucket['entry_id_partials_seen']) < 16:
+            bucket['entry_id_partials_seen'].add(str(entry_partial))
+        if stage == 'webhook_received':
+            bucket['webhook_received_count'] += 1
+            _bump(bucket, 'last_webhook_received_at', created)
+        elif stage == 'webhook_comment_detected':
+            bucket['webhook_comment_detected_count'] += 1
+            _bump(bucket, 'last_comment_webhook_detected_at', created)
+            if isinstance(created, datetime) and (
+                bucket['latest_comment_source_at'] is None
+                or created > bucket['latest_comment_source_at']
+            ):
+                bucket['latest_comment_source_at'] = created
+                bucket['latest_comment_source'] = 'webhook'
+        elif stage == 'account_resolution_success':
+            via = str((extra or {}).get('via') or 'unknown')
+            counts = bucket['resolution_path_counts']
+            counts[via] = int(counts.get(via, 0)) + 1
+        elif stage == 'account_resolution_failed':
+            bucket['account_resolution_failed_count'] += 1
+        elif stage == 'automation_success' and source == 'webhook':
+            bucket['webhook_success_count'] += 1
+            _bump(bucket, 'last_webhook_automation_success_at', created)
+        elif stage == 'poller_comment_seen' and source == 'polling':
+            bucket['polling_seen_count'] += 1
+            _bump(bucket, 'last_polling_seen_at', created)
+            if isinstance(created, datetime) and (
+                bucket['latest_comment_source_at'] is None
+                or created > bucket['latest_comment_source_at']
+            ):
+                bucket['latest_comment_source_at'] = created
+                bucket['latest_comment_source'] = 'polling'
+
+    # Load account rows again (subscription helper already filtered by
+    # username/userId — we re-use that scope). We need the on-row
+    # ``webhookEntryIdAliases`` array to surface stored alias partials,
+    # plus the owner user_id so we can count active automation rules.
+    account_rows: list = []
+    try:
+        query: Dict[str, Any] = {'isActive': {'$ne': False}}
+        if username_key:
+            query['$or'] = [
+                {'username': username_key},
+                {'instagramHandle': username_key},
+            ]
+        else:
+            query['userId'] = caller_user_id
+        cursor = db.instagram_accounts.find(
+            query,
+            {
+                '_id': 0,
+                'id': 1,
+                'userId': 1,
+                'user_id': 1,
+                'username': 1,
+                'instagramHandle': 1,
+                'instagramAccountId': 1,
+                'igUserId': 1,
+                'connectionValid': 1,
+                'webhookEntryIdAliases': 1,
+                'webhookEntryIdAliasesUpdatedAt': 1,
+            },
+        ).limit(20)
+        account_rows = await cursor.to_list(20)
+    except Exception:
+        account_rows = []
+
+    accounts_out: list = []
+    # Index subscription_accounts by (username, ig_partial) for merge.
+    sub_by_key: Dict[tuple, dict] = {}
+    for sub in subscription_accounts:
+        key = (
+            str(sub.get('username') or ''),
+            str(sub.get('instagram_account_id_partial') or ''),
+        )
+        sub_by_key[key] = sub
+
+    seen_usernames: set = set()
+    for row in account_rows:
+        username_val = str(row.get('username') or row.get('instagramHandle') or '')
+        seen_usernames.add(username_val)
+        ig_id = row.get('instagramAccountId') or row.get('igUserId') or ''
+        ig_partial = _safe_partial_identifier(ig_id) or ''
+        sub = sub_by_key.get((username_val, ig_partial)) or {}
+
+        aliases = row.get('webhookEntryIdAliases') or []
+        if not isinstance(aliases, list):
+            aliases = []
+        alias_partials: list = []
+        for a in aliases[:16]:
+            partial = _safe_partial_identifier(a)
+            if partial and partial not in alias_partials:
+                alias_partials.append(partial)
+
+        owner_user_id = row.get('userId') or row.get('user_id') or ''
+        active_rule_count = 0
+        try:
+            if owner_user_id:
+                count_query: Dict[str, Any] = {
+                    'status': 'active',
+                    '$or': [
+                        {'userId': owner_user_id},
+                        {'user_id': owner_user_id},
+                    ],
+                }
+                if ig_id:
+                    count_query['$and'] = [
+                        {'$or': [
+                            {'userId': owner_user_id},
+                            {'user_id': owner_user_id},
+                        ]},
+                        {'$or': [
+                            {'instagramAccountId': str(ig_id)},
+                            {'igUserId': str(ig_id)},
+                            {'instagram_account_id': str(ig_id)},
+                        ]},
+                    ]
+                    count_query.pop('$or', None)
+                active_rule_count = await db.automations.count_documents(count_query)
+        except Exception:
+            active_rule_count = 0
+
+        bucket = per_account.get(username_val, {})
+        connection_valid = bool(sub.get('connection_valid', row.get('connectionValid', False)))
+        comments_subscribed = bool(sub.get('comments_subscribed'))
+        subscription_ready = bool(sub.get('webhook_comment_delivery_configured'))
+
+        blocker = 'no_signal'
+        webhook_received = bucket.get('webhook_received_count', 0)
+        webhook_comment_detected = bucket.get('webhook_comment_detected_count', 0)
+        webhook_success = bucket.get('webhook_success_count', 0)
+        polling_seen = bucket.get('polling_seen_count', 0)
+        resolution_failed = bucket.get('account_resolution_failed_count', 0)
+        if not connection_valid:
+            blocker = 'account_disconnected'
+        elif not comments_subscribed:
+            blocker = 'subscription_not_ready'
+        elif webhook_success > 0:
+            blocker = 'ok'
+        elif resolution_failed > 0 and webhook_comment_detected == 0:
+            blocker = 'account_resolution_mapping_mismatch'
+        elif webhook_received > 0 and webhook_comment_detected == 0:
+            blocker = 'subscription_ready_but_no_comment_webhook_delivery'
+        elif (
+            subscription_ready
+            and webhook_received == 0
+            and webhook_comment_detected == 0
+            and polling_seen > 0
+        ):
+            blocker = 'account_specific_webhook_delivery_missing'
+        elif (
+            subscription_ready
+            and webhook_received == 0
+            and webhook_comment_detected == 0
+        ):
+            blocker = 'no_signal'
+
+        accounts_out.append({
+            'username': username_val,
+            'instagram_account_id_partial': ig_partial or None,
+            'connection_valid': connection_valid,
+            'subscription_ready': subscription_ready,
+            'comments_subscribed': comments_subscribed,
+            'subscribed_fields': sub.get('subscribed_fields') or [],
+            'missing_fields': sub.get('missing_fields') or [],
+            'webhook_entry_id_aliases_partials': alias_partials,
+            'webhook_entry_id_aliases_updated_at': utc_iso(
+                row.get('webhookEntryIdAliasesUpdatedAt')
+            ),
+            'entry_id_partials_seen': sorted(list(bucket.get('entry_id_partials_seen') or set()))[:16],
+            'last_webhook_received_at': utc_iso(bucket.get('last_webhook_received_at')),
+            'last_comment_webhook_detected_at': utc_iso(bucket.get('last_comment_webhook_detected_at')),
+            'last_webhook_automation_success_at': utc_iso(bucket.get('last_webhook_automation_success_at')),
+            'last_polling_seen_at': utc_iso(bucket.get('last_polling_seen_at')),
+            'last_subscription_check_at': sub.get('last_subscription_check_at'),
+            'last_webhook_repair_attempt_at': sub.get('last_webhook_repair_attempt_at'),
+            'last_webhook_repair_result': sub.get('last_webhook_repair_result'),
+            'last_webhook_repair_error': sub.get('last_webhook_repair_error'),
+            'account_resolution_path_counts': dict(bucket.get('resolution_path_counts') or {}),
+            'webhook_received_count': webhook_received,
+            'webhook_comment_detected_count': webhook_comment_detected,
+            'webhook_success_count': webhook_success,
+            'account_resolution_failed_count': resolution_failed,
+            'polling_seen_count': polling_seen,
+            'latest_comment_source': bucket.get('latest_comment_source'),
+            'active_rule_count': int(active_rule_count or 0),
+            'blocker_label': blocker,
+        })
+
+    # Surface any in-window events for usernames not present on the
+    # caller's account list (e.g. account_resolution_failed bucket
+    # under '__unscoped__'). The operator sees these as a separate
+    # "unscoped_signals" block to highlight webhook noise that did NOT
+    # bind to any known account.
+    unscoped_bucket = per_account.get('__unscoped__', {})
+    unscoped_signal = None
+    if unscoped_bucket:
+        unscoped_signal = {
+            'webhook_received_count': unscoped_bucket.get('webhook_received_count', 0),
+            'webhook_comment_detected_count': unscoped_bucket.get('webhook_comment_detected_count', 0),
+            'account_resolution_failed_count': unscoped_bucket.get('account_resolution_failed_count', 0),
+            'entry_id_partials_seen': sorted(list(unscoped_bucket.get('entry_id_partials_seen') or set()))[:16],
+            'last_webhook_received_at': utc_iso(unscoped_bucket.get('last_webhook_received_at')),
+            'last_comment_webhook_detected_at': utc_iso(unscoped_bucket.get('last_comment_webhook_detected_at')),
+        }
+
+    return {
+        'accounts': accounts_out,
+        'unscoped_signal': unscoped_signal,
+        'blocker_label_meanings': {
+            'ok': 'At least one automation_success source=webhook in window.',
+            'account_specific_webhook_delivery_missing': (
+                'Subscription ready and polling sees comments, but no webhook '
+                'event arrived for this account in window. Meta is not '
+                'delivering comment webhooks for this specific account.'
+            ),
+            'account_resolution_mapping_mismatch': (
+                'Webhook arrived but account_resolution_failed and/or no '
+                'webhook_comment_detected bound to this account — entry.id is '
+                'not mapped. Repair via alias self-heal / media-owner fallback.'
+            ),
+            'subscription_ready_but_no_comment_webhook_delivery': (
+                'Webhook delivery happening (messaging etc.) but no '
+                'webhook_comment_detected in window. Comments subscription may '
+                'be advertised but not actually delivering comment payloads.'
+            ),
+            'subscription_not_ready': (
+                'Account is not subscribed to comments/live_comments fields. '
+                'Click Repair to force a fresh Graph subscribe.'
+            ),
+            'account_disconnected': (
+                'Account connection is not valid. Reconnect Instagram from '
+                'the dashboard before retrying webhook delivery.'
+            ),
+            'no_signal': (
+                'No comment activity for this account in window. Post a fresh '
+                'comment and reload.'
+            ),
+        },
+    }
+
+
 @api.post('/admin/instagram/repair-comment-webhooks')
 async def admin_instagram_repair_comment_webhooks(
     username: str,
@@ -25342,6 +25704,22 @@ async def admin_instagram_webhook_verification(
         caller_user_id=user_id,
     )
 
+    # Phase 2H: account parity panel. Build per-account event-derived
+    # signals (latest webhook_received_at, latest webhook
+    # comment_detected_at, latest webhook automation_success_at, latest
+    # polling poller_comment_seen_at, distinct entry.id partials,
+    # account-resolution path counts, latest comment source). Merge
+    # with subscription_status.accounts so the operator can compare
+    # WHY a working account works and a broken account does not — all
+    # in one view, account-agnostic, no username branching.
+    account_parity = await _compute_webhook_account_parity(
+        rows=rows,
+        subscription_accounts=list(subscription_status.get('accounts') or []),
+        username_key=username_key,
+        caller_user_id=user_id,
+        utc_iso=_utc_iso,
+    )
+
     return {
         'ok': True,
         'server_now_utc': _utc_iso(now_utc),
@@ -25350,6 +25728,7 @@ async def admin_instagram_webhook_verification(
         'applied_filters': applied_filters,
         'summary': summary,
         'subscription_status': subscription_status,
+        'account_parity': account_parity,
         'events': serialized_events,
     }
 
