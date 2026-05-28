@@ -18884,6 +18884,54 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 rule_type=_automation_flight_rule_type(matched_rule),
                 matched=True,
             )
+            # Phase 2G — webhook-first send gate. Polling can scan and
+            # record what it saw, but it must NOT silently send fresh
+            # comment replies/DMs on the webhook's behalf. The gate
+            # only fires when `source == 'polling'`; webhook +
+            # automation_queue + manual_catchup are never gated here.
+            # Opt back into legacy fallback behavior with the env flag
+            # `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1`.
+            #
+            # Skip is recorded with a clear, account-agnostic reason so
+            # the Webhook Verification panel can surface "polling saw
+            # this fresh comment but did not send because webhook is
+            # the primary path". This makes webhook delivery failures
+            # operator-visible instead of being masked by polling
+            # reply latency.
+            if source == 'polling' and not _is_polling_send_enabled():
+                await _record_instagram_automation_event(
+                    'automation_skipped',
+                    source=source,
+                    user_doc=user_doc,
+                    media_id=media_id,
+                    comment_id=ig_comment_id,
+                    commenter_id=commenter_id,
+                    rule_id=rule_id,
+                    rule_type=_automation_flight_rule_type(matched_rule),
+                    skip_reason='polling_comment_send_disabled_webhook_required',
+                    extra={
+                        'fallback_env_flag': 'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
+                        'note': (
+                            'Polling discovered this comment but the SaaS '
+                            'product requires webhook as the primary send '
+                            'path. Repair webhook subscription or set the '
+                            'env flag to 1 for emergency fallback.'
+                        ),
+                    },
+                )
+                logger.info(
+                    'polling_comment_send_disabled_webhook_required '
+                    'ig_comment_id=%s media_id=%s rule_id=%s user_id=%s',
+                    ig_comment_id, media_id, rule_id, user_id,
+                )
+                return {
+                    'processed': True,
+                    'matched': True,
+                    'action_status': 'skipped',
+                    'reason': 'polling_comment_send_disabled_webhook_required',
+                    'rule_id': rule_id,
+                    'comment_doc_id': doc['id'],
+                }
             # Phase 2.2 plan enforcement: stop the action chain BEFORE
             # any Meta call when the monthly comment-processed limit is
             # exceeded. The comment doc stays so we don't lose it; the
@@ -20977,8 +21025,15 @@ async def _process_webhook(payload: dict):
             for change in entry.get('changes', []):
                 field = change.get('field')
                 value = change.get('value', {})
-                # Normalize: IG sends field='comments'; FB Page feed sends field='feed' with item='comment'
-                is_comment = field == 'comments' or (field == 'feed' and value.get('item') == 'comment')
+                # Normalize: IG sends field='comments'; FB Page feed
+                # sends field='feed' with item='comment'; IG Live sends
+                # field='live_comments' (Phase 2G: do not silently drop
+                # live-broadcast comments).
+                is_comment = (
+                    field == 'comments'
+                    or field == 'live_comments'
+                    or (field == 'feed' and value.get('item') == 'comment')
+                )
                 if is_comment:
                     commenter = value.get('from', {}) or {}
                     media_obj = value.get('media') or {}
@@ -21032,6 +21087,32 @@ async def _process_webhook(payload: dict):
                             else 'none'
                         ),
                     )
+                    # Phase 2G: surface missing media id explicitly so
+                    # the operator can tell at a glance whether a
+                    # comment webhook arrived in a parseable shape but
+                    # was dropped because no media id could be extracted
+                    # (typically the `parent_id`-only reply shape).
+                    # Never silently drop the comment — record one
+                    # `comment_webhook_missing_media_identifier` event
+                    # before continuing to the normal webhook_comment_
+                    # detected branch.
+                    if not media_id_resolved:
+                        await _record_instagram_automation_event(
+                            'comment_webhook_missing_media_identifier',
+                            source='webhook',
+                            user_doc=user_doc,
+                            instagram_account_id=ig_account_id,
+                            comment_id=value.get('comment_id') or value.get('id'),
+                            commenter_id=commenter.get('id'),
+                            skip_reason='comment_webhook_missing_media_identifier',
+                            extra={
+                                'change_field': field,
+                                'has_parent_id': bool(value.get('parent_id')),
+                                'value_keys': sorted([
+                                    str(k)[:40] for k in (value or {}).keys()
+                                ])[:25],
+                            },
+                        )
                     await _record_instagram_automation_event(
                         'webhook_comment_detected',
                         source='webhook',
@@ -21120,6 +21201,45 @@ async def _process_webhook(payload: dict):
 # (one /comments call per linked IG account per tick = trivial fan-out).
 IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
 IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '1') == '1'
+
+
+def _is_polling_send_enabled() -> bool:
+    """Phase 2G: polling is **NOT** the primary path for fresh comment
+    automation. It can still scan, record what it saw, and serve as
+    diagnostics + missed-comment detection — but it must not silently
+    send public replies or opening DMs on behalf of fresh comments
+    that webhook should have processed first.
+
+    Set ``IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1`` to opt the
+    polling pipeline back into the legacy "send on discovery" behavior
+    (emergency / testing only). Default is OFF so that webhook delivery
+    failures become operator-visible instead of being silently masked
+    by polling reply latency.
+
+    Webhook source is NEVER gated by this flag.
+    """
+    raw = os.environ.get(
+        'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '',
+    ).strip().lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def _polling_mode() -> str:
+    """Phase 2G summary label for the verification UI.
+
+    - ``disabled``                   — IG_POLL_ENABLED=0 (poller loop OFF)
+    - ``emergency_fallback_enabled`` — IG_POLLING_COMMENT_AUTOMATION_
+                                       FALLBACK_ENABLED=1 (polling sends)
+    - ``reconciliation_only``        — poller running, but the send gate
+                                       blocks polling from sending; it is
+                                       the diagnostics / missed-comment
+                                       detector only.
+    """
+    if not IG_POLL_ENABLED:
+        return 'disabled'
+    if _is_polling_send_enabled():
+        return 'emergency_fallback_enabled'
+    return 'reconciliation_only'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
 IG_POLL_FRESH_COMMENT_WINDOW_SECONDS = _env_int_clamped(
@@ -24607,6 +24727,8 @@ async def admin_instagram_webhook_verification(
         'poller_media_scan_started',
         'historical_catchup_allowed',
         'existing_comment_unknown_state_reprocess',
+        # Phase 2G additions.
+        'comment_webhook_missing_media_identifier',
     ]
     query: Dict[str, Any] = {
         'stage': {'$in': relevant_stages},
@@ -24667,8 +24789,16 @@ async def admin_instagram_webhook_verification(
     unmapped_webhook_entries = 0
     fallback_used_count = 0
     alias_self_heal_count = 0
+    # Phase 2G counters: surfaces whether polling discovered fresh
+    # comments AND whether the webhook-required send-gate fired so the
+    # operator can immediately see "webhook is the primary path; here
+    # is what polling saw but did not send".
+    polling_seen_ids: set = set()
+    polling_send_disabled_ids: set = set()
     latest_webhook_comment_at: Optional[datetime] = None
     latest_polling_success_at: Optional[datetime] = None
+    latest_polling_seen_at: Optional[datetime] = None
+    latest_polling_send_disabled_at: Optional[datetime] = None
 
     # Index by comment_id_partial so we can reason about end-to-end
     # progression. Rows are newest-first.
@@ -24705,6 +24835,23 @@ async def admin_instagram_webhook_verification(
                     if (latest_polling_success_at is None
                             or created > latest_polling_success_at):
                         latest_polling_success_at = created
+        elif stage == 'poller_comment_seen' and source == 'polling' and cid:
+            polling_seen_ids.add(cid)
+            if isinstance(created, datetime):
+                if (latest_polling_seen_at is None
+                        or created > latest_polling_seen_at):
+                    latest_polling_seen_at = created
+        elif (
+            stage == 'automation_skipped'
+            and source == 'polling'
+            and r.get('skip_reason') == 'polling_comment_send_disabled_webhook_required'
+            and cid
+        ):
+            polling_send_disabled_ids.add(cid)
+            if isinstance(created, datetime):
+                if (latest_polling_send_disabled_at is None
+                        or created > latest_polling_send_disabled_at):
+                    latest_polling_send_disabled_at = created
 
     # Second pass to derive "reached_handle" — webhook_comment_detected
     # for comment X PLUS any downstream stage scoped to the same
@@ -24740,6 +24887,19 @@ async def admin_instagram_webhook_verification(
         'latest_webhook_comment_at': _iso(latest_webhook_comment_at),
         'latest_polling_success_at': _iso(latest_polling_success_at),
         'total_events_in_window': len(rows),
+        # Phase 2G — webhook-first send gate visibility.
+        'polling_seen_count': len(polling_seen_ids),
+        'polling_send_disabled_count': len(polling_send_disabled_ids),
+        'latest_polling_seen_at': _iso(latest_polling_seen_at),
+        'latest_polling_send_disabled_at': _iso(latest_polling_send_disabled_at),
+        'polling_send_enabled': _is_polling_send_enabled(),
+        'polling_send_fallback_env_flag': (
+            'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED'
+        ),
+        'polling_mode': _polling_mode(),
+        'polling_interval_seconds': IG_POLL_INTERVAL_SECONDS,
+        'polling_round_robin_batch_size': _ig_poll_round_robin_batch(),
+        'polling_recent_media_limit': _ig_poll_recent_media_limit(),
     }
 
     # Per-event sanitized view. Only carry the explicit safe fields the

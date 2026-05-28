@@ -162,6 +162,18 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('subscribe_status');
   });
 
+  test('Phase 2G: summary surfaces polling-seen / polling-send-disabled counters', () => {
+    expect(source).toContain('polling_seen_count');
+    expect(source).toContain('polling_send_disabled_count');
+    expect(source).toContain('Polling: send disabled');
+  });
+
+  test('Phase 2G: polling_mode chip rendered with color cues', () => {
+    expect(source).toContain('webhook-verification-polling-mode');
+    expect(source).toContain('emergency_fallback_enabled');
+    expect(source).toContain('polling_interval_seconds');
+  });
+
   test('does not introduce any username-specific automation logic', () => {
     // Allowed: ui default WV_DEFAULT_USERNAME = 'muhammad_gehad'; the
     // placeholder string; and the input value default. Forbidden:

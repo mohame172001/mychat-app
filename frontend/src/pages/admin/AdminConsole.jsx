@@ -3253,6 +3253,35 @@ function WebhookVerificationTab() {
               <span className="font-semibold text-slate-500 me-1">{ar ? 'منطقة المتصفح' : 'browser tz'}:</span>
               <span className="font-mono">{browserTz}</span>
             </div>
+            {summary?.polling_mode && (
+              <div
+                data-testid="webhook-verification-polling-mode"
+                title={
+                  ar
+                    ? 'وضع polling. webhook_first يعني أن webhook هو المسار الأساسي.'
+                    : 'Polling mode. reconciliation_only = webhook is the primary path.'
+                }
+              >
+                <span className="font-semibold text-slate-500 me-1">{ar ? 'وضع polling' : 'polling_mode'}:</span>
+                <span
+                  className={
+                    'font-mono px-1 rounded ' +
+                    (summary.polling_mode === 'emergency_fallback_enabled'
+                      ? 'bg-rose-100 text-rose-700'
+                      : summary.polling_mode === 'disabled'
+                        ? 'bg-slate-100 text-slate-600'
+                        : 'bg-emerald-100 text-emerald-700')
+                  }
+                >
+                  {summary.polling_mode}
+                </span>
+                {summary.polling_interval_seconds != null && (
+                  <span className="font-mono ms-2 text-slate-500">
+                    {summary.polling_interval_seconds}s
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3416,8 +3445,12 @@ function WebhookVerificationTab() {
                 ar ? 'وصل _handle_new_comment' : 'Reached handler'],
               ['webhook_comments_success_count',
                 ar ? 'نجاح عبر webhook' : 'Webhook success'],
+              ['polling_seen_count',
+                ar ? 'polling شاهد التعليقات' : 'Polling saw'],
+              ['polling_send_disabled_count',
+                ar ? 'polling: الإرسال موقوف' : 'Polling: send disabled (webhook required)'],
               ['polling_success_count',
-                ar ? 'نجاح عبر polling' : 'Polling success'],
+                ar ? 'نجاح عبر polling' : 'Polling success (fallback flag)'],
               ['phase2c_b_fallback_used_count',
                 ar ? 'استُخدم media-owner fallback' : 'Media-owner fallback used'],
               ['alias_self_heal_count',
