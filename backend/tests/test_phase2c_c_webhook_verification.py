@@ -58,7 +58,15 @@ def _match(doc, query):
             if not any(_match(doc, q) for q in v):
                 return False
             continue
+        if k == '$and':
+            if not all(_match(doc, q) for q in v):
+                return False
+            continue
         actual = doc.get(k)
+        if hasattr(v, 'search'):
+            if actual is None or not v.search(str(actual)):
+                return False
+            continue
         if isinstance(v, dict):
             if '$in' in v and actual not in v['$in']:
                 return False
@@ -426,6 +434,88 @@ def test_provider_proof_enrichment_is_redacted_and_read_only(monkeypatch):
         'access_token',
     ):
         assert forbidden not in blob
+
+
+def test_provider_proof_enrichment_matches_partial_event_without_filter(monkeypatch):
+    db = _DB()
+    now = datetime.utcnow()
+    full_comment_id = '181777777639'
+    full_media_id = '180777777892'
+    full_reply_id = '178777777111'
+    comment_partial = server._safe_partial_identifier(full_comment_id)
+    media_partial = server._safe_partial_identifier(full_media_id)
+    _seed(db, **_ev(
+        'opening_dm_success',
+        username='acca',
+        when=now,
+        comment=comment_partial,
+        media=media_partial,
+        instagram_account_id_partial='178...615',
+    ))
+    # Older doc without last_attempt_at would be missed by the broad
+    # diagnostic window scan. The endpoint should still do a bounded
+    # targeted read by partial comment+media+account identity.
+    db.comments.docs.append({
+        'igCommentId': full_comment_id,
+        'mediaId': full_media_id,
+        'instagramUsername': 'acca',
+        'instagramAccountId': '178000000615',
+        'reply_provider_comment_id': full_reply_id,
+        'reply_provider_response_ok': True,
+        'reply_status': 'success',
+        'dm_status': 'success',
+        'action_status': 'success',
+        'created': now - timedelta(days=2),
+    })
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=60,
+        user_id='admin',
+    ))
+    event = result['events'][0]
+    assert event['comment_id_partial'] == comment_partial
+    assert event['media_id_partial'] == media_partial
+    assert event['reply_status'] == 'success'
+    assert event['dm_status'] == 'success'
+    assert event['action_status'] == 'success'
+    assert event['reply_provider_comment_id_partial'] == server._safe_partial_identifier(full_reply_id)
+    blob = repr(result)
+    assert full_comment_id not in blob
+    assert full_media_id not in blob
+    assert full_reply_id not in blob
+
+
+def test_provider_proof_enrichment_unmatched_comment_fails_safely(monkeypatch):
+    db = _DB()
+    now = datetime.utcnow()
+    _seed(db, **_ev(
+        'public_reply_success',
+        username='acca',
+        when=now,
+        comment='181...639',
+        media='180...892',
+    ))
+    db.comments.docs.append({
+        'ig_comment_id': '181000000000',
+        'media_id': '180000000000',
+        'instagramUsername': 'acca',
+        'reply_provider_comment_id': '178000000111',
+        'reply_status': 'success',
+        'created': now - timedelta(days=2),
+    })
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='acca',
+        since_minutes=60,
+        user_id='admin',
+    ))
+    event = result['events'][0]
+    assert event['comment_id_partial'] == '181...639'
+    assert 'reply_provider_comment_id_partial' not in event
+    assert 'reply_status' not in event
 
 
 # ---------------------------------------------------------------------------

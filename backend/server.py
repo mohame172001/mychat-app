@@ -24483,6 +24483,17 @@ async def admin_instagram_webhook_verification(
                 ids.add(str(raw))
         return {v for v in ids if v}
 
+    def _partial_identifier_regex(partial: Any) -> Optional[re.Pattern]:
+        text = str(partial or '').strip()
+        if not text or '...' not in text:
+            return None
+        first, last = text.split('...', 1)
+        first = re.escape(first.strip())
+        last = re.escape(last.strip())
+        if not first or not last:
+            return None
+        return re.compile(f'^{first}.*{last}$')
+
     def _proof_from_comment_doc(comment_doc: dict) -> dict:
         # Read-only admin enrichment. Keep every identifier partial-only
         # and every error sanitized through the flight-recorder text guard.
@@ -24543,6 +24554,81 @@ async def admin_instagram_webhook_verification(
         }
         return {k: v for k, v in proof.items() if v not in (None, '')}
 
+    comment_projection = {
+        '_id': 0,
+        'id': 1,
+        'user_id': 1,
+        'username_key': 1,
+        'instagramUsername': 1,
+        'instagram_account_id_partial': 1,
+        'instagramAccountId': 1,
+        'igUserId': 1,
+        'ig_comment_id': 1,
+        'igCommentId': 1,
+        'comment_id': 1,
+        'commentId': 1,
+        'source_comment_id': 1,
+        'sourceCommentId': 1,
+        'media_id': 1,
+        'mediaId': 1,
+        'ig_media_id': 1,
+        'igMediaId': 1,
+        'reply_provider_comment_id': 1,
+        'provider_reply_id': 1,
+        'reply_id': 1,
+        'reply_provider_response_ok': 1,
+        'opening_message_id': 1,
+        'openingMessageId': 1,
+        'opening_dm_message_id': 1,
+        'provider_message_id': 1,
+        'dm_provider_message_id': 1,
+        'message_id': 1,
+        'dm_provider_response_ok': 1,
+        'reply_status': 1,
+        'replyStatus': 1,
+        'dm_status': 1,
+        'dmStatus': 1,
+        'action_status': 1,
+        'actionStatus': 1,
+        'reply_failure_reason': 1,
+        'last_public_reply_error': 1,
+        'public_reply_error': 1,
+        'dm_failure_reason': 1,
+        'last_dm_error': 1,
+        'opening_dm_error': 1,
+        'dm_skip_reason': 1,
+        'dmSkipReason': 1,
+        'created': 1,
+        'created_at': 1,
+        'processed_at': 1,
+        'last_attempt_at': 1,
+        'updated': 1,
+    }
+
+    def _store_comment_proof_for_event_matches(
+        comment_doc: dict,
+        wanted_comment_partials: set,
+        wanted_media_partials: set,
+        proof_by_event_key: dict,
+    ) -> bool:
+        c_comment_ids = _comment_id_partials(comment_doc)
+        c_media_ids = _media_id_partials(comment_doc)
+        matched_comment_partials = wanted_comment_partials & c_comment_ids
+        matched_media_partials = wanted_media_partials & c_media_ids
+        if not matched_comment_partials and not matched_media_partials:
+            return False
+        proof = _proof_from_comment_doc(comment_doc)
+        if not proof:
+            return False
+        for cid in matched_comment_partials or {''}:
+            for mid in matched_media_partials or {''}:
+                proof_by_event_key[(cid, mid)] = proof
+        for cid in matched_comment_partials:
+            proof_by_event_key[(cid, '')] = proof
+        for mid in matched_media_partials:
+            proof_by_event_key[('', mid)] = proof
+        return True
+
     proof_by_event_key: Dict[tuple, dict] = {}
     try:
         comment_coll = getattr(db, 'comments', None)
@@ -24567,69 +24653,81 @@ async def admin_instagram_webhook_verification(
                 comment_query['$or'] = [
                     {'created': {'$gte': since}},
                     {'created_at': {'$gte': since}},
+                    {'processed_at': {'$gte': since}},
                     {'last_attempt_at': {'$gte': since}},
                     {'updated': {'$gte': since}},
                 ]
-            comment_cursor = comment_coll.find(comment_query, {
-                '_id': 0,
-                'id': 1,
-                'ig_comment_id': 1,
-                'comment_id': 1,
-                'commentId': 1,
-                'source_comment_id': 1,
-                'sourceCommentId': 1,
-                'media_id': 1,
-                'mediaId': 1,
-                'ig_media_id': 1,
-                'igMediaId': 1,
-                'reply_provider_comment_id': 1,
-                'provider_reply_id': 1,
-                'reply_id': 1,
-                'reply_provider_response_ok': 1,
-                'opening_message_id': 1,
-                'openingMessageId': 1,
-                'opening_dm_message_id': 1,
-                'provider_message_id': 1,
-                'dm_provider_message_id': 1,
-                'message_id': 1,
-                'dm_provider_response_ok': 1,
-                'reply_status': 1,
-                'replyStatus': 1,
-                'dm_status': 1,
-                'dmStatus': 1,
-                'action_status': 1,
-                'actionStatus': 1,
-                'reply_failure_reason': 1,
-                'last_public_reply_error': 1,
-                'public_reply_error': 1,
-                'dm_failure_reason': 1,
-                'last_dm_error': 1,
-                'opening_dm_error': 1,
-                'dm_skip_reason': 1,
-                'dmSkipReason': 1,
-                'created': 1,
-                'created_at': 1,
-                'last_attempt_at': 1,
-                'updated': 1,
-            }).sort('last_attempt_at', -1).limit(500)
+            comment_cursor = comment_coll.find(comment_query, comment_projection).sort('last_attempt_at', -1).limit(500)
             comment_rows = await comment_cursor.to_list(500)
             for c in comment_rows:
-                c_comment_ids = _comment_id_partials(c)
-                c_media_ids = _media_id_partials(c)
-                matched_comment_partials = wanted_comment_partials & c_comment_ids
-                matched_media_partials = wanted_media_partials & c_media_ids
-                if not matched_comment_partials and not matched_media_partials:
+                _store_comment_proof_for_event_matches(
+                    c,
+                    wanted_comment_partials,
+                    wanted_media_partials,
+                    proof_by_event_key,
+                )
+            missing_pairs = []
+            for r in rows[:200]:
+                cid = str(r.get('comment_id_partial') or '')
+                mid = str(r.get('media_id_partial') or '')
+                if not cid and not mid:
                     continue
-                proof = _proof_from_comment_doc(c)
-                if not proof:
+                if proof_by_event_key.get((cid, mid)) or proof_by_event_key.get((cid, '')):
                     continue
-                for cid in matched_comment_partials or {''}:
-                    for mid in matched_media_partials or {''}:
-                        proof_by_event_key[(cid, mid)] = proof
-                for cid in matched_comment_partials:
-                    proof_by_event_key[(cid, '')] = proof
-                for mid in matched_media_partials:
-                    proof_by_event_key[('', mid)] = proof
+                missing_pairs.append((cid, mid, str(r.get('username_key') or ''),
+                                      str(r.get('instagram_account_id_partial') or '')))
+            seen_target_queries = set()
+            for cid, mid, row_username, row_ig_partial in missing_pairs[:80]:
+                cid_re = _partial_identifier_regex(cid)
+                mid_re = _partial_identifier_regex(mid)
+                if not cid_re and not mid_re:
+                    continue
+                query_parts = []
+                if cid_re:
+                    query_parts.append({'$or': [
+                        {'ig_comment_id': cid_re},
+                        {'igCommentId': cid_re},
+                        {'comment_id': cid_re},
+                        {'commentId': cid_re},
+                        {'source_comment_id': cid_re},
+                        {'sourceCommentId': cid_re},
+                    ]})
+                if mid_re:
+                    query_parts.append({'$or': [
+                        {'media_id': mid_re},
+                        {'mediaId': mid_re},
+                        {'ig_media_id': mid_re},
+                        {'igMediaId': mid_re},
+                    ]})
+                identity_or = []
+                if row_username:
+                    identity_or.extend([
+                        {'username_key': row_username},
+                        {'instagramUsername': row_username},
+                    ])
+                ig_re = _partial_identifier_regex(row_ig_partial)
+                if ig_re:
+                    identity_or.extend([
+                        {'instagram_account_id_partial': row_ig_partial},
+                        {'instagramAccountId': ig_re},
+                        {'igUserId': ig_re},
+                    ])
+                if identity_or:
+                    query_parts.append({'$or': identity_or})
+                targeted_query = {'$and': query_parts} if len(query_parts) > 1 else query_parts[0]
+                query_key = repr(targeted_query)
+                if query_key in seen_target_queries:
+                    continue
+                seen_target_queries.add(query_key)
+                targeted_cursor = comment_coll.find(targeted_query, comment_projection).sort('last_attempt_at', -1).limit(5)
+                targeted_rows = await targeted_cursor.to_list(5)
+                for c in targeted_rows:
+                    _store_comment_proof_for_event_matches(
+                        c,
+                        wanted_comment_partials,
+                        wanted_media_partials,
+                        proof_by_event_key,
+                    )
     except Exception:
         proof_by_event_key = {}
     SAFE_EXTRA_KEYS = {
