@@ -77,6 +77,19 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toMatch(/title=\{ev\.created_at \|\| ''\}/);
   });
 
+  test('defines parseBackendUtcTimestamp and uses it from wvFormatLocal', () => {
+    // The helper must exist by name (operator can search the codebase).
+    expect(source).toContain('function parseBackendUtcTimestamp');
+    // It must defensively handle both Z-suffixed and naive ISO strings.
+    expect(source).toMatch(/\/Z\$\/\.test/);
+    expect(source).toMatch(/\[\+\-\]\\d\{2\}:\?\\d\{2\}\$/);
+    // wvFormatLocal must consume the parser, not call `new Date(ts)` raw.
+    expect(source).toContain('parseBackendUtcTimestamp(ts)');
+    // Defensive: the formatter must not bypass the parser by calling
+    // new Date directly on the timestamp string.
+    expect(source).not.toMatch(/new Date\(ts\)/);
+  });
+
   test('does not introduce any username-specific automation logic', () => {
     // Allowed: ui default WV_DEFAULT_USERNAME = 'muhammad_gehad'; the
     // placeholder string; and the input value default. Forbidden:

@@ -24311,8 +24311,30 @@ async def admin_instagram_webhook_verification(
                 if (r.get('media_id_partial') or '')
                 .find(str(media_id_partial)) >= 0]
 
-    def _iso(value):
-        return value.isoformat() if isinstance(value, datetime) else value
+    def _utc_iso(value):
+        """Always emit a Z-suffixed UTC ISO string so the browser's
+        `Date()` constructor doesn't silently parse a naive ISO as
+        local time. Stored Mongo datetimes are naive UTC (Python
+        `datetime.utcnow()`), so we tag them with 'Z'. Aware datetimes
+        are converted to UTC first. Non-datetime values pass through.
+        """
+        if not isinstance(value, datetime):
+            return value
+        # Naive datetime → treat as UTC and add the suffix.
+        if value.tzinfo is None:
+            return value.isoformat() + 'Z'
+        # Aware datetime → convert to UTC, then strip the +00:00 and
+        # use 'Z' for consistency.
+        try:
+            from datetime import timezone as _tz
+            utc = value.astimezone(_tz.utc).replace(tzinfo=None)
+            return utc.isoformat() + 'Z'
+        except Exception:
+            return value.isoformat()
+
+    # Backwards-compatible alias for any local code that still calls
+    # _iso — only used inside this endpoint scope.
+    _iso = _utc_iso
 
     # Counters
     webhook_comment_ids: set = set()
@@ -24434,7 +24456,11 @@ async def admin_instagram_webhook_verification(
         for f in SAFE_EVENT_FIELDS:
             v = r.get(f)
             if isinstance(v, datetime):
-                out[f] = v.isoformat()
+                # Emit as Z-suffixed UTC. Mongo stores naive UTC; without
+                # the suffix the frontend's `new Date(...)` would parse
+                # this as local time and shift the displayed value by
+                # the browser's UTC offset (TZ display bug fix).
+                out[f] = _utc_iso(v)
             else:
                 out[f] = v
         # Extra: pick only safe keys + scrub identity-alias samples to
@@ -24476,9 +24502,9 @@ async def admin_instagram_webhook_verification(
 
     return {
         'ok': True,
-        'server_now_utc': now_utc.isoformat(),
-        'window_start_utc': since.isoformat(),
-        'window_end_utc': now_utc.isoformat(),
+        'server_now_utc': _utc_iso(now_utc),
+        'window_start_utc': _utc_iso(since),
+        'window_end_utc': _utc_iso(now_utc),
         'applied_filters': applied_filters,
         'summary': summary,
         'events': serialized_events,

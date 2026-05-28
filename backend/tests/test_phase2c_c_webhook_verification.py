@@ -468,6 +468,74 @@ def test_endpoint_does_not_call_send_or_dedupe_paths():
 # ---------------------------------------------------------------------------
 
 
+def test_response_timestamps_are_z_suffixed_utc(monkeypatch):
+    """Phase 2C-C timezone fix: every datetime the endpoint emits MUST
+    end with a 'Z' so the browser's `new Date(...)` parses it as UTC.
+    Without the suffix, naive ISO is parsed as LOCAL time, which made
+    Europe/Berlin events display 2 hours behind the actual time."""
+    db = _DB()
+    now = datetime.utcnow()
+    db.instagram_automation_events.docs.append({
+        'created_at': now,
+        'stage': 'webhook_comment_detected',
+        'source': 'webhook',
+        'username_key': 'acca',
+        'instagram_account_id_partial': 'ig-A',
+        'comment_id_partial': 'c-1', 'media_id_partial': 'm-1',
+        'commenter_id_partial': 'fan-1',
+        'skip_reason': None, 'error_code': None,
+        'extra': {},
+    })
+    db.instagram_automation_events.docs.append({
+        'created_at': now,
+        'stage': 'automation_success',
+        'source': 'webhook',
+        'username_key': 'acca',
+        'instagram_account_id_partial': 'ig-A',
+        'comment_id_partial': 'c-1', 'media_id_partial': 'm-1',
+        'commenter_id_partial': 'fan-1',
+        'skip_reason': None, 'error_code': None,
+        'extra': {},
+    })
+    db.instagram_automation_events.docs.append({
+        'created_at': now,
+        'stage': 'automation_success',
+        'source': 'polling',
+        'username_key': 'acca',
+        'instagram_account_id_partial': 'ig-A',
+        'comment_id_partial': 'c-2', 'media_id_partial': 'm-2',
+        'commenter_id_partial': 'fan-2',
+        'skip_reason': None, 'error_code': None,
+        'extra': {},
+    })
+    _install(monkeypatch, db)
+    result = _run(server.admin_instagram_webhook_verification(
+        username='acca', user_id='admin',
+    ))
+    # Top-level diagnostic metadata.
+    for key in ('server_now_utc', 'window_start_utc', 'window_end_utc'):
+        v = result.get(key)
+        assert isinstance(v, str) and v.endswith('Z'), (
+            f'{key} must be Z-suffixed UTC, got {v!r}'
+        )
+    # Per-event created_at fields.
+    for ev in result.get('events') or []:
+        ca = ev.get('created_at')
+        assert isinstance(ca, str) and ca.endswith('Z'), (
+            f'event created_at must be Z-suffixed UTC, got {ca!r}'
+        )
+    # Summary latest_*_at fields.
+    s = result.get('summary') or {}
+    for key in ('latest_webhook_comment_at', 'latest_polling_success_at'):
+        v = s.get(key)
+        # These can be None when no qualifying event exists; when set,
+        # they must be Z-suffixed.
+        if v is not None:
+            assert isinstance(v, str) and v.endswith('Z'), (
+                f'summary.{key} must be Z-suffixed UTC, got {v!r}'
+            )
+
+
 def test_response_carries_diagnostic_metadata(monkeypatch):
     """Phase 2C-C frontend needs `server_now_utc`, `window_start_utc`,
     `window_end_utc`, and `applied_filters` to render the active

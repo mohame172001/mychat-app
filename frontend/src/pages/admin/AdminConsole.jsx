@@ -2701,11 +2701,38 @@ const WV_QUICK_RANGES_MIN = [10, 30, 60, 120];
 // on username.)
 const WV_DEFAULT_USERNAME = 'muhammad_gehad';
 
+/**
+ * Backend datetimes are UTC. Some come back without an explicit
+ * timezone suffix (legacy Mongo naive datetimes). JavaScript's
+ * `new Date(...)` parses a naive ISO string as LOCAL time, which
+ * silently subtracts the browser's UTC offset and shifts the display
+ * by `tz_offset` (2 hours behind in Europe/Berlin during DST).
+ *
+ * This helper normalises every backend timestamp to a real UTC
+ * instant before passing it to `Date`. If the string already carries
+ * `Z` or a `±HH:MM` offset, it's parsed verbatim. If it lacks a
+ * suffix, we append `Z` so JS treats it as UTC.
+ */
+function parseBackendUtcTimestamp(ts) {
+  if (ts == null) return null;
+  if (ts instanceof Date) return ts;
+  const s = String(ts);
+  if (!s) return null;
+  // Already carries a tz marker?
+  const hasTz =
+    /Z$/.test(s) ||
+    /[+-]\d{2}:?\d{2}$/.test(s);
+  const normalised = hasTz ? s : `${s}Z`;
+  const d = new Date(normalised);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
 function wvFormatLocal(ts) {
   if (!ts) return '';
   try {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return ts;
+    const d = ts instanceof Date ? ts : parseBackendUtcTimestamp(ts);
+    if (!d || Number.isNaN(d.getTime())) return String(ts);
     return d.toLocaleString(undefined, {
       year: 'numeric', month: 'short', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
