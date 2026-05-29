@@ -381,14 +381,29 @@ def test_helper_is_called_from_account_sync_path():
     """_sync_user_instagram_account_doc must fire the parity helper
     after upsert so every freshly-connected account auto-repairs."""
     src = inspect.getsource(server._sync_user_instagram_account_doc)
-    assert 'ensure_instagram_account_webhook_ready' in src
+    # Phase 2M re-wired the call sites to go through the
+    # certification helper which itself calls ensure_instagram_account_webhook_ready.
+    assert (
+        'ensure_instagram_account_webhook_ready' in src
+        or 'certify_instagram_account_for_comment_webhooks' in src
+    )
 
 
 def test_helper_is_called_from_account_activate_endpoint():
     src = inspect.getsource(server.instagram_account_activate)
-    assert 'ensure_instagram_account_webhook_ready' in src
+    # Phase 2M re-wired the call sites to go through the
+    # certification helper which itself calls ensure_instagram_account_webhook_ready.
+    assert (
+        'ensure_instagram_account_webhook_ready' in src
+        or 'certify_instagram_account_for_comment_webhooks' in src
+    )
 
 
 def test_helper_is_called_from_admin_repair_endpoint():
     src = inspect.getsource(server.admin_instagram_repair_comment_webhooks)
-    assert 'ensure_instagram_account_webhook_ready' in src
+    # Phase 2M re-wired the call sites to go through the
+    # certification helper which itself calls ensure_instagram_account_webhook_ready.
+    assert (
+        'ensure_instagram_account_webhook_ready' in src
+        or 'certify_instagram_account_for_comment_webhooks' in src
+    )

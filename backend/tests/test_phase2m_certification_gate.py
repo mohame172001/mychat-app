@@ -1,0 +1,473 @@
+"""Phase 2M — comment-webhook certification gate.
+
+The product now refuses to activate a comment automation rule on an
+Instagram account that has not been certified ready by the backend.
+This file covers the 23-point spec:
+
+  1.  Account connect runs certification (via the sync wire-in).
+  2.  Account activation runs certification (via the activate wire-in).
+  3.  Admin Repair runs certification (delegates to the helper).
+  4.  Certification normalizes identity (delegates to Phase 2K helper).
+  5.  Certification adds webhookEntryIdAliases generically.
+  6.  Certification fresh-verifies subscribed fields (calls subscribe).
+  7.  Certification repairs missing comments/live_comments (subscribe).
+  8.  Certification repairs safe empty/null rule binding (Phase 2K).
+  9.  Certification repairs media catalog binding (Phase 2K).
+  10. Comment automation activation is blocked if account is not ready.
+  11. Existing comment rule is paused if account flips to not ready.
+  12. Ready account can activate comment automation.
+  13. Working-shape account stays ready (idempotent).
+  14. Missing-shape account is repaired and certified ready when subs ok.
+  15. Meta-delivery-blocked status set when comments subscribed but only
+      non-comment webhooks arrive in the lookback window.
+  16-23. Unchanged-contract guards.
+"""
+import asyncio
+import inspect
+import os
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
+os.environ.setdefault('JWT_SECRET', 'test-secret')
+os.environ.setdefault('BACKEND_PUBLIC_URL', 'https://example.com')
+os.environ.setdefault('FRONTEND_URL', 'https://example.com')
+os.environ.setdefault('IG_APP_ID', '123')
+os.environ.setdefault('IG_APP_SECRET', 'secret')
+os.environ.setdefault('CRON_SECRET', 'cron-secret')
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import server  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# In-memory fake DB
+# ---------------------------------------------------------------------------
+
+
+class _UR:
+    def __init__(self, n):
+        self.modified_count = n
+
+
+class _Coll:
+    def __init__(self, items=None):
+        self.items = list(items or [])
+
+    def find(self, query=None, projection=None):
+        out = []
+        for it in self.items:
+            ok = True
+            if isinstance(query, dict):
+                for k, v in query.items():
+                    if k.startswith('$'):
+                        continue
+                    if isinstance(v, dict) and '$gte' in v:
+                        if it.get(k) is None or it.get(k) < v['$gte']:
+                            ok = False
+                            break
+                    elif it.get(k) != v:
+                        ok = False
+                        break
+            if ok:
+                out.append(it)
+        class _C:
+            def __init__(self, rows): self._r = rows
+            def sort(self, *a, **kw): return self
+            def limit(self, n): self._r = self._r[:n]; return self
+            async def to_list(self, n): return list(self._r[:n])
+        return _C(out)
+
+    async def find_one(self, query=None, projection=None):
+        if not query:
+            return self.items[0] if self.items else None
+        for it in self.items:
+            ok = True
+            for k, v in query.items():
+                if k.startswith('$'):
+                    continue
+                if it.get(k) != v:
+                    ok = False
+                    break
+            if ok:
+                return it
+        return None
+
+    async def update_one(self, query, update):
+        for it in self.items:
+            if all(
+                it.get(k) == v for k, v in query.items() if not k.startswith('$')
+            ):
+                for k, v in (update.get('$set') or {}).items():
+                    it[k] = v
+                add = (update.get('$addToSet') or {}).get('webhookEntryIdAliases')
+                if add:
+                    existing = list(it.get('webhookEntryIdAliases') or [])
+                    items_to_add = (
+                        add.get('$each')
+                        if isinstance(add, dict) and '$each' in add
+                        else [add]
+                    )
+                    for v in items_to_add:
+                        if v not in existing:
+                            existing.append(v)
+                    it['webhookEntryIdAliases'] = existing
+                return _UR(1)
+        return _UR(0)
+
+    async def update_many(self, query, update):
+        modified = 0
+        for it in self.items:
+            ok = True
+            # match owner clauses
+            for clause in query.get('$or') or []:
+                pass  # fall through to detailed check below
+            # owner: userId or user_id
+            owner_ok = True
+            top_or = query.get('$or')
+            if top_or:
+                owner_ok = any(it.get(k) == v for c in top_or for k, v in c.items())
+            if not owner_ok:
+                continue
+            # status filter
+            if 'status' in query and it.get('status') != query['status']:
+                continue
+            # nested $and clauses (instagram match + comment rule type)
+            and_clauses = query.get('$and') or []
+            and_ok = True
+            for cl in and_clauses:
+                inner_or = cl.get('$or')
+                if not inner_or:
+                    continue
+                if not any(
+                    (
+                        (v == {'$in': ['', None]} and it.get(k) in ('', None))
+                        or (v == {'$exists': False} and k not in it)
+                        or (it.get(k) == v)
+                    )
+                    for o in inner_or for k, v in o.items()
+                ):
+                    and_ok = False
+                    break
+            if not and_ok:
+                continue
+            for k, v in (update.get('$set') or {}).items():
+                it[k] = v
+            modified += 1
+        return _UR(modified)
+
+
+class _DB:
+    def __init__(self, accounts=None, automations=None, media=None, events=None):
+        self.instagram_accounts = _Coll(accounts)
+        self.automations = _Coll(automations)
+        self.instagram_media_catalog = _Coll(media)
+        self.instagram_automation_events = _Coll(events)
+
+    def __getattr__(self, name):
+        return _Coll([])
+
+
+class _SubStub:
+    def __init__(self, subscribed=None, status=200):
+        self.subscribed = list(
+            subscribed if subscribed is not None
+            else server.WEBHOOK_REQUIRED_FIELDS
+        )
+        self.status = status
+
+    async def __call__(self, ig_user_id, access_token):
+        return {
+            'ok': self.status == 200,
+            'subscribe_status': self.status,
+            'verify_status': self.status,
+            'subscribed_fields': list(self.subscribed),
+        }
+
+
+# ---------------------------------------------------------------------------
+# 4-9, 13, 14. Certification produces ready state for working-shape input
+# ---------------------------------------------------------------------------
+
+
+def test_13_working_shape_account_certified_ready(monkeypatch):
+    account = {
+        'id': 'acct_ready',
+        'userId': 'owner_R',
+        'username': 'working_acc',
+        'instagramAccountId': '17841500000000777',
+        'igUserId': '17841500000000777',
+        'webhookEntryIdAliases': ['17841500000000777'],
+        'accessToken': 'fake-token',
+        'connectionValid': True,
+    }
+    db = _DB(accounts=[dict(account)])
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
+    )
+    assert report['comment_webhook_ready'] is True
+    assert report['comment_webhook_status'] == 'ready'
+    persisted = db.instagram_accounts.items[0]
+    assert persisted['commentWebhookReady'] is True
+    assert persisted['commentWebhookStatus'] == 'ready'
+    assert persisted['commentWebhookCertifiedAt']
+
+
+def test_14_missing_shape_account_is_repaired_then_certified_ready(monkeypatch):
+    account = {
+        'id': 'acct_missing',
+        'userId': 'owner_M',
+        'username': 'missing_acc',
+        'instagramAccountId': '17841500000000999',
+        # No igUserId mirror, no aliases.
+        'accessToken': 'fake-token',
+        'connectionValid': True,
+    }
+    db = _DB(accounts=[dict(account)])
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
+    )
+    assert report['comment_webhook_ready'] is True
+    persisted = db.instagram_accounts.items[0]
+    assert persisted['igUserId'] == '17841500000000999'
+    assert '17841500000000999' in (persisted.get('webhookEntryIdAliases') or [])
+
+
+# ---------------------------------------------------------------------------
+# 15. Meta-delivery-blocked verdict
+# ---------------------------------------------------------------------------
+
+
+def test_15_meta_delivery_blocked_when_only_non_comment_events_seen(monkeypatch):
+    account = {
+        'id': 'acct_mdb',
+        'userId': 'owner_MDB',
+        'username': 'mdb_acc',
+        'instagramAccountId': '17841500000000222',
+        'igUserId': '17841500000000222',
+        'accessToken': 'fake-token',
+        'connectionValid': True,
+        'webhookEntryIdAliases': ['17841500000000222'],
+    }
+    # Non-comment events only.
+    now = datetime.utcnow()
+    events = [
+        {
+            'created_at': now - timedelta(minutes=5),
+            'stage': 'webhook_received',
+            'source': 'webhook',
+            'username_key': 'mdb_acc',
+            'extra': {},
+        },
+        {
+            'created_at': now - timedelta(minutes=4),
+            'stage': 'account_resolution_success',
+            'source': 'webhook',
+            'username_key': 'mdb_acc',
+            'extra': {
+                'via': 'instagram_accounts',
+                'has_comments_field': False,
+                'has_live_comments_field': False,
+                'has_messages_field': True,
+            },
+        },
+    ]
+    db = _DB(accounts=[dict(account)], events=events)
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
+    )
+    assert report['comment_webhook_status'] == 'meta_delivery_blocked'
+    assert report['comment_webhook_ready'] is False
+    assert report['comment_webhook_meta_delivery_blocked'] is True
+
+
+# ---------------------------------------------------------------------------
+# 10-12. Activation gate
+# ---------------------------------------------------------------------------
+
+
+def test_10_activation_blocked_when_not_ready(monkeypatch):
+    monkeypatch.setattr(server, '_IG_REQUIRE_COMMENT_WEBHOOK_CERT', True)
+    account = {
+        'id': 'acct_x', 'instagramAccountId': '17841500000000111',
+        'igUserId': '17841500000000111', 'connectionValid': True,
+        'commentWebhookReady': False,
+        'commentWebhookStatus': 'repair_required',
+    }
+    automation = {
+        'id': 'r1', 'trigger': 'comment', 'status': 'active',
+        'instagramAccountId': '17841500000000111',
+    }
+    try:
+        _run(server._validate_automation_integrity_for_account(
+            'owner_X', account, automation, require_connected=True,
+        ))
+        assert False, 'expected HTTPException'
+    except server.HTTPException as exc:
+        assert exc.status_code == 400
+        detail = exc.detail
+        if isinstance(detail, dict):
+            assert detail.get('code') == 'comment_webhook_not_ready'
+
+
+def test_12_activation_allowed_when_ready(monkeypatch):
+    monkeypatch.setattr(server, '_IG_REQUIRE_COMMENT_WEBHOOK_CERT', True)
+    account = {
+        'id': 'acct_y', 'instagramAccountId': '17841500000000111',
+        'igUserId': '17841500000000111', 'connectionValid': True,
+        'commentWebhookReady': True,
+        'commentWebhookStatus': 'ready',
+    }
+    automation = {
+        'id': 'r1', 'trigger': 'comment', 'status': 'active',
+        'instagramAccountId': '17841500000000111',
+    }
+    # No exception → allowed.
+    _run(server._validate_automation_integrity_for_account(
+        'owner_Y', account, automation, require_connected=True,
+    ))
+
+
+def test_dm_rule_activation_not_blocked_by_comment_cert(monkeypatch):
+    """Only comment rules are gated. DM rules continue to activate
+    even when the comment cert is not ready."""
+    monkeypatch.setattr(server, '_IG_REQUIRE_COMMENT_WEBHOOK_CERT', True)
+    account = {
+        'id': 'acct_z', 'instagramAccountId': '17841500000000111',
+        'igUserId': '17841500000000111', 'connectionValid': True,
+        'commentWebhookReady': False,
+        'commentWebhookStatus': 'repair_required',
+    }
+    automation = {
+        'id': 'r_dm', 'event_type': 'dm', 'status': 'active',
+        'instagramAccountId': '17841500000000111',
+    }
+    _run(server._validate_automation_integrity_for_account(
+        'owner_Z', account, automation, require_connected=True,
+    ))
+
+
+def test_11_existing_comment_rule_auto_paused_when_not_ready(monkeypatch):
+    account = {
+        'id': 'acct_p',
+        'userId': 'owner_P',
+        'instagramAccountId': '17841500000000333',
+        'igUserId': '17841500000000333',
+        'accessToken': 'fake-token',
+        'connectionValid': True,
+    }
+    automations = [
+        {'id': 'r_active', 'userId': 'owner_P', 'status': 'active',
+         'event_type': 'comment',
+         'instagramAccountId': '17841500000000333'},
+        {'id': 'r_dm', 'userId': 'owner_P', 'status': 'active',
+         'event_type': 'dm',
+         'instagramAccountId': '17841500000000333'},
+    ]
+    db = _DB(accounts=[dict(account)], automations=automations)
+    server.db = db
+    # Force the subscribe stub to return MISSING fields so cert →
+    # repair_required → auto-pause kicks in.
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(['messages']),  # comments + live_comments missing
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='admin_repair')
+    )
+    assert report['comment_webhook_ready'] is False
+    assert report['comment_webhook_status'] == 'repair_required'
+    by_id = {r['id']: r for r in db.automations.items}
+    assert by_id['r_active']['status'] == 'paused'
+    assert by_id['r_active'].get('paused_reason') == 'comment_webhook_not_ready'
+    # DM rule must NOT be touched.
+    assert by_id['r_dm']['status'] == 'active'
+
+
+# ---------------------------------------------------------------------------
+# 1-3. Wire-in proof
+# ---------------------------------------------------------------------------
+
+
+def test_1_certify_called_from_sync_path():
+    src = inspect.getsource(server._sync_user_instagram_account_doc)
+    assert 'certify_instagram_account_for_comment_webhooks' in src
+
+
+def test_2_certify_called_from_activate_endpoint():
+    src = inspect.getsource(server.instagram_account_activate)
+    assert 'certify_instagram_account_for_comment_webhooks' in src
+
+
+def test_3_certify_called_from_admin_repair():
+    src = inspect.getsource(server.admin_instagram_repair_comment_webhooks)
+    assert 'certify_instagram_account_for_comment_webhooks' in src
+
+
+# ---------------------------------------------------------------------------
+# 16-23. Unchanged-contract guards
+# ---------------------------------------------------------------------------
+
+
+def test_no_username_specific_logic():
+    src = inspect.getsource(server)
+    for needle in (
+        "username == 'muhammad_gehad'",
+        "username == 'mogehad17'",
+        "username_key == 'muhammad_gehad'",
+        "username_key == 'mogehad17'",
+    ):
+        assert needle not in src
+
+
+def test_polling_remains_disabled_by_default():
+    src = inspect.getsource(server)
+    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
+
+
+def test_hmac_unchanged():
+    assert 'hmac.compare_digest' in inspect.getsource(server)
+
+
+def test_billing_unchanged():
+    assert hasattr(server, 'reserve_usage_limit')
+
+
+def test_dedupe_unchanged():
+    assert "'dedupe_checked'" in inspect.getsource(server)
+
+
+def test_phase2d_cooldown_unchanged():
+    assert 'opening_dm_already_sent_for_commenter_media' in inspect.getsource(server)
+
+
+def test_quick_reply_copy_unchanged():
+    src = inspect.getsource(server)
+    assert 'public_reply_attempted' in src
+    assert 'opening_dm_attempted' in src
+
+
+def test_no_cross_account_routing_changed():
+    src = inspect.getsource(server)
+    assert 'INSTAGRAM_SINGLE_TENANT_FALLBACK' in src

@@ -174,6 +174,15 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('polling_interval_seconds');
   });
 
+  test('Phase 2M: per-account comment_webhook_status badge rendered', () => {
+    expect(source).toContain('webhook-verification-comment-webhook-status-');
+    expect(source).toContain('comment_webhook_status');
+    expect(source).toContain('comment_webhook_ready');
+    expect(source).toContain('comment_webhook_blocker');
+    expect(source).toContain('reconnect_required');
+    expect(source).toContain('meta_delivery_blocked');
+  });
+
   test('Phase 2L: fresh-comment anchor + fresh Graph verify wired in', () => {
     expect(source).toContain('webhook-verification-fresh-comment-anchor');
     expect(source).toContain('webhook-verification-after-utc');

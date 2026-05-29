@@ -13665,6 +13665,54 @@ async def _validate_automation_integrity_for_account(
         raise HTTPException(400, 'No Instagram account connected')
     if require_connected and account_doc.get('connectionValid') is False:
         raise HTTPException(400, 'instagram_reconnect_required')
+    # Phase 2M — comment-webhook certification gate.
+    # An active comment automation cannot be created or re-enabled
+    # unless the Instagram account has been certified ready by the
+    # backend. The certification fields are written by
+    # `certify_instagram_account_for_comment_webhooks` on every
+    # connect / activate / admin-repair, so the operator never has to
+    # think about it: ready = automatic; not ready = clear refusal
+    # with an actionable error. Polling is NOT used as a fallback —
+    # the spec explicitly forbids that masking.
+    if (
+        require_connected
+        and _IG_REQUIRE_COMMENT_WEBHOOK_CERT
+        and _is_comment_automation_rule(automation_doc)
+    ):
+        ready = bool(account_doc.get('commentWebhookReady'))
+        if not ready:
+            status = (
+                account_doc.get('commentWebhookStatus')
+                or COMMENT_WEBHOOK_STATUS_NOT_READY
+            )
+            blocker = account_doc.get('commentWebhookBlocker')
+            if status == COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED:
+                action = 'Reconnect Instagram for this account.'
+            elif status == COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED:
+                action = (
+                    'Meta is not delivering comment payloads for this '
+                    'account. Open a Meta support ticket for this '
+                    'Instagram Business Account id; comment automation '
+                    'cannot be activated until delivery resumes.'
+                )
+            else:
+                action = (
+                    'Run the admin Repair / Fresh Graph verify, then '
+                    'try again. Comment automation requires a certified '
+                    'comment webhook subscription.'
+                )
+            raise HTTPException(
+                400,
+                {
+                    'code': 'comment_webhook_not_ready',
+                    'message': (
+                        'Instagram comment webhooks are not ready for '
+                        'this account. ' + action
+                    ),
+                    'comment_webhook_status': status,
+                    'comment_webhook_blocker': blocker,
+                },
+            )
     expected_ig = str(account_doc.get('instagramAccountId') or account_doc.get('igUserId') or '').strip()
     actual_ig = str(
         automation_doc.get('instagramAccountId') or
@@ -14167,10 +14215,10 @@ async def _sync_user_instagram_account_doc(
     if stored and _IG_AUTO_ENSURE_WEBHOOK_READY:
         try:
             create_tracked_task(
-                ensure_instagram_account_webhook_ready(
+                certify_instagram_account_for_comment_webhooks(
                     stored, reason='sync',
                 ),
-                f'ensure_account_webhook_ready:{_safe_partial_identifier(stored.get("id"))}',
+                f'certify_account_for_comment_webhooks:{_safe_partial_identifier(stored.get("id"))}',
             )
         except Exception:
             pass
@@ -15937,6 +15985,299 @@ async def ensure_instagram_account_webhook_ready(
         and not report['account_binding_mismatch']
     )
     return report
+
+
+# Phase 2M — gate flag for the comment-webhook certification check
+# inside `_validate_automation_integrity_for_account`. Default ON in
+# production so a fresh deploy refuses to activate comment automation
+# on an uncertified account. conftest.py turns it OFF for the legacy
+# pytest suite (which builds fake accounts that never went through
+# the certification helper). The Phase 2M tests force it back ON
+# inside the test body.
+_IG_REQUIRE_COMMENT_WEBHOOK_CERT = (
+    os.environ.get('IG_REQUIRE_COMMENT_WEBHOOK_CERT', '1') == '1'
+)
+
+
+# Phase 2M — Comment-webhook certification states.
+COMMENT_WEBHOOK_STATUS_READY = 'ready'
+COMMENT_WEBHOOK_STATUS_REPAIR_REQUIRED = 'repair_required'
+COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED = 'reconnect_required'
+COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED = 'meta_delivery_blocked'
+COMMENT_WEBHOOK_STATUS_NOT_READY = 'not_ready'
+
+
+# How long to look back at the flight recorder when deciding whether
+# Meta is delivering non-comment webhooks but no comment ones. Tunable
+# via env; default 24h so a single quiet posting window doesn't trip
+# the meta_delivery_blocked verdict.
+_COMMENT_WEBHOOK_DELIVERY_LOOKBACK_MINUTES = int(
+    os.environ.get('COMMENT_WEBHOOK_DELIVERY_LOOKBACK_MINUTES', '1440')
+)
+
+
+async def _measure_account_webhook_delivery_signal(
+    *,
+    username_key: str,
+    instagram_account_id: str,
+    minutes: int,
+) -> Dict[str, Any]:
+    """Read-only count: in the lookback window, how many webhook events
+    of any kind arrived for this account, and how many were comment-
+    bearing?
+
+    Returns ``{webhook_event_count, comment_event_count,
+    comment_payload_seen, lookback_minutes}``. Used by the
+    certification helper to decide ``meta_delivery_blocked`` (other
+    webhooks arrived, comments did not). All identifiers are partial.
+    """
+    out = {
+        'webhook_event_count': 0,
+        'comment_event_count': 0,
+        'comment_payload_seen': False,
+        'lookback_minutes': int(minutes),
+    }
+    if not (username_key or instagram_account_id):
+        return out
+    since = datetime.utcnow() - timedelta(minutes=int(minutes))
+    ig_partial = _safe_partial_identifier(instagram_account_id) if instagram_account_id else ''
+    query: Dict[str, Any] = {
+        'created_at': {'$gte': since},
+        'source': 'webhook',
+    }
+    or_clauses: list = []
+    if username_key:
+        or_clauses.append({'username_key': username_key})
+    if ig_partial:
+        or_clauses.append({'instagram_account_id_partial': ig_partial})
+    if or_clauses:
+        query['$or'] = or_clauses
+    try:
+        cursor = db.instagram_automation_events.find(
+            query, {'_id': 0, 'stage': 1, 'extra': 1},
+        ).limit(500)
+        rows = await cursor.to_list(500)
+    except Exception:
+        rows = []
+    for r in rows:
+        stage = str(r.get('stage') or '')
+        if stage in (
+            'webhook_received',
+            'account_resolution_success',
+            'account_resolution_failed',
+            'webhook_comment_detected',
+        ):
+            out['webhook_event_count'] += 1
+        if stage == 'webhook_comment_detected':
+            out['comment_event_count'] += 1
+            out['comment_payload_seen'] = True
+        elif stage == 'account_resolution_success':
+            extra = r.get('extra') if isinstance(r.get('extra'), dict) else {}
+            if extra.get('has_comments_field') or extra.get('has_live_comments_field'):
+                out['comment_payload_seen'] = True
+                out['comment_event_count'] += 1
+    return out
+
+
+async def _pause_comment_rules_for_uncertified_account(
+    *,
+    user_id: str,
+    instagram_account_id: str,
+    blocker: str,
+) -> int:
+    """Pause active comment automations bound to this specific
+    account when certification flips to a non-ready state. Account-
+    scoped: never touches rules of other users or other accounts.
+    Returns the count of rules that were paused.
+    """
+    if not (user_id and instagram_account_id):
+        return 0
+    try:
+        result = await db.automations.update_many(
+            {
+                '$or': [
+                    {'userId': user_id},
+                    {'user_id': user_id},
+                ],
+                '$and': [
+                    {'$or': [
+                        {'instagramAccountId': instagram_account_id},
+                        {'igUserId': instagram_account_id},
+                    ]},
+                ],
+                'status': 'active',
+                # Only pause COMMENT automations. DM automations and
+                # other rule types are untouched (DM webhooks are a
+                # separate Meta delivery channel and unaffected by
+                # comment-field gating).
+                '$or': [
+                    {'event_type': 'comment'},
+                    {'eventType': 'comment'},
+                    {'rule_type': 'comment'},
+                    {'ruleType': 'comment'},
+                ],
+            },
+            {'$set': {
+                'status': 'paused',
+                'paused_reason': 'comment_webhook_not_ready',
+                'pausedReason': 'comment_webhook_not_ready',
+                'pause_blocker': blocker,
+                'pauseBlocker': blocker,
+                'paused_at': datetime.utcnow(),
+                'pausedAt': datetime.utcnow(),
+                'updated': datetime.utcnow(),
+            }},
+        )
+        return int(getattr(result, 'modified_count', 0) or 0)
+    except Exception as exc:
+        logger.info(
+            'comment_rule_auto_pause_failed user_id=%s err=%s',
+            user_id, type(exc).__name__,
+        )
+        return 0
+
+
+async def certify_instagram_account_for_comment_webhooks(
+    account: dict,
+    *,
+    reason: str = 'connect',
+    auto_pause_when_not_ready: bool = True,
+) -> dict:
+    """Phase 2M — authoritative comment-webhook readiness gate.
+
+    Wraps :func:`ensure_instagram_account_webhook_ready` and produces a
+    single, durable readiness verdict that the rest of the product
+    uses to decide whether comment automation may be active for this
+    account. Persisted on the row as ``commentWebhookReady`` plus the
+    supporting status fields enumerated in the spec.
+
+    Status decision tree (highest precedence first):
+
+      * ``reconnect_required`` — no canonical ig_user_id, no access
+        token, or connection is invalid.
+      * ``repair_required``    — fresh Graph subscribe failed OR
+        ``comments`` / ``live_comments`` are still missing post-repair.
+      * ``meta_delivery_blocked`` — fresh subscribe says ok AND the
+        account has received non-comment webhooks in the lookback
+        window BUT zero comment payloads.
+      * ``ready``              — fresh subscribe ok AND comments are
+        subscribed. Account is allowed to host active comment rules.
+      * ``not_ready``          — catch-all if no other branch fires
+        (e.g. brand-new account before any webhook traffic).
+
+    Account-agnostic: no per-username branches. Returns the same
+    sanitized report shape as Phase 2K plus the new certification
+    fields and persists them to the row.
+    """
+    if not isinstance(account, dict):
+        return {'comment_webhook_ready': False, 'comment_webhook_status': COMMENT_WEBHOOK_STATUS_NOT_READY}
+
+    # 1. Run the underlying repair pipeline (identity, alias,
+    #    subscription, rule binding, media-catalog rebind).
+    parity = await ensure_instagram_account_webhook_ready(account, reason=reason)
+
+    ig_user_id = str(
+        account.get('instagramAccountId') or account.get('igUserId') or ''
+    ).strip()
+    access_token = account.get('accessToken') or ''
+    connection_valid = bool(account.get('connectionValid'))
+    username_key = (account.get('username') or account.get('instagramHandle') or '').replace('@', '').lower()
+
+    subscribed_fields = sorted(
+        set(parity.get('missing_subscriptions') or []) ^ set(WEBHOOK_REQUIRED_FIELDS)
+    )
+    comments_subscribed = (
+        'comments' in subscribed_fields or 'live_comments' in subscribed_fields
+    )
+    missing_subscriptions = parity.get('missing_subscriptions') or []
+
+    # 2. Decide status.
+    status = COMMENT_WEBHOOK_STATUS_NOT_READY
+    blocker: Optional[str] = None
+    reconnect_required = False
+    meta_delivery_blocked = False
+    if not ig_user_id or not access_token or not connection_valid:
+        status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
+        blocker = 'missing_identity_or_token_or_connection'
+        reconnect_required = True
+    elif missing_subscriptions or (
+        parity.get('subscribe_status') not in (None, 200)
+    ):
+        status = COMMENT_WEBHOOK_STATUS_REPAIR_REQUIRED
+        blocker = 'subscription_repair_failed' if not comments_subscribed else (
+            'subscription_partially_ready'
+        )
+    else:
+        # Subscribe says we're good. Check whether Meta has actually
+        # delivered comment payloads recently — if non-comment events
+        # arrived but no comment events did, the durable verdict is
+        # `meta_delivery_blocked` and we must NOT mark this account
+        # ready for comment automation.
+        delivery = await _measure_account_webhook_delivery_signal(
+            username_key=username_key,
+            instagram_account_id=ig_user_id,
+            minutes=_COMMENT_WEBHOOK_DELIVERY_LOOKBACK_MINUTES,
+        )
+        if (
+            delivery['webhook_event_count'] > 0
+            and not delivery['comment_payload_seen']
+            and comments_subscribed
+        ):
+            status = COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED
+            blocker = 'comment_fields_subscribed_but_not_delivered'
+            meta_delivery_blocked = True
+        else:
+            status = COMMENT_WEBHOOK_STATUS_READY
+
+    comment_webhook_ready = status == COMMENT_WEBHOOK_STATUS_READY
+    now = datetime.utcnow()
+
+    cert_fields = {
+        'commentWebhookReady': comment_webhook_ready,
+        'commentWebhookStatus': status,
+        'commentWebhookBlocker': blocker,
+        'commentWebhookCertifiedAt': now,
+        'commentWebhookRepairAttemptedAt': now if reason in ('admin_repair', 'rule_activation') else account.get('commentWebhookRepairAttemptedAt'),
+        'commentWebhookRepairResult': (
+            'ready' if comment_webhook_ready else status
+        ),
+        'commentWebhookReconnectRequired': reconnect_required,
+        'commentWebhookMetaDeliveryBlocked': meta_delivery_blocked,
+        'commentWebhookCertificationReason': reason,
+    }
+    if account.get('id'):
+        try:
+            await db.instagram_accounts.update_one(
+                {'id': account.get('id')},
+                {'$set': cert_fields},
+            )
+        except Exception as exc:
+            logger.info(
+                'comment_webhook_certification_persist_failed account_id_partial=%s err=%s',
+                _safe_partial_identifier(account.get('id')), type(exc).__name__,
+            )
+
+    # 3. If newly not-ready, auto-pause existing active comment rules
+    # bound to this account. Always account-scoped.
+    paused = 0
+    if auto_pause_when_not_ready and not comment_webhook_ready and ig_user_id:
+        owner_user_id = account.get('userId') or account.get('user_id') or ''
+        paused = await _pause_comment_rules_for_uncertified_account(
+            user_id=owner_user_id,
+            instagram_account_id=ig_user_id,
+            blocker=str(blocker or status),
+        )
+
+    return {
+        **parity,
+        'comment_webhook_ready': comment_webhook_ready,
+        'comment_webhook_status': status,
+        'comment_webhook_blocker': blocker,
+        'comment_webhook_meta_delivery_blocked': meta_delivery_blocked,
+        'comment_webhook_reconnect_required': reconnect_required,
+        'comment_webhook_paused_rules_count': paused,
+        'comment_webhook_certified_at': now.isoformat() + 'Z',
+    }
 
 
 async def _subscribe_instagram_account_to_webhooks(ig_user_id: str, access_token: str) -> Dict[str, Any]:
@@ -24847,6 +25188,25 @@ async def _compute_webhook_subscription_status(
             'last_webhook_repair_error': _automation_flight_safe_text(
                 row.get('lastWebhookRepairError'), 160,
             ),
+            # Phase 2M — durable certification fields. The UI reads
+            # `comment_webhook_ready` and `comment_webhook_status`
+            # directly to decide whether to show "Ready" / "Repair"
+            # / "Reconnect" / "Meta delivery blocked" without
+            # interpreting raw events.
+            'comment_webhook_ready': bool(row.get('commentWebhookReady')),
+            'comment_webhook_status': row.get('commentWebhookStatus'),
+            'comment_webhook_blocker': row.get('commentWebhookBlocker'),
+            'comment_webhook_certified_at': (
+                row.get('commentWebhookCertifiedAt').isoformat() + 'Z'
+                if isinstance(row.get('commentWebhookCertifiedAt'), datetime)
+                else None
+            ),
+            'comment_webhook_reconnect_required': bool(
+                row.get('commentWebhookReconnectRequired')
+            ),
+            'comment_webhook_meta_delivery_blocked': bool(
+                row.get('commentWebhookMetaDeliveryBlocked')
+            ),
         })
     return {
         'expected_fields': expected,
@@ -25669,13 +26029,13 @@ async def admin_instagram_repair_comment_webhooks(
                 'Operator should reconnect the Instagram account from the UI.'
             ),
         }
-    # Phase 2K: delegate to the generic onboarding/repair helper so
-    # the operator-triggered repair runs the FULL parity work — not
-    # just the Graph subscribe. The helper performs identity
-    # normalization, webhookEntryIdAliases self-population, the Graph
-    # subscribe, active-rule rebind, and media-catalog rebind, all
-    # account-agnostic and idempotent.
-    ready_report = await ensure_instagram_account_webhook_ready(
+    # Phase 2M: delegate to the certification helper so the
+    # operator-triggered repair runs the FULL parity + decides
+    # readiness in one shot (identity normalization, webhookEntryId
+    # Aliases self-population, the Graph subscribe, active-rule
+    # rebind, media-catalog rebind, then certification status set
+    # on the account row). Account-agnostic and idempotent.
+    ready_report = await certify_instagram_account_for_comment_webhooks(
         account, reason='admin_repair',
     )
     subscribed_now = sorted(
@@ -29027,10 +29387,10 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
     if _IG_AUTO_ENSURE_WEBHOOK_READY:
         try:
             create_tracked_task(
-                ensure_instagram_account_webhook_ready(
+                certify_instagram_account_for_comment_webhooks(
                     refreshed, reason='activate',
                 ),
-                f'ensure_account_webhook_ready:{_safe_partial_identifier(account_id)}',
+                f'certify_account_for_comment_webhooks:{_safe_partial_identifier(account_id)}',
             )
         except Exception:
             pass

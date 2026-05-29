@@ -3421,10 +3421,35 @@ function WebhookVerificationTab() {
               {(subscriptionStatus.expected_fields || []).join(', ')}
             </span>
           </div>
-          {(subscriptionStatus.accounts || []).map((acc, idx) => (
+          {(subscriptionStatus.accounts || []).map((acc, idx) => {
+            // Phase 2M: single durable certification badge per account.
+            const certStatus = acc.comment_webhook_status || 'not_ready';
+            const certReady = !!acc.comment_webhook_ready;
+            const certColor = certReady
+              ? 'bg-emerald-100 text-emerald-900'
+              : certStatus === 'reconnect_required'
+              ? 'bg-rose-100 text-rose-900'
+              : certStatus === 'meta_delivery_blocked'
+              ? 'bg-rose-100 text-rose-900'
+              : 'bg-amber-100 text-amber-900';
+            const certAction = certReady
+              ? (ar ? 'جاهز' : 'ready')
+              : certStatus === 'reconnect_required'
+              ? (ar ? 'أعد ربط Instagram' : 'reconnect Instagram')
+              : certStatus === 'meta_delivery_blocked'
+              ? (ar ? 'حظر تسليم Meta' : 'Meta delivery blocked')
+              : (ar ? 'اضغط إصلاح' : 'click Repair');
+            return (
             <div key={idx} className="ms-2 mb-1">
               <span className="font-mono font-semibold me-1">
                 {acc.username || acc.instagram_account_id_partial || '—'}
+              </span>
+              <span
+                className={'inline-block rounded px-1 font-mono me-2 ' + certColor}
+                data-testid={`webhook-verification-comment-webhook-status-${idx}`}
+                title={acc.comment_webhook_blocker || ''}
+              >
+                {certStatus}{' · '}{certAction}
               </span>
               <span className="me-1">
                 {acc.webhook_comment_delivery_configured
@@ -3450,7 +3475,8 @@ function WebhookVerificationTab() {
                 </span>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {/* Phase 2L: fresh-comment time anchor + signal panel */}

@@ -40,3 +40,11 @@ os.environ.setdefault('IG_POLL_ENABLED', '1')
 # helper directly (test_phase2k_account_onboarding_parity.py) bypass
 # the flag because they call the helper themselves.
 os.environ.setdefault('IG_AUTO_ENSURE_WEBHOOK_READY', '0')
+
+# Phase 2M: legacy automation tests build fake accounts that never
+# pass through `certify_instagram_account_for_comment_webhooks`, so
+# their accounts lack the `commentWebhookReady=True` flag the gate
+# now enforces. Set the flag OFF for tests so those existing
+# scenarios continue to assert their original errors. The Phase 2M
+# tests explicitly monkeypatch the flag back ON inside the test body.
+os.environ.setdefault('IG_REQUIRE_COMMENT_WEBHOOK_CERT', '0')
