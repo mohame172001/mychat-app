@@ -20570,9 +20570,23 @@ def _comment_webhook_change_media_id(change: dict) -> Optional[str]:
 
 
 def _is_comment_field_change(change: dict) -> bool:
+    """Phase 2J: also treat `live_comments` as a comment-bearing change.
+
+    Meta delivers comments on Live videos under the `live_comments`
+    field, not `comments`. The downstream parser already special-cases
+    `live_comments` in the boolean `is_comment` check; we mirror that
+    here so the account-resolution / media-owner-probe paths see the
+    same payload the parser will. Without this, a live-comment webhook
+    whose `entry.id` is unmapped would fail the resolution probe and
+    never reach `webhook_comment_detected`.
+    """
     field = (change or {}).get('field')
     value = (change or {}).get('value') or {}
-    return field == 'comments' or (field == 'feed' and value.get('item') == 'comment')
+    return (
+        field == 'comments'
+        or field == 'live_comments'
+        or (field == 'feed' and value.get('item') == 'comment')
+    )
 
 
 def _first_comment_webhook_change(entry: dict) -> Optional[dict]:
@@ -20728,6 +20742,90 @@ async def _resolve_comment_webhook_by_media_owner(
     mapping_via = 'media_owner_probe'
     _webhook_media_owner_probe_cache_set(cache_key, account.get('id'), mapping_via)
     return _with_instagram_account_context(owner, account), mapping_via, 'ok'
+
+
+def _build_webhook_payload_shape(payload: dict, entry: dict) -> dict:
+    """Phase 2J — safe redacted shape of a single webhook entry.
+
+    Used both on ``account_resolution_success`` and ``account_resolution_
+    failed`` so the operator can answer "what kind of webhook did Meta
+    actually deliver for this account?" without exposing tokens, raw
+    payloads, or full IDs. Every identifier is reduced to the
+    `first3...last3` partial form via ``_safe_partial_identifier``.
+
+    Keys:
+      - ``webhook_object``               — the top-level ``object``
+                                           field (e.g. ``instagram``).
+      - ``change_fields``                — sorted list of distinct
+                                           ``changes[].field`` names.
+      - ``has_comments_field``           — at least one ``comments``
+                                           change present.
+      - ``has_live_comments_field``      — at least one ``live_comments``
+                                           change present.
+      - ``has_messages_field`` /
+        ``has_messaging_seen_field`` /
+        ``has_message_reactions_field`` /
+        ``has_messaging_postbacks_field``— mirrored from the messaging
+                                           array's event types.
+      - ``entry_id_partial`` /
+        ``value_id_partial`` /
+        ``value_comment_id_partial`` /
+        ``value_media_id_partial`` /
+        ``value_from_id_partial``        — partial-id surface.
+    """
+    entry = entry or {}
+    payload = payload or {}
+    changes = entry.get('changes') or []
+    messaging = entry.get('messaging') or []
+    change_fields = sorted({
+        str(c.get('field'))[:40] for c in changes if isinstance(c, dict) and c.get('field')
+    })
+
+    def _has_change(field_name: str) -> bool:
+        for c in changes:
+            if isinstance(c, dict) and c.get('field') == field_name:
+                return True
+        return False
+
+    messaging_types: set = set()
+    for ev in messaging:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get('message'):
+            messaging_types.add('message')
+        if ev.get('read'):
+            messaging_types.add('read')
+        if ev.get('reaction'):
+            messaging_types.add('reaction')
+        if ev.get('postback'):
+            messaging_types.add('postback')
+        if ev.get('messaging_seen'):
+            messaging_types.add('seen')
+
+    comment_change = _first_comment_webhook_change(entry)
+    value = (comment_change or {}).get('value') or {}
+    media_obj = value.get('media') or {}
+    from_obj = value.get('from') or {}
+
+    return {
+        'webhook_object': str(payload.get('object') or '')[:40] or None,
+        'change_fields': change_fields,
+        'has_comments_field': _has_change('comments'),
+        'has_live_comments_field': _has_change('live_comments'),
+        'has_messages_field': 'message' in messaging_types,
+        'has_messaging_seen_field': 'seen' in messaging_types or 'read' in messaging_types,
+        'has_message_reactions_field': 'reaction' in messaging_types,
+        'has_messaging_postbacks_field': 'postback' in messaging_types,
+        'entry_id_partial': _safe_partial_identifier(entry.get('id')),
+        'value_id_partial': _safe_partial_identifier(value.get('id')),
+        'value_comment_id_partial': _safe_partial_identifier(
+            value.get('comment_id') or value.get('id')
+        ),
+        'value_media_id_partial': _safe_partial_identifier(
+            media_obj.get('id') or _comment_webhook_change_media_id(comment_change or {})
+        ),
+        'value_from_id_partial': _safe_partial_identifier(from_obj.get('id')),
+    }
 
 
 async def _build_webhook_failure_identifier_matrix(entry: dict) -> dict:
@@ -20903,12 +21001,22 @@ async def _process_webhook(payload: dict):
                 _safe_partial_identifier(ig_account_id),
                 mapping_via,
             )
+            # Phase 2J: stamp the safe webhook payload shape onto the
+            # success event so the operator can answer "the webhook
+            # arrived and resolved — but did it carry a comment field?"
+            # without re-querying logs. Shape is partial-only and never
+            # exposes raw IDs / tokens / payload bodies.
+            try:
+                shape_extra = _build_webhook_payload_shape(payload, entry)
+            except Exception:
+                shape_extra = {}
+            shape_extra['via'] = mapping_via
             await _record_instagram_automation_event(
                 'account_resolution_success',
                 source='webhook',
                 user_doc=user_doc,
                 instagram_account_id=ig_account_id,
-                extra={'via': mapping_via},
+                extra=shape_extra,
             )
             logger.info('dm_user_mapping_success entry_id=%s user_id=%s via=%s',
                         entry.get('id'), user_id, mapping_via)
@@ -24818,6 +24926,16 @@ async def _compute_webhook_account_parity(
         webhook_success = bucket.get('webhook_success_count', 0)
         polling_seen = bucket.get('polling_seen_count', 0)
         resolution_failed = bucket.get('account_resolution_failed_count', 0)
+        # Phase 2J: count account_resolution_success events whose payload
+        # shape carried no comment field — those are messaging-only
+        # webhooks, which is normal but should not be confused with
+        # "comment webhook arrived". The bucket's resolution_path_counts
+        # only tells us we resolved; we read the per-account events
+        # again to know whether comments were present in the payload.
+        resolution_success_total = sum(
+            int(v) for v in (bucket.get('resolution_path_counts') or {}).values()
+        )
+        # Phase 2J blocker priority — most actionable label first.
         if not connection_valid:
             blocker = 'account_disconnected'
         elif not comments_subscribed:
@@ -24827,7 +24945,20 @@ async def _compute_webhook_account_parity(
         elif resolution_failed > 0 and webhook_comment_detected == 0:
             blocker = 'account_resolution_mapping_mismatch'
         elif webhook_received > 0 and webhook_comment_detected == 0:
-            blocker = 'subscription_ready_but_no_comment_webhook_delivery'
+            # Webhook arrived AND resolved but never carried a comment
+            # change for this account — Meta delivered messaging /
+            # other-field events but no comment payloads.
+            blocker = 'webhook_received_but_no_comment_payload'
+        elif (
+            resolution_success_total > 0
+            and webhook_received == 0
+            and webhook_comment_detected == 0
+        ):
+            # Recorder wrote account_resolution_success (because the
+            # webhook handler ran for this account) but the routing
+            # path never emitted a comment payload signal. Same root
+            # cause as above from the operator's POV.
+            blocker = 'subscription_ready_but_no_comment_payload_received_for_account'
         elif (
             subscription_ready
             and webhook_received == 0
@@ -25073,6 +25204,268 @@ async def admin_instagram_repair_comment_webhooks(
             'If Meta\'s app is in Development Mode, only registered testers '
             'will receive webhooks. Promote the app to Live Mode for general '
             'comment-webhook delivery.'
+        ),
+    }
+
+
+@api.get('/admin/instagram/comment-graph-check')
+async def admin_instagram_comment_graph_check(
+    username: str,
+    media_id: Optional[str] = None,
+    post_url: Optional[str] = None,
+    text: Optional[str] = None,
+    commenter_username: Optional[str] = None,
+    since_minutes: int = 30,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2J — direct Graph comment visibility probe.
+
+    The Webhook Verification panel can show that a comment was never
+    delivered as a webhook, but it cannot prove whether Meta's Graph
+    API itself sees the comment for the connected account's token.
+    This endpoint runs that probe explicitly:
+
+      1. Resolve the connected account by ``username`` (no per-user
+         branching).
+      2. Resolve the media id from either ``media_id`` directly or
+         from ``post_url`` by extracting the shortcode + looking up
+         the media in our cached `instagram_media_catalog` collection.
+      3. Call Graph ``/{media-id}/comments`` with the account token,
+         no-cache, page size 50.
+      4. Optionally match candidates by partial text contains and/or
+         commenter username (both fuzzy / case-insensitive).
+      5. Return ONLY redacted partials + booleans + bounded error.
+
+    Returns one of three top-level verdicts:
+
+      - ``graph_sees_comment``                         — at least one
+        comment matches the filters; the webhook flow is the only
+        thing missing.
+      - ``graph_does_not_see_matching_comment``        — Graph returned
+        comments but none matched the filters provided.
+      - ``graph_returned_no_comments``                 — Graph returned
+        an empty list for this media.
+      - ``graph_error``                                — Graph rejected
+        the request; ``graph_error_code`` /
+        ``graph_error_message`` carry the redacted reason.
+
+    Never exposes the raw token, the raw comment text, or full IDs.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    username_key = _automation_flight_username_key(username) if username else ''
+    if not username_key:
+        return {
+            'ok': False,
+            'verdict': 'missing_username',
+            'message': 'A non-empty username is required.',
+        }
+    if not media_id and not post_url:
+        return {
+            'ok': False,
+            'verdict': 'missing_media_id',
+            'message': 'Provide media_id or post_url to probe a specific media.',
+        }
+    account = await db.instagram_accounts.find_one({
+        'isActive': {'$ne': False},
+        '$or': [
+            {'username': username_key},
+            {'instagramHandle': username_key},
+        ],
+    })
+    if not account:
+        return {
+            'ok': False,
+            'verdict': 'account_not_found',
+            'username': username_key,
+        }
+    access_token = account.get('accessToken') or ''
+    if not access_token:
+        return {
+            'ok': False,
+            'verdict': 'account_disconnected',
+            'username': username_key,
+            'instagram_account_id_partial': _safe_partial_identifier(
+                account.get('instagramAccountId') or account.get('igUserId')
+            ),
+        }
+
+    resolved_media_id: Optional[str] = (media_id or '').strip() or None
+    media_resolution_source: Optional[str] = 'input' if resolved_media_id else None
+    if not resolved_media_id and post_url:
+        shortcode = None
+        try:
+            m = re.search(r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)', str(post_url))
+            shortcode = m.group(1) if m else None
+        except Exception:
+            shortcode = None
+        if shortcode:
+            try:
+                catalog = await db.instagram_media_catalog.find_one(
+                    {
+                        '$and': [
+                            {'$or': [
+                                {'username_key': username_key},
+                                {'instagramUsername': username_key},
+                            ]},
+                            {'$or': [
+                                {'shortcode': shortcode},
+                                {'permalink': {'$regex': re.escape(shortcode)}},
+                            ]},
+                        ],
+                    },
+                    {'_id': 0, 'media_id': 1, 'mediaId': 1, 'ig_media_id': 1, 'igMediaId': 1},
+                )
+            except Exception:
+                catalog = None
+            if catalog:
+                resolved_media_id = (
+                    catalog.get('media_id')
+                    or catalog.get('mediaId')
+                    or catalog.get('ig_media_id')
+                    or catalog.get('igMediaId')
+                )
+                media_resolution_source = 'catalog_shortcode'
+    if not resolved_media_id:
+        return {
+            'ok': False,
+            'verdict': 'media_id_not_resolvable',
+            'username': username_key,
+            'instagram_account_id_partial': _safe_partial_identifier(
+                account.get('instagramAccountId') or account.get('igUserId')
+            ),
+            'message': (
+                'Could not resolve a media id from the inputs. Pass media_id '
+                'directly or ensure the post is in the cached media catalog.'
+            ),
+        }
+
+    since_seconds = max(60, min(int(since_minutes or 30), 1440) * 60)
+    now_utc = datetime.utcnow()
+    threshold = now_utc - timedelta(seconds=since_seconds)
+    norm_text = (text or '').strip().lower()
+    norm_commenter = (commenter_username or '').strip().lstrip('@').lower()
+
+    safe_media_id_partial = _safe_partial_identifier(resolved_media_id)
+    graph_error_code: Optional[str] = None
+    graph_error_message: Optional[str] = None
+    candidates: list = []
+    matches: list = []
+    raw_count = 0
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f'https://graph.facebook.com/v21.0/{resolved_media_id}/comments',
+                params={
+                    'fields': 'id,from{id,username},text,timestamp,like_count',
+                    'limit': 50,
+                    'access_token': access_token,
+                },
+            )
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            err = body.get('error') if isinstance(body, dict) else {}
+            graph_error_code = _automation_flight_safe_text(
+                (err or {}).get('code') or (err or {}).get('type'), 80,
+            )
+            raw_msg = (err or {}).get('message') or getattr(resp, 'text', '')
+            safe_msg = _automation_flight_safe_text(raw_msg, 180) or ''
+            if re.search(r'(?i)\b(access[_-]?token|token|bearer|secret|password)\b', safe_msg):
+                safe_msg = '[redacted]'
+            graph_error_message = safe_msg or None
+            return {
+                'ok': False,
+                'verdict': 'graph_error',
+                'graph_status': int(resp.status_code),
+                'graph_error_code': graph_error_code,
+                'graph_error_message': graph_error_message,
+                'username': username_key,
+                'media_id_partial': safe_media_id_partial,
+                'media_resolution_source': media_resolution_source,
+                'instagram_account_id_partial': _safe_partial_identifier(
+                    account.get('instagramAccountId') or account.get('igUserId')
+                ),
+            }
+        body = resp.json() if resp.content else {}
+    except Exception as exc:
+        return {
+            'ok': False,
+            'verdict': 'graph_error',
+            'graph_error_code': type(exc).__name__,
+            'graph_error_message': _automation_flight_safe_text(str(exc), 160),
+            'username': username_key,
+            'media_id_partial': safe_media_id_partial,
+            'media_resolution_source': media_resolution_source,
+        }
+
+    raw_comments = (body or {}).get('data') or []
+    raw_count = len(raw_comments)
+    for c in raw_comments[:50]:
+        if not isinstance(c, dict):
+            continue
+        cid = c.get('id')
+        from_obj = c.get('from') or {}
+        commenter_id = from_obj.get('id')
+        commenter_handle = (from_obj.get('username') or '').lstrip('@').lower()
+        comment_text = c.get('text') or ''
+        ts_str = c.get('timestamp') or ''
+        try:
+            created_dt = (
+                parse_graph_datetime(ts_str) if ts_str else None
+            )
+        except Exception:
+            created_dt = None
+        # Build a safe candidate record. We never echo raw text.
+        candidate = {
+            'comment_id_partial': _safe_partial_identifier(cid),
+            'commenter_id_partial': _safe_partial_identifier(commenter_id),
+            'commenter_username': commenter_handle or None,
+            'created_time': created_dt.isoformat() + 'Z' if isinstance(created_dt, datetime) else ts_str or None,
+            'text_match': bool(norm_text and norm_text in str(comment_text).lower()),
+            'within_window': (
+                isinstance(created_dt, datetime) and created_dt >= threshold
+            ) if created_dt else None,
+        }
+        candidates.append(candidate)
+        # A "match" requires every supplied filter to match.
+        text_ok = (not norm_text) or candidate['text_match']
+        commenter_ok = (not norm_commenter) or candidate['commenter_username'] == norm_commenter
+        window_ok = (candidate['within_window'] is not False)
+        if text_ok and commenter_ok and window_ok:
+            matches.append(candidate)
+    if raw_count == 0:
+        verdict = 'graph_returned_no_comments'
+    elif matches:
+        verdict = 'graph_sees_comment'
+    else:
+        verdict = 'graph_does_not_see_matching_comment'
+
+    return {
+        'ok': True,
+        'verdict': verdict,
+        'username': username_key,
+        'media_id_partial': safe_media_id_partial,
+        'media_resolution_source': media_resolution_source,
+        'instagram_account_id_partial': _safe_partial_identifier(
+            account.get('instagramAccountId') or account.get('igUserId')
+        ),
+        'queried_at': now_utc.isoformat() + 'Z',
+        'since_minutes': max(1, int(since_minutes or 30)),
+        'graph_returned_count': raw_count,
+        'match_count': len(matches),
+        'matches': matches[:5],
+        'sample_candidates': candidates[:5],
+        # If Graph sees the comment but the Webhook Verification panel
+        # shows no webhook_comment_detected for the same comment_id,
+        # the operator now has a single durable blocker label they can
+        # screenshot and pursue with Meta support.
+        'webhook_blocker_label_if_graph_sees_but_no_webhook': (
+            'graph_sees_comment_but_no_webhook_comment_event'
+        ),
+        'webhook_blocker_label_if_graph_does_not_see': (
+            'comment_not_visible_to_connected_account_token'
         ),
     }
 
@@ -25707,6 +26100,14 @@ async def admin_instagram_webhook_verification(
         'sample_value_from_id_partial', 'sample_recipient_id_partial',
         'sample_sender_id_partial', 'probe_media_id_partial',
         'probe_outcome',
+        # Phase 2J payload-shape keys (mirrored from
+        # _build_webhook_payload_shape). Account-agnostic, partial-only.
+        'webhook_object',
+        'has_comments_field', 'has_live_comments_field',
+        'has_messages_field', 'has_messaging_seen_field',
+        'has_message_reactions_field', 'has_messaging_postbacks_field',
+        'value_id_partial', 'value_comment_id_partial',
+        'value_media_id_partial', 'value_from_id_partial',
         # account_resolution_success metadata
         'via',
         # rule_loading_finished count

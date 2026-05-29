@@ -2875,6 +2875,50 @@ function WebhookVerificationTab() {
   const flowVerdicts = Array.isArray(data?.flow_verdicts) ? data.flow_verdicts : [];
   const flowVerdictLegend = data?.flow_verdict_legend || {};
 
+  // Phase 2J: Graph comment-check.
+  const [graphCheckState, setGraphCheckState] = useState('idle');
+  const [graphCheckResult, setGraphCheckResult] = useState(null);
+  const [graphCheckMediaId, setGraphCheckMediaId] = useState('');
+  const [graphCheckPostUrl, setGraphCheckPostUrl] = useState('');
+  const [graphCheckText, setGraphCheckText] = useState('');
+  const [graphCheckCommenter, setGraphCheckCommenter] = useState('');
+  const onGraphCommentCheck = useCallback(async () => {
+    const u = (username || '').trim();
+    if (!u) {
+      setGraphCheckResult({
+        ok: false,
+        verdict: 'missing_username',
+        message: ar
+          ? 'يجب اختيار حساب username قبل التحقق.'
+          : 'Pick a username before checking Graph.',
+      });
+      return;
+    }
+    setGraphCheckState('loading');
+    setGraphCheckResult(null);
+    try {
+      const params = new URLSearchParams();
+      params.set('username', u);
+      if (graphCheckMediaId.trim()) params.set('media_id', graphCheckMediaId.trim());
+      if (graphCheckPostUrl.trim()) params.set('post_url', graphCheckPostUrl.trim());
+      if (graphCheckText.trim()) params.set('text', graphCheckText.trim());
+      if (graphCheckCommenter.trim()) params.set('commenter_username', graphCheckCommenter.trim());
+      params.set('since_minutes', String(sinceMinutes || 30));
+      const r = await api.get(
+        `/admin/instagram/comment-graph-check?${params.toString()}`,
+      );
+      setGraphCheckResult(r.data || null);
+      setGraphCheckState(r.data?.ok ? 'success' : 'failed');
+    } catch (e) {
+      setGraphCheckResult({
+        ok: false,
+        verdict: 'graph_check_request_failed',
+        graph_error_message: e?.response?.data?.detail || e?.message,
+      });
+      setGraphCheckState('failed');
+    }
+  }, [api, ar, username, graphCheckMediaId, graphCheckPostUrl, graphCheckText, graphCheckCommenter, sinceMinutes]);
+
   // Phase 2F: per-username admin repair button. Calls the new
   // /api/admin/instagram/repair-comment-webhooks endpoint, then
   // reloads the verification view so the operator sees the updated
@@ -3348,6 +3392,87 @@ function WebhookVerificationTab() {
           ))}
         </div>
       )}
+      {/* Phase 2J: Graph comment visibility check */}
+      {state === 'success' && (
+        <div
+          className="border border-slate-200 rounded-md p-2 mb-2 text-[11px] bg-white"
+          data-testid="webhook-verification-graph-comment-check"
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="font-semibold">
+              {ar ? 'تحقق Graph مباشرة (Phase 2J)' : 'Direct Graph comment check'}
+            </span>
+            <span className="text-slate-500">
+              {ar
+                ? 'هل يرى توكن الحساب التعليق على Graph؟'
+                : 'Can the connected account token see the comment via Graph?'}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-1 mb-1">
+            <input
+              type="text"
+              value={graphCheckMediaId}
+              onChange={(e) => setGraphCheckMediaId(e.target.value)}
+              placeholder="media_id"
+              className={WV_INPUT_CLASS}
+              data-testid="webhook-verification-graph-check-media-id"
+            />
+            <input
+              type="text"
+              value={graphCheckPostUrl}
+              onChange={(e) => setGraphCheckPostUrl(e.target.value)}
+              placeholder="post_url"
+              className={WV_INPUT_CLASS}
+              data-testid="webhook-verification-graph-check-post-url"
+            />
+            <input
+              type="text"
+              value={graphCheckText}
+              onChange={(e) => setGraphCheckText(e.target.value)}
+              placeholder={ar ? 'نص جزئي' : 'text contains'}
+              className={WV_INPUT_CLASS}
+              data-testid="webhook-verification-graph-check-text"
+            />
+            <input
+              type="text"
+              value={graphCheckCommenter}
+              onChange={(e) => setGraphCheckCommenter(e.target.value)}
+              placeholder={ar ? 'اسم المعلّق' : 'commenter username'}
+              className={WV_INPUT_CLASS}
+              data-testid="webhook-verification-graph-check-commenter"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              onClick={onGraphCommentCheck}
+              disabled={graphCheckState === 'loading'}
+              data-testid="webhook-verification-graph-comment-check-button"
+            >
+              {graphCheckState === 'loading'
+                ? (ar ? 'جارٍ التحقق…' : 'Checking…')
+                : (ar ? 'تحقق من Graph' : 'Check Graph')}
+            </Button>
+            {graphCheckResult && (
+              <span className="font-mono text-[11px]" data-testid="webhook-verification-graph-comment-check-result">
+                {graphCheckResult.verdict || '—'}
+                {typeof graphCheckResult.graph_returned_count === 'number' && (
+                  <span className="ms-2 text-slate-500">
+                    {' '}returned={graphCheckResult.graph_returned_count}
+                    {' '}matched={graphCheckResult.match_count}
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+          {graphCheckResult && (graphCheckResult.graph_error_message || graphCheckResult.message) && (
+            <div className="mt-1 text-rose-700">
+              {graphCheckResult.graph_error_message || graphCheckResult.message}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Phase 2I: per-comment flow verdict panel */}
       {state === 'success' && flowVerdicts.length > 0 && (
         <div

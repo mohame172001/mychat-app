@@ -174,6 +174,17 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('polling_interval_seconds');
   });
 
+  test('Phase 2J: Graph comment-check control rendered with redacted inputs', () => {
+    expect(source).toContain('webhook-verification-graph-comment-check');
+    expect(source).toContain('webhook-verification-graph-check-media-id');
+    expect(source).toContain('webhook-verification-graph-check-post-url');
+    expect(source).toContain('webhook-verification-graph-check-text');
+    expect(source).toContain('webhook-verification-graph-check-commenter');
+    expect(source).toContain('webhook-verification-graph-comment-check-button');
+    expect(source).toContain('webhook-verification-graph-comment-check-result');
+    expect(source).toContain('/admin/instagram/comment-graph-check');
+  });
+
   test('Phase 2I: per-comment flow verdict panel structural contract', () => {
     // Backend supplies the verdict label strings; the JSX reads them
     // from data.flow_verdicts and renders each as a colored chip.

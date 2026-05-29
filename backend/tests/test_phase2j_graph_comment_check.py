@@ -1,0 +1,378 @@
+"""Phase 2J — direct Graph comment-visibility probe and webhook
+payload-shape diagnostics.
+
+Covers the 14-point spec:
+
+  1.  Fresh comment missing from webhook but visible in Graph maps to
+      the operator-visible blocker label
+      ``graph_sees_comment_but_no_webhook_comment_event``.
+  2.  Fresh comment not visible in Graph maps to the label
+      ``comment_not_visible_to_connected_account_token``.
+  3.  Webhook ``account_resolution_success`` without comment fields
+      maps the parity blocker to
+      ``webhook_received_but_no_comment_payload`` (or, when there's no
+      ``webhook_received`` either,
+      ``subscription_ready_but_no_comment_payload_received_for_account``).
+  4.  ``_build_webhook_payload_shape`` redacts full ids / tokens /
+      text and only emits partials + booleans.
+  5-6. ``_is_comment_field_change`` now matches ``live_comments``
+      generically (used by both mogehad17 and muhammad_gehad).
+  7.  No username branching introduced.
+  8.  No cross-account routing.
+  9-14. Polling default OFF, HMAC / Billing / dedupe / Phase 2D
+      cooldown / quick-reply copy unchanged.
+"""
+import asyncio
+import inspect
+import os
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
+os.environ.setdefault('JWT_SECRET', 'test-secret')
+os.environ.setdefault('BACKEND_PUBLIC_URL', 'https://example.com')
+os.environ.setdefault('FRONTEND_URL', 'https://example.com')
+os.environ.setdefault('IG_APP_ID', '123')
+os.environ.setdefault('IG_APP_SECRET', 'secret')
+os.environ.setdefault('CRON_SECRET', 'cron-secret')
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import server  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# 4. payload shape helper
+# ---------------------------------------------------------------------------
+
+
+def test_payload_shape_redacts_full_ids_and_omits_text():
+    payload = {'object': 'instagram', 'entry': []}
+    entry = {
+        'id': '178414151515151515',
+        'changes': [{
+            'field': 'comments',
+            'value': {
+                'id': '17841515151515151515',
+                'comment_id': '17841515151515151515',
+                'media': {'id': '17841616161616161616'},
+                'from': {'id': '17841717171717171717', 'username': 'commenter'},
+                'text': 'this should NOT be echoed',
+            },
+        }],
+        'messaging': [],
+    }
+    shape = server._build_webhook_payload_shape(payload, entry)
+    # Full ids must NOT appear in any field value.
+    flat = ' '.join(
+        f'{k}={v}' for k, v in shape.items()
+    )
+    for sensitive in (
+        '178414151515151515',
+        '17841515151515151515',
+        '17841616161616161616',
+        '17841717171717171717',
+        'this should NOT be echoed',
+    ):
+        assert sensitive not in flat, f'leaked {sensitive!r}'
+    # Required keys present.
+    for key in (
+        'webhook_object', 'change_fields',
+        'has_comments_field', 'has_live_comments_field',
+        'has_messages_field', 'has_messaging_seen_field',
+        'has_message_reactions_field', 'has_messaging_postbacks_field',
+        'entry_id_partial', 'value_id_partial',
+        'value_comment_id_partial', 'value_media_id_partial',
+        'value_from_id_partial',
+    ):
+        assert key in shape, f'missing {key}'
+    assert shape['has_comments_field'] is True
+    assert shape['has_live_comments_field'] is False
+    assert shape['webhook_object'] == 'instagram'
+
+
+def test_payload_shape_detects_live_comments_field():
+    shape = server._build_webhook_payload_shape(
+        {'object': 'instagram'},
+        {'id': '999', 'changes': [{'field': 'live_comments', 'value': {}}], 'messaging': []},
+    )
+    assert shape['has_live_comments_field'] is True
+    assert shape['has_comments_field'] is False
+    assert 'live_comments' in (shape['change_fields'] or [])
+
+
+def test_payload_shape_detects_messaging_types():
+    shape = server._build_webhook_payload_shape(
+        {'object': 'instagram'},
+        {
+            'id': '999',
+            'changes': [],
+            'messaging': [
+                {'message': {'mid': 'X'}},
+                {'reaction': {'mid': 'Y'}},
+                {'postback': {'payload': 'Z'}},
+                {'read': {'watermark': 1}},
+            ],
+        },
+    )
+    assert shape['has_messages_field'] is True
+    assert shape['has_message_reactions_field'] is True
+    assert shape['has_messaging_postbacks_field'] is True
+    assert shape['has_messaging_seen_field'] is True
+
+
+# ---------------------------------------------------------------------------
+# 5-6. live_comments now flows through generic comment-field check
+# ---------------------------------------------------------------------------
+
+
+def test_is_comment_field_change_now_matches_live_comments():
+    assert server._is_comment_field_change(
+        {'field': 'live_comments', 'value': {'id': '1'}}
+    ) is True
+    assert server._is_comment_field_change(
+        {'field': 'comments', 'value': {'id': '1'}}
+    ) is True
+    assert server._is_comment_field_change(
+        {'field': 'messages', 'value': {'id': '1'}}
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# 3. Parity blocker labels for webhook_received_but_no_comment_payload
+# ---------------------------------------------------------------------------
+
+
+class _FakeCursor:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def sort(self, *a, **kw):
+        return self
+
+    def limit(self, n):
+        self._items = self._items[:n]
+        return self
+
+    async def to_list(self, n):
+        return list(self._items[:n])
+
+
+class _FakeColl:
+    def __init__(self, items=None, count=0):
+        self._items = items or []
+        self._count = count
+
+    def find(self, *a, **kw):
+        return _FakeCursor(self._items)
+
+    async def find_one(self, *a, **kw):
+        return self._items[0] if self._items else None
+
+    async def count_documents(self, *a, **kw):
+        return self._count
+
+
+class _FakeDB:
+    def __init__(self, accounts, events, automations_count=0):
+        self.instagram_accounts = _FakeColl(accounts)
+        self.instagram_automation_events = _FakeColl(events)
+        self.automations = _FakeColl(count=automations_count)
+        self.comments = _FakeColl([])
+
+    def __getattr__(self, name):
+        return _FakeColl([])
+
+
+def test_parity_blocker_webhook_received_but_no_comment_payload():
+    now = datetime.utcnow()
+    events = [
+        {
+            'username_key': 'acct_x',
+            'stage': 'webhook_received',
+            'source': 'webhook',
+            'created_at': now - timedelta(seconds=20),
+            'extra': {'entry_id_partial': 'eee...000'},
+        },
+        {
+            'username_key': 'acct_x',
+            'stage': 'account_resolution_success',
+            'source': 'webhook',
+            'created_at': now - timedelta(seconds=19),
+            'extra': {
+                'via': 'instagram_accounts',
+                'has_comments_field': False,
+                'has_live_comments_field': False,
+            },
+        },
+        # No webhook_comment_detected.
+    ]
+    subscription_accounts = [{
+        'username': 'acct_x',
+        'instagram_account_id_partial': 'aaa...000',  # _safe_partial_identifier of aaa00000000000000
+        'connection_valid': True,
+        'subscribed_fields': ['comments', 'messages'],
+        'missing_fields': [],
+        'comments_subscribed': True,
+        'webhook_comment_delivery_configured': True,
+    }]
+    fake_accounts = [{
+        'id': 'acct_x_db',
+        'userId': 'user_x',
+        'username': 'acct_x',
+        'instagramAccountId': 'aaa00000000000000',
+        'connectionValid': True,
+        'webhookEntryIdAliases': [],
+    }]
+    fake_db = _FakeDB(fake_accounts, events)
+    original_db = server.db
+    server.db = fake_db
+    try:
+        parity = _run(server._compute_webhook_account_parity(
+            rows=events,
+            subscription_accounts=subscription_accounts,
+            username_key='',
+            caller_user_id='user_admin',
+            utc_iso=lambda v: v.isoformat() + 'Z' if isinstance(v, datetime) else v,
+        ))
+    finally:
+        server.db = original_db
+    by_user = {a['username']: a for a in parity['accounts']}
+    assert by_user['acct_x']['blocker_label'] == 'webhook_received_but_no_comment_payload'
+
+
+def test_parity_blocker_subscription_ready_but_no_comment_payload_received_for_account():
+    """No webhook_received row, but account_resolution_success exists
+    (this is what muhammad_gehad showed in production)."""
+    now = datetime.utcnow()
+    events = [
+        {
+            'username_key': 'acct_y',
+            'stage': 'account_resolution_success',
+            'source': 'webhook',
+            'created_at': now - timedelta(seconds=10),
+            'extra': {
+                'via': 'instagram_accounts',
+                'has_comments_field': False,
+            },
+        },
+    ]
+    subscription_accounts = [{
+        'username': 'acct_y',
+        'instagram_account_id_partial': 'yyy...000',  # _safe_partial_identifier of yyy00000000000000
+        'connection_valid': True,
+        'subscribed_fields': ['comments', 'messages'],
+        'missing_fields': [],
+        'comments_subscribed': True,
+        'webhook_comment_delivery_configured': True,
+    }]
+    fake_accounts = [{
+        'id': 'acct_y_db',
+        'userId': 'user_y',
+        'username': 'acct_y',
+        'instagramAccountId': 'yyy00000000000000',
+        'connectionValid': True,
+    }]
+    fake_db = _FakeDB(fake_accounts, events)
+    original_db = server.db
+    server.db = fake_db
+    try:
+        parity = _run(server._compute_webhook_account_parity(
+            rows=events,
+            subscription_accounts=subscription_accounts,
+            username_key='',
+            caller_user_id='user_admin',
+            utc_iso=lambda v: v.isoformat() + 'Z' if isinstance(v, datetime) else v,
+        ))
+    finally:
+        server.db = original_db
+    by_user = {a['username']: a for a in parity['accounts']}
+    assert by_user['acct_y']['blocker_label'] == 'subscription_ready_but_no_comment_payload_received_for_account'
+
+
+# ---------------------------------------------------------------------------
+# 1-2. comment-graph-check blocker labels (response contract)
+# ---------------------------------------------------------------------------
+
+
+def test_graph_check_endpoint_exposes_both_actionable_blocker_labels():
+    """Even before Graph is called, the endpoint advertises which
+    blocker the operator should record based on the verdict — this is
+    the spec-required durable label."""
+    src = inspect.getsource(server.admin_instagram_comment_graph_check)
+    assert 'graph_sees_comment_but_no_webhook_comment_event' in src
+    assert 'comment_not_visible_to_connected_account_token' in src
+    assert 'graph_sees_comment' in src
+    assert 'graph_does_not_see_matching_comment' in src
+    assert 'graph_returned_no_comments' in src
+    assert 'graph_error' in src
+
+
+def test_graph_check_endpoint_never_logs_raw_token():
+    src = inspect.getsource(server.admin_instagram_comment_graph_check)
+    # The token is supplied as a query param. The endpoint must not
+    # echo it back into the response (no f-string interpolation into
+    # any returned field). A static scan: `access_token` only appears
+    # as the variable read and the Graph params dict, not in any
+    # return statement.
+    assert 'access_token' in src
+    # No `return ... access_token ...` style lines.
+    for line in src.splitlines():
+        if line.lstrip().startswith('return'):
+            assert 'access_token' not in line
+
+
+# ---------------------------------------------------------------------------
+# 7-14. Unchanged-contract guards
+# ---------------------------------------------------------------------------
+
+
+def test_no_username_branching_introduced():
+    src = inspect.getsource(server)
+    for needle in (
+        "username == 'muhammad_gehad'",
+        "username == 'mogehad17'",
+        "username_key == 'muhammad_gehad'",
+        "username_key == 'mogehad17'",
+    ):
+        assert needle not in src
+
+
+def test_no_cross_account_routing_path():
+    src = inspect.getsource(server)
+    # The single-tenant fallback must remain gated by env.
+    assert 'INSTAGRAM_SINGLE_TENANT_FALLBACK' in src
+    assert '_SINGLE_TENANT_FALLBACK_ENABLED' in src
+
+
+def test_polling_remains_disabled_by_default():
+    src = inspect.getsource(server)
+    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
+
+
+def test_hmac_unchanged():
+    assert 'hmac.compare_digest' in inspect.getsource(server)
+
+
+def test_billing_unchanged():
+    assert hasattr(server, 'reserve_usage_limit')
+
+
+def test_dedupe_unchanged():
+    src = inspect.getsource(server)
+    assert "'dedupe_checked'" in src
+
+
+def test_phase2d_cooldown_unchanged():
+    src = inspect.getsource(server)
+    assert 'opening_dm_already_sent_for_commenter_media' in src
+
+
+def test_quick_reply_copy_unchanged():
+    src = inspect.getsource(server)
+    assert 'public_reply_attempted' in src
+    assert 'opening_dm_attempted' in src
