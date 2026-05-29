@@ -24020,8 +24020,17 @@ async def _webhook_subscription_heal_loop():
                         if _IG_AUTO_ENSURE_WEBHOOK_READY:
                             try:
                                 await _refresh_account_granted_scopes_via_graph(acc)
+                                # auto_pause_when_not_ready=False: a
+                                # background tick must only REFRESH the
+                                # certification status, never pause a
+                                # currently-working account's comment rules
+                                # on a transient Meta hiccup. Pausing stays
+                                # reserved for deliberate connect / activate
+                                # / admin-repair paths so the fleet never
+                                # flaps.
                                 await certify_instagram_account_for_comment_webhooks(
                                     acc, reason='heal',
+                                    auto_pause_when_not_ready=False,
                                 )
                             except asyncio.CancelledError:
                                 raise
