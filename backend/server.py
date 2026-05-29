@@ -24007,6 +24007,30 @@ async def _webhook_subscription_heal_loop():
                                     'ig_user_id=%s err=%s',
                                     ig_user_id, type(exc).__name__,
                                 )
+                        # Phase 2N: continuously refresh granted scopes and
+                        # re-certify every active account so the fleet
+                        # converges without any manual Repair click. This
+                        # auto-flips an account to reconnect_required (and
+                        # auto-pauses its comment rules) the moment its token
+                        # loses the comment-management permission, and back to
+                        # ready once a reconnect restores it. Account-agnostic
+                        # and idempotent. Gated by the same env flag as the
+                        # rest of the auto-ready machinery so the legacy
+                        # mocked-httpx test suite is never disturbed.
+                        if _IG_AUTO_ENSURE_WEBHOOK_READY:
+                            try:
+                                await _refresh_account_granted_scopes_via_graph(acc)
+                                await certify_instagram_account_for_comment_webhooks(
+                                    acc, reason='heal',
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as exc:
+                                logger.info(
+                                    'webhook_subscription_heal_recertify_failed '
+                                    'ig_user_id=%s err=%s',
+                                    ig_user_id, type(exc).__name__,
+                                )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
