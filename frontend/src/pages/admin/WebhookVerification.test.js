@@ -174,6 +174,25 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('polling_interval_seconds');
   });
 
+  test('Phase 2I: per-comment flow verdict panel structural contract', () => {
+    // Backend supplies the verdict label strings; the JSX reads them
+    // from data.flow_verdicts and renders each as a colored chip.
+    expect(source).toContain('flow_verdicts');
+    expect(source).toContain('flow_verdict_legend');
+    expect(source).toContain('webhook-verification-flow-verdicts');
+    expect(source).toContain('webhook-verification-flow-verdicts-table');
+    expect(source).toContain('webhook-verification-flow-verdict-');
+    // The two color-cued strings the JSX hard-codes for chip coloring.
+    expect(source).toContain('webhook_completed');
+    expect(source).toContain('webhook_in_flight');
+    expect(source).toContain('webhook_partial_success_missing_final_automation_success');
+    expect(source).toContain('webhook_polling_only');
+    // The data fields the table reads off each verdict entry.
+    expect(source).toContain('flow_verdict');
+    expect(source).toContain('stop_stage');
+    expect(source).toContain('last_stage_seen');
+  });
+
   test('Phase 2H: account parity panel structural contract', () => {
     expect(source).toContain('account_parity');
     expect(source).toContain('webhook-verification-account-parity');

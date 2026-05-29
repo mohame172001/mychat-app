@@ -24471,6 +24471,110 @@ async def _compute_webhook_subscription_status(
     }
 
 
+def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
+    """Phase 2I — per-comment final-verdict classifier.
+
+    Walks the flight-recorder events for each ``comment_id_partial`` in
+    the in-window result set and decides which terminal state the
+    webhook automation pipeline reached for that one comment. The
+    verdict labels are exactly the ones the spec requires:
+
+      * ``webhook_completed``
+      * ``webhook_failed_at_account_resolution``
+      * ``webhook_failed_at_rule_loading``
+      * ``webhook_failed_at_rule_match``
+      * ``webhook_failed_at_public_reply``
+      * ``webhook_failed_at_opening_dm``
+      * ``webhook_partial_success_missing_final_automation_success``
+      * ``webhook_in_flight``
+      * ``webhook_polling_only``
+
+    Account-agnostic: the classifier never looks at username, only at
+    stage / source / created_at. Pure function — extracted so the unit
+    tests can drive it directly without spinning up the endpoint.
+    """
+    flow_verdict_by_comment: Dict[str, dict] = {}
+    flow_events_by_comment: Dict[str, list] = {}
+    for r in rows:
+        cid = str(r.get('comment_id_partial') or '')
+        if not cid:
+            continue
+        flow_events_by_comment.setdefault(cid, []).append(r)
+    for cid, evs in flow_events_by_comment.items():
+        evs.sort(key=lambda e: (e.get('created_at') or datetime.min))
+        stages = [str(e.get('stage') or '') for e in evs]
+        sources = {str(e.get('source') or '') for e in evs}
+        stage_set = set(stages)
+        last_stage = stages[-1] if stages else None
+        verdict: Optional[str] = None
+        reason_stage: Optional[str] = None
+        webhook_sourced = 'webhook' in sources
+        if not webhook_sourced and ('polling' in sources):
+            verdict = 'webhook_polling_only'
+        elif any(
+            e.get('stage') == 'automation_success'
+            and e.get('source') == 'webhook'
+            for e in evs
+        ):
+            verdict = 'webhook_completed'
+        elif (
+            'account_resolution_failed' in stage_set
+            and 'webhook_comment_detected' not in stage_set
+        ):
+            verdict = 'webhook_failed_at_account_resolution'
+            reason_stage = 'account_resolution_failed'
+        elif (
+            'rule_match_failed' in stage_set
+            and 'rule_match_success' not in stage_set
+        ):
+            verdict = 'webhook_failed_at_rule_match'
+            reason_stage = 'rule_match_failed'
+        elif (
+            'rule_loading_started' in stage_set
+            and 'rule_loading_finished' not in stage_set
+            and 'rule_match_success' not in stage_set
+            and 'rule_match_failed' not in stage_set
+        ):
+            verdict = 'webhook_failed_at_rule_loading'
+            reason_stage = 'rule_loading_started'
+        elif (
+            'public_reply_failed' in stage_set
+            and 'public_reply_success' not in stage_set
+        ):
+            verdict = 'webhook_failed_at_public_reply'
+            reason_stage = 'public_reply_failed'
+        elif (
+            'opening_dm_failed' in stage_set
+            and 'opening_dm_success' not in stage_set
+        ):
+            verdict = 'webhook_failed_at_opening_dm'
+            reason_stage = 'opening_dm_failed'
+        elif (
+            ('public_reply_success' in stage_set or 'opening_dm_success' in stage_set)
+            and 'automation_success' not in stage_set
+            and 'automation_failed' not in stage_set
+        ):
+            verdict = 'webhook_partial_success_missing_final_automation_success'
+            reason_stage = last_stage
+        elif 'automation_failed' in stage_set:
+            verdict = (
+                'webhook_failed_at_public_reply'
+                if 'public_reply_attempted' in stage_set
+                else 'webhook_in_flight'
+            )
+            reason_stage = 'automation_failed'
+        else:
+            verdict = 'webhook_in_flight'
+            reason_stage = last_stage
+        flow_verdict_by_comment[cid] = {
+            'flow_verdict': verdict,
+            'stop_stage': reason_stage,
+            'last_stage_seen': last_stage,
+            'sources': sorted(s for s in sources if s),
+        }
+    return flow_verdict_by_comment
+
+
 async def _compute_webhook_account_parity(
     *,
     rows: list,
@@ -25628,6 +25732,10 @@ async def admin_instagram_webhook_verification(
         'total_known_media_count', 'reply_cap',
         'target_media_partials',
     }
+    # Phase 2I: compute per-comment verdict before serializing so each
+    # event row can carry the verdict chip.
+    flow_verdict_by_comment = _compute_webhook_flow_verdicts(rows)
+
     serialized_events: list = []
     for r in rows:
         out: Dict[str, Any] = {}
@@ -25687,6 +25795,13 @@ async def admin_instagram_webhook_verification(
             for k in SAFE_COMMENT_PROOF_FIELDS:
                 if k in proof:
                     out[k] = proof[k]
+        # Phase 2I: stamp every per-event row with the comment-level
+        # flow verdict so the UI can render the verdict chip without a
+        # second lookup. comment_id_partial is the natural key.
+        verdict_entry = flow_verdict_by_comment.get(cid)
+        if verdict_entry:
+            out['flow_verdict'] = verdict_entry.get('flow_verdict')
+            out['flow_stop_stage'] = verdict_entry.get('stop_stage')
         serialized_events.append(out)
 
     # Phase 2F: surface webhook subscription status directly in the
@@ -25699,6 +25814,43 @@ async def admin_instagram_webhook_verification(
     # triggers a Graph subscribe). Scoped to the queried username if
     # set; otherwise to every active account on the caller's user_id
     # so a workspace-wide read still works.
+    # Phase 2I — per-comment flow-completion verdict.
+    #
+    # For every distinct comment_id_partial we saw in the window, walk
+    # the events keyed to that comment in chronological order and
+    # decide whether the webhook flow reached automation_success, the
+    # exact stage at which it stopped, or whether it is still in
+    # flight. This is the single signal the operator needs to answer
+    # "for this fresh comment I posted, where did the pipeline stall?"
+    # without scrolling through 30 events.
+    #
+    # Verdicts (exactly the labels the spec defines):
+    #   webhook_completed
+    #   webhook_failed_at_account_resolution
+    #   webhook_failed_at_rule_loading
+    #   webhook_failed_at_rule_match
+    #   webhook_failed_at_public_reply
+    #   webhook_failed_at_opening_dm
+    #   webhook_partial_success_missing_final_automation_success
+    #   webhook_in_flight
+    #   webhook_polling_only        (no webhook event, polling only)
+    # (Computed earlier, before the event serialization loop, so each
+    # serialized event row can carry the verdict chip.)
+
+    # Aggregate verdict counts for the summary block.
+    flow_verdict_counts: Dict[str, int] = {}
+    for entry in flow_verdict_by_comment.values():
+        v = entry.get('flow_verdict') or 'webhook_in_flight'
+        flow_verdict_counts[v] = flow_verdict_counts.get(v, 0) + 1
+    summary['flow_verdict_counts'] = flow_verdict_counts
+    summary['webhook_completed_count'] = flow_verdict_counts.get('webhook_completed', 0)
+    summary['webhook_failed_count'] = sum(
+        v for k, v in flow_verdict_counts.items() if k.startswith('webhook_failed_')
+    )
+    summary['webhook_partial_count'] = flow_verdict_counts.get(
+        'webhook_partial_success_missing_final_automation_success', 0
+    )
+
     subscription_status = await _compute_webhook_subscription_status(
         username_key=username_key,
         caller_user_id=user_id,
@@ -25729,6 +25881,47 @@ async def admin_instagram_webhook_verification(
         'summary': summary,
         'subscription_status': subscription_status,
         'account_parity': account_parity,
+        'flow_verdicts': [
+            {
+                'comment_id_partial': cid,
+                'flow_verdict': info.get('flow_verdict'),
+                'stop_stage': info.get('stop_stage'),
+                'last_stage_seen': info.get('last_stage_seen'),
+                'sources': info.get('sources'),
+            }
+            for cid, info in flow_verdict_by_comment.items()
+        ],
+        'flow_verdict_legend': {
+            'webhook_completed':
+                'automation_success reached with source=webhook for this comment.',
+            'webhook_failed_at_account_resolution':
+                'Webhook arrived but the entry.id did not bind to any '
+                'Instagram account row (alias / media-owner fallback both '
+                'declined). Repair the account mapping.',
+            'webhook_failed_at_rule_loading':
+                'rule_loading_started fired but rule_loading_finished did '
+                'not — the rule loader raised or returned no rules.',
+            'webhook_failed_at_rule_match':
+                'Rules loaded but none matched this comment.',
+            'webhook_failed_at_public_reply':
+                'public_reply_attempted but the Graph API call failed. See '
+                'reply_failure_reason / error_code on the per-event row.',
+            'webhook_failed_at_opening_dm':
+                'Public reply succeeded but the opening DM send failed. '
+                'See dm_failure_reason. Phase 2D 24h cooldown is NOT a '
+                'failure — that records opening_dm_skipped, not _failed.',
+            'webhook_partial_success_missing_final_automation_success':
+                'Reply / DM emitted success events but no final '
+                'automation_success was recorded — usually means the '
+                'handler raised after the send. Operator should re-run.',
+            'webhook_in_flight':
+                'Webhook events seen but the flow has not reached a '
+                'terminal stage yet.',
+            'webhook_polling_only':
+                'No webhook events for this comment in window; polling '
+                'observed it but the polling send-gate is closed. '
+                'Webhook delivery is the blocker for this account.',
+        },
         'events': serialized_events,
     }
 

@@ -2872,6 +2872,8 @@ function WebhookVerificationTab() {
   const windowEndUtc = data?.window_end_utc || null;
   const subscriptionStatus = data?.subscription_status || null;
   const accountParity = data?.account_parity || null;
+  const flowVerdicts = Array.isArray(data?.flow_verdicts) ? data.flow_verdicts : [];
+  const flowVerdictLegend = data?.flow_verdict_legend || {};
 
   // Phase 2F: per-username admin repair button. Calls the new
   // /api/admin/instagram/repair-comment-webhooks endpoint, then
@@ -3346,6 +3348,78 @@ function WebhookVerificationTab() {
           ))}
         </div>
       )}
+      {/* Phase 2I: per-comment flow verdict panel */}
+      {state === 'success' && flowVerdicts.length > 0 && (
+        <div
+          className="border border-slate-200 rounded-md p-2 mb-2 text-[11px] bg-white"
+          data-testid="webhook-verification-flow-verdicts"
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="font-semibold">
+              {ar ? 'نتيجة كل تعليق (Phase 2I)' : 'Per-comment flow verdict'}
+            </span>
+            <span className="text-slate-500">
+              {ar
+                ? 'حيث توقّف التدفق لكل تعليق ظهر في النافذة'
+                : 'where the webhook pipeline stopped for each comment in window'}
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] border-collapse" data-testid="webhook-verification-flow-verdicts-table">
+              <thead>
+                <tr className="text-slate-600">
+                  <th className="text-left p-1 border-b border-slate-200">comment_id</th>
+                  <th className="text-left p-1 border-b border-slate-200">sources</th>
+                  <th className="text-left p-1 border-b border-slate-200">last_stage_seen</th>
+                  <th className="text-left p-1 border-b border-slate-200">stop_stage</th>
+                  <th className="text-left p-1 border-b border-slate-200">verdict</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flowVerdicts.map((v, idx) => {
+                  const verdict = v.flow_verdict || 'webhook_in_flight';
+                  const color =
+                    verdict === 'webhook_completed'
+                      ? 'bg-emerald-100 text-emerald-900'
+                      : verdict === 'webhook_in_flight'
+                      ? 'bg-slate-100 text-slate-700'
+                      : verdict === 'webhook_partial_success_missing_final_automation_success'
+                      ? 'bg-amber-100 text-amber-900'
+                      : verdict === 'webhook_polling_only'
+                      ? 'bg-amber-100 text-amber-900'
+                      : 'bg-rose-100 text-rose-900';
+                  return (
+                    <tr key={idx} className="align-top">
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.comment_id_partial || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {(v.sources || []).join(',') || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.last_stage_seen || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.stop_stage || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100">
+                        <span
+                          className={'inline-block rounded px-1 font-mono ' + color}
+                          data-testid={`webhook-verification-flow-verdict-${idx}`}
+                          title={flowVerdictLegend[verdict] || ''}
+                        >
+                          {verdict}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Phase 2H: per-account parity panel */}
       {state === 'success' && accountParity && Array.isArray(accountParity.accounts) && accountParity.accounts.length > 0 && (
         <div
