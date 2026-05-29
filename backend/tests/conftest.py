@@ -30,3 +30,13 @@ import os
 # to remove or flip these flags inside the test body.
 os.environ.setdefault('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '1')
 os.environ.setdefault('IG_POLL_ENABLED', '1')
+
+# Phase 2K: disable the auto-fire of the onboarding/parity helper from
+# `_sync_user_instagram_account_doc` / `instagram_account_activate`
+# during tests. The legacy token-refresh / multi-account tests mock
+# `httpx.AsyncClient` with a fixed FIFO list of responses; the helper's
+# background Graph subscribe would consume one of those responses and
+# shift every other assertion downstream. Tests that exercise the
+# helper directly (test_phase2k_account_onboarding_parity.py) bypass
+# the flag because they call the helper themselves.
+os.environ.setdefault('IG_AUTO_ENSURE_WEBHOOK_READY', '0')

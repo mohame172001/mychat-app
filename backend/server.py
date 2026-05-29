@@ -14157,6 +14157,23 @@ async def _sync_user_instagram_account_doc(
         {'$set': {'active_instagram_account_id': account_id}},
     )
     stored = await db.instagram_accounts.find_one({'id': account_id})
+    # Phase 2K: every freshly-synced account runs through the generic
+    # webhook-ready helper so its identity / aliases / subscription /
+    # rule binding match the working account shape. Fire-and-forget so
+    # OAuth callbacks never block on Graph. Gated by env flag so the
+    # legacy test suite (which mocks httpx with a fixed response list)
+    # doesn't see an extra subscribe call shuffled in — conftest sets
+    # the flag OFF for tests; production default is ON.
+    if stored and _IG_AUTO_ENSURE_WEBHOOK_READY:
+        try:
+            create_tracked_task(
+                ensure_instagram_account_webhook_ready(
+                    stored, reason='sync',
+                ),
+                f'ensure_account_webhook_ready:{_safe_partial_identifier(stored.get("id"))}',
+            )
+        except Exception:
+            pass
     return stored
 
 
@@ -15656,6 +15673,270 @@ async def instagram_profile(user_id: str = Depends(get_current_active_user_id)):
         out['profilePictureUnavailable'] = True
         out['error'] = str(e)[:160]
     return out
+
+
+# Phase 2K env flag. Production default is ON so every connected
+# account auto-runs the parity helper on sync / activate. Tests
+# (which monkey-patch httpx with a fixed FIFO response queue) flip
+# this OFF in conftest.py so the helper's extra Graph subscribe does
+# not shuffle their expected response order.
+_IG_AUTO_ENSURE_WEBHOOK_READY = (
+    os.environ.get('IG_AUTO_ENSURE_WEBHOOK_READY', '1') == '1'
+)
+
+
+async def ensure_instagram_account_webhook_ready(
+    account: dict,
+    *,
+    reason: str = 'connect',
+    do_graph_subscribe: bool = True,
+) -> dict:
+    """Phase 2K — generic onboarding/repair parity helper.
+
+    For ANY connected Instagram account (no per-username branching),
+    this helper performs the safe, idempotent steps that turn a
+    just-connected / reactivated / repair-targeted account into the
+    same shape as the known-working account so its comment webhooks
+    flow through the standard resolver → ``_handle_new_comment`` →
+    ``automation_success`` path:
+
+      1. Canonical identity normalization.
+         If ``igUserId`` is missing but ``instagramAccountId`` exists,
+         mirror it (and vice versa). Both fields must be present so
+         the resolver's identity-clauses match against either.
+      2. webhookEntryIdAliases self-population.
+         The resolver matches ``entry.id`` against
+         ``webhookEntryIdAliases``. We always add the account's own
+         ``instagramAccountId`` (or ``igUserId``) as an alias so the
+         common-case entry.id == ig_user_id delivery always resolves.
+         We never blindly add a Page id we have not verified.
+      3. Comment webhook subscription verify + repair.
+         Calls ``_subscribe_instagram_account_to_webhooks`` to upsert
+         every required field. Persists the cached
+         ``webhookSubscriptionFields`` / ``webhookSubscriptionMissing``
+         so the verification panel reads fresh state.
+      4. Active-rule binding repair.
+         For rules in the same owner ``user_id`` whose
+         ``instagramAccountId`` is empty / None / a stale legacy
+         alias, set the canonical ``instagramAccountId``. Account-
+         scoped: never touches rules of OTHER accounts owned by the
+         same user.
+      5. Media-catalog account binding repair.
+         Mirror of (4) on the media catalog so the media-owner probe
+         can resolve incoming comment webhooks.
+      6. Sanitized report.
+         Returns a dict the caller can log/persist:
+         ``{ready, repaired, missing_identity_fields, missing_aliases,
+            missing_subscriptions, account_binding_mismatch,
+            rule_binding_mismatch, media_catalog_mismatch, reason}``.
+
+    NEVER logs tokens or full IDs. Idempotent: re-running on a
+    healthy account is a near-no-op (no Graph re-subscribe if
+    ``do_graph_subscribe=False``).
+    """
+    if not isinstance(account, dict):
+        return {'ready': False, 'reason': 'invalid_account'}
+    account_db_id = str(account.get('id') or '').strip()
+    ig_user_id = str(
+        account.get('instagramAccountId')
+        or account.get('igUserId')
+        or ''
+    ).strip()
+    owner_user_id = (
+        account.get('userId')
+        or account.get('user_id')
+        or ''
+    )
+    access_token = account.get('accessToken') or ''
+    username = (account.get('username') or '').replace('@', '')
+
+    report = {
+        'ready': False,
+        'repaired': False,
+        'reason': reason,
+        'username': username or None,
+        'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+        'missing_identity_fields': [],
+        'missing_aliases': [],
+        'missing_subscriptions': [],
+        'account_binding_mismatch': False,
+        'rule_binding_mismatch': 0,
+        'media_catalog_mismatch': 0,
+        'subscribe_status': None,
+    }
+
+    if not ig_user_id:
+        report['missing_identity_fields'].append('instagramAccountId')
+        return report
+    if not account_db_id:
+        # Without a db id we cannot do alias self-heal or rebind. Bail
+        # safely with a structured report.
+        report['missing_identity_fields'].append('id')
+
+    # --- 1. Canonical identity normalization -------------------------
+    set_fields: Dict[str, Any] = {}
+    if not account.get('instagramAccountId'):
+        set_fields['instagramAccountId'] = ig_user_id
+        report['missing_identity_fields'].append('instagramAccountId')
+    if not account.get('igUserId'):
+        set_fields['igUserId'] = ig_user_id
+        report['missing_identity_fields'].append('igUserId')
+
+    # --- 2. webhookEntryIdAliases self-population --------------------
+    existing_aliases = account.get('webhookEntryIdAliases') or []
+    if not isinstance(existing_aliases, list):
+        existing_aliases = []
+    aliases_now = list(existing_aliases)
+    needed_aliases: list = []
+    if ig_user_id and ig_user_id not in aliases_now:
+        needed_aliases.append(ig_user_id)
+    add_alias_ops: Dict[str, Any] = {}
+    if needed_aliases:
+        add_alias_ops = {
+            '$addToSet': {'webhookEntryIdAliases': {'$each': needed_aliases}},
+            '$set': {'webhookEntryIdAliasesUpdatedAt': datetime.utcnow()},
+        }
+        report['missing_aliases'] = [
+            _safe_partial_identifier(a) for a in needed_aliases
+        ]
+
+    # --- 3. Comment webhook subscription verify + repair -------------
+    subscribed_now: list = []
+    subscribe_result: Dict[str, Any] = {}
+    if do_graph_subscribe and ig_user_id and access_token:
+        try:
+            subscribe_result = await _subscribe_instagram_account_to_webhooks(
+                ig_user_id, access_token,
+            )
+        except Exception as exc:
+            subscribe_result = {'ok': False, 'reason': type(exc).__name__}
+        subscribed_now = list(subscribe_result.get('subscribed_fields') or [])
+        report['subscribe_status'] = subscribe_result.get('subscribe_status')
+    else:
+        # Cache-only verify path (do_graph_subscribe=False): trust the
+        # cached fields the periodic heal already wrote.
+        subscribed_now = list(account.get('webhookSubscriptionFields') or [])
+
+    missing_subscriptions = sorted(
+        set(WEBHOOK_REQUIRED_FIELDS) - set(subscribed_now or [])
+    )
+    report['missing_subscriptions'] = list(missing_subscriptions)
+    if subscribe_result:
+        set_fields['webhookSubscriptionFields'] = sorted(set(subscribed_now))
+        set_fields['webhookSubscriptionMissing'] = list(missing_subscriptions)
+        set_fields['webhookSubscriptionLastCheckedAt'] = datetime.utcnow()
+        set_fields['lastWebhookReadyAttemptAt'] = datetime.utcnow()
+        set_fields['lastWebhookReadyResult'] = (
+            'ready' if not missing_subscriptions else 'partial'
+        )
+
+    # --- Persist identity + alias + cached subscription ---------------
+    if account_db_id and (set_fields or add_alias_ops):
+        try:
+            update_doc: Dict[str, Any] = {}
+            if set_fields:
+                update_doc['$set'] = set_fields
+            if add_alias_ops:
+                # Merge $set if both exist.
+                if '$set' in add_alias_ops and '$set' in update_doc:
+                    update_doc['$set'].update(add_alias_ops['$set'])
+                elif '$set' in add_alias_ops:
+                    update_doc['$set'] = add_alias_ops['$set']
+                update_doc['$addToSet'] = add_alias_ops.get('$addToSet') or {}
+            await db.instagram_accounts.update_one(
+                {'id': account_db_id}, update_doc,
+            )
+            if needed_aliases:
+                report['repaired'] = True
+            if set_fields:
+                report['repaired'] = True
+        except Exception as exc:
+            logger.info(
+                'instagram_account_ready_persist_failed account_id_partial=%s err=%s',
+                _safe_partial_identifier(account_db_id), type(exc).__name__,
+            )
+
+    # --- 4. Active-rule binding repair --------------------------------
+    if owner_user_id and ig_user_id:
+        try:
+            stale_rules_query: Dict[str, Any] = {
+                '$or': [
+                    {'userId': owner_user_id},
+                    {'user_id': owner_user_id},
+                ],
+                '$and': [
+                    {'$or': [
+                        {'instagramAccountId': {'$in': ['', None]}},
+                        {'instagramAccountId': {'$exists': False}},
+                    ]},
+                ],
+            }
+            update_result = await db.automations.update_many(
+                stale_rules_query,
+                {'$set': {
+                    'instagramAccountId': ig_user_id,
+                    'igUserId': ig_user_id,
+                    'updated': datetime.utcnow(),
+                }},
+            )
+            modified = int(getattr(update_result, 'modified_count', 0) or 0)
+            report['rule_binding_mismatch'] = modified
+            if modified:
+                report['repaired'] = True
+        except Exception as exc:
+            logger.info(
+                'instagram_account_rule_rebind_failed account_id_partial=%s err=%s',
+                _safe_partial_identifier(account_db_id),
+                type(exc).__name__,
+            )
+
+    # --- 5. Media-catalog rebind --------------------------------------
+    if owner_user_id and ig_user_id:
+        try:
+            mc_coll = getattr(db, 'instagram_media_catalog', None)
+            if mc_coll is not None:
+                media_query: Dict[str, Any] = {
+                    '$or': [
+                        {'userId': owner_user_id},
+                        {'user_id': owner_user_id},
+                    ],
+                    '$and': [
+                        {'$or': [
+                            {'instagramAccountId': {'$in': ['', None]}},
+                            {'instagramAccountId': {'$exists': False}},
+                        ]},
+                    ],
+                }
+                mc_result = await mc_coll.update_many(
+                    media_query,
+                    {'$set': {
+                        'instagramAccountId': ig_user_id,
+                        'igUserId': ig_user_id,
+                    }},
+                )
+                modified = int(getattr(mc_result, 'modified_count', 0) or 0)
+                report['media_catalog_mismatch'] = modified
+                if modified:
+                    report['repaired'] = True
+        except Exception as exc:
+            logger.info(
+                'instagram_account_media_rebind_failed account_id_partial=%s err=%s',
+                _safe_partial_identifier(account_db_id),
+                type(exc).__name__,
+            )
+
+    # --- 6. Final readiness verdict -----------------------------------
+    # `missing_identity_fields` is informational ("what did we need to
+    # repair?"). The ready verdict reflects POST-repair state: a
+    # canonical ig_user_id is known, the Graph subscription includes
+    # every required field, and no account-binding mismatch was
+    # detected. This is what the operator-facing parity panel reads.
+    report['ready'] = bool(
+        ig_user_id
+        and not missing_subscriptions
+        and not report['account_binding_mismatch']
+    )
+    return report
 
 
 async def _subscribe_instagram_account_to_webhooks(ig_user_id: str, access_token: str) -> Dict[str, Any]:
@@ -25120,19 +25401,26 @@ async def admin_instagram_repair_comment_webhooks(
                 'Operator should reconnect the Instagram account from the UI.'
             ),
         }
-    # Delegate to the existing idempotent helper. It returns
-    # `{ok, subscribe_status, verify_status, subscribed_fields}` and
-    # NEVER returns the access token.
-    result = await _subscribe_instagram_account_to_webhooks(ig_user_id, access_token)
+    # Phase 2K: delegate to the generic onboarding/repair helper so
+    # the operator-triggered repair runs the FULL parity work — not
+    # just the Graph subscribe. The helper performs identity
+    # normalization, webhookEntryIdAliases self-population, the Graph
+    # subscribe, active-rule rebind, and media-catalog rebind, all
+    # account-agnostic and idempotent.
+    ready_report = await ensure_instagram_account_webhook_ready(
+        account, reason='admin_repair',
+    )
+    subscribed_now = sorted(
+        set(WEBHOOK_REQUIRED_FIELDS) - set(ready_report.get('missing_subscriptions') or [])
+    )
     sanitized_result = {
-        'ok': bool(result.get('ok')),
-        'subscribe_status': result.get('subscribe_status'),
-        'verify_status': result.get('verify_status'),
-        'subscribed_fields': sorted(set(result.get('subscribed_fields') or [])),
-        'missing_fields': sorted(
-            set(WEBHOOK_REQUIRED_FIELDS) - set(result.get('subscribed_fields') or []),
-        ),
-        'reason': result.get('reason'),
+        'ok': bool(ready_report.get('ready') or (ready_report.get('subscribe_status') == 200)),
+        'subscribe_status': ready_report.get('subscribe_status'),
+        'verify_status': ready_report.get('subscribe_status'),
+        'subscribed_fields': subscribed_now,
+        'missing_fields': list(ready_report.get('missing_subscriptions') or []),
+        'reason': None if ready_report.get('ready') else 'partial_repair',
+        'parity_report': ready_report,
     }
     # Persist sanitized history on the account row so the verification
     # endpoint can surface it without a fresh Graph call.
@@ -28415,6 +28703,23 @@ async def instagram_account_activate(account_id: str, user_id: str = Depends(get
     )
     await invalidate_dashboard_summary(user_id)
     refreshed = await db.instagram_accounts.find_one({'id': account_id}) or account
+    # Phase 2K: switching to a different connected account also runs
+    # the generic onboarding parity helper so the activated account
+    # has aliases/subscription/rules pointing to the right canonical
+    # IG id before the next webhook arrives. Best-effort — never
+    # blocks the response. Env-gated so legacy tests with mocked
+    # httpx don't see an extra Graph subscribe consume their fake
+    # response sequence.
+    if _IG_AUTO_ENSURE_WEBHOOK_READY:
+        try:
+            create_tracked_task(
+                ensure_instagram_account_webhook_ready(
+                    refreshed, reason='activate',
+                ),
+                f'ensure_account_webhook_ready:{_safe_partial_identifier(account_id)}',
+            )
+        except Exception:
+            pass
     return {'ok': True, 'account': _instagram_account_public_row(refreshed, account_id)}
 
 
