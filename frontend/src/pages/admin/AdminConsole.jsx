@@ -2794,6 +2794,10 @@ function WebhookVerificationTab() {
   const ar = isAr();
   const [username, setUsername] = useState(WV_DEFAULT_USERNAME);
   const [sinceMinutes, setSinceMinutes] = useState(10);
+  // Phase 2L — fresh-comment lower-bound. Accepts ISO with Z or with
+  // offset. Empty string disables the lower-bound and the
+  // fresh-comment signal panel.
+  const [afterUtc, setAfterUtc] = useState('');
   const [commentIdPartial, setCommentIdPartial] = useState('');
   const [mediaIdPartial, setMediaIdPartial] = useState('');
   const [state, setState] = useState('idle');
@@ -2836,6 +2840,9 @@ function WebhookVerificationTab() {
       if (cid) params.set('comment_id_partial', cid);
       const mid = (activeMedia || '').trim();
       if (mid) params.set('media_id_partial', mid);
+      const ac = (overrides.afterUtc !== undefined ? overrides.afterUtc : afterUtc) || '';
+      const acTrim = String(ac).trim();
+      if (acTrim) params.set('after_utc', acTrim);
       const qs = params.toString();
       const r = await api.get(
         `/admin/instagram/webhook-verification${qs ? `?${qs}` : ''}`,
@@ -2849,7 +2856,7 @@ function WebhookVerificationTab() {
       setError(String(detail).slice(0, 240));
       setState(status === 401 || status === 403 ? 'forbidden' : 'error');
     }
-  }, [username, sinceMinutes, commentIdPartial, mediaIdPartial]);
+  }, [username, sinceMinutes, commentIdPartial, mediaIdPartial, afterUtc]);
 
   // Auto-load once on mount with the default username so the operator
   // sees the current state immediately. Subsequent loads are explicit
@@ -2925,6 +2932,29 @@ function WebhookVerificationTab() {
   // subscription_status block + any new attempt history.
   const [repairState, setRepairState] = useState('idle');
   const [repairResult, setRepairResult] = useState(null);
+  // Phase 2L: fresh Graph subscription verification (GET only, never POST).
+  const [freshVerifyState, setFreshVerifyState] = useState('idle');
+  const [freshVerifyResult, setFreshVerifyResult] = useState(null);
+  const onFreshVerifySubscription = useCallback(async () => {
+    const u = (username || '').trim();
+    if (!u) return;
+    setFreshVerifyState('loading');
+    setFreshVerifyResult(null);
+    try {
+      const r = await api.get(
+        `/admin/instagram/subscription-verify-fresh?username=${encodeURIComponent(u)}`,
+      );
+      setFreshVerifyResult(r.data || null);
+      setFreshVerifyState(r.data?.ok ? 'success' : 'failed');
+      // Reload the verification panel so the cached subscription state
+      // reflects the freshly-read Graph values.
+      await load();
+    } catch (e) {
+      setFreshVerifyResult({ ok: false, verdict: 'request_failed', graph_error_message: e?.message });
+      setFreshVerifyState('failed');
+    }
+  }, [api, username, load]);
+
   const onRepairWebhooks = useCallback(async () => {
     const u = (username || '').trim();
     if (!u) {
@@ -3138,6 +3168,37 @@ function WebhookVerificationTab() {
             ? (ar ? 'جاري الإصلاح…' : 'Repairing…')
             : (ar ? 'إصلاح اشتراك Webhook' : 'Repair comment webhooks')}
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onFreshVerifySubscription}
+          disabled={state === 'loading' || freshVerifyState === 'loading' || !(username || '').trim()}
+          data-testid="webhook-verification-subscription-verify-fresh"
+          title={
+            ar
+              ? 'يقرأ حقول اشتراك Graph مباشرة دون POST.'
+              : 'Read-only Graph GET /subscribed_apps. Updates the cache without re-subscribing.'
+          }
+        >
+          {freshVerifyState === 'loading'
+            ? (ar ? 'يتحقّق…' : 'Verifying…')
+            : (ar ? 'تحقّق Graph (قراءة فقط)' : 'Fresh Graph verify')}
+        </Button>
+        {freshVerifyResult && (
+          <span className="ms-2 text-[11px] font-mono" data-testid="webhook-verification-subscription-verify-fresh-result">
+            {freshVerifyResult.verdict || '—'}
+            {Array.isArray(freshVerifyResult.fresh_fields_from_graph) && (
+              <span className="ms-2 text-slate-500">
+                fields={freshVerifyResult.fresh_fields_from_graph.join(',') || '—'}
+              </span>
+            )}
+            {Array.isArray(freshVerifyResult.missing_fields) && freshVerifyResult.missing_fields.length > 0 && (
+              <span className="ms-2 text-rose-700">
+                missing={freshVerifyResult.missing_fields.join(',')}
+              </span>
+            )}
+          </span>
+        )}
       </header>
 
       {/* Filter controls */}
@@ -3392,6 +3453,113 @@ function WebhookVerificationTab() {
           ))}
         </div>
       )}
+      {/* Phase 2L: fresh-comment time anchor + signal panel */}
+      {state === 'success' && (
+        <div
+          className="border border-slate-200 rounded-md p-2 mb-2 text-[11px] bg-white"
+          data-testid="webhook-verification-fresh-comment-anchor"
+        >
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="font-semibold">
+              {ar ? 'وقت التعليق الجديد (UTC) — Phase 2L' : 'Fresh comment time anchor (UTC)'}
+            </span>
+            <input
+              type="text"
+              value={afterUtc}
+              onChange={(e) => setAfterUtc(e.target.value)}
+              placeholder="2026-05-29T21:55:00Z"
+              className={WV_INPUT_CLASS}
+              data-testid="webhook-verification-after-utc"
+              style={{ minWidth: 220 }}
+            />
+            <Button
+              size="sm"
+              onClick={() => load({ afterUtc })}
+              data-testid="webhook-verification-after-utc-apply"
+            >
+              {ar ? 'تطبيق' : 'Apply'}
+            </Button>
+            <span className="text-slate-500">
+              {ar
+                ? 'يستبعد الأحداث قبل هذا الوقت من تشخيص التعليق الجديد.'
+                : 'Excludes events before this time from the fresh-comment verdict.'}
+            </span>
+          </div>
+          {data?.fresh_comment_signal && Array.isArray(data.fresh_comment_signal.accounts) && (
+            <div
+              className="mt-1"
+              data-testid="webhook-verification-fresh-comment-signal"
+            >
+              <div className="font-mono text-[11px] text-slate-600 mb-1">
+                {ar ? 'القطع الزمني:' : 'cutoff:'} {data.fresh_comment_signal.after_time_utc || '—'}
+              </div>
+              <div className="overflow-x-auto">
+                <table
+                  className="w-full text-[11px] border-collapse"
+                  data-testid="webhook-verification-fresh-comment-signal-table"
+                >
+                  <thead>
+                    <tr className="text-slate-600">
+                      <th className="text-left p-1 border-b border-slate-200">username</th>
+                      <th className="text-left p-1 border-b border-slate-200">webhook_received</th>
+                      <th className="text-left p-1 border-b border-slate-200">resolve_success</th>
+                      <th className="text-left p-1 border-b border-slate-200">w/ comment_payload</th>
+                      <th className="text-left p-1 border-b border-slate-200">comment_detected</th>
+                      <th className="text-left p-1 border-b border-slate-200">automation_success</th>
+                      <th className="text-left p-1 border-b border-slate-200">verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.fresh_comment_signal.accounts.map((a, idx) => {
+                      const v = a.verdict || '—';
+                      const color =
+                        v === 'fresh_comment_webhook_completed'
+                          ? 'bg-emerald-100 text-emerald-900'
+                          : v === 'fresh_comment_webhook_detected'
+                          ? 'bg-amber-100 text-amber-900'
+                          : 'bg-rose-100 text-rose-900';
+                      return (
+                        <tr key={idx}>
+                          <td className="p-1 border-b border-slate-100 font-mono font-semibold">
+                            {a.username || '—'}
+                          </td>
+                          <td className="p-1 border-b border-slate-100 font-mono">
+                            {a.webhook_received_count_after_cutoff ?? 0}
+                          </td>
+                          <td className="p-1 border-b border-slate-100 font-mono">
+                            {a.account_resolution_success_count_after_cutoff ?? 0}
+                          </td>
+                          <td className="p-1 border-b border-slate-100 font-mono">
+                            {a.account_resolution_success_with_comment_payload_count_after_cutoff ?? 0}
+                          </td>
+                          <td className="p-1 border-b border-slate-100 font-mono">
+                            {a.webhook_comment_detected_count_after_cutoff ?? 0}
+                          </td>
+                          <td className="p-1 border-b border-slate-100 font-mono">
+                            {a.automation_success_webhook_count_after_cutoff ?? 0}
+                          </td>
+                          <td className="p-1 border-b border-slate-100">
+                            <span
+                              className={'inline-block rounded px-1 font-mono ' + color}
+                              data-testid={`webhook-verification-fresh-comment-verdict-${idx}`}
+                              title={
+                                (data.fresh_comment_signal.verdict_meanings || {})[v] || ''
+                              }
+                            >
+                              {v}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Phase 2J: Graph comment visibility check */}
       {state === 'success' && (
         <div

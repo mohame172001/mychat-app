@@ -24860,6 +24860,157 @@ async def _compute_webhook_subscription_status(
     }
 
 
+def _compute_fresh_comment_signal(
+    rows: list,
+    after_time_utc: Optional[datetime],
+    subscription_accounts: list,
+) -> dict:
+    """Phase 2L — verdict for the operator's "I just posted a fresh
+    comment at time T" question.
+
+    Walks the in-window events but considers only rows whose
+    ``created_at`` is at or after ``after_time_utc``. Returns a dict
+    keyed by ``username`` (and a sentinel ``__unscoped__`` for events
+    that did not bind to any account). For each account the verdict
+    is one of:
+
+      * ``fresh_comment_webhook_completed`` —
+        automation_success source=webhook for a comment created after
+        the cutoff.
+      * ``fresh_comment_webhook_detected`` —
+        webhook_comment_detected after the cutoff but no terminal
+        success yet (the flow is still in progress for this comment).
+      * ``webhook_received_after_comment_time_but_no_comment_payload``
+        — at least one webhook_received / account_resolution_success
+        after the cutoff, but none carried a comments or live_comments
+        payload (Meta delivered messaging-only events for this account).
+      * ``comment_field_subscribed_but_fresh_comment_not_delivered`` —
+        the cached subscription says comments / live_comments are
+        subscribed for this account but NO webhook arrived at all
+        after the cutoff.
+      * ``fresh_comment_no_webhook_signal_after_comment_time`` —
+        nothing arrived for this account after the cutoff and
+        subscription is not asserted as ready.
+
+    When ``after_time_utc`` is None the signal block is omitted from
+    the response (the operator did not anchor a fresh-comment time).
+    """
+    if not isinstance(after_time_utc, datetime):
+        return {}
+    per_user: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(key: str) -> Dict[str, Any]:
+        b = per_user.get(key)
+        if b is None:
+            b = {
+                'webhook_received_count': 0,
+                'webhook_comment_detected_count': 0,
+                'account_resolution_success_count': 0,
+                'account_resolution_success_with_comment_payload_count': 0,
+                'automation_success_webhook_count': 0,
+                'first_event_at': None,
+                'latest_event_stage': None,
+            }
+            per_user[key] = b
+        return b
+
+    for r in rows:
+        created = r.get('created_at')
+        if not isinstance(created, datetime) or created < after_time_utc:
+            continue
+        u = (r.get('username_key') or '') or '__unscoped__'
+        b = _bucket(u)
+        stage = r.get('stage')
+        source = r.get('source')
+        b['latest_event_stage'] = stage
+        if b['first_event_at'] is None or created < b['first_event_at']:
+            b['first_event_at'] = created
+        if stage == 'webhook_received':
+            b['webhook_received_count'] += 1
+        elif stage == 'webhook_comment_detected':
+            b['webhook_comment_detected_count'] += 1
+        elif stage == 'account_resolution_success':
+            b['account_resolution_success_count'] += 1
+            extra = r.get('extra') or {}
+            if isinstance(extra, dict) and (
+                extra.get('has_comments_field')
+                or extra.get('has_live_comments_field')
+            ):
+                b['account_resolution_success_with_comment_payload_count'] += 1
+        elif stage == 'automation_success' and source == 'webhook':
+            b['automation_success_webhook_count'] += 1
+
+    sub_by_username: Dict[str, dict] = {}
+    for sub in subscription_accounts or []:
+        u = str(sub.get('username') or '')
+        if u:
+            sub_by_username[u] = sub
+
+    out_accounts: list = []
+    seen_usernames = set(per_user.keys()) | set(sub_by_username.keys())
+    for u in sorted(seen_usernames):
+        if u == '__unscoped__':
+            continue
+        b = per_user.get(u, {})
+        sub = sub_by_username.get(u, {})
+        comments_subscribed = bool(sub.get('comments_subscribed'))
+        any_event = (
+            b.get('webhook_received_count', 0)
+            + b.get('account_resolution_success_count', 0)
+            + b.get('webhook_comment_detected_count', 0)
+        )
+        comment_payload = (
+            b.get('account_resolution_success_with_comment_payload_count', 0)
+            + b.get('webhook_comment_detected_count', 0)
+        )
+        if b.get('automation_success_webhook_count', 0):
+            verdict = 'fresh_comment_webhook_completed'
+        elif b.get('webhook_comment_detected_count', 0):
+            verdict = 'fresh_comment_webhook_detected'
+        elif any_event and not comment_payload:
+            verdict = 'webhook_received_after_comment_time_but_no_comment_payload'
+        elif not any_event and comments_subscribed:
+            verdict = 'comment_field_subscribed_but_fresh_comment_not_delivered'
+        else:
+            verdict = 'fresh_comment_no_webhook_signal_after_comment_time'
+        out_accounts.append({
+            'username': u,
+            'verdict': verdict,
+            'webhook_received_count_after_cutoff': b.get('webhook_received_count', 0),
+            'account_resolution_success_count_after_cutoff': b.get('account_resolution_success_count', 0),
+            'account_resolution_success_with_comment_payload_count_after_cutoff':
+                b.get('account_resolution_success_with_comment_payload_count', 0),
+            'webhook_comment_detected_count_after_cutoff':
+                b.get('webhook_comment_detected_count', 0),
+            'automation_success_webhook_count_after_cutoff':
+                b.get('automation_success_webhook_count', 0),
+            'latest_event_stage_after_cutoff': b.get('latest_event_stage'),
+            'comments_subscribed': comments_subscribed,
+        })
+    return {
+        'after_time_utc': after_time_utc.isoformat() + 'Z',
+        'accounts': out_accounts,
+        'verdict_meanings': {
+            'fresh_comment_webhook_completed':
+                'automation_success source=webhook after the cutoff.',
+            'fresh_comment_webhook_detected':
+                'webhook_comment_detected after the cutoff; flow still in progress.',
+            'webhook_received_after_comment_time_but_no_comment_payload':
+                'Webhook delivery happened after the cutoff for this account '
+                'but no comments/live_comments payload was carried. Meta is '
+                'not delivering the fresh comment to this specific account.',
+            'comment_field_subscribed_but_fresh_comment_not_delivered':
+                'Cached subscription says comments are subscribed but no '
+                'webhook arrived at all after the cutoff. Force a fresh '
+                'Graph verify with /admin/instagram/subscription-verify-fresh '
+                'before contacting Meta.',
+            'fresh_comment_no_webhook_signal_after_comment_time':
+                'Nothing arrived for this account after the cutoff and '
+                'subscription is not asserted as ready in the cache.',
+        },
+    }
+
+
 def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
     """Phase 2I — per-comment final-verdict classifier.
 
@@ -25339,6 +25490,123 @@ async def _compute_webhook_account_parity(
     }
 
 
+@api.get('/admin/instagram/subscription-verify-fresh')
+async def admin_instagram_subscription_verify_fresh(
+    username: str,
+    user_id: str = Depends(get_current_active_user_id),
+):
+    """Phase 2L — read-only fresh Graph subscription verification.
+
+    Calls Graph ``GET /{ig_user_id}/subscribed_apps`` for the specified
+    account, **never** ``POST``. This is the operator's way to answer
+    "is the cache lying about my subscription state?" without making
+    a subscribe call. Persists the fresh ``webhookSubscriptionFields``
+    / ``webhookSubscriptionMissing`` / ``webhookSubscriptionLastCheckedAt``
+    on the row so the verification panel reads the same fresh values
+    immediately. Never logs or returns the access token.
+    """
+    await _require_admin_permission(user_id, _admin_roles.PERM_USERS_VIEW)
+    username_key = _automation_flight_username_key(username) if username else ''
+    if not username_key:
+        return {'ok': False, 'error': 'missing_username'}
+    account = await db.instagram_accounts.find_one({
+        'isActive': {'$ne': False},
+        '$or': [
+            {'username': username_key},
+            {'instagramHandle': username_key},
+        ],
+    })
+    if not account:
+        return {'ok': False, 'error': 'account_not_found', 'username': username_key}
+    ig_user_id = account.get('instagramAccountId') or account.get('igUserId') or ''
+    access_token = account.get('accessToken') or ''
+    if not ig_user_id or not access_token:
+        return {
+            'ok': False,
+            'error': 'missing_id_or_token',
+            'username': username_key,
+            'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+        }
+    fresh_fields: list = []
+    status: Optional[int] = None
+    graph_error_code: Optional[str] = None
+    graph_error_message: Optional[str] = None
+    target_object_id_partial: Optional[str] = _safe_partial_identifier(ig_user_id)
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                params={'access_token': access_token},
+            )
+            status = r.status_code
+            if r.status_code == 200:
+                try:
+                    body = r.json() or {}
+                except Exception:
+                    body = {}
+                for entry in (body.get('data') or []):
+                    for f in entry.get('subscribed_fields') or []:
+                        if f and f not in fresh_fields:
+                            fresh_fields.append(f)
+            else:
+                try:
+                    body = r.json() or {}
+                except Exception:
+                    body = {}
+                err = body.get('error') if isinstance(body, dict) else {}
+                graph_error_code = _automation_flight_safe_text(
+                    (err or {}).get('code') or (err or {}).get('type'), 80,
+                )
+                raw_msg = (err or {}).get('message') or r.text
+                safe_msg = _automation_flight_safe_text(raw_msg, 180) or ''
+                if re.search(r'(?i)\b(access[_-]?token|token|bearer|secret|password)\b', safe_msg):
+                    safe_msg = '[redacted]'
+                graph_error_message = safe_msg or None
+    except Exception as exc:
+        graph_error_code = type(exc).__name__
+        graph_error_message = _automation_flight_safe_text(str(exc), 160)
+    missing = sorted(set(WEBHOOK_REQUIRED_FIELDS) - set(fresh_fields))
+    now = datetime.utcnow()
+    persisted = False
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': account.get('id')},
+            {'$set': {
+                'webhookSubscriptionFields': sorted(set(fresh_fields)),
+                'webhookSubscriptionMissing': missing,
+                'webhookSubscriptionLastCheckedAt': now,
+            }},
+        )
+        persisted = True
+    except Exception:
+        persisted = False
+    verdict = 'ok'
+    if status != 200:
+        verdict = 'graph_error'
+    elif missing:
+        verdict = 'partial_subscription'
+    elif not fresh_fields:
+        verdict = 'no_subscription_returned'
+    return {
+        'ok': status == 200 and not missing,
+        'verdict': verdict,
+        'username': username_key,
+        'instagram_account_id_partial': _safe_partial_identifier(ig_user_id),
+        'target_object_id_partial': target_object_id_partial,
+        'graph_status': status,
+        'graph_error_code': graph_error_code,
+        'graph_error_message': graph_error_message,
+        'fresh_fields_from_graph': sorted(set(fresh_fields)),
+        'missing_fields': missing,
+        'persisted_to_cache': persisted,
+        'queried_at': now.isoformat() + 'Z',
+        'note': (
+            'Read-only verify. Use the Repair endpoint to POST a fresh '
+            'subscribe and let the parity helper rebind aliases/rules.'
+        ),
+    }
+
+
 @api.post('/admin/instagram/repair-comment-webhooks')
 async def admin_instagram_repair_comment_webhooks(
     username: str,
@@ -25764,6 +26032,8 @@ async def admin_instagram_webhook_verification(
     since_minutes: int = 30,
     comment_id_partial: Optional[str] = None,
     media_id_partial: Optional[str] = None,
+    after_utc: Optional[str] = None,
+    after_local: Optional[str] = None,
     limit: int = 200,
     user_id: str = Depends(get_current_active_user_id),
 ):
@@ -25828,11 +26098,50 @@ async def admin_instagram_webhook_verification(
     now_utc = datetime.utcnow()
     since = now_utc - timedelta(minutes=safe_since)
     username_key = _automation_flight_username_key(username) if username else ''
+    # Phase 2L — fresh-comment lower-bound filter.
+    # The operator can pass `after_utc=2026-05-29T21:55:00Z` (or an
+    # `after_local` ISO with offset that is converted to UTC) to ask
+    # the verdict computation "since the user posted a fresh comment
+    # at time T, what does the webhook stream actually show?" Events
+    # strictly before T are excluded from the fresh-comment verdict
+    # so old, already-replied comments cannot pollute the diagnosis.
+    after_time_utc: Optional[datetime] = None
+    after_filter_source: Optional[str] = None
+    raw_after = (after_utc or '').strip() or (after_local or '').strip()
+    if raw_after:
+        # Accept Z-suffix, +00:00, or any tzaware ISO. Convert to
+        # naive UTC (matches Mongo's stored format).
+        try:
+            from datetime import timezone as _tz
+            normalised = raw_after
+            if normalised.endswith('Z'):
+                normalised = normalised[:-1] + '+00:00'
+            parsed = datetime.fromisoformat(normalised)
+            if parsed.tzinfo is None:
+                # Treat naive ISO as UTC for the `after_utc` field; or
+                # as local-with-no-tz for `after_local` we cannot
+                # reliably convert without explicit offset → still
+                # treat as UTC and let the operator confirm via the
+                # echoed filter.
+                after_time_utc = parsed
+            else:
+                after_time_utc = parsed.astimezone(_tz.utc).replace(tzinfo=None)
+            after_filter_source = 'after_utc' if after_utc else 'after_local'
+        except Exception:
+            after_time_utc = None
+            after_filter_source = 'parse_error'
     applied_filters = {
         'username': username_key or None,
         'since_minutes': safe_since,
         'comment_id_partial': (comment_id_partial or '').strip() or None,
         'media_id_partial': (media_id_partial or '').strip() or None,
+        'after_utc': (after_utc or '').strip() or None,
+        'after_local': (after_local or '').strip() or None,
+        'after_time_utc_effective': (
+            after_time_utc.isoformat() + 'Z'
+            if isinstance(after_time_utc, datetime) else None
+        ),
+        'after_filter_source': after_filter_source,
         'limit': safe_limit,
     }
 
@@ -26570,6 +26879,11 @@ async def admin_instagram_webhook_verification(
         'summary': summary,
         'subscription_status': subscription_status,
         'account_parity': account_parity,
+        'fresh_comment_signal': _compute_fresh_comment_signal(
+            rows,
+            after_time_utc,
+            list(subscription_status.get('accounts') or []),
+        ),
         'flow_verdicts': [
             {
                 'comment_id_partial': cid,

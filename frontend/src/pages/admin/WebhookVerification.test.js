@@ -174,6 +174,22 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('polling_interval_seconds');
   });
 
+  test('Phase 2L: fresh-comment anchor + fresh Graph verify wired in', () => {
+    expect(source).toContain('webhook-verification-fresh-comment-anchor');
+    expect(source).toContain('webhook-verification-after-utc');
+    expect(source).toContain('webhook-verification-after-utc-apply');
+    expect(source).toContain('webhook-verification-fresh-comment-signal');
+    expect(source).toContain('webhook-verification-fresh-comment-signal-table');
+    expect(source).toContain('webhook-verification-fresh-comment-verdict-');
+    expect(source).toContain('webhook-verification-subscription-verify-fresh');
+    expect(source).toContain('webhook-verification-subscription-verify-fresh-result');
+    expect(source).toContain('/admin/instagram/subscription-verify-fresh');
+    expect(source).toContain('after_utc');
+    expect(source).toContain('fresh_comment_signal');
+    expect(source).toContain('fresh_comment_webhook_completed');
+    expect(source).toContain('fresh_comment_webhook_detected');
+  });
+
   test('Phase 2J: Graph comment-check control rendered with redacted inputs', () => {
     expect(source).toContain('webhook-verification-graph-comment-check');
     expect(source).toContain('webhook-verification-graph-check-media-id');
