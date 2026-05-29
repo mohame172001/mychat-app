@@ -3432,8 +3432,18 @@ function WebhookVerificationTab() {
               : certStatus === 'meta_delivery_blocked'
               ? 'bg-rose-100 text-rose-900'
               : 'bg-amber-100 text-amber-900';
+            // Phase 2N: the comment-permission blocker gets its own
+            // actionable copy because the remedy (reconnect + grant the
+            // comment permission) is different from a generic reconnect.
+            const permissionBlocked =
+              acc.comment_webhook_blocker === 'comment_permission_not_granted'
+              || acc.comment_permission_granted === false;
             const certAction = certReady
               ? (ar ? 'جاهز' : 'ready')
+              : permissionBlocked
+              ? (ar
+                  ? 'أعد الربط وامنح صلاحية التعليقات'
+                  : 'reconnect & grant comment permission')
               : certStatus === 'reconnect_required'
               ? (ar ? 'أعد ربط Instagram' : 'reconnect Instagram')
               : certStatus === 'meta_delivery_blocked'

@@ -247,6 +247,14 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('unscoped_signal');
   });
 
+  test('Phase 2N: comment-permission gate surfaced with actionable copy', () => {
+    expect(source).toContain('comment_permission_not_granted');
+    expect(source).toContain('comment_permission_granted');
+    // The badge must offer the reconnect-and-grant remedy distinct from
+    // a generic reconnect.
+    expect(source).toContain('reconnect & grant comment permission');
+  });
+
   test('does not introduce any username-specific automation logic', () => {
     // Allowed: ui default WV_DEFAULT_USERNAME = 'muhammad_gehad'; the
     // placeholder string; and the input value default. Forbidden:

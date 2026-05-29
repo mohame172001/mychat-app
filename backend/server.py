@@ -15503,6 +15503,28 @@ async def instagram_callback(request: Request,
                 last_refreshed_at=datetime.utcnow() if final_token_source == 'long_lived' else None)
             connected_account_id = (account_doc or {}).get('id')
             if connected_account_id:
+                # Phase 2N: persist the granted scopes as a first-class
+                # field on the account doc so certification can detect a
+                # missing comment-management permission (the silent
+                # "subscribe ok but Meta never delivers comments" cause)
+                # without a live Graph call. Account-agnostic.
+                try:
+                    _connect_scopes = _normalize_granted_scopes(
+                        (audit.get('debugToken') or {}).get('scopes')
+                    )
+                    if _connect_scopes is not None:
+                        await db.instagram_accounts.update_one(
+                            {'id': connected_account_id},
+                            {'$set': {
+                                'grantedScopes': _connect_scopes,
+                                'commentPermissionGranted': bool(
+                                    _scopes_include_comment_permission(_connect_scopes)
+                                ),
+                                'grantedScopesRefreshedAt': datetime.utcnow(),
+                            }},
+                        )
+                except Exception:
+                    pass
                 audit['connectedInstagramAccountId'] = connected_account_id
                 await db.users.update_one(
                     {'id': user_id},
@@ -16007,6 +16029,156 @@ COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED = 'meta_delivery_blocked'
 COMMENT_WEBHOOK_STATUS_NOT_READY = 'not_ready'
 
 
+# Phase 2N — comment-permission gate.
+#
+# Root cause of the long-standing "subscribe says ok but Meta never
+# delivers comment webhooks" symptom: the account's access token was
+# granted WITHOUT the comment-management permission. With Instagram
+# Business Login the relevant scope is ``instagram_business_manage_
+# comments`` (the legacy Graph equivalent is ``instagram_manage_
+# comments``). When that scope is absent Meta still ACCEPTS the
+# ``/subscribed_apps`` POST for the ``comments`` field — so the
+# subscription looks healthy — but it never actually delivers comment
+# webhooks, while messaging keeps working via the messages scope.
+#
+# This is account-data, not account-code: it depends on which scopes a
+# given user granted at connect time, and is fixed generically by
+# detecting the missing scope and telling the user to reconnect and
+# grant comment access. No per-username branches.
+COMMENT_PERMISSION_SCOPE_TOKENS = (
+    'instagram_business_manage_comments',
+    'instagram_manage_comments',
+)
+
+
+def _normalize_granted_scopes(scopes: Any) -> Optional[List[str]]:
+    """Normalize a debug_token ``scopes`` / ``granular_scopes`` value
+    into a flat list of scope-name strings.
+
+    Returns ``None`` when the input carries no usable scope information
+    (so callers can distinguish "scopes unknown" from "scopes known and
+    empty"). Accepts:
+
+      * ``['instagram_business_basic', ...]`` (plain string list)
+      * ``[{'scope': 'instagram_business_manage_comments', ...}, ...]``
+        (granular_scopes dict list)
+    """
+    if not isinstance(scopes, (list, tuple)):
+        return None
+    out: List[str] = []
+    for item in scopes:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            name = item.get('scope') or item.get('permission') or item.get('name')
+            if isinstance(name, str) and name.strip():
+                out.append(name.strip())
+    if not out:
+        # An explicitly-empty list still means "we asked and got none".
+        return [] if isinstance(scopes, (list, tuple)) else None
+    return out
+
+
+def _scopes_include_comment_permission(scopes: Any) -> Optional[bool]:
+    """Return True/False if the granted-scope set is known, else None.
+
+    True  → a comment-management scope is present.
+    False → scopes are known and none of them is a comment scope.
+    None  → scopes are unknown (no information to act on).
+    """
+    normalized = _normalize_granted_scopes(scopes)
+    if normalized is None:
+        return None
+    for scope in normalized:
+        low = scope.lower()
+        for token in COMMENT_PERMISSION_SCOPE_TOKENS:
+            if token in low:
+                return True
+    return False
+
+
+async def _resolve_account_granted_scopes(account: dict) -> Optional[List[str]]:
+    """Best-effort, network-free lookup of the scopes granted to this
+    account's token.
+
+    Order of preference (all read-only DB / in-memory, never a live
+    Graph call — so the legacy test suite that mocks httpx is never
+    disturbed):
+
+      1. ``account['grantedScopes']`` if already persisted.
+      2. The owning user doc's
+         ``ig_oauth_last_audit.debugToken.scopes`` captured at the most
+         recent OAuth connect.
+
+    Returns a normalized scope list, an empty list (known-empty), or
+    ``None`` when nothing is available.
+    """
+    if not isinstance(account, dict):
+        return None
+    direct = _normalize_granted_scopes(account.get('grantedScopes'))
+    if direct is not None:
+        return direct
+    owner_id = account.get('userId') or account.get('user_id')
+    if not owner_id:
+        return None
+    try:
+        user_doc = await db.users.find_one(
+            {'id': owner_id},
+            {'ig_oauth_last_audit': 1},
+        )
+    except Exception:
+        return None
+    if not isinstance(user_doc, dict):
+        return None
+    audit = user_doc.get('ig_oauth_last_audit')
+    if not isinstance(audit, dict):
+        return None
+    debug_token = audit.get('debugToken')
+    if not isinstance(debug_token, dict):
+        return None
+    return _normalize_granted_scopes(debug_token.get('scopes'))
+
+
+async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[List[str]]:
+    """Live (network) refresh of an account's granted scopes via the
+    Instagram debug_token endpoint, persisting the result onto the
+    account doc as ``grantedScopes`` + ``commentPermissionGranted``.
+
+    Only called from operator-initiated paths (admin repair) where a
+    real Graph round-trip is expected — never inside the generic
+    certify hot path, so the mocked-httpx test suite is unaffected.
+    """
+    if not isinstance(account, dict):
+        return None
+    token = account.get('accessToken') or ''
+    if not token:
+        return None
+    try:
+        debug = await _debug_token_with_ig_app(token)
+    except Exception:
+        return None
+    scopes = _normalize_granted_scopes(debug.get('scopes'))
+    if scopes is None:
+        return None
+    has_comment = _scopes_include_comment_permission(scopes)
+    if account.get('id'):
+        try:
+            await db.instagram_accounts.update_one(
+                {'id': account.get('id')},
+                {'$set': {
+                    'grantedScopes': scopes,
+                    'commentPermissionGranted': bool(has_comment),
+                    'grantedScopesRefreshedAt': datetime.utcnow(),
+                }},
+            )
+        except Exception:
+            pass
+    # Mutate in place so an immediately-following certify sees them.
+    account['grantedScopes'] = scopes
+    account['commentPermissionGranted'] = bool(has_comment)
+    return scopes
+
+
 # How long to look back at the flight recorder when deciding whether
 # Meta is delivering non-comment webhooks but no comment ones. Tunable
 # via env; default 24h so a single quiet posting window doesn't trip
@@ -16191,6 +16363,16 @@ async def certify_instagram_account_for_comment_webhooks(
     )
     missing_subscriptions = parity.get('missing_subscriptions') or []
 
+    # Phase 2N: resolve granted scopes (network-free) so we can detect
+    # the missing-comment-permission case BEFORE trusting the
+    # subscription. Meta accepts a `comments` subscribe even when the
+    # token lacks the comment scope, then silently never delivers.
+    granted_scopes = await _resolve_account_granted_scopes(account)
+    comment_permission = _scopes_include_comment_permission(granted_scopes)
+    comment_permission_granted = (
+        comment_permission if comment_permission is not None else None
+    )
+
     # 2. Decide status.
     status = COMMENT_WEBHOOK_STATUS_NOT_READY
     blocker: Optional[str] = None
@@ -16199,6 +16381,14 @@ async def certify_instagram_account_for_comment_webhooks(
     if not ig_user_id or not access_token or not connection_valid:
         status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
         blocker = 'missing_identity_or_token_or_connection'
+        reconnect_required = True
+    elif comment_permission is False:
+        # Scopes are known and the comment-management permission is
+        # absent. Subscribing will look fine but Meta will never deliver
+        # comment webhooks — the durable, actionable verdict is "the user
+        # must reconnect and grant comment access". Account-agnostic.
+        status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
+        blocker = 'comment_permission_not_granted'
         reconnect_required = True
     elif missing_subscriptions or (
         parity.get('subscribe_status') not in (None, 200)
@@ -16244,7 +16434,10 @@ async def certify_instagram_account_for_comment_webhooks(
         'commentWebhookReconnectRequired': reconnect_required,
         'commentWebhookMetaDeliveryBlocked': meta_delivery_blocked,
         'commentWebhookCertificationReason': reason,
+        'commentPermissionGranted': comment_permission_granted,
     }
+    if granted_scopes is not None:
+        cert_fields['grantedScopes'] = granted_scopes
     if account.get('id'):
         try:
             await db.instagram_accounts.update_one(
@@ -16277,6 +16470,7 @@ async def certify_instagram_account_for_comment_webhooks(
         'comment_webhook_reconnect_required': reconnect_required,
         'comment_webhook_paused_rules_count': paused,
         'comment_webhook_certified_at': now.isoformat() + 'Z',
+        'comment_permission_granted': comment_permission_granted,
     }
 
 
@@ -25207,6 +25401,10 @@ async def _compute_webhook_subscription_status(
             'comment_webhook_meta_delivery_blocked': bool(
                 row.get('commentWebhookMetaDeliveryBlocked')
             ),
+            # Phase 2N — comment-permission state. None = unknown (no
+            # scope info captured yet); False = token lacks the comment
+            # scope (reconnect + grant required); True = granted.
+            'comment_permission_granted': row.get('commentPermissionGranted'),
         })
     return {
         'expected_fields': expected,
@@ -26029,6 +26227,12 @@ async def admin_instagram_repair_comment_webhooks(
                 'Operator should reconnect the Instagram account from the UI.'
             ),
         }
+    # Phase 2N: operator-triggered repair is the right place to spend a
+    # live Graph round-trip refreshing the account's granted scopes, so
+    # certification can detect a missing comment-management permission
+    # (the silent "subscribe ok but Meta never delivers comments" cause)
+    # against the freshest token state. Best-effort, account-agnostic.
+    await _refresh_account_granted_scopes_via_graph(account)
     # Phase 2M: delegate to the certification helper so the
     # operator-triggered repair runs the FULL parity + decides
     # readiness in one shot (identity normalization, webhookEntryId
