@@ -164,11 +164,12 @@ class _Coll:
 
 
 class _DB:
-    def __init__(self, accounts=None, automations=None, media=None, events=None):
+    def __init__(self, accounts=None, automations=None, media=None, events=None, users=None):
         self.instagram_accounts = _Coll(accounts)
         self.automations = _Coll(automations)
         self.instagram_media_catalog = _Coll(media)
         self.instagram_automation_events = _Coll(events)
+        self.users = _Coll(users)
 
     def __getattr__(self, name):
         return _Coll([])
@@ -247,6 +248,78 @@ def test_14_missing_shape_account_is_repaired_then_certified_ready(monkeypatch):
     persisted = db.instagram_accounts.items[0]
     assert persisted['igUserId'] == '17841500000000999'
     assert '17841500000000999' in (persisted.get('webhookEntryIdAliases') or [])
+
+
+def test_duplicate_account_rows_repaired_to_canonical_same_owner(monkeypatch):
+    stale = {
+        'id': 'acct_stale',
+        'userId': 'owner_DUP',
+        'username': 'dup_acc_old',
+        'instagramAccountId': '17841500000001000',
+        'igUserId': '17841500000001000',
+        'accessToken': '',
+        'connectionValid': False,
+        'isActive': True,
+    }
+    canonical = {
+        'id': 'acct_canonical',
+        'userId': 'owner_DUP',
+        'username': 'dup_acc_new',
+        'instagramAccountId': '17841500000001000',
+        'igUserId': '17841500000001000',
+        'webhookEntryIdAliases': ['17841500000001000'],
+        'accessToken': 'fresh-token',
+        'connectionValid': True,
+        'isActive': True,
+    }
+    user = {
+        'id': 'owner_DUP',
+        'active_instagram_account_id': 'acct_stale',
+    }
+    automations = [
+        {
+            'id': 'rule_stale',
+            'userId': 'owner_DUP',
+            'status': 'active',
+            'event_type': 'comment',
+            'instagramAccountDbId': 'acct_stale',
+            'instagram_account_id': 'acct_stale',
+            'instagramAccountId': '17841500000001000',
+        },
+    ]
+    media = [
+        {
+            'id': 'media_stale',
+            'userId': 'owner_DUP',
+            'instagramAccountDbId': 'acct_stale',
+            'instagram_account_id': 'acct_stale',
+            'instagramAccountId': '17841500000001000',
+        },
+    ]
+    db = _DB(
+        accounts=[stale, canonical],
+        automations=automations,
+        media=media,
+        users=[user],
+    )
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(stale, reason='sync')
+    )
+    assert report['comment_webhook_status'] == 'ready'
+    assert report['duplicate_account_row_detected'] is True
+    assert report['stale_account_row_detected'] is True
+    assert report['canonical_account_id_partial'] == server._safe_partial_identifier('acct_canonical')
+    by_id = {row['id']: row for row in db.instagram_accounts.items}
+    assert by_id['acct_stale']['connectionValid'] is False
+    assert by_id['acct_stale']['staleDuplicateOf'] == 'acct_canonical'
+    assert db.users.items[0]['active_instagram_account_id'] == 'acct_canonical'
+    assert db.automations.items[0]['instagramAccountDbId'] == 'acct_canonical'
+    assert db.instagram_media_catalog.items[0]['instagramAccountDbId'] == 'acct_canonical'
 
 
 # ---------------------------------------------------------------------------

@@ -189,6 +189,24 @@ def test_normalize_granular_scopes_dictlist():
     assert server._scopes_include_comment_permission(granular) is True
 
 
+def test_debug_token_parser_combines_scopes_and_granular_scopes():
+    debug = {
+        'data': {
+            'scopes': ['instagram_business_basic'],
+            'granular_scopes': [
+                {
+                    'scope': 'instagram_business_manage_comments',
+                    'target_ids': ['1784'],
+                },
+            ],
+        },
+    }
+    scopes = server._debug_token_scopes(debug)
+    assert 'instagram_business_basic' in scopes
+    assert 'instagram_business_manage_comments' in scopes
+    assert server._scopes_include_comment_permission(scopes) is True
+
+
 # ---------------------------------------------------------------------------
 # 1. known-missing comment scope → reconnect_required
 # ---------------------------------------------------------------------------
@@ -205,6 +223,9 @@ def test_missing_comment_scope_forces_reconnect(monkeypatch):
         'accessToken': 'fake-token',
         'connectionValid': True,
         'grantedScopes': list(_NO_COMMENT_SCOPES),
+        'grantedScopesTokenPrefix': server._token_prefix('fake-token'),
+        'grantedScopesDebugTokenWorks': True,
+        'grantedScopesMatchesIgAppId': True,
     }
     db = _DB(accounts=[dict(account)])
     server.db = db
@@ -224,6 +245,36 @@ def test_missing_comment_scope_forces_reconnect(monkeypatch):
     assert persisted['commentWebhookStatus'] == 'reconnect_required'
     assert persisted['commentWebhookBlocker'] == 'comment_permission_not_granted'
     assert persisted['commentPermissionGranted'] is False
+    assert persisted['commentPermissionScopeCheckProven'] is True
+
+
+def test_unproven_missing_comment_scope_is_inconclusive(monkeypatch):
+    account = {
+        'id': 'acct_unproven',
+        'userId': 'owner_UP',
+        'username': 'unproven_acc',
+        'instagramAccountId': '17841500000000445',
+        'igUserId': '17841500000000445',
+        'webhookEntryIdAliases': ['17841500000000445'],
+        'accessToken': 'fake-token',
+        'connectionValid': True,
+        'grantedScopes': list(_NO_COMMENT_SCOPES),
+    }
+    db = _DB(accounts=[dict(account)])
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
+    )
+    assert report['comment_webhook_ready'] is False
+    assert report['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert report['comment_webhook_blocker'] == 'certification_scope_check_inconclusive'
+    assert report['comment_webhook_reconnect_required'] is False
+    assert report['comment_permission_granted'] is False
+    assert report['comment_permission_scope_check_proven'] is False
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +365,12 @@ def test_scopes_resolved_from_user_audit_fallback(monkeypatch):
     user = {
         'id': 'owner_FB',
         'ig_oauth_last_audit': {
-            'debugToken': {'scopes': list(_NO_COMMENT_SCOPES)},
+            'finalTokenPrefix': server._token_prefix('fake-token'),
+            'debugToken': {
+                'scopes': list(_NO_COMMENT_SCOPES),
+                'debugTokenWorks': True,
+                'matchesIgAppId': True,
+            },
         },
     }
     db = _DB(accounts=[dict(account)], users=[user])
@@ -328,6 +384,43 @@ def test_scopes_resolved_from_user_audit_fallback(monkeypatch):
     )
     assert report['comment_webhook_status'] == 'reconnect_required'
     assert report['comment_webhook_blocker'] == 'comment_permission_not_granted'
+    assert report['comment_permission_scope_check_proven'] is True
+
+
+def test_stale_user_audit_scope_mismatch_is_inconclusive(monkeypatch):
+    account = {
+        'id': 'acct_stale_audit',
+        'userId': 'owner_SA',
+        'username': 'stale_audit_acc',
+        'instagramAccountId': '17841500000000889',
+        'igUserId': '17841500000000889',
+        'webhookEntryIdAliases': ['17841500000000889'],
+        'accessToken': 'active-token',
+        'connectionValid': True,
+    }
+    user = {
+        'id': 'owner_SA',
+        'ig_oauth_last_audit': {
+            'finalTokenPrefix': server._token_prefix('old-token'),
+            'debugToken': {
+                'scopes': list(_NO_COMMENT_SCOPES),
+                'debugTokenWorks': True,
+                'matchesIgAppId': True,
+            },
+        },
+    }
+    db = _DB(accounts=[dict(account)], users=[user])
+    server.db = db
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS),
+    )
+    report = _run(
+        server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
+    )
+    assert report['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert report['comment_webhook_blocker'] == 'certification_scope_check_inconclusive'
+    assert report['comment_permission_token_prefix_matches'] is False
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +433,7 @@ def test_certify_hot_path_makes_no_live_scope_call():
     Graph call (so the mocked-httpx legacy suite is undisturbed). The
     only live refresh lives in the admin-repair endpoint."""
     src = inspect.getsource(server.certify_instagram_account_for_comment_webhooks)
-    assert '_resolve_account_granted_scopes' in src
+    assert '_resolve_account_granted_scope_context' in src
     assert '_refresh_account_granted_scopes_via_graph' not in src
 
 

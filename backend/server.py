@@ -14792,7 +14792,8 @@ async def _debug_token_with_ig_app(token: str) -> Dict[str, Any]:
                     'debugTokenWorks': True,
                     'tokenAppId': token_app_id,
                     'matchesIgAppId': bool(token_app_id and token_app_id == IG_APP_ID),
-                    'scopes': d.get('scopes') or d.get('granular_scopes') or [],
+                    'scopes': _debug_token_scopes(d) or [],
+                    'granularScopes': d.get('granular_scopes') or [],
                     'isValid': bool(d.get('is_valid')),
                     'expiresAt': d.get('expires_at'),
                 })
@@ -15509,9 +15510,8 @@ async def instagram_callback(request: Request,
                 # "subscribe ok but Meta never delivers comments" cause)
                 # without a live Graph call. Account-agnostic.
                 try:
-                    _connect_scopes = _normalize_granted_scopes(
-                        (audit.get('debugToken') or {}).get('scopes')
-                    )
+                    _connect_debug = audit.get('debugToken') or {}
+                    _connect_scopes = _debug_token_scopes(_connect_debug)
                     if _connect_scopes is not None:
                         await db.instagram_accounts.update_one(
                             {'id': connected_account_id},
@@ -15521,6 +15521,14 @@ async def instagram_callback(request: Request,
                                     _scopes_include_comment_permission(_connect_scopes)
                                 ),
                                 'grantedScopesRefreshedAt': datetime.utcnow(),
+                                'grantedScopesTokenPrefix': _token_prefix(final_token),
+                                'grantedScopesDebugTokenWorks': bool(
+                                    _connect_debug.get('debugTokenWorks')
+                                ),
+                                'grantedScopesMatchesIgAppId': bool(
+                                    _connect_debug.get('matchesIgAppId')
+                                ),
+                                'grantedScopesSource': 'oauth_debug_token',
                             }},
                         )
                 except Exception:
@@ -16027,6 +16035,10 @@ COMMENT_WEBHOOK_STATUS_REPAIR_REQUIRED = 'repair_required'
 COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED = 'reconnect_required'
 COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED = 'meta_delivery_blocked'
 COMMENT_WEBHOOK_STATUS_NOT_READY = 'not_ready'
+COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE = 'certification_scope_check_inconclusive'
+COMMENT_WEBHOOK_STATUS_TOKEN_MISMATCH = 'active_account_token_mismatch'
+COMMENT_WEBHOOK_STATUS_DUPLICATE_ACCOUNT = 'duplicate_account_row_detected'
+COMMENT_WEBHOOK_STATUS_STALE_ACCOUNT = 'stale_account_row_detected'
 
 
 # Phase 2N — comment-permission gate.
@@ -16077,6 +16089,30 @@ def _normalize_granted_scopes(scopes: Any) -> Optional[List[str]]:
         # An explicitly-empty list still means "we asked and got none".
         return [] if isinstance(scopes, (list, tuple)) else None
     return out
+
+
+def _debug_token_scopes(debug_token: Any) -> Optional[List[str]]:
+    """Extract all known permission scopes from a Meta debug_token shape.
+
+    Meta can return scope names in either ``scopes`` or
+    ``granular_scopes``. Treat them as additive; do not let a partial
+    ``scopes`` list hide a valid comment permission present only in
+    ``granular_scopes``.
+    """
+    if not isinstance(debug_token, dict):
+        return None
+    data = debug_token.get('data') if isinstance(debug_token.get('data'), dict) else debug_token
+    combined: List[Any] = []
+    saw_field = False
+    for field in ('scopes', 'granular_scopes', 'granularScopes'):
+        raw = data.get(field)
+        normalized = _normalize_granted_scopes(raw)
+        if normalized is not None:
+            saw_field = True
+            combined.extend(normalized)
+    if not saw_field:
+        return None
+    return sorted({str(scope).strip() for scope in combined if str(scope).strip()})
 
 
 def _scopes_include_comment_permission(scopes: Any) -> Optional[bool]:
@@ -16139,6 +16175,87 @@ async def _resolve_account_granted_scopes(account: dict) -> Optional[List[str]]:
     return _normalize_granted_scopes(debug_token.get('scopes'))
 
 
+async def _resolve_account_granted_scope_context(account: dict) -> Dict[str, Any]:
+    """Return scope evidence plus provenance for certification.
+
+    ``comment_permission_not_granted`` is only actionable when the
+    scopes came from the same active instagram_accounts row/token.
+    Older user-level OAuth audits and cache rows without token-prefix
+    provenance are useful hints, but not proof.
+    """
+    ctx: Dict[str, Any] = {
+        'scopes': None,
+        'scope_source': None,
+        'scope_check_proven': False,
+        'token_prefix_matches': None,
+        'active_account_token_used': None,
+        'blocker': None,
+    }
+    if not isinstance(account, dict):
+        return ctx
+    account_id = str(account.get('id') or '')
+    owner_id = account.get('userId') or account.get('user_id') or ''
+    token = account.get('accessToken') or ''
+    token_prefix = _token_prefix(token) if token else ''
+    try:
+        user_doc = await db.users.find_one(
+            {'id': owner_id},
+            {
+                'active_instagram_account_id': 1,
+                'ig_oauth_last_audit': 1,
+            },
+        )
+    except Exception:
+        user_doc = None
+    active_id = (user_doc or {}).get('active_instagram_account_id') or ''
+    if active_id and account_id and active_id != account_id:
+        ctx['blocker'] = 'active_account_token_mismatch'
+        ctx['active_account_token_used'] = False
+        return ctx
+    ctx['active_account_token_used'] = bool(account_id and (not active_id or active_id == account_id))
+
+    direct = _normalize_granted_scopes(account.get('grantedScopes'))
+    if direct is not None:
+        cached_prefix = account.get('grantedScopesTokenPrefix')
+        debug_ok = account.get('grantedScopesDebugTokenWorks')
+        matches_app = account.get('grantedScopesMatchesIgAppId')
+        prefix_matches = bool(cached_prefix and token_prefix and cached_prefix == token_prefix)
+        ctx.update({
+            'scopes': direct,
+            'scope_source': 'instagram_accounts.grantedScopes',
+            'token_prefix_matches': prefix_matches,
+            'scope_check_proven': bool(
+                prefix_matches and debug_ok is True and matches_app is not False
+            ),
+        })
+        return ctx
+
+    audit = (user_doc or {}).get('ig_oauth_last_audit')
+    debug_token = audit.get('debugToken') if isinstance(audit, dict) else None
+    audit_scopes = _debug_token_scopes(debug_token)
+    if audit_scopes is not None:
+        audit_prefix = (
+            audit.get('finalTokenPrefix')
+            or audit.get('finalTokenStoredPrefix')
+            or audit.get('longTokenPrefix')
+            if isinstance(audit, dict)
+            else None
+        )
+        prefix_matches = bool(audit_prefix and token_prefix and audit_prefix == token_prefix)
+        ctx.update({
+            'scopes': audit_scopes,
+            'scope_source': 'users.ig_oauth_last_audit.debugToken',
+            'token_prefix_matches': prefix_matches,
+            'scope_check_proven': bool(
+                prefix_matches
+                and isinstance(debug_token, dict)
+                and debug_token.get('debugTokenWorks') is True
+                and debug_token.get('matchesIgAppId') is not False
+            ),
+        })
+    return ctx
+
+
 async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[List[str]]:
     """Live (network) refresh of an account's granted scopes via the
     Instagram debug_token endpoint, persisting the result onto the
@@ -16169,6 +16286,10 @@ async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[L
                     'grantedScopes': scopes,
                     'commentPermissionGranted': bool(has_comment),
                     'grantedScopesRefreshedAt': datetime.utcnow(),
+                    'grantedScopesTokenPrefix': _token_prefix(token),
+                    'grantedScopesDebugTokenWorks': bool(debug.get('debugTokenWorks')),
+                    'grantedScopesMatchesIgAppId': bool(debug.get('matchesIgAppId')),
+                    'grantedScopesSource': 'debug_token',
                 }},
             )
         except Exception:
@@ -16176,7 +16297,163 @@ async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[L
     # Mutate in place so an immediately-following certify sees them.
     account['grantedScopes'] = scopes
     account['commentPermissionGranted'] = bool(has_comment)
+    account['grantedScopesTokenPrefix'] = _token_prefix(token)
+    account['grantedScopesDebugTokenWorks'] = bool(debug.get('debugTokenWorks'))
+    account['grantedScopesMatchesIgAppId'] = bool(debug.get('matchesIgAppId'))
+    account['grantedScopesSource'] = 'debug_token'
     return scopes
+
+
+async def repair_instagram_account_duplicate_rows_for_owner(account: dict) -> dict:
+    """Generic same-owner repair for duplicate/stale rows of one IG id.
+
+    Chooses one canonical row for the same owner + same
+    instagramAccountId/igUserId, updates the user's active pointer,
+    marks stale duplicates inactive, mirrors a valid token onto the
+    canonical row when needed, and rebinds rules/media catalog from
+    stale DB ids to the canonical DB id. Never crosses owners.
+    """
+    report = {
+        'duplicate_account_row_detected': False,
+        'stale_account_row_detected': False,
+        'canonical_account_id': account.get('id') if isinstance(account, dict) else None,
+        'stale_account_ids': [],
+        'repaired': False,
+    }
+    if not isinstance(account, dict):
+        return report
+    owner_id = account.get('userId') or account.get('user_id') or ''
+    ig_user_id = str(account.get('instagramAccountId') or account.get('igUserId') or '').strip()
+    if not owner_id or not ig_user_id:
+        return report
+    try:
+        rows = await db.instagram_accounts.find(
+            {'$or': [{'userId': owner_id}, {'user_id': owner_id}]}
+        ).limit(200).to_list(200)
+    except Exception:
+        rows = []
+    candidates = [
+        row for row in rows
+        if str(row.get('instagramAccountId') or row.get('igUserId') or '').strip() == ig_user_id
+    ]
+    if len(candidates) <= 1:
+        return report
+    report['duplicate_account_row_detected'] = True
+    try:
+        user_doc = await db.users.find_one(
+            {'id': owner_id},
+            {'active_instagram_account_id': 1},
+        )
+    except Exception:
+        user_doc = None
+    active_id = (user_doc or {}).get('active_instagram_account_id') or ''
+
+    def _score(row: dict) -> tuple:
+        return (
+            1 if row.get('connectionValid') is not False and row.get('isActive') is not False else 0,
+            1 if row.get('accessToken') else 0,
+            1 if active_id and row.get('id') == active_id else 0,
+            str(row.get('updatedAt') or row.get('connectedAt') or row.get('createdAt') or ''),
+            str(row.get('id') or ''),
+        )
+
+    canonical = sorted(candidates, key=_score, reverse=True)[0]
+    canonical_id = canonical.get('id') or account.get('id')
+    report['canonical_account_id'] = canonical_id
+    stale_rows = [row for row in candidates if row.get('id') != canonical_id]
+    report['stale_account_ids'] = [row.get('id') for row in stale_rows if row.get('id')]
+    report['stale_account_row_detected'] = bool(stale_rows)
+    set_canonical: Dict[str, Any] = {
+        'instagramAccountId': ig_user_id,
+        'igUserId': ig_user_id,
+        'connectionValid': True,
+        'isActive': True,
+        'updatedAt': datetime.utcnow(),
+    }
+    if not canonical.get('accessToken'):
+        donor_token = next((row.get('accessToken') for row in candidates if row.get('accessToken')), None)
+        if donor_token:
+            set_canonical['accessToken'] = donor_token
+    try:
+        await db.instagram_accounts.update_one(
+            {'id': canonical_id},
+            {
+                '$set': set_canonical,
+                '$addToSet': {'webhookEntryIdAliases': ig_user_id},
+            },
+        )
+        report['repaired'] = True
+    except Exception:
+        pass
+    for stale in stale_rows:
+        stale_id = stale.get('id')
+        if not stale_id:
+            continue
+        try:
+            await db.instagram_accounts.update_one(
+                {'id': stale_id},
+                {'$set': {
+                    'connectionValid': False,
+                    'isActive': False,
+                    'isCurrent': False,
+                    'staleDuplicateOf': canonical_id,
+                    'updatedAt': datetime.utcnow(),
+                }},
+            )
+            report['repaired'] = True
+        except Exception:
+            pass
+        try:
+            await db.automations.update_many(
+                {
+                    '$or': [{'userId': owner_id}, {'user_id': owner_id}],
+                    '$and': [{'$or': [
+                        {'instagramAccountDbId': stale_id},
+                        {'instagram_account_id': stale_id},
+                    ]}],
+                },
+                {'$set': {
+                    'instagramAccountDbId': canonical_id,
+                    'instagram_account_id': canonical_id,
+                    'instagramAccountId': ig_user_id,
+                    'igUserId': ig_user_id,
+                    'updated': datetime.utcnow(),
+                }},
+            )
+        except Exception:
+            pass
+        try:
+            mc_coll = getattr(db, 'instagram_media_catalog', None)
+            if mc_coll is not None:
+                await mc_coll.update_many(
+                    {
+                        '$or': [{'userId': owner_id}, {'user_id': owner_id}],
+                        '$and': [{'$or': [
+                            {'instagramAccountDbId': stale_id},
+                            {'instagram_account_id': stale_id},
+                        ]}],
+                    },
+                    {'$set': {
+                        'instagramAccountDbId': canonical_id,
+                        'instagram_account_id': canonical_id,
+                        'instagramAccountId': ig_user_id,
+                        'igUserId': ig_user_id,
+                    }},
+                )
+        except Exception:
+            pass
+    if active_id != canonical_id:
+        try:
+            await db.users.update_one(
+                {'id': owner_id},
+                {'$set': {'active_instagram_account_id': canonical_id}},
+            )
+            report['repaired'] = True
+        except Exception:
+            pass
+    if account.get('id') == canonical_id:
+        account.update(set_canonical)
+    return report
 
 
 # How long to look back at the flight recorder when deciding whether
@@ -16344,6 +16621,16 @@ async def certify_instagram_account_for_comment_webhooks(
     if not isinstance(account, dict):
         return {'comment_webhook_ready': False, 'comment_webhook_status': COMMENT_WEBHOOK_STATUS_NOT_READY}
 
+    duplicate_repair = await repair_instagram_account_duplicate_rows_for_owner(account)
+    canonical_account_id = duplicate_repair.get('canonical_account_id')
+    if canonical_account_id and canonical_account_id != account.get('id'):
+        try:
+            canonical = await db.instagram_accounts.find_one({'id': canonical_account_id})
+            if isinstance(canonical, dict):
+                account = canonical
+        except Exception:
+            pass
+
     # 1. Run the underlying repair pipeline (identity, alias,
     #    subscription, rule binding, media-catalog rebind).
     parity = await ensure_instagram_account_webhook_ready(account, reason=reason)
@@ -16367,7 +16654,8 @@ async def certify_instagram_account_for_comment_webhooks(
     # the missing-comment-permission case BEFORE trusting the
     # subscription. Meta accepts a `comments` subscribe even when the
     # token lacks the comment scope, then silently never delivers.
-    granted_scopes = await _resolve_account_granted_scopes(account)
+    scope_context = await _resolve_account_granted_scope_context(account)
+    granted_scopes = scope_context.get('scopes')
     comment_permission = _scopes_include_comment_permission(granted_scopes)
     comment_permission_granted = (
         comment_permission if comment_permission is not None else None
@@ -16382,14 +16670,31 @@ async def certify_instagram_account_for_comment_webhooks(
         status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
         blocker = 'missing_identity_or_token_or_connection'
         reconnect_required = True
+    elif scope_context.get('blocker') == 'active_account_token_mismatch':
+        status = COMMENT_WEBHOOK_STATUS_TOKEN_MISMATCH
+        blocker = 'active_account_token_mismatch'
+    elif (
+        duplicate_repair.get('duplicate_account_row_detected')
+        and duplicate_repair.get('stale_account_row_detected')
+        and not duplicate_repair.get('repaired')
+    ):
+        status = COMMENT_WEBHOOK_STATUS_STALE_ACCOUNT
+        blocker = 'stale_account_row_detected'
     elif comment_permission is False:
-        # Scopes are known and the comment-management permission is
-        # absent. Subscribing will look fine but Meta will never deliver
-        # comment webhooks — the durable, actionable verdict is "the user
-        # must reconnect and grant comment access". Account-agnostic.
-        status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
-        blocker = 'comment_permission_not_granted'
-        reconnect_required = True
+        if scope_context.get('scope_check_proven') is True:
+            # Scopes are known, came from this active account token, and
+            # the comment-management permission is absent. Subscribing
+            # will look fine but Meta will never deliver comment webhooks.
+            status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
+            blocker = 'comment_permission_not_granted'
+            reconnect_required = True
+        else:
+            # Cached or user-level scope evidence can be stale after
+            # reconnects or duplicate account rows. Do not falsely tell
+            # the user Meta permission is missing unless provenance
+            # proves the active account token was checked.
+            status = COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE
+            blocker = 'certification_scope_check_inconclusive'
     elif missing_subscriptions or (
         parity.get('subscribe_status') not in (None, 200)
     ):
@@ -16435,6 +16740,16 @@ async def certify_instagram_account_for_comment_webhooks(
         'commentWebhookMetaDeliveryBlocked': meta_delivery_blocked,
         'commentWebhookCertificationReason': reason,
         'commentPermissionGranted': comment_permission_granted,
+        'commentPermissionScopeSource': scope_context.get('scope_source'),
+        'commentPermissionScopeCheckProven': bool(scope_context.get('scope_check_proven')),
+        'commentPermissionTokenPrefixMatches': scope_context.get('token_prefix_matches'),
+        'commentWebhookDuplicateAccountDetected': bool(
+            duplicate_repair.get('duplicate_account_row_detected')
+        ),
+        'commentWebhookStaleAccountDetected': bool(
+            duplicate_repair.get('stale_account_row_detected')
+        ),
+        'commentWebhookCanonicalAccountId': canonical_account_id,
     }
     if granted_scopes is not None:
         cert_fields['grantedScopes'] = granted_scopes
@@ -16471,6 +16786,12 @@ async def certify_instagram_account_for_comment_webhooks(
         'comment_webhook_paused_rules_count': paused,
         'comment_webhook_certified_at': now.isoformat() + 'Z',
         'comment_permission_granted': comment_permission_granted,
+        'comment_permission_scope_source': scope_context.get('scope_source'),
+        'comment_permission_scope_check_proven': bool(scope_context.get('scope_check_proven')),
+        'comment_permission_token_prefix_matches': scope_context.get('token_prefix_matches'),
+        'duplicate_account_row_detected': bool(duplicate_repair.get('duplicate_account_row_detected')),
+        'stale_account_row_detected': bool(duplicate_repair.get('stale_account_row_detected')),
+        'canonical_account_id_partial': _safe_partial_identifier(canonical_account_id),
     }
 
 
