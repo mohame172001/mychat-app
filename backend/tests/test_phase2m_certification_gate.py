@@ -438,6 +438,7 @@ def test_admin_repair_graph_readback_failure_is_explicit(monkeypatch):
 
 
 async def _scope_refresh_inconclusive(account):
+    account['commentPermissionScopeProofFailureReason'] = 'debug_token_missing_scopes_fields'
     return None
 
 
@@ -456,8 +457,53 @@ def test_admin_repair_active_token_scope_inconclusive_not_missing_permission(mon
         server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
     )
 
-    assert result['ok'] is False
-    assert result['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert result['ok'] is True
+    assert result['comment_webhook_ready'] is True
+    assert (
+        result['comment_webhook_status']
+        == 'subscription_verified_scope_proof_inconclusive'
+    )
+    assert result['comment_webhook_blocker'] == 'active_token_scope_proof_inconclusive'
+    assert result['comment_webhook_blocker'] != 'comment_permission_not_granted'
+    assert result['actionable_error'] is None
+    assert result['comment_permission_scope_proof_failure_reason'] == (
+        'debug_token_missing_scopes_fields'
+    )
+    persisted = db.instagram_accounts.items[0]
+    assert persisted['lastWebhookRepairResult'] == 'success'
+    assert persisted['commentWebhookReady'] is True
+    assert persisted['commentWebhookStatus'] == (
+        'subscription_verified_scope_proof_inconclusive'
+    )
+    assert persisted['commentWebhookScopeWarning'] == (
+        'scope_proof_inconclusive_but_graph_subscription_verified'
+    )
+
+
+def test_stale_cached_missing_scopes_cannot_override_fresh_readback(monkeypatch):
+    account = _admin_account(
+        grantedScopes=[
+            'instagram_business_basic',
+            'instagram_business_manage_messages',
+        ],
+        grantedScopesTokenPrefix=server._token_prefix('old-token'),
+        grantedScopesDebugTokenWorks=True,
+        grantedScopesMatchesIgAppId=True,
+    )
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _scope_refresh_inconclusive)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS, status=200, verify_status=200),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is True
     assert result['comment_webhook_blocker'] == 'active_token_scope_proof_inconclusive'
     assert result['comment_webhook_blocker'] != 'comment_permission_not_granted'
 

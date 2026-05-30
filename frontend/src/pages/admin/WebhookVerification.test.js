@@ -249,10 +249,16 @@ describe('Webhook Verification tab structural contract', () => {
 
   test('Phase 2N: comment-permission gate surfaced with actionable copy', () => {
     expect(source).toContain('comment_permission_not_granted');
-    expect(source).toContain('comment_permission_granted');
     // The badge must offer the reconnect-and-grant remedy distinct from
     // a generic reconnect.
     expect(source).toContain('reconnect & grant comment permission');
+    expect(source).toContain('subscription_verified_scope_proof_inconclusive');
+    expect(source).toContain('active_token_scope_proof_inconclusive');
+    expect(source).toContain('Graph subscription verified; live webhook test required');
+    expect(source).toContain('scope proof inconclusive');
+    expect(source).toMatch(
+      /const permissionBlocked[\s\S]{0,120}comment_permission_not_granted[\s\S]{0,120}const scopeProofInconclusive/,
+    );
   });
 
   test('does not introduce any username-specific automation logic', () => {

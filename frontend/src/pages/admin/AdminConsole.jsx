@@ -3436,9 +3436,15 @@ function WebhookVerificationTab() {
             // actionable copy because the remedy (reconnect + grant the
             // comment permission) is different from a generic reconnect.
             const permissionBlocked =
-              acc.comment_webhook_blocker === 'comment_permission_not_granted'
-              || acc.comment_permission_granted === false;
-            const certAction = certReady
+              acc.comment_webhook_blocker === 'comment_permission_not_granted';
+            const scopeProofInconclusive =
+              certStatus === 'subscription_verified_scope_proof_inconclusive'
+              || acc.comment_webhook_blocker === 'active_token_scope_proof_inconclusive';
+            const certAction = scopeProofInconclusive
+              ? (ar
+                  ? 'Graph subscription verified; live webhook test required'
+                  : 'Graph subscription verified; live webhook test required')
+              : certReady
               ? (ar ? 'جاهز' : 'ready')
               : permissionBlocked
               ? (ar
@@ -3470,6 +3476,11 @@ function WebhookVerificationTab() {
                 <span className="text-rose-700 font-mono">
                   {ar ? 'مفقود: ' : 'missing: '}
                   {acc.missing_fields.join(', ')}
+                </span>
+              )}
+              {scopeProofInconclusive && !(acc.missing_fields && acc.missing_fields.length > 0) && (
+                <span className="text-amber-700 font-mono">
+                  {ar ? 'scope proof inconclusive' : 'scope proof inconclusive'}
                 </span>
               )}
               {acc.last_webhook_repair_attempt_at && (

@@ -207,6 +207,23 @@ def test_debug_token_parser_combines_scopes_and_granular_scopes():
     assert server._scopes_include_comment_permission(scopes) is True
 
 
+def test_debug_token_parser_reads_camel_case_granular_scopes():
+    debug = {
+        'data': {
+            'scopes': ['instagram_business_basic'],
+            'granularScopes': [
+                {
+                    'scope': 'instagram_business_manage_comments',
+                    'target_ids': ['1784'],
+                },
+            ],
+        },
+    }
+    scopes = server._debug_token_scopes(debug)
+    assert 'instagram_business_manage_comments' in scopes
+    assert server._scopes_include_comment_permission(scopes) is True
+
+
 # ---------------------------------------------------------------------------
 # 1. known-missing comment scope → reconnect_required
 # ---------------------------------------------------------------------------

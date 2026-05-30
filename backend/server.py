@@ -16043,12 +16043,27 @@ COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED = 'reconnect_required'
 COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED = 'meta_delivery_blocked'
 COMMENT_WEBHOOK_STATUS_NOT_READY = 'not_ready'
 COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE = 'certification_scope_check_inconclusive'
+COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE = (
+    'subscription_verified_scope_proof_inconclusive'
+)
 COMMENT_WEBHOOK_STATUS_TOKEN_MISMATCH = 'active_account_token_mismatch'
 COMMENT_WEBHOOK_STATUS_DUPLICATE_ACCOUNT = 'duplicate_account_row_detected'
 COMMENT_WEBHOOK_STATUS_STALE_ACCOUNT = 'stale_account_row_detected'
 COMMENT_WEBHOOK_BLOCKER_REPAIR_HTTP_200_READBACK_MISSING = 'repair_http_200_but_graph_readback_missing_fields'
 COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED = 'repair_graph_readback_failed'
 COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE = 'active_token_scope_proof_inconclusive'
+COMMENT_WEBHOOK_SCOPE_PROOF_INCONCLUSIVE_BUT_SUBSCRIBED = (
+    'scope_proof_inconclusive_but_graph_subscription_verified'
+)
+
+DEBUG_TOKEN_HTTP_FAILED = 'debug_token_http_failed'
+DEBUG_TOKEN_MISSING_SCOPES_FIELDS = 'debug_token_missing_scopes_fields'
+DEBUG_TOKEN_MISSING_GRANULAR_SCOPES_FIELDS = 'debug_token_missing_granular_scopes_fields'
+DEBUG_TOKEN_APP_TOKEN_INVALID = 'debug_token_app_token_invalid'
+ACTIVE_ACCOUNT_TOKEN_MISSING = 'active_account_token_missing'
+ACTIVE_ACCOUNT_TOKEN_MISMATCH = 'active_account_token_mismatch'
+DEBUG_TOKEN_RESPONSE_UNPARSEABLE = 'debug_token_response_unparseable'
+SCOPE_CACHE_STALE_OR_UNPROVEN = 'scope_cache_stale_or_unproven'
 
 
 # Phase 2N — comment-permission gate.
@@ -16123,6 +16138,40 @@ def _debug_token_scopes(debug_token: Any) -> Optional[List[str]]:
     if not saw_field:
         return None
     return sorted({str(scope).strip() for scope in combined if str(scope).strip()})
+
+
+def _debug_token_scope_proof_failure_reason(debug: Any, token: str = '') -> str:
+    """Return a safe, specific reason why debug_token did not prove scopes."""
+    if not token:
+        return ACTIVE_ACCOUNT_TOKEN_MISSING
+    if not isinstance(debug, dict):
+        return DEBUG_TOKEN_RESPONSE_UNPARSEABLE
+    error = debug.get('error')
+    error_text = str(error or '').lower()
+    if debug.get('debugTokenWorks') is not True:
+        if (
+            'app token' in error_text
+            or 'app access token' in error_text
+            or 'invalid appsecret_proof' in error_text
+            or 'invalid app' in error_text
+        ):
+            return DEBUG_TOKEN_APP_TOKEN_INVALID
+        return DEBUG_TOKEN_HTTP_FAILED
+    if debug.get('matchesIgAppId') is False:
+        return ACTIVE_ACCOUNT_TOKEN_MISMATCH
+    data = debug.get('data') if isinstance(debug.get('data'), dict) else debug
+    if not isinstance(data, dict):
+        return DEBUG_TOKEN_RESPONSE_UNPARSEABLE
+    has_scopes = 'scopes' in data
+    has_granular = 'granular_scopes' in data or 'granularScopes' in data
+    scopes = _debug_token_scopes(debug)
+    if scopes is None:
+        if not has_scopes:
+            return DEBUG_TOKEN_MISSING_SCOPES_FIELDS
+        if not has_granular:
+            return DEBUG_TOKEN_MISSING_GRANULAR_SCOPES_FIELDS
+        return DEBUG_TOKEN_RESPONSE_UNPARSEABLE
+    return SCOPE_CACHE_STALE_OR_UNPROVEN
 
 
 def _scopes_include_comment_permission(scopes: Any) -> Optional[bool]:
@@ -16200,6 +16249,7 @@ async def _resolve_account_granted_scope_context(account: dict) -> Dict[str, Any
         'token_prefix_matches': None,
         'active_account_token_used': None,
         'blocker': None,
+        'scope_proof_failure_reason': None,
     }
     if not isinstance(account, dict):
         return ctx
@@ -16220,6 +16270,7 @@ async def _resolve_account_granted_scope_context(account: dict) -> Dict[str, Any
     active_id = (user_doc or {}).get('active_instagram_account_id') or ''
     if active_id and account_id and active_id != account_id:
         ctx['blocker'] = 'active_account_token_mismatch'
+        ctx['scope_proof_failure_reason'] = ACTIVE_ACCOUNT_TOKEN_MISMATCH
         ctx['active_account_token_used'] = False
         return ctx
     ctx['active_account_token_used'] = bool(account_id and (not active_id or active_id == account_id))
@@ -16238,6 +16289,12 @@ async def _resolve_account_granted_scope_context(account: dict) -> Dict[str, Any
                 prefix_matches and debug_ok is True and matches_app is not False
             ),
         })
+        if not ctx['scope_check_proven']:
+            ctx['scope_proof_failure_reason'] = (
+                account.get('commentPermissionScopeProofFailureReason')
+                or account.get('grantedScopesProofFailureReason')
+                or SCOPE_CACHE_STALE_OR_UNPROVEN
+            )
         return ctx
 
     audit = (user_doc or {}).get('ig_oauth_last_audit')
@@ -16263,6 +16320,14 @@ async def _resolve_account_granted_scope_context(account: dict) -> Dict[str, Any
                 and debug_token.get('matchesIgAppId') is not False
             ),
         })
+        if not ctx['scope_check_proven']:
+            ctx['scope_proof_failure_reason'] = SCOPE_CACHE_STALE_OR_UNPROVEN
+    else:
+        ctx['scope_proof_failure_reason'] = (
+            account.get('commentPermissionScopeProofFailureReason')
+            or account.get('grantedScopesProofFailureReason')
+            or DEBUG_TOKEN_MISSING_SCOPES_FIELDS
+        )
     return ctx
 
 
@@ -16279,13 +16344,36 @@ async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[L
         return None
     token = account.get('accessToken') or ''
     if not token:
+        reason = ACTIVE_ACCOUNT_TOKEN_MISSING
+        account['commentPermissionScopeProofFailureReason'] = reason
         return None
     try:
         debug = await _debug_token_with_ig_app(token)
     except Exception:
+        reason = DEBUG_TOKEN_HTTP_FAILED
+        account['commentPermissionScopeProofFailureReason'] = reason
         return None
     scopes = _normalize_granted_scopes(debug.get('scopes'))
     if scopes is None:
+        reason = _debug_token_scope_proof_failure_reason(debug, token)
+        fields = {
+            'commentPermissionScopeProofFailureReason': reason,
+            'grantedScopesProofFailureReason': reason,
+            'grantedScopesRefreshedAt': datetime.utcnow(),
+            'grantedScopesTokenPrefix': _token_prefix(token),
+            'grantedScopesDebugTokenWorks': bool(debug.get('debugTokenWorks')),
+            'grantedScopesMatchesIgAppId': bool(debug.get('matchesIgAppId')),
+            'grantedScopesSource': 'debug_token',
+        }
+        if account.get('id'):
+            try:
+                await db.instagram_accounts.update_one(
+                    {'id': account.get('id')},
+                    {'$set': fields},
+                )
+            except Exception:
+                pass
+        account.update(fields)
         return None
     has_comment = _scopes_include_comment_permission(scopes)
     if account.get('id'):
@@ -16300,6 +16388,8 @@ async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[L
                     'grantedScopesDebugTokenWorks': bool(debug.get('debugTokenWorks')),
                     'grantedScopesMatchesIgAppId': bool(debug.get('matchesIgAppId')),
                     'grantedScopesSource': 'debug_token',
+                    'commentPermissionScopeProofFailureReason': None,
+                    'grantedScopesProofFailureReason': None,
                 }},
             )
         except Exception:
@@ -16311,6 +16401,8 @@ async def _refresh_account_granted_scopes_via_graph(account: dict) -> Optional[L
     account['grantedScopesDebugTokenWorks'] = bool(debug.get('debugTokenWorks'))
     account['grantedScopesMatchesIgAppId'] = bool(debug.get('matchesIgAppId'))
     account['grantedScopesSource'] = 'debug_token'
+    account['commentPermissionScopeProofFailureReason'] = None
+    account['grantedScopesProofFailureReason'] = None
     return scopes
 
 
@@ -16619,6 +16711,10 @@ async def certify_instagram_account_for_comment_webhooks(
       * ``meta_delivery_blocked`` — fresh subscribe says ok AND the
         account has received non-comment webhooks in the lookback
         window BUT zero comment payloads.
+      * ``subscription_verified_scope_proof_inconclusive`` — fresh
+        subscribe/readback proves all required fields but debug_token
+        scope proof is unavailable/inconclusive. Account is usable for
+        live webhook testing; do not claim missing permission.
       * ``ready``              — fresh subscribe ok AND comments are
         subscribed. Account is allowed to host active comment rules.
       * ``not_ready``          — catch-all if no other branch fires
@@ -16670,6 +16766,10 @@ async def certify_instagram_account_for_comment_webhooks(
     comment_permission_granted = (
         comment_permission if comment_permission is not None else None
     )
+    scope_proof_failure_reason = (
+        scope_context.get('scope_proof_failure_reason')
+        or account.get('commentPermissionScopeProofFailureReason')
+    )
 
     # 2. Decide status.
     status = COMMENT_WEBHOOK_STATUS_NOT_READY
@@ -16714,6 +16814,9 @@ async def certify_instagram_account_for_comment_webhooks(
             )
     elif (
         reason == 'admin_repair'
+        and
+        comments_subscribed
+        and not missing_subscriptions
         and (
             comment_permission is None
             or (
@@ -16722,7 +16825,12 @@ async def certify_instagram_account_for_comment_webhooks(
             )
         )
     ):
-        status = COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE
+        # Graph POST + fresh readback proves the account is subscribed,
+        # but debug_token could not prove the active token's comment
+        # scope. This is not the same as a missing permission. Keep the
+        # state usable and explicit so operators run a live webhook test
+        # or inspect debug_token configuration instead of reconnecting.
+        status = COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE
         blocker = COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE
     elif comment_permission is False:
         # Cached or user-level scope evidence can be stale after
@@ -16753,7 +16861,10 @@ async def certify_instagram_account_for_comment_webhooks(
         else:
             status = COMMENT_WEBHOOK_STATUS_READY
 
-    comment_webhook_ready = status == COMMENT_WEBHOOK_STATUS_READY
+    comment_webhook_ready = status in (
+        COMMENT_WEBHOOK_STATUS_READY,
+        COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE,
+    )
     now = datetime.utcnow()
 
     cert_fields = {
@@ -16772,6 +16883,12 @@ async def certify_instagram_account_for_comment_webhooks(
         'commentPermissionScopeSource': scope_context.get('scope_source'),
         'commentPermissionScopeCheckProven': bool(scope_context.get('scope_check_proven')),
         'commentPermissionTokenPrefixMatches': scope_context.get('token_prefix_matches'),
+        'commentPermissionScopeProofFailureReason': scope_proof_failure_reason,
+        'commentWebhookScopeWarning': (
+            COMMENT_WEBHOOK_SCOPE_PROOF_INCONCLUSIVE_BUT_SUBSCRIBED
+            if status == COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE
+            else None
+        ),
         'commentWebhookDuplicateAccountDetected': bool(
             duplicate_repair.get('duplicate_account_row_detected')
         ),
@@ -16782,6 +16899,8 @@ async def certify_instagram_account_for_comment_webhooks(
     }
     if granted_scopes is not None:
         cert_fields['grantedScopes'] = granted_scopes
+    if scope_proof_failure_reason:
+        cert_fields['grantedScopesProofFailureReason'] = scope_proof_failure_reason
     if account.get('id'):
         try:
             await db.instagram_accounts.update_one(
@@ -16818,6 +16937,12 @@ async def certify_instagram_account_for_comment_webhooks(
         'comment_permission_scope_source': scope_context.get('scope_source'),
         'comment_permission_scope_check_proven': bool(scope_context.get('scope_check_proven')),
         'comment_permission_token_prefix_matches': scope_context.get('token_prefix_matches'),
+        'comment_permission_scope_proof_failure_reason': scope_proof_failure_reason,
+        'comment_webhook_scope_warning': (
+            COMMENT_WEBHOOK_SCOPE_PROOF_INCONCLUSIVE_BUT_SUBSCRIBED
+            if status == COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE
+            else None
+        ),
         'duplicate_account_row_detected': bool(duplicate_repair.get('duplicate_account_row_detected')),
         'stale_account_row_detected': bool(duplicate_repair.get('stale_account_row_detected')),
         'canonical_account_id_partial': _safe_partial_identifier(canonical_account_id),
@@ -25781,6 +25906,7 @@ async def _compute_webhook_subscription_status(
             'comment_webhook_reconnect_required': bool(
                 row.get('commentWebhookReconnectRequired')
             ),
+            'comment_webhook_scope_warning': row.get('commentWebhookScopeWarning'),
             'comment_webhook_meta_delivery_blocked': bool(
                 row.get('commentWebhookMetaDeliveryBlocked')
             ),
@@ -25788,6 +25914,10 @@ async def _compute_webhook_subscription_status(
             # scope info captured yet); False = token lacks the comment
             # scope (reconnect + grant required); True = granted.
             'comment_permission_granted': row.get('commentPermissionGranted'),
+            'comment_permission_scope_proof_failure_reason': (
+                row.get('commentPermissionScopeProofFailureReason')
+                or row.get('grantedScopesProofFailureReason')
+            ),
         })
     return {
         'expected_fields': expected,
@@ -26645,6 +26775,10 @@ async def admin_instagram_repair_comment_webhooks(
         'comment_webhook_ready': bool(ready_report.get('comment_webhook_ready')),
         'comment_webhook_status': ready_report.get('comment_webhook_status'),
         'comment_webhook_blocker': ready_report.get('comment_webhook_blocker'),
+        'comment_webhook_scope_warning': ready_report.get('comment_webhook_scope_warning'),
+        'comment_permission_scope_proof_failure_reason': ready_report.get(
+            'comment_permission_scope_proof_failure_reason'
+        ),
     }
     # Persist sanitized history on the account row so the verification
     # endpoint can surface it without a fresh Graph call.
@@ -26700,6 +26834,13 @@ async def admin_instagram_repair_comment_webhooks(
                 'or the account is no longer linked to a Facebook Page that '
                 'the app is allowed to access.'
             )
+        elif reason == COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE:
+            actionable_error = (
+                'Active token scope proof is inconclusive. This is not proof '
+                'that comment permission is missing; if Graph readback shows '
+                'the required fields, run a live webhook test or inspect '
+                'debug_token configuration.'
+            )
         elif reason and reason != 'missing_id_or_token':
             actionable_error = f'Graph subscribe raised {reason}.'
     return {
@@ -26713,6 +26854,10 @@ async def admin_instagram_repair_comment_webhooks(
         'comment_webhook_ready': sanitized_result['comment_webhook_ready'],
         'comment_webhook_status': sanitized_result['comment_webhook_status'],
         'comment_webhook_blocker': sanitized_result['comment_webhook_blocker'],
+        'comment_webhook_scope_warning': sanitized_result['comment_webhook_scope_warning'],
+        'comment_permission_scope_proof_failure_reason': sanitized_result[
+            'comment_permission_scope_proof_failure_reason'
+        ],
         'parity_report': sanitized_result['parity_report'],
         'attempted_at': now.isoformat() + 'Z',
         'actionable_error': actionable_error,
