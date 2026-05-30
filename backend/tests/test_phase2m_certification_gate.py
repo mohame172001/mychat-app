@@ -92,7 +92,11 @@ class _Coll:
             for k, v in query.items():
                 if k.startswith('$'):
                     continue
-                if it.get(k) != v:
+                if isinstance(v, dict) and '$ne' in v:
+                    if it.get(k) == v['$ne']:
+                        ok = False
+                        break
+                elif it.get(k) != v:
                     ok = False
                     break
             if ok:
@@ -176,18 +180,19 @@ class _DB:
 
 
 class _SubStub:
-    def __init__(self, subscribed=None, status=200):
+    def __init__(self, subscribed=None, status=200, verify_status=None):
         self.subscribed = list(
             subscribed if subscribed is not None
             else server.WEBHOOK_REQUIRED_FIELDS
         )
         self.status = status
+        self.verify_status = status if verify_status is None else verify_status
 
     async def __call__(self, ig_user_id, access_token):
         return {
             'ok': self.status == 200,
             'subscribe_status': self.status,
-            'verify_status': self.status,
+            'verify_status': self.verify_status,
             'subscribed_fields': list(self.subscribed),
         }
 
@@ -320,6 +325,141 @@ def test_duplicate_account_rows_repaired_to_canonical_same_owner(monkeypatch):
     assert db.users.items[0]['active_instagram_account_id'] == 'acct_canonical'
     assert db.automations.items[0]['instagramAccountDbId'] == 'acct_canonical'
     assert db.instagram_media_catalog.items[0]['instagramAccountDbId'] == 'acct_canonical'
+
+
+def _admin_account(**overrides):
+    base = {
+        'id': 'acct_admin',
+        'userId': 'owner_ADMIN',
+        'username': 'admin_acc',
+        'instagramAccountId': '17841500000001111',
+        'igUserId': '17841500000001111',
+        'webhookEntryIdAliases': ['17841500000001111'],
+        'accessToken': 'active-token',
+        'connectionValid': True,
+        'isActive': True,
+    }
+    base.update(overrides)
+    return base
+
+
+async def _grant_admin(*args, **kwargs):
+    return None
+
+
+async def _fresh_scope_proof(account):
+    scopes = [
+        'instagram_business_basic',
+        'instagram_business_manage_messages',
+        'instagram_business_manage_comments',
+    ]
+    account['grantedScopes'] = scopes
+    account['grantedScopesTokenPrefix'] = server._token_prefix(
+        account.get('accessToken') or ''
+    )
+    account['grantedScopesDebugTokenWorks'] = True
+    account['grantedScopesMatchesIgAppId'] = True
+    return scopes
+
+
+def test_admin_repair_http_200_readback_fields_present_returns_ready(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS, status=200, verify_status=200),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is True
+    assert result['comment_webhook_ready'] is True
+    assert result['comment_webhook_status'] == 'ready'
+    assert result['missing_fields'] == []
+    persisted = db.instagram_accounts.items[0]
+    assert persisted['commentWebhookReady'] is True
+    assert persisted['webhookSubscriptionMissing'] == []
+
+
+def test_admin_repair_http_200_readback_missing_is_not_success(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(['messages'], status=200, verify_status=200),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['subscribe_status'] == 200
+    assert result['verify_status'] == 200
+    assert result['comment_webhook_status'] == 'repair_required'
+    assert (
+        result['comment_webhook_blocker']
+        == 'repair_http_200_but_graph_readback_missing_fields'
+    )
+    assert 'comments' in result['missing_fields']
+    persisted = db.instagram_accounts.items[0]
+    assert persisted['lastWebhookRepairResult'] == 'failed'
+    assert persisted['commentWebhookBlocker'] == 'repair_http_200_but_graph_readback_missing_fields'
+
+
+def test_admin_repair_graph_readback_failure_is_explicit(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub([], status=200, verify_status=500),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['subscribe_status'] == 200
+    assert result['verify_status'] == 500
+    assert result['comment_webhook_status'] == 'repair_required'
+    assert result['comment_webhook_blocker'] == 'repair_graph_readback_failed'
+
+
+async def _scope_refresh_inconclusive(account):
+    return None
+
+
+def test_admin_repair_active_token_scope_inconclusive_not_missing_permission(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _scope_refresh_inconclusive)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(server.WEBHOOK_REQUIRED_FIELDS, status=200, verify_status=200),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert result['comment_webhook_blocker'] == 'active_token_scope_proof_inconclusive'
+    assert result['comment_webhook_blocker'] != 'comment_permission_not_granted'
 
 
 # ---------------------------------------------------------------------------

@@ -352,6 +352,21 @@ def test_repair_endpoint_success_persists_sanitized_history(monkeypatch):
         }
     monkeypatch.setattr(server, '_subscribe_instagram_account_to_webhooks',
                         fake_subscribe)
+    async def fake_refresh_scopes(account):
+        scopes = [
+            'instagram_business_basic',
+            'instagram_business_manage_messages',
+            'instagram_business_manage_comments',
+        ]
+        account['grantedScopes'] = scopes
+        account['grantedScopesTokenPrefix'] = server._token_prefix(
+            account.get('accessToken') or ''
+        )
+        account['grantedScopesDebugTokenWorks'] = True
+        account['grantedScopesMatchesIgAppId'] = True
+        return scopes
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph',
+                        fake_refresh_scopes)
 
     result = _run(server.admin_instagram_repair_comment_webhooks(
         username='acca', user_id='admin',

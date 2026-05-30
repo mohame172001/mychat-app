@@ -15841,6 +15841,8 @@ async def ensure_instagram_account_webhook_ready(
         'rule_binding_mismatch': 0,
         'media_catalog_mismatch': 0,
         'subscribe_status': None,
+        'verify_status': None,
+        'subscription_readback_failed': False,
     }
 
     if not ig_user_id:
@@ -15890,6 +15892,11 @@ async def ensure_instagram_account_webhook_ready(
             subscribe_result = {'ok': False, 'reason': type(exc).__name__}
         subscribed_now = list(subscribe_result.get('subscribed_fields') or [])
         report['subscribe_status'] = subscribe_result.get('subscribe_status')
+        report['verify_status'] = subscribe_result.get('verify_status')
+        report['subscription_readback_failed'] = bool(
+            report['subscribe_status'] == 200
+            and report['verify_status'] not in (None, 200)
+        )
     else:
         # Cache-only verify path (do_graph_subscribe=False): trust the
         # cached fields the periodic heal already wrote.
@@ -15905,7 +15912,7 @@ async def ensure_instagram_account_webhook_ready(
         set_fields['webhookSubscriptionLastCheckedAt'] = datetime.utcnow()
         set_fields['lastWebhookReadyAttemptAt'] = datetime.utcnow()
         set_fields['lastWebhookReadyResult'] = (
-            'ready' if not missing_subscriptions else 'partial'
+            'ready' if not missing_subscriptions and not report['subscription_readback_failed'] else 'partial'
         )
 
     # --- Persist identity + alias + cached subscription ---------------
@@ -16039,6 +16046,9 @@ COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE = 'certification_scope_check_inconclus
 COMMENT_WEBHOOK_STATUS_TOKEN_MISMATCH = 'active_account_token_mismatch'
 COMMENT_WEBHOOK_STATUS_DUPLICATE_ACCOUNT = 'duplicate_account_row_detected'
 COMMENT_WEBHOOK_STATUS_STALE_ACCOUNT = 'stale_account_row_detected'
+COMMENT_WEBHOOK_BLOCKER_REPAIR_HTTP_200_READBACK_MISSING = 'repair_http_200_but_graph_readback_missing_fields'
+COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED = 'repair_graph_readback_failed'
+COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE = 'active_token_scope_proof_inconclusive'
 
 
 # Phase 2N — comment-permission gate.
@@ -16680,28 +16690,47 @@ async def certify_instagram_account_for_comment_webhooks(
     ):
         status = COMMENT_WEBHOOK_STATUS_STALE_ACCOUNT
         blocker = 'stale_account_row_detected'
-    elif comment_permission is False:
-        if scope_context.get('scope_check_proven') is True:
-            # Scopes are known, came from this active account token, and
-            # the comment-management permission is absent. Subscribing
-            # will look fine but Meta will never deliver comment webhooks.
-            status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
-            blocker = 'comment_permission_not_granted'
-            reconnect_required = True
-        else:
-            # Cached or user-level scope evidence can be stale after
-            # reconnects or duplicate account rows. Do not falsely tell
-            # the user Meta permission is missing unless provenance
-            # proves the active account token was checked.
-            status = COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE
-            blocker = 'certification_scope_check_inconclusive'
+    elif comment_permission is False and scope_context.get('scope_check_proven') is True:
+        # Scopes are known, came from this active account token, and
+        # the comment-management permission is absent. Subscribing
+        # will look fine but Meta will never deliver comment webhooks.
+        status = COMMENT_WEBHOOK_STATUS_RECONNECT_REQUIRED
+        blocker = 'comment_permission_not_granted'
+        reconnect_required = True
     elif missing_subscriptions or (
         parity.get('subscribe_status') not in (None, 200)
     ):
         status = COMMENT_WEBHOOK_STATUS_REPAIR_REQUIRED
-        blocker = 'subscription_repair_failed' if not comments_subscribed else (
-            'subscription_partially_ready'
+        if parity.get('subscription_readback_failed') or (
+            parity.get('subscribe_status') == 200
+            and parity.get('verify_status') not in (None, 200)
+        ):
+            blocker = COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED
+        elif parity.get('subscribe_status') == 200 and missing_subscriptions:
+            blocker = COMMENT_WEBHOOK_BLOCKER_REPAIR_HTTP_200_READBACK_MISSING
+        else:
+            blocker = 'subscription_repair_failed' if not comments_subscribed else (
+                'subscription_partially_ready'
+            )
+    elif (
+        reason == 'admin_repair'
+        and (
+            comment_permission is None
+            or (
+                comment_permission is False
+                and scope_context.get('scope_check_proven') is not True
+            )
         )
+    ):
+        status = COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE
+        blocker = COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE
+    elif comment_permission is False:
+        # Cached or user-level scope evidence can be stale after
+        # reconnects or duplicate account rows. Do not falsely tell
+        # the user Meta permission is missing unless provenance proves
+        # the active account token was checked.
+        status = COMMENT_WEBHOOK_STATUS_SCOPE_INCONCLUSIVE
+        blocker = COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE
     else:
         # Subscribe says we're good. Check whether Meta has actually
         # delivered comment payloads recently — if non-comment events
@@ -16822,7 +16851,7 @@ async def _subscribe_instagram_account_to_webhooks(ig_user_id: str, access_token
                 except Exception:
                     pass
             return {
-                'ok': sub.status_code == 200,
+                'ok': sub.status_code == 200 and verify.status_code == 200,
                 'subscribe_status': sub.status_code,
                 'verify_status': verify.status_code,
                 'subscribed_fields': subscribed_now,
@@ -26599,14 +26628,23 @@ async def admin_instagram_repair_comment_webhooks(
     subscribed_now = sorted(
         set(WEBHOOK_REQUIRED_FIELDS) - set(ready_report.get('missing_subscriptions') or [])
     )
+    final_ready = bool(ready_report.get('comment_webhook_ready'))
+    final_blocker = (
+        ready_report.get('comment_webhook_blocker')
+        or ready_report.get('comment_webhook_status')
+        or ready_report.get('reason')
+    )
     sanitized_result = {
-        'ok': bool(ready_report.get('ready') or (ready_report.get('subscribe_status') == 200)),
+        'ok': final_ready,
         'subscribe_status': ready_report.get('subscribe_status'),
-        'verify_status': ready_report.get('subscribe_status'),
+        'verify_status': ready_report.get('verify_status'),
         'subscribed_fields': subscribed_now,
         'missing_fields': list(ready_report.get('missing_subscriptions') or []),
-        'reason': None if ready_report.get('ready') else 'partial_repair',
+        'reason': None if final_ready else final_blocker,
         'parity_report': ready_report,
+        'comment_webhook_ready': bool(ready_report.get('comment_webhook_ready')),
+        'comment_webhook_status': ready_report.get('comment_webhook_status'),
+        'comment_webhook_blocker': ready_report.get('comment_webhook_blocker'),
     }
     # Persist sanitized history on the account row so the verification
     # endpoint can surface it without a fresh Graph call.
@@ -26672,6 +26710,10 @@ async def admin_instagram_repair_comment_webhooks(
         'verify_status': sanitized_result['verify_status'],
         'subscribed_fields': sanitized_result['subscribed_fields'],
         'missing_fields': sanitized_result['missing_fields'],
+        'comment_webhook_ready': sanitized_result['comment_webhook_ready'],
+        'comment_webhook_status': sanitized_result['comment_webhook_status'],
+        'comment_webhook_blocker': sanitized_result['comment_webhook_blocker'],
+        'parity_report': sanitized_result['parity_report'],
         'attempted_at': now.isoformat() + 'Z',
         'actionable_error': actionable_error,
         'note': (
