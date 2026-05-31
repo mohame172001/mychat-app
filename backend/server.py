@@ -15843,6 +15843,14 @@ async def ensure_instagram_account_webhook_ready(
         'subscribe_status': None,
         'verify_status': None,
         'subscription_readback_failed': False,
+        'subscription_readback_failure_reason': None,
+        'subscription_readback_endpoint_kind': None,
+        'subscription_readback_object_id_partial': None,
+        'subscription_readback_http_status': None,
+        'subscription_readback_response_keys': [],
+        'subscription_readback_graph_error_code': None,
+        'subscription_readback_graph_error_subcode': None,
+        'subscription_readback_graph_error_message': None,
     }
 
     if not ig_user_id:
@@ -15893,9 +15901,36 @@ async def ensure_instagram_account_webhook_ready(
         subscribed_now = list(subscribe_result.get('subscribed_fields') or [])
         report['subscribe_status'] = subscribe_result.get('subscribe_status')
         report['verify_status'] = subscribe_result.get('verify_status')
+        report['subscription_readback_failure_reason'] = (
+            subscribe_result.get('readback_failure_reason')
+        )
+        report['subscription_readback_endpoint_kind'] = (
+            subscribe_result.get('readback_endpoint_kind')
+        )
+        report['subscription_readback_object_id_partial'] = (
+            subscribe_result.get('readback_object_id_partial')
+        )
+        report['subscription_readback_http_status'] = (
+            subscribe_result.get('readback_http_status')
+        )
+        report['subscription_readback_response_keys'] = list(
+            subscribe_result.get('readback_response_keys') or []
+        )
+        report['subscription_readback_graph_error_code'] = (
+            subscribe_result.get('graph_error_code')
+        )
+        report['subscription_readback_graph_error_subcode'] = (
+            subscribe_result.get('graph_error_subcode')
+        )
+        report['subscription_readback_graph_error_message'] = (
+            subscribe_result.get('graph_error_message')
+        )
         report['subscription_readback_failed'] = bool(
             report['subscribe_status'] == 200
-            and report['verify_status'] not in (None, 200)
+            and (
+                report['verify_status'] not in (None, 200)
+                or report['subscription_readback_failure_reason']
+            )
         )
     else:
         # Cache-only verify path (do_graph_subscribe=False): trust the
@@ -15910,6 +15945,30 @@ async def ensure_instagram_account_webhook_ready(
         set_fields['webhookSubscriptionFields'] = sorted(set(subscribed_now))
         set_fields['webhookSubscriptionMissing'] = list(missing_subscriptions)
         set_fields['webhookSubscriptionLastCheckedAt'] = datetime.utcnow()
+        set_fields['webhookSubscriptionReadbackFailureReason'] = (
+            report.get('subscription_readback_failure_reason')
+        )
+        set_fields['webhookSubscriptionReadbackEndpointKind'] = (
+            report.get('subscription_readback_endpoint_kind')
+        )
+        set_fields['webhookSubscriptionReadbackObjectIdPartial'] = (
+            report.get('subscription_readback_object_id_partial')
+        )
+        set_fields['webhookSubscriptionReadbackHttpStatus'] = (
+            report.get('subscription_readback_http_status')
+        )
+        set_fields['webhookSubscriptionReadbackResponseKeys'] = list(
+            report.get('subscription_readback_response_keys') or []
+        )
+        set_fields['webhookSubscriptionReadbackGraphErrorCode'] = (
+            report.get('subscription_readback_graph_error_code')
+        )
+        set_fields['webhookSubscriptionReadbackGraphErrorSubcode'] = (
+            report.get('subscription_readback_graph_error_subcode')
+        )
+        set_fields['webhookSubscriptionReadbackGraphErrorMessage'] = (
+            report.get('subscription_readback_graph_error_message')
+        )
         set_fields['lastWebhookReadyAttemptAt'] = datetime.utcnow()
         set_fields['lastWebhookReadyResult'] = (
             'ready' if not missing_subscriptions and not report['subscription_readback_failed'] else 'partial'
@@ -16805,7 +16864,11 @@ async def certify_instagram_account_for_comment_webhooks(
             parity.get('subscribe_status') == 200
             and parity.get('verify_status') not in (None, 200)
         ):
-            blocker = COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED
+            readback_reason = (
+                parity.get('subscription_readback_failure_reason')
+                or 'graph_readback_http_failed'
+            )
+            blocker = f'{COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED}:{readback_reason}'
         elif parity.get('subscribe_status') == 200 and missing_subscriptions:
             blocker = COMMENT_WEBHOOK_BLOCKER_REPAIR_HTTP_200_READBACK_MISSING
         else:
@@ -16896,6 +16959,30 @@ async def certify_instagram_account_for_comment_webhooks(
             duplicate_repair.get('stale_account_row_detected')
         ),
         'commentWebhookCanonicalAccountId': canonical_account_id,
+        'commentWebhookReadbackFailureReason': parity.get(
+            'subscription_readback_failure_reason'
+        ),
+        'commentWebhookReadbackEndpointKind': parity.get(
+            'subscription_readback_endpoint_kind'
+        ),
+        'commentWebhookReadbackObjectIdPartial': parity.get(
+            'subscription_readback_object_id_partial'
+        ),
+        'commentWebhookReadbackHttpStatus': parity.get(
+            'subscription_readback_http_status'
+        ),
+        'commentWebhookReadbackResponseKeys': list(
+            parity.get('subscription_readback_response_keys') or []
+        ),
+        'commentWebhookReadbackGraphErrorCode': parity.get(
+            'subscription_readback_graph_error_code'
+        ),
+        'commentWebhookReadbackGraphErrorSubcode': parity.get(
+            'subscription_readback_graph_error_subcode'
+        ),
+        'commentWebhookReadbackGraphErrorMessage': parity.get(
+            'subscription_readback_graph_error_message'
+        ),
     }
     if granted_scopes is not None:
         cert_fields['grantedScopes'] = granted_scopes
@@ -16957,34 +17044,138 @@ async def _subscribe_instagram_account_to_webhooks(ig_user_id: str, access_token
     fields = 'comments,messages,messaging_postbacks,messaging_seen,message_reactions,live_comments'
     if not ig_user_id or not access_token:
         return {'ok': False, 'reason': 'missing_id_or_token'}
+
+    endpoint = f'https://graph.instagram.com/{ig_user_id}/subscribed_apps'
+
+    def _response_keys(body: Any) -> list:
+        if isinstance(body, dict):
+            return sorted(str(k)[:80] for k in body.keys())
+        if isinstance(body, list):
+            return ['<list>']
+        if body is None:
+            return []
+        return [f'<{type(body).__name__}>']
+
+    def _graph_error(body: Any) -> Dict[str, Any]:
+        err = body.get('error') if isinstance(body, dict) else None
+        if not isinstance(err, dict):
+            return {}
+        return {
+            'graph_error_code': err.get('code'),
+            'graph_error_subcode': err.get('error_subcode') or err.get('subcode'),
+            'graph_error_message': _automation_flight_safe_text(err.get('message'), 180),
+            'graph_error_type': _automation_flight_safe_text(err.get('type'), 80),
+        }
+
+    def _classify_readback_failure(
+        status_code: Optional[int],
+        body: Any = None,
+        exc: Optional[BaseException] = None,
+    ) -> str:
+        if exc is not None:
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                return 'graph_readback_timeout'
+            return 'graph_readback_http_failed'
+        if status_code in (401, 190):
+            return 'graph_readback_unauthorized'
+        if status_code == 403:
+            return 'graph_readback_permission_denied'
+        if status_code in (400, 404):
+            err = body.get('error') if isinstance(body, dict) else {}
+            msg = str((err or {}).get('message') or '').lower()
+            if any(
+                token in msg
+                for token in (
+                    'unsupported get request',
+                    'does not exist',
+                    'object does not exist',
+                    'cannot be loaded',
+                )
+            ):
+                return 'graph_readback_wrong_object_id'
+        if status_code != 200:
+            return 'graph_readback_http_failed'
+        if not isinstance(body, dict):
+            return 'graph_readback_unexpected_shape'
+        if 'data' not in body:
+            return 'graph_readback_missing_data_array'
+        if not isinstance(body.get('data'), list):
+            return 'graph_readback_unexpected_shape'
+        if not body.get('data'):
+            return 'graph_readback_empty_response'
+        return ''
+
     async with httpx.AsyncClient(timeout=20) as c:
+        sub_status: Optional[int] = None
         try:
             sub = await c.post(
-                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
+                endpoint,
                 params={'access_token': access_token, 'subscribed_fields': fields},
             )
-            verify = await c.get(
-                f'https://graph.instagram.com/{ig_user_id}/subscribed_apps',
-                params={'access_token': access_token},
-            )
+            sub_status = sub.status_code
+            try:
+                verify = await c.get(endpoint, params={'access_token': access_token})
+            except Exception as exc:
+                readback_failure = _classify_readback_failure(None, exc=exc)
+                logger.warning(
+                    'ig_subscribe_webhooks_readback_failed ig_user_id=%s err=%s reason=%s',
+                    _safe_partial_identifier(ig_user_id), type(exc).__name__, readback_failure,
+                )
+                return {
+                    'ok': False,
+                    'subscribe_status': sub_status,
+                    'verify_status': None,
+                    'subscribed_fields': [],
+                    'readback_endpoint_kind': 'instagram_subscribed_apps',
+                    'readback_object_id_partial': _safe_partial_identifier(ig_user_id),
+                    'readback_failure_reason': readback_failure,
+                    'readback_response_keys': [],
+                }
             subscribed_now = []
-            if verify.status_code == 200:
-                try:
-                    for entry in (verify.json().get('data') or []):
-                        for f in entry.get('subscribed_fields') or []:
-                            subscribed_now.append(f)
-                except Exception:
-                    pass
+            verify_body: Any = None
+            verify_parse_failed = False
+            try:
+                verify_body = verify.json()
+            except Exception:
+                verify_parse_failed = True
+            if (
+                verify.status_code == 200
+                and not verify_parse_failed
+                and isinstance(verify_body, dict)
+                and isinstance(verify_body.get('data'), list)
+            ):
+                for entry in verify_body.get('data') or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    for f in entry.get('subscribed_fields') or []:
+                        subscribed_now.append(f)
+            readback_failure = (
+                'graph_readback_parse_error'
+                if verify_parse_failed
+                else _classify_readback_failure(verify.status_code, verify_body)
+            )
             return {
-                'ok': sub.status_code == 200 and verify.status_code == 200,
-                'subscribe_status': sub.status_code,
+                'ok': sub.status_code == 200 and verify.status_code == 200 and not readback_failure,
+                'subscribe_status': sub_status,
                 'verify_status': verify.status_code,
                 'subscribed_fields': subscribed_now,
+                'readback_endpoint_kind': 'instagram_subscribed_apps',
+                'readback_object_id_partial': _safe_partial_identifier(ig_user_id),
+                'readback_http_status': verify.status_code,
+                'readback_failure_reason': readback_failure or None,
+                'readback_response_keys': _response_keys(verify_body),
+                **_graph_error(verify_body),
             }
         except Exception as exc:
             logger.warning('ig_subscribe_webhooks_failed ig_user_id=%s err=%s',
-                           ig_user_id, type(exc).__name__)
-            return {'ok': False, 'reason': type(exc).__name__}
+                           _safe_partial_identifier(ig_user_id), type(exc).__name__)
+            return {
+                'ok': False,
+                'reason': type(exc).__name__,
+                'subscribe_status': sub_status,
+                'readback_endpoint_kind': 'instagram_subscribed_apps',
+                'readback_object_id_partial': _safe_partial_identifier(ig_user_id),
+            }
 
 
 @api.post('/instagram/subscribe-webhook-all')
@@ -25918,6 +26109,33 @@ async def _compute_webhook_subscription_status(
                 row.get('commentPermissionScopeProofFailureReason')
                 or row.get('grantedScopesProofFailureReason')
             ),
+            'webhook_subscription_readback_failure_reason': row.get(
+                'webhookSubscriptionReadbackFailureReason'
+            ) or row.get('commentWebhookReadbackFailureReason'),
+            'webhook_subscription_readback_endpoint_kind': row.get(
+                'webhookSubscriptionReadbackEndpointKind'
+            ) or row.get('commentWebhookReadbackEndpointKind'),
+            'webhook_subscription_readback_object_id_partial': row.get(
+                'webhookSubscriptionReadbackObjectIdPartial'
+            ) or row.get('commentWebhookReadbackObjectIdPartial'),
+            'webhook_subscription_readback_http_status': row.get(
+                'webhookSubscriptionReadbackHttpStatus'
+            ) or row.get('commentWebhookReadbackHttpStatus'),
+            'webhook_subscription_readback_response_keys': list(
+                row.get('webhookSubscriptionReadbackResponseKeys')
+                or row.get('commentWebhookReadbackResponseKeys')
+                or []
+            ),
+            'webhook_subscription_readback_graph_error_code': row.get(
+                'webhookSubscriptionReadbackGraphErrorCode'
+            ) or row.get('commentWebhookReadbackGraphErrorCode'),
+            'webhook_subscription_readback_graph_error_subcode': row.get(
+                'webhookSubscriptionReadbackGraphErrorSubcode'
+            ) or row.get('commentWebhookReadbackGraphErrorSubcode'),
+            'webhook_subscription_readback_graph_error_message': (
+                row.get('webhookSubscriptionReadbackGraphErrorMessage')
+                or row.get('commentWebhookReadbackGraphErrorMessage')
+            ),
         })
     return {
         'expected_fields': expected,
@@ -26779,6 +26997,14 @@ async def admin_instagram_repair_comment_webhooks(
         'comment_permission_scope_proof_failure_reason': ready_report.get(
             'comment_permission_scope_proof_failure_reason'
         ),
+        'readback_failure_reason': ready_report.get('subscription_readback_failure_reason'),
+        'readback_endpoint_kind': ready_report.get('subscription_readback_endpoint_kind'),
+        'readback_object_id_partial': ready_report.get('subscription_readback_object_id_partial'),
+        'readback_http_status': ready_report.get('subscription_readback_http_status'),
+        'readback_response_keys': list(ready_report.get('subscription_readback_response_keys') or []),
+        'readback_graph_error_code': ready_report.get('subscription_readback_graph_error_code'),
+        'readback_graph_error_subcode': ready_report.get('subscription_readback_graph_error_subcode'),
+        'readback_graph_error_message': ready_report.get('subscription_readback_graph_error_message'),
     }
     # Persist sanitized history on the account row so the verification
     # endpoint can surface it without a fresh Graph call.
@@ -26841,6 +27067,13 @@ async def admin_instagram_repair_comment_webhooks(
                 'the required fields, run a live webhook test or inspect '
                 'debug_token configuration.'
             )
+        elif str(reason).startswith(COMMENT_WEBHOOK_BLOCKER_REPAIR_GRAPH_READBACK_FAILED):
+            readback_reason = (
+                sanitized_result.get('readback_failure_reason')
+                or str(reason).split(':', 1)[-1]
+                or 'graph_readback_http_failed'
+            )
+            actionable_error = f'Graph readback failed: {readback_reason}.'
         elif reason and reason != 'missing_id_or_token':
             actionable_error = f'Graph subscribe raised {reason}.'
     return {
@@ -26858,6 +27091,14 @@ async def admin_instagram_repair_comment_webhooks(
         'comment_permission_scope_proof_failure_reason': sanitized_result[
             'comment_permission_scope_proof_failure_reason'
         ],
+        'readback_failure_reason': sanitized_result['readback_failure_reason'],
+        'readback_endpoint_kind': sanitized_result['readback_endpoint_kind'],
+        'readback_object_id_partial': sanitized_result['readback_object_id_partial'],
+        'readback_http_status': sanitized_result['readback_http_status'],
+        'readback_response_keys': sanitized_result['readback_response_keys'],
+        'readback_graph_error_code': sanitized_result['readback_graph_error_code'],
+        'readback_graph_error_subcode': sanitized_result['readback_graph_error_subcode'],
+        'readback_graph_error_message': sanitized_result['readback_graph_error_message'],
         'parity_report': sanitized_result['parity_report'],
         'attempted_at': now.isoformat() + 'Z',
         'actionable_error': actionable_error,

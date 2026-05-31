@@ -10,6 +10,8 @@
 
 MyChat is being built as a real multi-user SaaS, not as a one-off tool for one Instagram account.
 
+Current Phase 2O repair/readback rule (2026-05-31): the comment-webhook Repair action must never report a generic permission/reconnect problem when the actual failure is the fresh Graph readback after a subscribe POST. Subscribe and readback must use the same active `instagram_accounts` row token and IG business id. If readback fails, persist and surface a precise, redacted reason (`graph_readback_permission_denied`, `graph_readback_wrong_object_id`, `graph_readback_missing_data_array`, `graph_readback_unexpected_shape`, `graph_readback_empty_response`, `graph_readback_parse_error`, `graph_readback_timeout`, etc.) plus safe response metadata only. Do not expose tokens/full IDs/raw payloads. Do not re-enable polling fallback to mask webhook repair issues. Only show `reconnect & grant comment permission` when `comment_permission_not_granted` is proven from the correct active token.
+
 Therefore:
 
 - Do not special-case `muhammad_gehad`.

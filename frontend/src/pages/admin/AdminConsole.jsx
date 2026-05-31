@@ -3425,8 +3425,18 @@ function WebhookVerificationTab() {
             // Phase 2M: single durable certification badge per account.
             const certStatus = acc.comment_webhook_status || 'not_ready';
             const certReady = !!acc.comment_webhook_ready;
+            const readbackBlocked =
+              String(acc.comment_webhook_blocker || '').startsWith('repair_graph_readback_failed');
+            const readbackReason =
+              acc.webhook_subscription_readback_failure_reason
+              || String(acc.comment_webhook_blocker || '').split(':')[1]
+              || '';
             const certColor = certReady
               ? 'bg-emerald-100 text-emerald-900'
+              : readbackBlocked
+              ? 'bg-rose-100 text-rose-900'
+              : readbackBlocked
+              ? `${ar ? 'readback failed' : 'readback failed'}${readbackReason ? `: ${readbackReason}` : ''}`
               : certStatus === 'reconnect_required'
               ? 'bg-rose-100 text-rose-900'
               : certStatus === 'meta_delivery_blocked'
@@ -3913,6 +3923,17 @@ function WebhookVerificationTab() {
             <div className="font-mono">
               {ar ? 'مشترك الآن: ' : 'subscribed now: '}
               {(repairResult.subscribed_fields || []).join(', ') || '—'}
+            </div>
+          )}
+          {repairResult.readback_failure_reason && (
+            <div className="font-mono mt-1">
+              readback failed: {repairResult.readback_failure_reason}
+              {repairResult.readback_http_status ? ` · HTTP ${repairResult.readback_http_status}` : ''}
+            </div>
+          )}
+          {repairResult.readback_response_keys && repairResult.readback_response_keys.length > 0 && (
+            <div className="font-mono mt-1 text-slate-600">
+              response keys: {(repairResult.readback_response_keys || []).join(', ')}
             </div>
           )}
           {repairResult.actionable_error && (

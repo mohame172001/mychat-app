@@ -23,6 +23,9 @@ Stack:
 
 ## Git And Deploy State
 
+- Current local HEAD before Phase 2O repair/readback fix: `2692eb10179a76f40f1e99288000b8f17aa08bed`.
+- Current production build_sha before Phase 2O repair/readback fix: `2692eb10179a`.
+- Current local app-code fix: pending `fix(instagram): expose and fix webhook subscription graph readback failure`. The Repair comment-webhooks flow now carries Graph subscribed-apps readback details end-to-end instead of collapsing them into generic `repair_graph_readback_failed`. Subscribe POST and readback GET use the same active `instagram_accounts` row IG business id and access token. Readback failures now expose only redacted diagnostic fields: endpoint kind, object id partial, HTTP status, response keys, Graph error code/subcode/message, and precise reason such as `graph_readback_permission_denied`, `graph_readback_wrong_object_id`, `graph_readback_missing_data_array`, `graph_readback_unexpected_shape`, `graph_readback_empty_response`, `graph_readback_parse_error`, or `graph_readback_timeout`. UI copy shows `readback failed: <reason>` instead of suggesting reconnect unless `comment_permission_not_granted` is proven. Polling remains disabled by default; Billing, HMAC, dedupe, Phase 2D cooldown, rate limits, quick reply copy, DM automation, Dashboard routes, and username-specific behavior are unchanged.
 - Current local HEAD before Phase 2C-B work: `90fa8e3523e98377578554f92bcd071283e1a38a`.
 - Current known-good code baseline: `debbcfb9f16d56b9cc511e24768ffd9086b8ef3b`.
 - Current production build_sha before Phase 2C-B work: `90fa8e3523e9` (docs marker commit on top of known-good Phase 2D code).

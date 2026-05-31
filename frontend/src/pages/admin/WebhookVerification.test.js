@@ -160,6 +160,9 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('webhook-verification-repair-result');
     expect(source).toContain('repairResult.actionable_error');
     expect(source).toContain('subscribe_status');
+    expect(source).toContain('repairResult.readback_failure_reason');
+    expect(source).toContain('readback failed:');
+    expect(source).toContain('readback_response_keys');
   });
 
   test('Phase 2G: summary surfaces polling-seen / polling-send-disabled counters', () => {
@@ -257,8 +260,16 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('Graph subscription verified; live webhook test required');
     expect(source).toContain('scope proof inconclusive');
     expect(source).toMatch(
-      /const permissionBlocked[\s\S]{0,120}comment_permission_not_granted[\s\S]{0,120}const scopeProofInconclusive/,
+      /const permissionBlocked[\s\S]{0,420}comment_permission_not_granted[\s\S]{0,420}const scopeProofInconclusive/,
     );
+  });
+
+  test('Phase 2O: readback failure gets precise non-reconnect copy', () => {
+    expect(source).toContain('repair_graph_readback_failed');
+    expect(source).toContain('webhook_subscription_readback_failure_reason');
+    expect(source).toContain('readbackBlocked');
+    expect(source).toContain('readback failed');
+    expect(source).toContain('readback failed:');
   });
 
   test('does not introduce any username-specific automation logic', () => {

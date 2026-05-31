@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Repair Comment Webhooks Returned HTTP 200 But Graph Readback Failed Generically
+
+- Date/time: 2026-05-31
+- Symptom: After clicking Repair comment webhooks, the admin UI could show `Repair failed · HTTP 200` and "subscribed now: -" while the account panel still listed every required field as missing with generic `repair_graph_readback_failed`. Operators could not tell whether the Graph readback failed because of auth, wrong object id, unexpected JSON shape, timeout, parse error, or genuinely missing subscription fields.
+- Affected area: Admin Repair comment-webhook flow: `_subscribe_instagram_account_to_webhooks`, `ensure_instagram_account_webhook_ready`, `certify_instagram_account_for_comment_webhooks`, `admin_instagram_repair_comment_webhooks`, and Webhook Verification UI copy.
+- Root cause: The subscribe helper performed the POST and immediate readback GET with the active account IG id/token, but it only returned `verify_status` and subscribed fields. Readback JSON parse/shape problems were swallowed, Graph error bodies were not safely summarized, and certification collapsed any readback failure into generic `repair_graph_readback_failed`.
+- Fix commit: pending (this commit). Keep the same active-row token/object for POST and GET, but classify readback failures precisely (`graph_readback_permission_denied`, `graph_readback_wrong_object_id`, `graph_readback_missing_data_array`, `graph_readback_unexpected_shape`, `graph_readback_empty_response`, `graph_readback_parse_error`, `graph_readback_timeout`, etc.). Persist and return only redacted metadata: endpoint kind, object id partial, HTTP status, response keys, and Graph error code/subcode/message. Certification now emits `repair_graph_readback_failed:<reason>` for readback failures, and the UI displays `readback failed: <reason>` instead of suggesting reconnect unless `comment_permission_not_granted` is proven.
+- Tests: Certification/repair tests for ready, missing fields, HTTP 403 permission denied, wrong object id, unexpected shape, response-key redaction, same object/token usage, no username-specific behavior. Frontend Webhook Verification structural tests cover readback failure copy.
+- Deploy status: Local, deploy required.
+- Lesson learned: A successful subscribe POST is not enough. Repair must immediately read back the same Graph object with the same active token and surface a precise, redacted readback failure when that proof step fails.
+- Preventive test added: Yes.
+
 ### Comment Webhooks Arrived With Unmapped Entry Ids
 
 - Date/time: 2026-05-28

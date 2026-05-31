@@ -180,13 +180,22 @@ class _DB:
 
 
 class _SubStub:
-    def __init__(self, subscribed=None, status=200, verify_status=None):
+    def __init__(
+        self,
+        subscribed=None,
+        status=200,
+        verify_status=None,
+        readback_failure_reason=None,
+        readback_response_keys=None,
+    ):
         self.subscribed = list(
             subscribed if subscribed is not None
             else server.WEBHOOK_REQUIRED_FIELDS
         )
         self.status = status
         self.verify_status = status if verify_status is None else verify_status
+        self.readback_failure_reason = readback_failure_reason
+        self.readback_response_keys = list(readback_response_keys or [])
 
     async def __call__(self, ig_user_id, access_token):
         return {
@@ -194,7 +203,47 @@ class _SubStub:
             'subscribe_status': self.status,
             'verify_status': self.verify_status,
             'subscribed_fields': list(self.subscribed),
+            'readback_endpoint_kind': 'instagram_subscribed_apps',
+            'readback_object_id_partial': server._safe_partial_identifier(ig_user_id),
+            'readback_http_status': self.verify_status,
+            'readback_failure_reason': self.readback_failure_reason,
+            'readback_response_keys': list(self.readback_response_keys),
         }
+
+
+class _FakeGraphResponse:
+    def __init__(self, status_code=200, body=None, json_raises=False):
+        self.status_code = status_code
+        self._body = body
+        self._json_raises = json_raises
+
+    def json(self):
+        if self._json_raises:
+            raise ValueError('bad json')
+        return self._body
+
+
+class _FakeAsyncClient:
+    calls = []
+    post_response = _FakeGraphResponse(200, {'success': True})
+    get_response = _FakeGraphResponse(200, {'data': []})
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def post(self, url, params=None):
+        type(self).calls.append(('post', url, dict(params or {})))
+        return type(self).post_response
+
+    async def get(self, url, params=None):
+        type(self).calls.append(('get', url, dict(params or {})))
+        return type(self).get_response
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +472,13 @@ def test_admin_repair_graph_readback_failure_is_explicit(monkeypatch):
     monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
     monkeypatch.setattr(
         server, '_subscribe_instagram_account_to_webhooks',
-        _SubStub([], status=200, verify_status=500),
+        _SubStub(
+            [],
+            status=200,
+            verify_status=500,
+            readback_failure_reason='graph_readback_http_failed',
+            readback_response_keys=['error'],
+        ),
     )
 
     result = _run(
@@ -434,7 +489,160 @@ def test_admin_repair_graph_readback_failure_is_explicit(monkeypatch):
     assert result['subscribe_status'] == 200
     assert result['verify_status'] == 500
     assert result['comment_webhook_status'] == 'repair_required'
-    assert result['comment_webhook_blocker'] == 'repair_graph_readback_failed'
+    assert result['comment_webhook_blocker'] == 'repair_graph_readback_failed:graph_readback_http_failed'
+    assert result['readback_failure_reason'] == 'graph_readback_http_failed'
+    assert result['readback_response_keys'] == ['error']
+
+
+def test_admin_repair_graph_readback_permission_denied_is_precise(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(
+            [],
+            status=200,
+            verify_status=403,
+            readback_failure_reason='graph_readback_permission_denied',
+            readback_response_keys=['error'],
+        ),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['comment_webhook_blocker'] == (
+        'repair_graph_readback_failed:graph_readback_permission_denied'
+    )
+    assert result['readback_failure_reason'] == 'graph_readback_permission_denied'
+    assert 'readback failed: graph_readback_permission_denied' in result['actionable_error']
+
+
+def test_admin_repair_graph_readback_wrong_object_is_precise(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(
+            [],
+            status=200,
+            verify_status=404,
+            readback_failure_reason='graph_readback_wrong_object_id',
+            readback_response_keys=['error'],
+        ),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['comment_webhook_blocker'] == (
+        'repair_graph_readback_failed:graph_readback_wrong_object_id'
+    )
+    assert result['readback_failure_reason'] == 'graph_readback_wrong_object_id'
+
+
+def test_admin_repair_graph_readback_unexpected_shape_is_precise(monkeypatch):
+    account = _admin_account()
+    db = _DB(accounts=[account])
+    server.db = db
+    monkeypatch.setattr(server, '_require_admin_permission', _grant_admin)
+    monkeypatch.setattr(server, '_refresh_account_granted_scopes_via_graph', _fresh_scope_proof)
+    monkeypatch.setattr(
+        server, '_subscribe_instagram_account_to_webhooks',
+        _SubStub(
+            [],
+            status=200,
+            verify_status=200,
+            readback_failure_reason='graph_readback_unexpected_shape',
+            readback_response_keys=['unexpected'],
+        ),
+    )
+
+    result = _run(
+        server.admin_instagram_repair_comment_webhooks('admin_acc', user_id='owner_ADMIN')
+    )
+
+    assert result['ok'] is False
+    assert result['comment_webhook_blocker'] == (
+        'repair_graph_readback_failed:graph_readback_unexpected_shape'
+    )
+    assert result['readback_response_keys'] == ['unexpected']
+    assert 'access_token' not in str(result)
+
+
+def test_subscribe_helper_uses_same_object_and_token_for_post_and_readback(monkeypatch):
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.post_response = _FakeGraphResponse(200, {'success': True})
+    _FakeAsyncClient.get_response = _FakeGraphResponse(
+        200,
+        {'data': [{'subscribed_fields': list(server.WEBHOOK_REQUIRED_FIELDS)}]},
+    )
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _FakeAsyncClient)
+
+    result = _run(
+        server._subscribe_instagram_account_to_webhooks('17841500000001111', 'active-token')
+    )
+
+    assert result['ok'] is True
+    assert result['readback_failure_reason'] is None
+    assert _FakeAsyncClient.calls[0][1] == _FakeAsyncClient.calls[1][1]
+    assert _FakeAsyncClient.calls[0][2]['access_token'] == 'active-token'
+    assert _FakeAsyncClient.calls[1][2]['access_token'] == 'active-token'
+    assert '17841500000001111' in _FakeAsyncClient.calls[0][1]
+
+
+def test_subscribe_helper_classifies_readback_403_without_payload_leak(monkeypatch):
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.post_response = _FakeGraphResponse(200, {'success': True})
+    _FakeAsyncClient.get_response = _FakeGraphResponse(
+        403,
+        {
+            'error': {
+                'code': 10,
+                'message': 'Permission denied for this object',
+                'fbtrace_id': 'secret-trace',
+            },
+            'access_token': 'must-not-leak',
+        },
+    )
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _FakeAsyncClient)
+
+    result = _run(
+        server._subscribe_instagram_account_to_webhooks('17841500000001111', 'active-token')
+    )
+
+    assert result['ok'] is False
+    assert result['verify_status'] == 403
+    assert result['readback_failure_reason'] == 'graph_readback_permission_denied'
+    assert result['readback_response_keys'] == ['access_token', 'error']
+    assert result['graph_error_code'] == 10
+    assert 'must-not-leak' not in str(result)
+    assert 'secret-trace' not in str(result)
+
+
+def test_subscribe_helper_classifies_unexpected_readback_shape(monkeypatch):
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.post_response = _FakeGraphResponse(200, {'success': True})
+    _FakeAsyncClient.get_response = _FakeGraphResponse(200, {'unexpected': []})
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _FakeAsyncClient)
+
+    result = _run(
+        server._subscribe_instagram_account_to_webhooks('17841500000001111', 'active-token')
+    )
+
+    assert result['ok'] is False
+    assert result['readback_failure_reason'] == 'graph_readback_missing_data_array'
+    assert result['readback_response_keys'] == ['unexpected']
 
 
 async def _scope_refresh_inconclusive(account):
