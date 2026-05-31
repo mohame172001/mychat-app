@@ -188,6 +188,56 @@ class _FakeDB:
         return _FakeColl([])
 
 
+class _GraphResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.content = b'{}'
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _GraphClient:
+    responses = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, *args, **kwargs):
+        if self.__class__.responses:
+            return self.__class__.responses.pop(0)
+        return _GraphResponse(200, {'data': []})
+
+
+def _install_graph_check(monkeypatch, *, events=None):
+    fake_db = _FakeDB(
+        accounts=[{
+            'id': 'acct_db',
+            'username': 'acct_x',
+            'instagramAccountId': '178000000615',
+            'accessToken': 'TOKEN-SHOULD-NOT-LEAK',
+            'isActive': True,
+        }],
+        events=events or [],
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    async def _admin(*_args, **_kwargs):
+        return ({'id': 'admin'}, 'owner')
+
+    monkeypatch.setattr(server, '_require_admin_permission', _admin)
+    monkeypatch.setattr(server.httpx, 'AsyncClient', _GraphClient)
+    return fake_db
+
+
 def test_parity_blocker_webhook_received_but_no_comment_payload():
     now = datetime.utcnow()
     events = [
@@ -310,6 +360,160 @@ def test_graph_check_endpoint_exposes_both_actionable_blocker_labels():
     assert 'graph_does_not_see_matching_comment' in src
     assert 'graph_returned_no_comments' in src
     assert 'graph_error' in src
+    assert 'external_comment_visible_in_graph_but_no_webhook_event' in src
+    assert 'external_comment_not_visible_in_graph' in src
+    assert 'external_comment_arrived_under_different_media' in src
+    assert 'external_comment_filtered_before_logging' in src
+
+
+def test_graph_check_visible_external_comment_without_webhook(monkeypatch):
+    _install_graph_check(monkeypatch, events=[])
+    _GraphClient.responses = [
+        _GraphResponse(200, {'data': [{
+            'id': '181000000639',
+            'from': {'id': '435000000938', 'username': 'fan'},
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        }]}),
+    ]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        commenter_id_partial=server._safe_partial_identifier('435000000938'),
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['verdict'] == 'external_comment_visible_in_graph_but_no_webhook_event'
+    assert result['legacy_verdict'] == 'graph_sees_comment'
+    assert result['matches'][0]['comment_id_partial'] == server._safe_partial_identifier('181000000639')
+    assert result['matches'][0]['commenter_id_partial'] == server._safe_partial_identifier('435000000938')
+    assert result['matches'][0]['matched_by_time_window'] is True
+    assert result['matches'][0]['matched_by_commenter_partial'] is True
+    assert result['webhook_detected_for_matching_comment'] is False
+    assert 'TOKEN-SHOULD-NOT-LEAK' not in repr(result)
+    assert 'hello' not in repr(result)
+
+
+def test_graph_check_external_comment_not_visible(monkeypatch):
+    _install_graph_check(monkeypatch, events=[])
+    _GraphClient.responses = [
+        _GraphResponse(200, {'data': [{
+            'id': '181000000111',
+            'from': {'id': '999000000999', 'username': 'other'},
+            'text': 'other',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        }]}),
+    ]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        commenter_id_partial=server._safe_partial_identifier('435000000938'),
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['verdict'] == 'external_comment_not_visible_in_graph'
+    assert result['legacy_verdict'] == 'graph_does_not_see_matching_comment'
+    assert result['match_count'] == 0
+    assert result['visibility_blocker_label_if_not_visible'] == (
+        'graph_comment_not_visible_due_to_permission_or_visibility'
+    )
+
+
+def test_graph_check_visible_and_webhook_detected(monkeypatch):
+    partial_comment = server._safe_partial_identifier('181000000639')
+    events = [{
+        'created_at': datetime.utcnow(),
+        'username_key': 'acct_x',
+        'stage': 'webhook_comment_detected',
+        'source': 'webhook',
+        'comment_id_partial': partial_comment,
+        'media_id_partial': server._safe_partial_identifier('180000000892'),
+        'commenter_id_partial': server._safe_partial_identifier('435000000938'),
+    }]
+    _install_graph_check(monkeypatch, events=events)
+    _GraphClient.responses = [
+        _GraphResponse(200, {'data': [{
+            'id': '181000000639',
+            'from': {'id': '435000000938', 'username': 'fan'},
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        }]}),
+    ]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        commenter_id_partial=server._safe_partial_identifier('435000000938'),
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['verdict'] == 'external_comment_visible_in_graph'
+    assert result['webhook_detected_for_matching_comment'] is True
+
+
+def test_graph_check_comment_arrived_under_different_media(monkeypatch):
+    events = [{
+        'created_at': datetime.utcnow(),
+        'username_key': 'acct_x',
+        'stage': 'webhook_comment_detected',
+        'source': 'webhook',
+        'comment_id_partial': '181...999',
+        'media_id_partial': '180...DIFF',
+        'commenter_id_partial': server._safe_partial_identifier('435000000938'),
+    }]
+    _install_graph_check(monkeypatch, events=events)
+    _GraphClient.responses = [
+        _GraphResponse(200, {'data': []}),
+    ]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        commenter_id_partial=server._safe_partial_identifier('435000000938'),
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['verdict'] == 'external_comment_arrived_under_different_media'
+    assert result['external_comment_arrived_under_different_media'] is True
+
+
+def test_graph_check_comment_filtered_before_logging(monkeypatch):
+    partial_comment = server._safe_partial_identifier('181000000639')
+    events = [{
+        'created_at': datetime.utcnow(),
+        'username_key': 'acct_x',
+        'stage': 'account_resolution_success',
+        'source': 'webhook',
+        'comment_id_partial': '',
+        'media_id_partial': '',
+        'extra': {'value_comment_id_partial': partial_comment},
+    }]
+    _install_graph_check(monkeypatch, events=events)
+    _GraphClient.responses = [
+        _GraphResponse(200, {'data': [{
+            'id': '181000000639',
+            'from': {'id': '435000000938', 'username': 'fan'},
+            'text': 'hello',
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+0000'),
+        }]}),
+    ]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        commenter_id_partial=server._safe_partial_identifier('435000000938'),
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['verdict'] == 'external_comment_filtered_before_logging'
+    assert result['webhook_filtered_before_logging_for_matching_comment'] is True
 
 
 def test_graph_check_endpoint_never_logs_raw_token():

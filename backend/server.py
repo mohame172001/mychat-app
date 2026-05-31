@@ -27174,6 +27174,8 @@ async def admin_instagram_comment_graph_check(
     post_url: Optional[str] = None,
     text: Optional[str] = None,
     commenter_username: Optional[str] = None,
+    commenter_id_partial: Optional[str] = None,
+    after_utc: Optional[str] = None,
     since_minutes: int = 30,
     user_id: str = Depends(get_current_active_user_id),
 ):
@@ -27191,22 +27193,32 @@ async def admin_instagram_comment_graph_check(
          the media in our cached `instagram_media_catalog` collection.
       3. Call Graph ``/{media-id}/comments`` with the account token,
          no-cache, page size 50.
-      4. Optionally match candidates by partial text contains and/or
-         commenter username (both fuzzy / case-insensitive).
-      5. Return ONLY redacted partials + booleans + bounded error.
+      4. Optionally match candidates by partial text contains,
+         commenter username, commenter id partial, and/or a fresh
+         comment time anchor.
+      5. Cross-check the flight recorder window to decide whether a
+         Graph-visible external comment also arrived as a webhook.
+      6. Return ONLY redacted partials + booleans + bounded error.
 
     Returns one of three top-level verdicts:
 
-      - ``graph_sees_comment``                         — at least one
-        comment matches the filters; the webhook flow is the only
-        thing missing.
-      - ``graph_does_not_see_matching_comment``        — Graph returned
-        comments but none matched the filters provided.
-      - ``graph_returned_no_comments``                 — Graph returned
-        an empty list for this media.
-      - ``graph_error``                                — Graph rejected
-        the request; ``graph_error_code`` /
-        ``graph_error_message`` carry the redacted reason.
+      - ``external_comment_visible_in_graph`` — matching external
+        comment is visible and a webhook_comment_detected row exists.
+      - ``external_comment_visible_in_graph_but_no_webhook_event`` —
+        matching external comment is visible, but no webhook row for
+        that comment exists in the recorder window.
+      - ``external_comment_not_visible_in_graph`` — the connected
+        account token can read the media comments, but no matching
+        external comment is visible.
+      - ``external_comment_arrived_under_different_media`` — no match
+        on the probed media, but a webhook comment by the same
+        commenter appeared on another media after the cutoff.
+      - ``external_comment_filtered_before_logging`` — a comment-shaped
+        webhook row carried the matching comment id partial, but the
+        normal webhook_comment_detected row was not recorded.
+      - ``graph_comments_read_failed`` — Graph rejected the comments
+        read; ``graph_error_code`` / ``graph_error_message`` carry the
+        redacted reason.
 
     Never exposes the raw token, the raw comment text, or full IDs.
     """
@@ -27301,8 +27313,23 @@ async def admin_instagram_comment_graph_check(
     since_seconds = max(60, min(int(since_minutes or 30), 1440) * 60)
     now_utc = datetime.utcnow()
     threshold = now_utc - timedelta(seconds=since_seconds)
+    after_time_utc: Optional[datetime] = None
+    if (after_utc or '').strip():
+        try:
+            from datetime import timezone as _tz
+            raw_after = str(after_utc or '').strip()
+            normalised_after = raw_after[:-1] + '+00:00' if raw_after.endswith('Z') else raw_after
+            parsed_after = datetime.fromisoformat(normalised_after)
+            after_time_utc = (
+                parsed_after.astimezone(_tz.utc).replace(tzinfo=None)
+                if parsed_after.tzinfo is not None else parsed_after
+            )
+            threshold = after_time_utc
+        except Exception:
+            after_time_utc = None
     norm_text = (text or '').strip().lower()
     norm_commenter = (commenter_username or '').strip().lstrip('@').lower()
+    norm_commenter_partial = (commenter_id_partial or '').strip()
 
     safe_media_id_partial = _safe_partial_identifier(resolved_media_id)
     graph_error_code: Optional[str] = None
@@ -27336,7 +27363,8 @@ async def admin_instagram_comment_graph_check(
             graph_error_message = safe_msg or None
             return {
                 'ok': False,
-                'verdict': 'graph_error',
+                'verdict': 'graph_comments_read_failed',
+                'legacy_verdict': 'graph_error',
                 'graph_status': int(resp.status_code),
                 'graph_error_code': graph_error_code,
                 'graph_error_message': graph_error_message,
@@ -27351,7 +27379,8 @@ async def admin_instagram_comment_graph_check(
     except Exception as exc:
         return {
             'ok': False,
-            'verdict': 'graph_error',
+            'verdict': 'graph_comments_read_failed',
+            'legacy_verdict': 'graph_error',
             'graph_error_code': type(exc).__name__,
             'graph_error_message': _automation_flight_safe_text(str(exc), 160),
             'username': username_key,
@@ -27372,7 +27401,7 @@ async def admin_instagram_comment_graph_check(
         ts_str = c.get('timestamp') or ''
         try:
             created_dt = (
-                parse_graph_datetime(ts_str) if ts_str else None
+                _parse_graph_datetime(ts_str) if ts_str else None
             )
         except Exception:
             created_dt = None
@@ -27383,27 +27412,102 @@ async def admin_instagram_comment_graph_check(
             'commenter_username': commenter_handle or None,
             'created_time': created_dt.isoformat() + 'Z' if isinstance(created_dt, datetime) else ts_str or None,
             'text_match': bool(norm_text and norm_text in str(comment_text).lower()),
-            'within_window': (
+            'matched_by_time_window': (
                 isinstance(created_dt, datetime) and created_dt >= threshold
             ) if created_dt else None,
+            'matched_by_commenter_partial': (
+                _safe_partial_identifier(commenter_id) == norm_commenter_partial
+            ) if norm_commenter_partial else None,
         }
+        # Backward-compatible alias for the current UI/tests.
+        candidate['within_window'] = candidate['matched_by_time_window']
         candidates.append(candidate)
         # A "match" requires every supplied filter to match.
         text_ok = (not norm_text) or candidate['text_match']
         commenter_ok = (not norm_commenter) or candidate['commenter_username'] == norm_commenter
-        window_ok = (candidate['within_window'] is not False)
+        commenter_partial_ok = (
+            not norm_commenter_partial
+            or candidate['matched_by_commenter_partial'] is True
+        )
+        window_ok = (candidate['matched_by_time_window'] is not False)
         if text_ok and commenter_ok and window_ok:
+            if commenter_partial_ok:
+                matches.append(candidate)
+        elif text_ok and commenter_ok and window_ok and not norm_commenter_partial:
             matches.append(candidate)
-    if raw_count == 0:
-        verdict = 'graph_returned_no_comments'
+
+    event_rows = []
+    try:
+        event_rows = await db.instagram_automation_events.find({
+            'username_key': username_key,
+            'created_at': {'$gte': threshold},
+        }).sort('created_at', -1).limit(200).to_list(200)
+    except Exception:
+        event_rows = []
+
+    match_partials = {
+        str(m.get('comment_id_partial') or '')
+        for m in matches
+        if m.get('comment_id_partial')
+    }
+    matched_commenter_partials = {
+        str(m.get('commenter_id_partial') or '')
+        for m in matches
+        if m.get('commenter_id_partial')
+    }
+
+    def _event_comment_partial(row: dict) -> str:
+        extra = row.get('extra') if isinstance(row.get('extra'), dict) else {}
+        return str(
+            row.get('comment_id_partial')
+            or extra.get('value_comment_id_partial')
+            or extra.get('value_id_partial')
+            or ''
+        )
+
+    detected_match = any(
+        row.get('stage') == 'webhook_comment_detected'
+        and _event_comment_partial(row) in match_partials
+        for row in event_rows
+    )
+    filtered_before_logging = any(
+        row.get('stage') in {'webhook_received', 'account_resolution_success'}
+        and _event_comment_partial(row) in match_partials
+        for row in event_rows
+    ) and not detected_match
+    different_media = False
+    if not matches and norm_commenter_partial:
+        for row in event_rows:
+            if row.get('stage') != 'webhook_comment_detected':
+                continue
+            event_commenter = str(row.get('commenter_id_partial') or '')
+            event_media = str(row.get('media_id_partial') or '')
+            if event_commenter == norm_commenter_partial and event_media and event_media != safe_media_id_partial:
+                different_media = True
+                break
+
+    if matches and detected_match:
+        verdict = 'external_comment_visible_in_graph'
+    elif matches and filtered_before_logging:
+        verdict = 'external_comment_filtered_before_logging'
     elif matches:
-        verdict = 'graph_sees_comment'
+        verdict = 'external_comment_visible_in_graph_but_no_webhook_event'
+    elif different_media:
+        verdict = 'external_comment_arrived_under_different_media'
     else:
-        verdict = 'graph_does_not_see_matching_comment'
+        verdict = 'external_comment_not_visible_in_graph'
+    legacy_verdict = (
+        'graph_sees_comment'
+        if matches else
+        'graph_returned_no_comments'
+        if raw_count == 0 else
+        'graph_does_not_see_matching_comment'
+    )
 
     return {
         'ok': True,
         'verdict': verdict,
+        'legacy_verdict': legacy_verdict,
         'username': username_key,
         'media_id_partial': safe_media_id_partial,
         'media_resolution_source': media_resolution_source,
@@ -27412,19 +27516,36 @@ async def admin_instagram_comment_graph_check(
         ),
         'queried_at': now_utc.isoformat() + 'Z',
         'since_minutes': max(1, int(since_minutes or 30)),
+        'after_utc': (after_utc or '').strip() or None,
+        'after_time_utc_effective': (
+            after_time_utc.isoformat() + 'Z'
+            if isinstance(after_time_utc, datetime) else None
+        ),
         'graph_returned_count': raw_count,
         'match_count': len(matches),
         'matches': matches[:5],
         'sample_candidates': candidates[:5],
+        'webhook_detected_for_matching_comment': detected_match,
+        'webhook_filtered_before_logging_for_matching_comment': filtered_before_logging,
+        'external_comment_arrived_under_different_media': different_media,
         # If Graph sees the comment but the Webhook Verification panel
         # shows no webhook_comment_detected for the same comment_id,
         # the operator now has a single durable blocker label they can
         # screenshot and pursue with Meta support.
         'webhook_blocker_label_if_graph_sees_but_no_webhook': (
+            'external_comment_visible_in_graph_but_no_webhook_event'
+        ),
+        'legacy_webhook_blocker_label_if_graph_sees_but_no_webhook': (
             'graph_sees_comment_but_no_webhook_comment_event'
         ),
         'webhook_blocker_label_if_graph_does_not_see': (
+            'external_comment_not_visible_in_graph'
+        ),
+        'legacy_webhook_blocker_label_if_graph_does_not_see': (
             'comment_not_visible_to_connected_account_token'
+        ),
+        'visibility_blocker_label_if_not_visible': (
+            'graph_comment_not_visible_due_to_permission_or_visibility'
         ),
     }
 

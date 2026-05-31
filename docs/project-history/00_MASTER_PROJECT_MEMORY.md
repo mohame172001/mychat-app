@@ -14,6 +14,8 @@ Current Phase 2O repair/readback rule (2026-05-31): the comment-webhook Repair a
 
 Current Phase 2P verification rule (2026-05-31): Webhook Verification must apply and echo the operator's fresh-comment cutoff (`after_utc`) so old/self-comment rows cannot pollute the diagnosis. A webhook `automation_skipped` with `skip_reason=bot_own_reply` is a correct terminal self-comment skip (`webhook_skipped_bot_own_reply`), not `webhook_in_flight`, not a failure, and not proof that an external tester comment arrived. If only self-comments are seen after the cutoff, report `only_bot_own_comment_seen_after_cutoff`; if no external-comment webhook signal is seen after the cutoff, report `fresh_external_comment_no_webhook_signal_after_comment_time`.
 
+Current Phase 2Q external-comment visibility rule (2026-05-31): if self-comments arrive through the comments webhook but an external tester comment does not, do not call the whole webhook path broken and do not re-enable polling. Use the active connected account token to read `/{media-id}/comments` and classify the external comment precisely: `external_comment_visible_in_graph`, `external_comment_visible_in_graph_but_no_webhook_event`, `external_comment_not_visible_in_graph`, `external_comment_arrived_under_different_media`, `external_comment_filtered_before_logging`, or `graph_comments_read_failed`. Return only partial ids, booleans, bounded redacted Graph errors, and no raw text/tokens/full ids. If Graph cannot see the external comment, treat likely causes as visibility/tester/media/account issues until proven otherwise.
+
 Therefore:
 
 - Do not special-case `muhammad_gehad`.

@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### External Comment Missing While Self-Comment Webhook Arrived
+
+- Date/time: 2026-05-31
+- Symptom: For `muhammad_gehad`, comments webhooks arrived and a self-comment reached `webhook_comment_detected` then skipped as `bot_own_reply`, proving comment webhook delivery, account resolution, parsing, and bot-own protection. A later external tester comment did not appear in Webhook Verification and did not trigger automation while polling remained disabled.
+- Affected area: Admin Webhook Verification / Direct Graph comment-check diagnostics only.
+- Root cause: The existing Direct Graph comment-check endpoint could tell whether Graph returned matching comments, but it did not classify the key split needed here: Graph-visible external comment with no webhook, Graph-invisible external comment, different-media webhook, or a comment-shaped webhook filtered before `webhook_comment_detected`. It also called `parse_graph_datetime` instead of `_parse_graph_datetime`, so Graph comment timestamps could fail parsing and make time-window matching inconclusive.
+- Fix commit: pending (this commit). Reuse the existing Direct Graph comment check, forward the active fresh-comment `after_utc` anchor, parse Graph timestamps with `_parse_graph_datetime`, and return precise safe verdicts: `external_comment_visible_in_graph`, `external_comment_visible_in_graph_but_no_webhook_event`, `external_comment_not_visible_in_graph`, `external_comment_arrived_under_different_media`, `external_comment_filtered_before_logging`, or `graph_comments_read_failed`.
+- Tests: Graph-visible/no-webhook, Graph-not-visible, visible-and-webhook-detected, different-media, filtered-before-logging, no username-specific behavior, and UI structural coverage.
+- Deploy status: Local, deploy required.
+- Lesson learned: Once self-comment webhooks prove the handler path, the next diagnostic step is provider visibility for the external comment on the expected media, not polling fallback or generic webhook-repair work.
+- Preventive test added: Yes.
+
 ### Fresh Comment Anchor Was Missing From Copied Diagnostics And Bot-Own Webhook Skips Looked In-Flight
 
 - Date/time: 2026-05-31

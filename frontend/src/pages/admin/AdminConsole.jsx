@@ -2910,6 +2910,7 @@ function WebhookVerificationTab() {
       if (graphCheckPostUrl.trim()) params.set('post_url', graphCheckPostUrl.trim());
       if (graphCheckText.trim()) params.set('text', graphCheckText.trim());
       if (graphCheckCommenter.trim()) params.set('commenter_username', graphCheckCommenter.trim());
+      if ((afterUtc || '').trim()) params.set('after_utc', (afterUtc || '').trim());
       params.set('since_minutes', String(sinceMinutes || 30));
       const r = await api.get(
         `/admin/instagram/comment-graph-check?${params.toString()}`,
@@ -2924,7 +2925,7 @@ function WebhookVerificationTab() {
       });
       setGraphCheckState('failed');
     }
-  }, [api, ar, username, graphCheckMediaId, graphCheckPostUrl, graphCheckText, graphCheckCommenter, sinceMinutes]);
+  }, [api, ar, username, graphCheckMediaId, graphCheckPostUrl, graphCheckText, graphCheckCommenter, afterUtc, sinceMinutes]);
 
   // Phase 2F: per-username admin repair button. Calls the new
   // /api/admin/instagram/repair-comment-webhooks endpoint, then
@@ -3688,6 +3689,10 @@ function WebhookVerificationTab() {
             {graphCheckResult && (
               <span className="font-mono text-[11px]" data-testid="webhook-verification-graph-comment-check-result">
                 {graphCheckResult.verdict || '—'}
+                {/* Expected diagnostic verdicts: external_comment_visible_in_graph_but_no_webhook_event,
+                    external_comment_not_visible_in_graph, external_comment_visible_in_graph,
+                    external_comment_arrived_under_different_media,
+                    external_comment_filtered_before_logging. */}
                 {typeof graphCheckResult.graph_returned_count === 'number' && (
                   <span className="ms-2 text-slate-500">
                     {' '}returned={graphCheckResult.graph_returned_count}

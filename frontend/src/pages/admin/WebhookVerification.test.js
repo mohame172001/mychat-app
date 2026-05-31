@@ -216,6 +216,9 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('webhook-verification-graph-comment-check-button');
     expect(source).toContain('webhook-verification-graph-comment-check-result');
     expect(source).toContain('/admin/instagram/comment-graph-check');
+    expect(source).toContain("params.set('after_utc'");
+    expect(source).toContain('external_comment_visible_in_graph_but_no_webhook_event');
+    expect(source).toContain('external_comment_not_visible_in_graph');
   });
 
   test('Phase 2I: per-comment flow verdict panel structural contract', () => {
