@@ -588,9 +588,10 @@ def test_no_cross_account_routing_path():
     assert '_SINGLE_TENANT_FALLBACK_ENABLED' in src
 
 
-def test_polling_remains_disabled_by_default():
+def test_polling_production_default_is_explicit():
     src = inspect.getsource(server)
-    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
+    assert "IG_POLL_ENABLED = _env_bool(" in src
+    assert "default=IS_PRODUCTION" in src
 
 
 def test_hmac_unchanged():

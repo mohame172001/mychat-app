@@ -2688,6 +2688,17 @@ def _env_int_clamped(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(value, maximum))
 
 
+def _env_bool(name: str, default: bool = False, aliases: Tuple[str, ...] = ()) -> bool:
+    raw = None
+    for candidate in (name, *aliases):
+        if candidate in os.environ:
+            raw = os.environ.get(candidate)
+            break
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _quick_reply_title(title: str, fallback: str = 'Send me the link') -> str:
     """Instagram quick reply labels are short; keep custom labels usable."""
     value = (title or fallback or '').strip() or fallback
@@ -18220,20 +18231,51 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
 # ---------------------------------------------------------------------------
 
 
-def _media_catalog_env_int(name: str, default: int, lo: int, hi: int) -> int:
+def _media_catalog_env_int(
+    name: str,
+    default: int,
+    lo: int,
+    hi: int,
+    aliases: Tuple[str, ...] = (),
+) -> int:
+    raw = None
+    for candidate in (name, *aliases):
+        if candidate in os.environ:
+            raw = os.environ.get(candidate)
+            break
     try:
-        v = int(os.environ.get(name, str(default)))
+        v = int(raw if raw is not None else default)
     except (TypeError, ValueError):
         v = default
     return max(lo, min(v, hi))
 
 
 def _ig_poll_recent_media_limit() -> int:
-    return _media_catalog_env_int('IG_POLL_RECENT_MEDIA_LIMIT', 25, 1, 100)
+    return _media_catalog_env_int(
+        'IG_POLL_RECENT_MEDIA_LIMIT',
+        50,
+        1,
+        100,
+        aliases=('IG_POLLING_RECENT_MEDIA_LIMIT',),
+    )
 
 
 def _ig_poll_round_robin_batch() -> int:
-    return _media_catalog_env_int('IG_POLL_ROUND_ROBIN_BATCH', 25, 0, 100)
+    return _media_catalog_env_int(
+        'IG_POLL_ROUND_ROBIN_BATCH',
+        25,
+        0,
+        100,
+        aliases=('IG_POLLING_ROUND_ROBIN_BATCH_SIZE',),
+    )
+
+
+def _effective_polling_round_robin_batch_size() -> int:
+    return _ig_poll_round_robin_batch()
+
+
+def _effective_polling_recent_media_limit() -> int:
+    return _ig_poll_recent_media_limit()
 
 
 def _ig_media_catalog_sync_interval_seconds() -> int:
@@ -20366,20 +20408,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                 rule_type=_automation_flight_rule_type(matched_rule),
                 matched=True,
             )
-            # Phase 2G — webhook-first send gate. Polling can scan and
-            # record what it saw, but it must NOT silently send fresh
-            # comment replies/DMs on the webhook's behalf. The gate
-            # only fires when `source == 'polling'`; webhook +
-            # automation_queue + manual_catchup are never gated here.
-            # Opt back into legacy fallback behavior with the env flag
-            # `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1`.
-            #
-            # Skip is recorded with a clear, account-agnostic reason so
-            # the Webhook Verification panel can surface "polling saw
-            # this fresh comment but did not send because webhook is
-            # the primary path". This makes webhook delivery failures
-            # operator-visible instead of being masked by polling
-            # reply latency.
+            # Polling send gate. Production allows polling to send fresh
+            # eligible comments, but explicit diagnostics-only mode still
+            # records a clear skip instead of sending. Webhook,
+            # automation_queue, and manual_catchup are never gated here.
             if source == 'polling' and not _is_polling_send_enabled():
                 await _record_instagram_automation_event(
                     'automation_skipped',
@@ -20394,10 +20426,10 @@ async def _handle_new_comment(user_doc: dict, comment_data: dict, source: str = 
                     extra={
                         'fallback_env_flag': 'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
                         'note': (
-                            'Polling discovered this comment but the SaaS '
-                            'product requires webhook as the primary send '
-                            'path. Repair webhook subscription or set the '
-                            'env flag to 1 for emergency fallback.'
+                            'Polling discovered this comment but polling '
+                            'send is disabled by configuration. Set '
+                            'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED '
+                            'to true to allow polling to send.'
                         ),
                     },
                 )
@@ -22789,56 +22821,48 @@ async def _process_webhook(payload: dict):
 # poller is the user-visible critical path. 15s keeps the worst-case latency
 # under a quarter of a minute while staying well below Meta's rate limits
 # (one /comments call per linked IG account per tick = trivial fan-out).
-IG_POLL_INTERVAL_SECONDS = int(os.environ.get('IG_POLL_INTERVAL_SECONDS', '15'))
-# Phase 2H: polling is no longer the primary path. The production
-# default is OFF — when a brand-new environment boots without setting
-# `IG_POLL_ENABLED`, NO background polling loop runs, no
-# `poller_media_scan_started` / `polling_scan_summary` events are
-# emitted, and no replies/DMs are ever sent by polling. Webhook is the
-# sole sender. Polling can only be re-enabled as an explicit emergency
-# diagnostic by setting BOTH `IG_POLL_ENABLED=1` AND
-# `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1` (see
-# `_polling_mode()` below). Tests force this back ON via conftest.py so
-# the legacy polling-pipeline suite keeps passing.
-IG_POLL_ENABLED = os.environ.get('IG_POLL_ENABLED', '0') == '1'
+IG_POLL_INTERVAL_SECONDS = _env_int_clamped(
+    'IG_POLL_INTERVAL_SECONDS',
+    15,
+    5,
+    3600,
+)
+# Phase 2S: production defaults to polling-primary comment automation because
+# external comment webhook delivery is still incomplete. Explicit env values
+# remain authoritative, so `IG_POLL_ENABLED=0` disables the background loop and
+# `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=0` makes polling
+# diagnostics-only.
+IG_POLL_ENABLED = _env_bool(
+    'IG_POLL_ENABLED',
+    default=IS_PRODUCTION,
+    aliases=('IG_POLLING_ENABLED',),
+)
+
+
+def _effective_polling_interval_seconds() -> int:
+    return IG_POLL_INTERVAL_SECONDS
 
 
 def _is_polling_send_enabled() -> bool:
-    """Phase 2G: polling is **NOT** the primary path for fresh comment
-    automation. It can still scan, record what it saw, and serve as
-    diagnostics + missed-comment detection — but it must not silently
-    send public replies or opening DMs on behalf of fresh comments
-    that webhook should have processed first.
+    """Return whether polling may execute comment automation sends.
 
-    Set ``IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1`` to opt the
-    polling pipeline back into the legacy "send on discovery" behavior
-    (emergency / testing only). Default is OFF so that webhook delivery
-    failures become operator-visible instead of being silently masked
-    by polling reply latency.
-
-    Webhook source is NEVER gated by this flag.
+    Production defaults to true because polling is currently the reliable
+    sender for external comments. Explicitly setting
+    ``IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=0`` makes polling
+    diagnostics-only. Webhook source is never gated by this flag.
     """
-    raw = os.environ.get(
-        'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '',
-    ).strip().lower()
-    return raw in ('1', 'true', 'yes', 'on')
+    return _env_bool(
+        'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
+        default=IS_PRODUCTION,
+    )
 
 
 def _polling_mode() -> str:
-    """Phase 2G summary label for the verification UI.
-
-    - ``disabled``                   — IG_POLL_ENABLED=0 (poller loop OFF)
-    - ``emergency_fallback_enabled`` — IG_POLLING_COMMENT_AUTOMATION_
-                                       FALLBACK_ENABLED=1 (polling sends)
-    - ``reconciliation_only``        — poller running, but the send gate
-                                       blocks polling from sending; it is
-                                       the diagnostics / missed-comment
-                                       detector only.
-    """
+    """Summary label for the verification UI."""
     if not IG_POLL_ENABLED:
         return 'disabled'
     if _is_polling_send_enabled():
-        return 'emergency_fallback_enabled'
+        return 'polling_primary'
     return 'reconciliation_only'
 IG_POLL_COMMENT_BATCH_LIMIT = max(1, min(int(os.environ.get('IG_POLL_COMMENT_BATCH_LIMIT', '20')), 20))
 IG_POLL_REPLY_CAP_PER_RUN = max(1, min(int(os.environ.get('IG_POLL_REPLY_CAP_PER_RUN', '10')), 10))
@@ -24804,8 +24828,13 @@ async def instagram_automation_health(user_id: str = Depends(get_current_active_
             'failed_comment_dm_sessions': failed_jobs,
         },
         'config': {
-            'comment_poller_interval_seconds': IG_POLL_INTERVAL_SECONDS,
+            'comment_poller_interval_seconds': _effective_polling_interval_seconds(),
             'comment_poller_enabled': IG_POLL_ENABLED,
+            'comment_poller_send_enabled': _is_polling_send_enabled(),
+            'comment_poller_mode': _polling_mode(),
+            'comment_poller_round_robin_batch_size': _effective_polling_round_robin_batch_size(),
+            'comment_poller_recent_media_limit': _effective_polling_recent_media_limit(),
+            'comment_poller_fresh_comment_window_seconds': IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
             'automation_queue_interval_seconds': AUTOMATION_QUEUE_INTERVAL_SECONDS,
             'automation_queue_batch_size': AUTOMATION_QUEUE_BATCH_SIZE,
             'automation_queue_max_attempts': AUTOMATION_QUEUE_MAX_ATTEMPTS,
@@ -25896,7 +25925,12 @@ async def admin_instagram_multi_account_health(
         },
         'polling': {
             'enabled': IG_POLL_ENABLED,
-            'interval_seconds': IG_POLL_INTERVAL_SECONDS,
+            'send_enabled': _is_polling_send_enabled(),
+            'mode': _polling_mode(),
+            'interval_seconds': _effective_polling_interval_seconds(),
+            'round_robin_batch_size': _effective_polling_round_robin_batch_size(),
+            'recent_media_limit': _effective_polling_recent_media_limit(),
+            'fresh_comment_window_seconds': IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
         },
         'accounts': items,
     }
@@ -27882,7 +27916,7 @@ async def admin_instagram_webhook_verification(
         'latest_webhook_comment_at': _iso(latest_webhook_comment_at),
         'latest_polling_success_at': _iso(latest_polling_success_at),
         'total_events_in_window': len(rows),
-        # Phase 2G — webhook-first send gate visibility.
+        # Polling-primary / diagnostics-only visibility.
         'polling_seen_count': len(polling_seen_ids),
         'polling_send_disabled_count': len(polling_send_disabled_ids),
         'latest_polling_seen_at': _iso(latest_polling_seen_at),
@@ -27891,10 +27925,12 @@ async def admin_instagram_webhook_verification(
         'polling_send_fallback_env_flag': (
             'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED'
         ),
+        'polling_enabled': IG_POLL_ENABLED,
         'polling_mode': _polling_mode(),
-        'polling_interval_seconds': IG_POLL_INTERVAL_SECONDS,
-        'polling_round_robin_batch_size': _ig_poll_round_robin_batch(),
-        'polling_recent_media_limit': _ig_poll_recent_media_limit(),
+        'polling_interval_seconds': _effective_polling_interval_seconds(),
+        'polling_round_robin_batch_size': _effective_polling_round_robin_batch_size(),
+        'polling_recent_media_limit': _effective_polling_recent_media_limit(),
+        'polling_fresh_comment_window_seconds': IG_POLL_FRESH_COMMENT_WINDOW_SECONDS,
     }
 
     # Per-event sanitized view. Only carry the explicit safe fields the

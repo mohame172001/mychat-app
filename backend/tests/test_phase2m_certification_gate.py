@@ -908,9 +908,10 @@ def test_no_username_specific_logic():
         assert needle not in src
 
 
-def test_polling_remains_disabled_by_default():
+def test_polling_production_default_is_explicit():
     src = inspect.getsource(server)
-    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
+    assert "IG_POLL_ENABLED = _env_bool(" in src
+    assert "default=IS_PRODUCTION" in src
 
 
 def test_hmac_unchanged():

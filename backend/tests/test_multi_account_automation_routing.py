@@ -5759,10 +5759,10 @@ def test_collect_target_media_ids_includes_recent_for_post_scope_only_general_ru
 
 def test_collect_target_media_ids_requests_bumped_recent_limit(monkeypatch):
     """The recent-media coverage for needs_any rules must request the
-    full hard cap (25) of recent posts, not the previous 10. On a
-    workspace with more than 10 posts, the lower cap silently dropped
-    fresh comments on the 11th+ most recent post out of the polling
-    scan target list."""
+    current aggressive production default (50) of recent posts, not the
+    older 10/25 caps. On a workspace with more than 25 posts, the lower
+    cap silently dropped fresh comments outside the polling scan target
+    list."""
     rule = _legacy_general_rule('accB', 'igB', 'ruleLimitCheck',
                                 trigger='Manual',
                                 node_trigger='comment:any',
@@ -5783,11 +5783,12 @@ def test_collect_target_media_ids_requests_bumped_recent_limit(monkeypatch):
     monkeypatch.setattr(server, '_fetch_latest_media_id', fake_latest)
 
     targets = _run(server._collect_target_media_ids(user, [rule]))
-    assert captured_limit.get('value') == 25
+    assert captured_limit.get('value') == 50
     # The collected target list must include the 11th+ ids that the
     # previous limit=10 would have dropped.
     assert 'media-10' in targets
     assert 'media-20' in targets
+    assert 'media-49' in targets
 
 
 def test_collect_target_media_ids_unchanged_for_post_specific_rule(monkeypatch):

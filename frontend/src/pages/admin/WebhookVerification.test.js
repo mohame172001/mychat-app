@@ -170,11 +170,16 @@ describe('Webhook Verification tab structural contract', () => {
   test('Phase 2G: summary surfaces polling-seen / polling-send-disabled counters', () => {
     expect(source).toContain('polling_seen_count');
     expect(source).toContain('polling_send_disabled_count');
+    expect(source).toContain('polling_enabled');
+    expect(source).toContain('polling_send_enabled');
+    expect(source).toContain('polling_round_robin_batch_size');
+    expect(source).toContain('polling_recent_media_limit');
     expect(source).toContain('Polling: send disabled');
   });
 
   test('Phase 2G: polling_mode chip rendered with color cues', () => {
     expect(source).toContain('webhook-verification-polling-mode');
+    expect(source).toContain('polling_primary');
     expect(source).toContain('emergency_fallback_enabled');
     expect(source).toContain('polling_interval_seconds');
   });

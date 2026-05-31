@@ -233,10 +233,11 @@ def test_classifier_keys_independent_comment_ids():
 # ---------------------------------------------------------------------------
 
 
-def test_11_polling_remains_disabled_by_default():
-    """Re-asserts Phase 2H production posture."""
+def test_11_polling_production_default_is_explicit():
+    """Re-asserts Phase 2S polling-primary production posture."""
     src = inspect.getsource(server)
-    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
+    assert "IG_POLL_ENABLED = _env_bool(" in src
+    assert "default=IS_PRODUCTION" in src
 
 
 def test_12_hmac_unchanged():

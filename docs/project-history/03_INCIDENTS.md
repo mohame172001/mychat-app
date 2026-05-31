@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### External Comment Webhooks Incomplete While Polling Was Disabled
+
+- Date/time: 2026-05-31
+- Symptom: For `muhammad_gehad`, Meta subscription readback was ready and non-comment webhook events (`messages`, `message_reactions`, `messaging_seen`) arrived, but external comment webhooks still showed `webhook_comment_events_seen_count=0`, `webhook_comments_success_count=0`, `latest_webhook_comment_at=null`, and polling was disabled. Fresh external comments therefore had no reliable sender path.
+- Affected area: Instagram comment automation delivery mode and admin polling diagnostics.
+- Root cause: The previous webhook-first posture intentionally disabled polling sends. Live evidence showed comment webhook delivery remained incomplete for external comments, so disabling polling removed the only reliable practical sender.
+- Fix commit: pending (this commit). Switch production defaults to polling-primary: `IG_POLL_ENABLED=true`, `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=true`, `IG_POLL_INTERVAL_SECONDS=15`, `IG_POLL_ROUND_ROBIN_BATCH=25`, `IG_POLL_RECENT_MEDIA_LIMIT=50`, `IG_POLL_FRESH_COMMENT_WINDOW_SECONDS=3600`. Keep webhook enabled and keep dedupe/cooldown/stale/bot-own safeguards intact.
+- Tests: Polling send defaults, production polling mode, effective recent/round-robin values, Webhook Verification polling diagnostics, existing polling send path, stale polling guards, media catalog round-robin, multi-account routing, DM failure/status, backend full suite, frontend Webhook Verification test, and frontend build.
+- Deploy status: Local, deploy required.
+- Lesson learned: Webhook-first is the long-term architecture, but the SaaS must keep a reliable sender path while Meta external-comment webhook delivery is incomplete. Diagnostic honesty matters: label polling success as `source=polling`, not webhook.
+- Preventive test added: Yes.
+
 ### Stale Fresh-Comment Anchor Looked Active
 
 - Date/time: 2026-05-31

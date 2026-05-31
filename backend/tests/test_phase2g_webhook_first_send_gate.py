@@ -1,9 +1,9 @@
-"""Phase 2G — webhook-first send gate.
+"""Phase 2S — polling-primary send gate.
 
 What this validates:
-- `_is_polling_send_enabled()` defaults to FALSE (production posture)
-  and honors `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1` opt-in.
-- `_polling_mode()` reports `disabled` / `emergency_fallback_enabled`
+- `_is_polling_send_enabled()` defaults to TRUE in production and
+  honors explicit `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED` overrides.
+- `_polling_mode()` reports `disabled` / `polling_primary`
   / `reconciliation_only` based on the two env flags.
 - The Webhook Verification endpoint's summary surfaces the new
   Phase 2G counters and metadata
@@ -47,13 +47,19 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 
 
-def test_polling_send_default_is_disabled_when_env_var_unset(monkeypatch):
-    """Production posture: polling MUST NOT send by default. The
-    conftest.py opt-in keeps legacy tests green but the production
-    default — env var absent — is OFF."""
+def test_polling_send_default_is_disabled_outside_production(monkeypatch):
+    """Local/dev can stay diagnostics-only when the env flag is absent."""
     monkeypatch.delenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
                        raising=False)
+    monkeypatch.setattr(server, 'IS_PRODUCTION', False)
     assert server._is_polling_send_enabled() is False
+
+
+def test_polling_send_default_is_enabled_in_production(monkeypatch):
+    monkeypatch.delenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
+                       raising=False)
+    monkeypatch.setattr(server, 'IS_PRODUCTION', True)
+    assert server._is_polling_send_enabled() is True
 
 
 def test_polling_send_enabled_opt_in_truthy(monkeypatch):
@@ -73,22 +79,49 @@ def test_polling_send_enabled_explicit_off(monkeypatch):
         assert server._is_polling_send_enabled() is False
 
 
-def test_polling_mode_emergency_fallback_when_legacy_flag_set(monkeypatch):
+def test_polling_mode_primary_when_legacy_flag_set(monkeypatch):
     monkeypatch.setattr(server, 'IG_POLL_ENABLED', True)
     monkeypatch.setenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '1')
-    assert server._polling_mode() == 'emergency_fallback_enabled'
+    assert server._polling_mode() == 'polling_primary'
 
 
 def test_polling_mode_reconciliation_only_default(monkeypatch):
     monkeypatch.setattr(server, 'IG_POLL_ENABLED', True)
     monkeypatch.delenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED',
                        raising=False)
+    monkeypatch.setattr(server, 'IS_PRODUCTION', False)
     assert server._polling_mode() == 'reconciliation_only'
 
 
 def test_polling_mode_disabled_when_poll_disabled(monkeypatch):
     monkeypatch.setattr(server, 'IG_POLL_ENABLED', False)
     assert server._polling_mode() == 'disabled'
+
+
+def test_polling_primary_production_defaults_are_pinned():
+    src = Path(server.__file__).read_text(encoding='utf-8')
+    assert "IG_POLL_ENABLED = _env_bool(" in src
+    assert "aliases=('IG_POLLING_ENABLED',)" in src
+    assert "'IG_POLL_INTERVAL_SECONDS'," in src
+    assert "15," in src
+    assert "'IG_POLL_FRESH_COMMENT_WINDOW_SECONDS'" in src
+    assert "60 * 60" in src
+
+
+def test_polling_round_robin_and_recent_media_defaults(monkeypatch):
+    monkeypatch.delenv('IG_POLL_ROUND_ROBIN_BATCH', raising=False)
+    monkeypatch.delenv('IG_POLLING_ROUND_ROBIN_BATCH_SIZE', raising=False)
+    monkeypatch.delenv('IG_POLL_RECENT_MEDIA_LIMIT', raising=False)
+    monkeypatch.delenv('IG_POLLING_RECENT_MEDIA_LIMIT', raising=False)
+    assert server._effective_polling_round_robin_batch_size() == 25
+    assert server._effective_polling_recent_media_limit() == 50
+
+
+def test_polling_round_robin_and_recent_media_env_overrides(monkeypatch):
+    monkeypatch.setenv('IG_POLL_ROUND_ROBIN_BATCH', '25')
+    monkeypatch.setenv('IG_POLL_RECENT_MEDIA_LIMIT', '50')
+    assert server._effective_polling_round_robin_batch_size() == 25
+    assert server._effective_polling_recent_media_limit() == 50
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +246,11 @@ def test_verification_summary_surfaces_polling_send_disabled_counters(monkeypatc
     assert s['polling_send_fallback_env_flag'] == (
         'IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED'
     )
+    assert 'polling_enabled' in s
+    assert 'polling_send_enabled' in s
+    assert 'polling_round_robin_batch_size' in s
+    assert 'polling_recent_media_limit' in s
+    assert 'polling_fresh_comment_window_seconds' in s
 
 
 def test_verification_relevant_stages_includes_phase2g_events(monkeypatch):

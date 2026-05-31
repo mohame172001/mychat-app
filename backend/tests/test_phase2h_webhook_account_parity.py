@@ -1,4 +1,4 @@
-"""Phase 2H — webhook-only account parity.
+"""Phase 2H/2S — webhook account parity with polling-primary fallback.
 
 This file covers the 16 contract points in the Phase 2H spec:
 
@@ -12,7 +12,7 @@ This file covers the 16 contract points in the Phase 2H spec:
       hardcoded username).
   5.  No cross-account routing: sibling accounts get distinct resolution.
   6.  Active rules are loaded for the resolved account only.
-  7.  Polling disabled by default (production posture, env unset).
+  7.  Polling defaults are explicit and production polling is enabled.
   8.  No ``poller_media_scan_started`` recorded when polling disabled
       (the startup hook never registers the loop).
   9.  No ``polling_scan_summary`` recorded when polling disabled.
@@ -100,27 +100,20 @@ class _FakeDB:
 
 
 # ---------------------------------------------------------------------------
-# 7-10. Polling disabled by default & emergency-fallback dual-flag
+# 7-10. Polling-primary defaults & disabled override
 # ---------------------------------------------------------------------------
 
 
-def test_7_polling_disabled_by_default_when_env_unset(monkeypatch):
-    """IG_POLL_ENABLED must default to OFF when the env var is absent.
-
-    The conftest.py module-load default sets the var to '1' so legacy
-    tests keep running, but the in-code default literal must be '0' so
-    a brand-new production process boots with the poller OFF.
-    """
+def test_7_polling_enabled_by_default_in_production_source_contract(monkeypatch):
+    """Production default is polling enabled unless env explicitly disables it."""
     src = inspect.getsource(server)
-    assert "os.environ.get('IG_POLL_ENABLED', '0')" in src, (
-        "IG_POLL_ENABLED must default to '0' (Phase 2H production posture)."
-    )
+    assert "IG_POLL_ENABLED = _env_bool(" in src
+    assert "default=IS_PRODUCTION" in src
+    assert "aliases=('IG_POLLING_ENABLED',)" in src
 
 
-def test_8_no_poller_loop_registered_when_disabled():
-    """The startup hook registers the comment poller only when
-    `IG_POLL_ENABLED` is True. Confirms the gate text exists so the
-    background loop will NOT run on the production default."""
+def test_8_no_poller_loop_registered_when_explicitly_disabled():
+    """The startup hook still honors an explicit disabled override."""
     src = inspect.getsource(server)
     assert 'if IG_POLL_ENABLED:' in src
     assert "_register_bg_task('comment_poller'" in src
@@ -153,9 +146,9 @@ def test_10_emergency_fallback_requires_both_flags(monkeypatch):
     monkeypatch.setattr(server, 'IG_POLL_ENABLED', True)
     monkeypatch.delenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', raising=False)
     assert server._polling_mode() == 'reconciliation_only'
-    # Both → emergency_fallback_enabled.
+    # Both → polling_primary.
     monkeypatch.setenv('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '1')
-    assert server._polling_mode() == 'emergency_fallback_enabled'
+    assert server._polling_mode() == 'polling_primary'
 
 
 # ---------------------------------------------------------------------------

@@ -3426,15 +3426,16 @@ function WebhookVerificationTab() {
                 data-testid="webhook-verification-polling-mode"
                 title={
                   ar
-                    ? 'وضع polling. webhook_first يعني أن webhook هو المسار الأساسي.'
-                    : 'Polling mode. reconciliation_only = webhook is the primary path.'
+                    ? 'Polling mode. polling_primary يعني أن polling يمكنه إرسال الأتمتة.'
+                    : 'Polling mode. polling_primary = polling can send comment automation; reconciliation_only = diagnostics only.'
                 }
               >
                 <span className="font-semibold text-slate-500 me-1">{ar ? 'وضع polling' : 'polling_mode'}:</span>
                 <span
                   className={
                     'font-mono px-1 rounded ' +
-                    (summary.polling_mode === 'emergency_fallback_enabled'
+                    (summary.polling_mode === 'polling_primary' ||
+                    summary.polling_mode === 'emergency_fallback_enabled'
                       ? 'bg-rose-100 text-rose-700'
                       : summary.polling_mode === 'disabled'
                         ? 'bg-slate-100 text-slate-600'
@@ -4118,9 +4119,17 @@ function WebhookVerificationTab() {
               ['polling_seen_count',
                 ar ? 'polling شاهد التعليقات' : 'Polling saw'],
               ['polling_send_disabled_count',
-                ar ? 'polling: الإرسال موقوف' : 'Polling: send disabled (webhook required)'],
+                ar ? 'polling: الإرسال موقوف' : 'Polling: send disabled'],
               ['polling_success_count',
-                ar ? 'نجاح عبر polling' : 'Polling success (fallback flag)'],
+                ar ? 'نجاح عبر polling' : 'Polling success'],
+              ['polling_enabled',
+                ar ? 'Polling enabled' : 'Polling enabled'],
+              ['polling_send_enabled',
+                ar ? 'Polling send enabled' : 'Polling send enabled'],
+              ['polling_round_robin_batch_size',
+                ar ? 'Round-robin batch' : 'Round-robin batch'],
+              ['polling_recent_media_limit',
+                ar ? 'Recent media limit' : 'Recent media limit'],
               ['phase2c_b_fallback_used_count',
                 ar ? 'استُخدم media-owner fallback' : 'Media-owner fallback used'],
               ['alias_self_heal_count',

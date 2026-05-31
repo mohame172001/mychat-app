@@ -18,6 +18,8 @@ Current Phase 2Q external-comment visibility rule (2026-05-31): if self-comments
 
 Current Phase 2R fresh-comment anchor rule (2026-05-31): Webhook Verification's `after_utc` filter must be explicit and request-scoped. The input is empty on page load, the placeholder is only a format hint, Copy JSON must show the backend-applied `after_utc` (or `null`), and invalid timestamps must not be sent. Empty, whitespace, or `null` means no cutoff and no cutoff-dependent fresh-comment verdict. Do not persist or silently restore old anchors across reloads or account changes.
 
+Current Phase 2S polling-primary operating rule (2026-05-31): the product decision is to enable Instagram comment polling aggressively as the practical sender until external comment webhook delivery is proven reliable. Production defaults are `IG_POLL_ENABLED=true`, `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=true`, `IG_POLL_INTERVAL_SECONDS=15`, `IG_POLL_ROUND_ROBIN_BATCH=25`, `IG_POLL_RECENT_MEDIA_LIMIT=50`, and `IG_POLL_FRESH_COMMENT_WINDOW_SECONDS=3600` unless explicit env values override them. Webhook handling remains enabled and must still dedupe with polling, but polling may send public replies and opening DMs for fresh eligible comments. Keep exact-comment dedupe, Phase 2D 24h opening-DM cooldown, bot-own skip, activation cutoff, and stale/historical polling guards intact. Rollback to diagnostics-only polling is via `IG_POLL_ENABLED=false` or `IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=false`.
+
 Therefore:
 
 - Do not special-case `muhammad_gehad`.
