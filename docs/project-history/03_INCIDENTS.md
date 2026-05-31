@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Stale Fresh-Comment Anchor Looked Active
+
+- Date/time: 2026-05-31
+- Symptom: Webhook Verification appeared to show an old fresh-comment anchor (`2026-05-29T21:55:00Z`) even though the operator did not intentionally type one, making the copied diagnostics and fresh-comment conclusions easy to misread.
+- Affected area: Admin Webhook Verification UI/state and request-scoped `after_utc` validation only.
+- Root cause: The anchor input used a real historical timestamp as its placeholder, so an empty field could visually resemble an active filter. Copy JSON also read the visible UI state rather than the backend-applied filter, and the backend accepted malformed/non-applied cutoff text without a strict request-scoped boundary.
+- Fix commit: pending (this commit). Replace the real timestamp placeholder with `YYYY-MM-DDTHH:mm:ssZ`, add explicit "No fresh-comment anchor active" / "Filtering events after" status text, add Clear anchor, clear the value on username changes, validate before sending, copy only `backend_response.applied_filters.after_utc`, and make the backend treat empty/whitespace/`null` as no cutoff while rejecting invalid non-empty timestamps.
+- Tests: Missing/empty/null `after_utc` has no applied cutoff and no fresh-comment signal; invalid `after_utc` returns a clear validation error; valid cutoff-dependent verdicts still work; Graph check rejects invalid cutoff; frontend structural test covers status, validation, clear button, and backend-applied Copy JSON.
+- Deploy status: Local, deploy required.
+- Lesson learned: Diagnostic filters need an explicit active/inactive state; placeholders must never look like live production values.
+- Preventive test added: Yes.
+
 ### External Comment Missing While Self-Comment Webhook Arrived
 
 - Date/time: 2026-05-31

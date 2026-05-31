@@ -26334,6 +26334,30 @@ def _compute_fresh_comment_signal(
     }
 
 
+def _parse_admin_after_utc_filter(raw_value: Optional[str]) -> tuple[Optional[datetime], Optional[str]]:
+    """Parse request-scoped Webhook Verification fresh-comment cutoff.
+
+    Empty/null-like values mean "no cutoff". Non-empty values must be
+    explicit UTC timestamps so the admin panel cannot silently reuse or
+    reinterpret a stale local/placeholder value.
+    """
+    raw = str(raw_value or '').strip()
+    if not raw or raw.lower() in {'null', 'none', 'undefined'}:
+        return None, None
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', raw):
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid after_utc. Use format YYYY-MM-DDTHH:mm:ssZ.',
+        )
+    try:
+        return datetime.strptime(raw, '%Y-%m-%dT%H:%M:%SZ'), raw
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid after_utc. Use format YYYY-MM-DDTHH:mm:ssZ.',
+        )
+
+
 def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
     """Phase 2I — per-comment final-verdict classifier.
 
@@ -27313,20 +27337,9 @@ async def admin_instagram_comment_graph_check(
     since_seconds = max(60, min(int(since_minutes or 30), 1440) * 60)
     now_utc = datetime.utcnow()
     threshold = now_utc - timedelta(seconds=since_seconds)
-    after_time_utc: Optional[datetime] = None
-    if (after_utc or '').strip():
-        try:
-            from datetime import timezone as _tz
-            raw_after = str(after_utc or '').strip()
-            normalised_after = raw_after[:-1] + '+00:00' if raw_after.endswith('Z') else raw_after
-            parsed_after = datetime.fromisoformat(normalised_after)
-            after_time_utc = (
-                parsed_after.astimezone(_tz.utc).replace(tzinfo=None)
-                if parsed_after.tzinfo is not None else parsed_after
-            )
-            threshold = after_time_utc
-        except Exception:
-            after_time_utc = None
+    after_time_utc, applied_after_utc = _parse_admin_after_utc_filter(after_utc)
+    if isinstance(after_time_utc, datetime):
+        threshold = after_time_utc
     norm_text = (text or '').strip().lower()
     norm_commenter = (commenter_username or '').strip().lstrip('@').lower()
     norm_commenter_partial = (commenter_id_partial or '').strip()
@@ -27516,7 +27529,7 @@ async def admin_instagram_comment_graph_check(
         ),
         'queried_at': now_utc.isoformat() + 'Z',
         'since_minutes': max(1, int(since_minutes or 30)),
-        'after_utc': (after_utc or '').strip() or None,
+        'after_utc': applied_after_utc,
         'after_time_utc_effective': (
             after_time_utc.isoformat() + 'Z'
             if isinstance(after_time_utc, datetime) else None
@@ -27623,7 +27636,7 @@ async def admin_instagram_webhook_verification(
     since = now_utc - timedelta(minutes=safe_since)
     username_key = _automation_flight_username_key(username) if username else ''
     # Phase 2L — fresh-comment lower-bound filter.
-    # The operator can pass `after_utc=2026-05-29T21:55:00Z` (or an
+    # The operator can pass an explicit `after_utc` UTC timestamp (or an
     # `after_local` ISO with offset that is converted to UTC) to ask
     # the verdict computation "since the user posted a fresh comment
     # at time T, what does the webhook stream actually show?" Events
@@ -27654,13 +27667,15 @@ async def admin_instagram_webhook_verification(
         except Exception:
             after_time_utc = None
             after_filter_source = 'parse_error'
+    after_time_utc, applied_after_utc = _parse_admin_after_utc_filter(after_utc)
+    after_filter_source = 'after_utc' if applied_after_utc else None
     applied_filters = {
         'username': username_key or None,
         'since_minutes': safe_since,
         'comment_id_partial': (comment_id_partial or '').strip() or None,
         'media_id_partial': (media_id_partial or '').strip() or None,
-        'after_utc': (after_utc or '').strip() or None,
-        'after_local': (after_local or '').strip() or None,
+        'after_utc': applied_after_utc,
+        'after_local': None,
         'after_time_utc_effective': (
             after_time_utc.isoformat() + 'Z'
             if isinstance(after_time_utc, datetime) else None

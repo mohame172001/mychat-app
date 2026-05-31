@@ -118,7 +118,7 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('provider_message_id_partial');
     expect(source).toContain('dm_provider_message_id_partial');
     expect(source).toContain('dm_provider_message_id_missing');
-    expect(source).toContain('after_utc: (afterUtc');
+    expect(source).toContain('after_utc: data?.applied_filters?.after_utc || null');
     expect(source).toContain('after_time_utc_effective');
   });
 
@@ -192,6 +192,14 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('webhook-verification-fresh-comment-anchor');
     expect(source).toContain('webhook-verification-after-utc');
     expect(source).toContain('webhook-verification-after-utc-apply');
+    expect(source).toContain('webhook-verification-after-utc-clear');
+    expect(source).toContain('webhook-verification-after-utc-status');
+    expect(source).toContain('No fresh-comment anchor active');
+    expect(source).toContain('Filtering events after:');
+    expect(source).toContain('Clear anchor');
+    expect(source).toContain('Invalid UTC timestamp. Use format YYYY-MM-DDTHH:mm:ssZ');
+    expect(source).toContain('validateWebhookAfterUtc');
+    expect(source).toContain('placeholder="YYYY-MM-DDTHH:mm:ssZ"');
     expect(source).toContain('webhook-verification-fresh-comment-signal');
     expect(source).toContain('webhook-verification-fresh-comment-signal-table');
     expect(source).toContain('webhook-verification-fresh-comment-verdict-');
@@ -203,6 +211,8 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('fresh_comment_webhook_completed');
     expect(source).toContain('fresh_comment_webhook_detected');
     expect(source).toContain("params.set('after_utc'");
+    expect(source).toContain("load({ afterUtc: '' })");
+    expect(source).toContain("setAfterUtc('')");
     expect(source).toContain('only_bot_own_comment_seen_after_cutoff');
     expect(source).toContain('fresh_external_comment_no_webhook_signal_after_comment_time');
   });

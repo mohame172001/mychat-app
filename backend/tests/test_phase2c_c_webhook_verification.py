@@ -708,7 +708,7 @@ def test_reply_visibility_endpoint_does_not_call_send_or_write_paths():
 
 def test_summary_distinguishes_webhook_vs_polling_paths(monkeypatch):
     db = _DB()
-    base = datetime.utcnow() - timedelta(minutes=5)
+    base = datetime.utcnow().replace(microsecond=0) - timedelta(minutes=5)
 
     # Webhook-side: detected → mapped → reached handler → success
     _seed(db, **_ev('webhook_received', when=base, comment='', media=''))
@@ -950,9 +950,76 @@ def test_response_carries_diagnostic_metadata(monkeypatch):
     assert af['limit'] == 42
 
 
+def test_missing_after_utc_has_no_applied_cutoff_or_fresh_signal(monkeypatch):
+    db = _DB()
+    _seed(db, **_ev('webhook_comment_detected', username='acca'))
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['applied_filters']['after_utc'] is None
+    assert result['applied_filters']['after_time_utc_effective'] is None
+    assert result['fresh_comment_signal'] == {}
+
+
+def test_empty_after_utc_has_no_applied_cutoff(monkeypatch):
+    db = _DB()
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=30,
+        after_utc='   ',
+        user_id='admin',
+    ))
+
+    assert result['applied_filters']['after_utc'] is None
+    assert result['applied_filters']['after_time_utc_effective'] is None
+    assert result['fresh_comment_signal'] == {}
+
+
+def test_null_string_after_utc_has_no_applied_cutoff(monkeypatch):
+    db = _DB()
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=30,
+        after_utc='null',
+        user_id='admin',
+    ))
+
+    assert result['applied_filters']['after_utc'] is None
+    assert result['applied_filters']['after_time_utc_effective'] is None
+    assert result['fresh_comment_signal'] == {}
+
+
+def test_invalid_after_utc_returns_clear_validation_error(monkeypatch):
+    db = _DB()
+    _install(monkeypatch, db)
+
+    from fastapi import HTTPException
+    try:
+        _run(server.admin_instagram_webhook_verification(
+            username='AccA',
+            since_minutes=30,
+            after_utc='2026-05-29T21:55:00',
+            user_id='admin',
+        ))
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert 'YYYY-MM-DDTHH:mm:ssZ' in str(exc.detail)
+    else:
+        raise AssertionError('invalid after_utc was accepted')
+
+
 def test_after_utc_filter_is_applied_and_echoed(monkeypatch):
     db = _DB()
-    base = datetime.utcnow() - timedelta(minutes=5)
+    base = datetime.utcnow().replace(microsecond=0) - timedelta(minutes=5)
     cutoff = base + timedelta(minutes=2)
     _seed(db, **_ev(
         'automation_success',
@@ -988,7 +1055,7 @@ def test_after_utc_filter_is_applied_and_echoed(monkeypatch):
 
 def test_only_bot_own_webhook_after_cutoff_is_terminal_signal(monkeypatch):
     db = _DB()
-    base = datetime.utcnow() - timedelta(minutes=5)
+    base = datetime.utcnow().replace(microsecond=0) - timedelta(minutes=5)
     cutoff = base + timedelta(minutes=1)
     _seed(db, **_ev(
         'webhook_comment_detected',

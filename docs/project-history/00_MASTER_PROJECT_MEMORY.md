@@ -16,6 +16,8 @@ Current Phase 2P verification rule (2026-05-31): Webhook Verification must apply
 
 Current Phase 2Q external-comment visibility rule (2026-05-31): if self-comments arrive through the comments webhook but an external tester comment does not, do not call the whole webhook path broken and do not re-enable polling. Use the active connected account token to read `/{media-id}/comments` and classify the external comment precisely: `external_comment_visible_in_graph`, `external_comment_visible_in_graph_but_no_webhook_event`, `external_comment_not_visible_in_graph`, `external_comment_arrived_under_different_media`, `external_comment_filtered_before_logging`, or `graph_comments_read_failed`. Return only partial ids, booleans, bounded redacted Graph errors, and no raw text/tokens/full ids. If Graph cannot see the external comment, treat likely causes as visibility/tester/media/account issues until proven otherwise.
 
+Current Phase 2R fresh-comment anchor rule (2026-05-31): Webhook Verification's `after_utc` filter must be explicit and request-scoped. The input is empty on page load, the placeholder is only a format hint, Copy JSON must show the backend-applied `after_utc` (or `null`), and invalid timestamps must not be sent. Empty, whitespace, or `null` means no cutoff and no cutoff-dependent fresh-comment verdict. Do not persist or silently restore old anchors across reloads or account changes.
+
 Therefore:
 
 - Do not special-case `muhammad_gehad`.

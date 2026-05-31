@@ -396,6 +396,41 @@ def test_graph_check_visible_external_comment_without_webhook(monkeypatch):
     assert 'hello' not in repr(result)
 
 
+def test_graph_check_empty_after_utc_is_request_scoped_no_cutoff(monkeypatch):
+    _install_graph_check(monkeypatch, events=[])
+    _GraphClient.responses = [_GraphResponse(200, {'data': []})]
+
+    result = _run(server.admin_instagram_comment_graph_check(
+        username='acct_x',
+        media_id='180000000892',
+        after_utc='   ',
+        since_minutes=30,
+        user_id='admin',
+    ))
+
+    assert result['after_utc'] is None
+    assert result['after_time_utc_effective'] is None
+
+
+def test_graph_check_invalid_after_utc_rejected(monkeypatch):
+    _install_graph_check(monkeypatch, events=[])
+
+    from fastapi import HTTPException
+    try:
+        _run(server.admin_instagram_comment_graph_check(
+            username='acct_x',
+            media_id='180000000892',
+            after_utc='not-a-date',
+            since_minutes=30,
+            user_id='admin',
+        ))
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert 'YYYY-MM-DDTHH:mm:ssZ' in str(exc.detail)
+    else:
+        raise AssertionError('invalid after_utc was accepted')
+
+
 def test_graph_check_external_comment_not_visible(monkeypatch):
     _install_graph_check(monkeypatch, events=[])
     _GraphClient.responses = [

@@ -2700,6 +2700,28 @@ const WV_QUICK_RANGES_MIN = [10, 30, 60, 120];
 // identically. (Audited per project rule: no automation branching
 // on username.)
 const WV_DEFAULT_USERNAME = 'muhammad_gehad';
+const WV_AFTER_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+function validateWebhookAfterUtc(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return { ok: true, value: null };
+  if (!WV_AFTER_UTC_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      value: null,
+      error: 'Invalid UTC timestamp. Use format YYYY-MM-DDTHH:mm:ssZ',
+    };
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 19) !== trimmed.slice(0, 19)) {
+    return {
+      ok: false,
+      value: null,
+      error: 'Invalid UTC timestamp. Use format YYYY-MM-DDTHH:mm:ssZ',
+    };
+  }
+  return { ok: true, value: trimmed };
+}
 
 /**
  * Backend datetimes are UTC. Some come back without an explicit
@@ -2798,6 +2820,7 @@ function WebhookVerificationTab() {
   // offset. Empty string disables the lower-bound and the
   // fresh-comment signal panel.
   const [afterUtc, setAfterUtc] = useState('');
+  const [afterUtcError, setAfterUtcError] = useState('');
   const [commentIdPartial, setCommentIdPartial] = useState('');
   const [mediaIdPartial, setMediaIdPartial] = useState('');
   const [state, setState] = useState('idle');
@@ -2822,14 +2845,22 @@ function WebhookVerificationTab() {
   }, []);
 
   const load = useCallback(async (overrides = {}) => {
-    setState('loading');
-    setError(null);
-    setCopyStatus('idle');
-    setVisibilityError(null);
     const activeUsername = overrides.username !== undefined ? overrides.username : username;
     const activeSince = overrides.sinceMinutes !== undefined ? overrides.sinceMinutes : sinceMinutes;
     const activeComment = overrides.commentIdPartial !== undefined ? overrides.commentIdPartial : commentIdPartial;
     const activeMedia = overrides.mediaIdPartial !== undefined ? overrides.mediaIdPartial : mediaIdPartial;
+    const activeAfterUtcRaw = overrides.afterUtc !== undefined ? overrides.afterUtc : afterUtc;
+    const activeAfterUtc = validateWebhookAfterUtc(activeAfterUtcRaw);
+    if (!activeAfterUtc.ok) {
+      setAfterUtcError(activeAfterUtc.error);
+      setCopyStatus('idle');
+      return;
+    }
+    setAfterUtcError('');
+    setState('loading');
+    setError(null);
+    setCopyStatus('idle');
+    setVisibilityError(null);
     try {
       const params = new URLSearchParams();
       const u = (activeUsername || '').trim();
@@ -2840,9 +2871,7 @@ function WebhookVerificationTab() {
       if (cid) params.set('comment_id_partial', cid);
       const mid = (activeMedia || '').trim();
       if (mid) params.set('media_id_partial', mid);
-      const ac = (overrides.afterUtc !== undefined ? overrides.afterUtc : afterUtc) || '';
-      const acTrim = String(ac).trim();
-      if (acTrim) params.set('after_utc', acTrim);
+      if (activeAfterUtc.value) params.set('after_utc', activeAfterUtc.value);
       const qs = params.toString();
       const r = await api.get(
         `/admin/instagram/webhook-verification${qs ? `?${qs}` : ''}`,
@@ -2871,6 +2900,12 @@ function WebhookVerificationTab() {
     load({ sinceMinutes: m });
   }, [load]);
 
+  const clearFreshCommentAnchor = useCallback(() => {
+    setAfterUtc('');
+    setAfterUtcError('');
+    load({ afterUtc: '' });
+  }, [load]);
+
   const summary = data?.summary || null;
   const allEvents = Array.isArray(data?.events) ? data.events : [];
   const appliedFilters = data?.applied_filters || null;
@@ -2881,6 +2916,11 @@ function WebhookVerificationTab() {
   const accountParity = data?.account_parity || null;
   const flowVerdicts = Array.isArray(data?.flow_verdicts) ? data.flow_verdicts : [];
   const flowVerdictLegend = data?.flow_verdict_legend || {};
+  const afterUtcValidation = useMemo(() => validateWebhookAfterUtc(afterUtc), [afterUtc]);
+  const afterUtcVisibleError = afterUtcError || (!afterUtcValidation.ok ? afterUtcValidation.error : '');
+  const afterUtcActiveLabel = afterUtcValidation.ok && afterUtcValidation.value
+    ? `Filtering events after: ${afterUtcValidation.value}`
+    : 'No fresh-comment anchor active';
 
   // Phase 2J: Graph comment-check.
   const [graphCheckState, setGraphCheckState] = useState('idle');
@@ -2901,6 +2941,18 @@ function WebhookVerificationTab() {
       });
       return;
     }
+    const activeAfterUtc = validateWebhookAfterUtc(afterUtc);
+    if (!activeAfterUtc.ok) {
+      setAfterUtcError(activeAfterUtc.error);
+      setGraphCheckResult({
+        ok: false,
+        verdict: 'invalid_after_utc',
+        message: activeAfterUtc.error,
+      });
+      setGraphCheckState('failed');
+      return;
+    }
+    setAfterUtcError('');
     setGraphCheckState('loading');
     setGraphCheckResult(null);
     try {
@@ -2910,7 +2962,7 @@ function WebhookVerificationTab() {
       if (graphCheckPostUrl.trim()) params.set('post_url', graphCheckPostUrl.trim());
       if (graphCheckText.trim()) params.set('text', graphCheckText.trim());
       if (graphCheckCommenter.trim()) params.set('commenter_username', graphCheckCommenter.trim());
-      if ((afterUtc || '').trim()) params.set('after_utc', (afterUtc || '').trim());
+      if (activeAfterUtc.value) params.set('after_utc', activeAfterUtc.value);
       params.set('since_minutes', String(sinceMinutes || 30));
       const r = await api.get(
         `/admin/instagram/comment-graph-check?${params.toString()}`,
@@ -3027,7 +3079,7 @@ function WebhookVerificationTab() {
         since_minutes: Number(sinceMinutes) || null,
         comment_id_partial: (commentIdPartial || '').trim() || null,
         media_id_partial: (mediaIdPartial || '').trim() || null,
-        after_utc: (afterUtc || '').trim() || null,
+        after_utc: data?.applied_filters?.after_utc || null,
         after_local: data?.applied_filters?.after_local || null,
         after_time_utc_effective: data?.applied_filters?.after_time_utc_effective || null,
       },
@@ -3059,7 +3111,7 @@ function WebhookVerificationTab() {
       setCopyStatus('error');
       setTimeout(() => setCopyStatus('idle'), 1500);
     }
-  }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial, afterUtc,
+  }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial,
       showWebhookOnly, showSuccessesOnly, hideRescans, browserTz]);
 
   const canCheckReplyVisibility = Boolean(
@@ -3213,7 +3265,11 @@ function WebhookVerificationTab() {
         <input
           type="text"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => {
+            setUsername(e.target.value);
+            setAfterUtc('');
+            setAfterUtcError('');
+          }}
           placeholder={ar ? 'username (افتراضي: muhammad_gehad)' : 'username (default: muhammad_gehad)'}
           className={WV_INPUT_CLASS}
           data-testid="webhook-verification-username"
@@ -3527,8 +3583,11 @@ function WebhookVerificationTab() {
             <input
               type="text"
               value={afterUtc}
-              onChange={(e) => setAfterUtc(e.target.value)}
-              placeholder="2026-05-29T21:55:00Z"
+              onChange={(e) => {
+                setAfterUtc(e.target.value);
+                setAfterUtcError('');
+              }}
+              placeholder="YYYY-MM-DDTHH:mm:ssZ"
               className={WV_INPUT_CLASS}
               data-testid="webhook-verification-after-utc"
               style={{ minWidth: 220 }}
@@ -3545,6 +3604,19 @@ function WebhookVerificationTab() {
                 ? 'يستبعد الأحداث قبل هذا الوقت من تشخيص التعليق الجديد.'
                 : 'Excludes events before this time from the fresh-comment verdict.'}
             </span>
+          </div>
+          <Button
+            size="sm"
+            onClick={clearFreshCommentAnchor}
+            data-testid="webhook-verification-after-utc-clear"
+          >
+            {ar ? 'Clear anchor' : 'Clear anchor'}
+          </Button>
+          <div
+            className={`text-[11px] ${afterUtcValidation.ok ? 'text-slate-600' : 'text-rose-700'}`}
+            data-testid="webhook-verification-after-utc-status"
+          >
+            {afterUtcVisibleError || afterUtcActiveLabel}
           </div>
           {data?.fresh_comment_signal && Array.isArray(data.fresh_comment_signal.accounts) && (
             <div
