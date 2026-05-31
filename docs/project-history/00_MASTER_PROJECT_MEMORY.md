@@ -12,6 +12,8 @@ MyChat is being built as a real multi-user SaaS, not as a one-off tool for one I
 
 Current Phase 2O repair/readback rule (2026-05-31): the comment-webhook Repair action must never report a generic permission/reconnect problem when the actual failure is the fresh Graph readback after a subscribe POST. Subscribe and readback must use the same active `instagram_accounts` row token and IG business id. If readback fails, persist and surface a precise, redacted reason (`graph_readback_permission_denied`, `graph_readback_wrong_object_id`, `graph_readback_missing_data_array`, `graph_readback_unexpected_shape`, `graph_readback_empty_response`, `graph_readback_parse_error`, `graph_readback_timeout`, etc.) plus safe response metadata only. Do not expose tokens/full IDs/raw payloads. Do not re-enable polling fallback to mask webhook repair issues. Only show `reconnect & grant comment permission` when `comment_permission_not_granted` is proven from the correct active token.
 
+Current Phase 2P verification rule (2026-05-31): Webhook Verification must apply and echo the operator's fresh-comment cutoff (`after_utc`) so old/self-comment rows cannot pollute the diagnosis. A webhook `automation_skipped` with `skip_reason=bot_own_reply` is a correct terminal self-comment skip (`webhook_skipped_bot_own_reply`), not `webhook_in_flight`, not a failure, and not proof that an external tester comment arrived. If only self-comments are seen after the cutoff, report `only_bot_own_comment_seen_after_cutoff`; if no external-comment webhook signal is seen after the cutoff, report `fresh_external_comment_no_webhook_signal_after_comment_time`.
+
 Therefore:
 
 - Do not special-case `muhammad_gehad`.

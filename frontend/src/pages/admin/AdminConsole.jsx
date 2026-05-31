@@ -3026,6 +3026,9 @@ function WebhookVerificationTab() {
         since_minutes: Number(sinceMinutes) || null,
         comment_id_partial: (commentIdPartial || '').trim() || null,
         media_id_partial: (mediaIdPartial || '').trim() || null,
+        after_utc: (afterUtc || '').trim() || null,
+        after_local: data?.applied_filters?.after_local || null,
+        after_time_utc_effective: data?.applied_filters?.after_time_utc_effective || null,
       },
       ui_view_filters: {
         show_webhook_only: showWebhookOnly,
@@ -3055,7 +3058,7 @@ function WebhookVerificationTab() {
       setCopyStatus('error');
       setTimeout(() => setCopyStatus('idle'), 1500);
     }
-  }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial,
+  }, [data, username, sinceMinutes, commentIdPartial, mediaIdPartial, afterUtc,
       showWebhookOnly, showSuccessesOnly, hideRescans, browserTz]);
 
   const canCheckReplyVisibility = Boolean(
@@ -3574,6 +3577,10 @@ function WebhookVerificationTab() {
                           ? 'bg-emerald-100 text-emerald-900'
                           : v === 'fresh_comment_webhook_detected'
                           ? 'bg-amber-100 text-amber-900'
+                          : v === 'only_bot_own_comment_seen_after_cutoff'
+                          ? 'bg-slate-100 text-slate-700'
+                          : v === 'fresh_external_comment_no_webhook_signal_after_comment_time'
+                          ? 'bg-rose-100 text-rose-900'
                           : 'bg-rose-100 text-rose-900';
                       return (
                         <tr key={idx}>
@@ -3719,9 +3726,13 @@ function WebhookVerificationTab() {
               <thead>
                 <tr className="text-slate-600">
                   <th className="text-left p-1 border-b border-slate-200">comment_id</th>
+                  <th className="text-left p-1 border-b border-slate-200">commenter</th>
                   <th className="text-left p-1 border-b border-slate-200">sources</th>
                   <th className="text-left p-1 border-b border-slate-200">last_stage_seen</th>
                   <th className="text-left p-1 border-b border-slate-200">stop_stage</th>
+                  <th className="text-left p-1 border-b border-slate-200">skip</th>
+                  <th className="text-left p-1 border-b border-slate-200">bot-own</th>
+                  <th className="text-left p-1 border-b border-slate-200">terminal</th>
                   <th className="text-left p-1 border-b border-slate-200">verdict</th>
                 </tr>
               </thead>
@@ -3732,6 +3743,8 @@ function WebhookVerificationTab() {
                     verdict === 'webhook_completed'
                       ? 'bg-emerald-100 text-emerald-900'
                       : verdict === 'webhook_in_flight'
+                      ? 'bg-slate-100 text-slate-700'
+                      : verdict === 'webhook_skipped_bot_own_reply'
                       ? 'bg-slate-100 text-slate-700'
                       : verdict === 'webhook_partial_success_missing_final_automation_success'
                       ? 'bg-amber-100 text-amber-900'
@@ -3744,6 +3757,9 @@ function WebhookVerificationTab() {
                         {v.comment_id_partial || '—'}
                       </td>
                       <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.commenter_id_partial || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
                         {(v.sources || []).join(',') || '—'}
                       </td>
                       <td className="p-1 border-b border-slate-100 font-mono">
@@ -3751,6 +3767,15 @@ function WebhookVerificationTab() {
                       </td>
                       <td className="p-1 border-b border-slate-100 font-mono">
                         {v.stop_stage || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.skip_reason || '—'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.is_bot_own_comment ? 'true' : 'false'}
+                      </td>
+                      <td className="p-1 border-b border-slate-100 font-mono">
+                        {v.terminal ? 'true' : 'false'}
                       </td>
                       <td className="p-1 border-b border-slate-100">
                         <span
@@ -4077,6 +4102,8 @@ function WebhookVerificationTab() {
                 <th className="text-start px-2 py-1">username_key</th>
                 <th className="text-start px-2 py-1">media_id</th>
                 <th className="text-start px-2 py-1">comment_id</th>
+                <th className="text-start px-2 py-1">commenter_id</th>
+                <th className="text-start px-2 py-1">bot-own</th>
                 <th className="text-start px-2 py-1">skip_reason</th>
                 <th className="text-start px-2 py-1">via / probe</th>
                 <th className="text-start px-2 py-1">statuses</th>
@@ -4087,7 +4114,7 @@ function WebhookVerificationTab() {
             <tbody>
               {events.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="px-2 py-2 text-slate-500">
+                  <td colSpan={13} className="px-2 py-2 text-slate-500">
                     {ar
                       ? 'لا توجد أحداث في النافذة الزمنية.'
                       : 'No events in the selected window.'}
@@ -4100,6 +4127,7 @@ function WebhookVerificationTab() {
                 const dmProofId = ev.opening_message_id_partial || ev.provider_message_id_partial || ev.dm_provider_message_id_partial;
                 const dmSuccessWithoutProof = ev.dm_status === 'success' && !dmProofId;
                 const replySuccessVisibilityUnknown = ev.reply_status === 'success' && !visibilityResult;
+                const isBotOwnEvent = ev.skip_reason === 'bot_own_reply' || ev.flow_verdict === 'webhook_skipped_bot_own_reply';
                 const stageKind = (
                   ev.stage === 'automation_success'
                   || ev.stage === 'webhook_comment_detected'
@@ -4135,6 +4163,8 @@ function WebhookVerificationTab() {
                     <td className="px-2 py-1 whitespace-nowrap">{ev.username_key || '—'}</td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.media_id_partial || '—'}</td>
                     <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.comment_id_partial || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{ev.commenter_id_partial || '—'}</td>
+                    <td className="px-2 py-1 whitespace-nowrap font-mono">{isBotOwnEvent ? 'true' : 'false'}</td>
                     <td className="px-2 py-1 whitespace-nowrap">
                       {ev.skip_reason === 'already_replied_success' ? (
                         <WvBadge kind="already_replied_success">{ev.skip_reason}</WvBadge>

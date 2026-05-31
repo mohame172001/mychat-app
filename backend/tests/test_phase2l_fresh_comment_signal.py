@@ -10,17 +10,20 @@ Spec contract points (15):
 
   1.  Events before the test-comment time are ignored for the
       fresh-comment verdict.
-  2.  Fresh comment after timestamp with no webhook events for the
-      account → ``fresh_comment_no_webhook_signal_after_comment_time``.
+  2.  Fresh external comment after timestamp with no webhook events for
+      the account →
+      ``fresh_external_comment_no_webhook_signal_after_comment_time``.
   3.  Non-comment webhook after timestamp → verdict is
       ``webhook_received_after_comment_time_but_no_comment_payload``.
   4.  Cached subscription says ready but zero events after timestamp →
-      ``comment_field_subscribed_but_fresh_comment_not_delivered``.
+      ``fresh_external_comment_no_webhook_signal_after_comment_time``.
   5.  Comment webhook after timestamp + automation_success →
       ``fresh_comment_webhook_completed``.
   6.  webhook_comment_detected after timestamp but no success yet →
       ``fresh_comment_webhook_detected``.
-  7-15. Unchanged-contract guards.
+  7.  Only self-comment webhook after timestamp →
+      ``only_bot_own_comment_seen_after_cutoff``.
+  8-16. Unchanged-contract guards.
 """
 import inspect
 import os
@@ -79,7 +82,7 @@ def test_1_events_before_cutoff_are_ignored():
         'webhook_comment_delivery_configured': True,
     }]
     v = _verdict_for(rows, cutoff, subscription_accounts=subs)
-    assert v == 'comment_field_subscribed_but_fresh_comment_not_delivered'
+    assert v == 'fresh_external_comment_no_webhook_signal_after_comment_time'
 
 
 def test_2_no_events_after_cutoff_returns_fresh_no_signal():
@@ -87,12 +90,12 @@ def test_2_no_events_after_cutoff_returns_fresh_no_signal():
     cutoff = base + timedelta(seconds=60)
     rows: list = []
     v = _verdict_for(rows, cutoff, subscription_accounts=[])
-    assert v is None or v == 'fresh_comment_no_webhook_signal_after_comment_time'
+    assert v is None or v == 'fresh_external_comment_no_webhook_signal_after_comment_time'
     # The signal block is also emitted when subscription is in cache:
     subs = [{'username': 'acct_x', 'comments_subscribed': False}]
     out = server._compute_fresh_comment_signal(rows, cutoff, subs)
     by_user = {a['username']: a for a in out.get('accounts') or []}
-    assert by_user['acct_x']['verdict'] == 'fresh_comment_no_webhook_signal_after_comment_time'
+    assert by_user['acct_x']['verdict'] == 'fresh_external_comment_no_webhook_signal_after_comment_time'
 
 
 def test_3_non_comment_webhook_after_cutoff_no_comment_payload():
@@ -119,7 +122,7 @@ def test_4_subscription_ready_but_zero_events_returns_dedicated_label():
         'webhook_comment_delivery_configured': True,
     }]
     v = _verdict_for([], cutoff, subscription_accounts=subs)
-    assert v == 'comment_field_subscribed_but_fresh_comment_not_delivered'
+    assert v == 'fresh_external_comment_no_webhook_signal_after_comment_time'
 
 
 def test_5_comment_webhook_after_cutoff_with_automation_success():
@@ -148,6 +151,34 @@ def test_6_webhook_comment_detected_in_flight():
     ]
     v = _verdict_for(rows, cutoff)
     assert v == 'fresh_comment_webhook_detected'
+
+
+def test_7_only_bot_own_comment_after_cutoff_is_not_in_flight():
+    base = datetime.utcnow()
+    cutoff = base
+    rows = [
+        _ev('webhook_received', t_offset_seconds=10, base=base),
+        _ev('account_resolution_success', t_offset_seconds=11, base=base,
+            extra={'has_comments_field': True}),
+        {
+            **_ev('webhook_comment_detected', t_offset_seconds=12, base=base),
+            'comment_id_partial': '181...233',
+            'commenter_id_partial': '178...615',
+        },
+        {
+            **_ev('automation_skipped', t_offset_seconds=13, base=base),
+            'comment_id_partial': '181...233',
+            'commenter_id_partial': '178...615',
+            'skip_reason': 'bot_own_reply',
+        },
+    ]
+    out = server._compute_fresh_comment_signal(rows, cutoff, [])
+    by_user = {a['username']: a for a in out.get('accounts') or []}
+    acct = by_user['acct_x']
+    assert acct['verdict'] == 'only_bot_own_comment_seen_after_cutoff'
+    assert acct['webhook_bot_own_skipped_count_after_cutoff'] == 1
+    assert acct['webhook_bot_own_comment_id_partials_after_cutoff'] == ['181...233']
+    assert acct['webhook_commenter_id_partials_after_cutoff'] == ['178...615']
 
 
 def test_helper_returns_empty_when_no_cutoff_supplied():

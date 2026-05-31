@@ -26173,13 +26173,12 @@ def _compute_fresh_comment_signal(
         — at least one webhook_received / account_resolution_success
         after the cutoff, but none carried a comments or live_comments
         payload (Meta delivered messaging-only events for this account).
-      * ``comment_field_subscribed_but_fresh_comment_not_delivered`` —
-        the cached subscription says comments / live_comments are
-        subscribed for this account but NO webhook arrived at all
-        after the cutoff.
-      * ``fresh_comment_no_webhook_signal_after_comment_time`` —
-        nothing arrived for this account after the cutoff and
-        subscription is not asserted as ready.
+      * ``only_bot_own_comment_seen_after_cutoff`` —
+        comment webhook(s) arrived after the cutoff, but every
+        comment that reached the handler was skipped as the connected
+        account's own comment.
+      * ``fresh_external_comment_no_webhook_signal_after_comment_time``
+        — no external-comment webhook signal arrived after the cutoff.
 
     When ``after_time_utc`` is None the signal block is omitted from
     the response (the operator did not anchor a fresh-comment time).
@@ -26197,6 +26196,10 @@ def _compute_fresh_comment_signal(
                 'account_resolution_success_count': 0,
                 'account_resolution_success_with_comment_payload_count': 0,
                 'automation_success_webhook_count': 0,
+                'webhook_bot_own_skipped_count': 0,
+                'webhook_comment_id_partials': set(),
+                'webhook_bot_own_comment_id_partials': set(),
+                'webhook_commenter_id_partials': set(),
                 'first_event_at': None,
                 'latest_event_stage': None,
             }
@@ -26218,6 +26221,12 @@ def _compute_fresh_comment_signal(
             b['webhook_received_count'] += 1
         elif stage == 'webhook_comment_detected':
             b['webhook_comment_detected_count'] += 1
+            cid = str(r.get('comment_id_partial') or '')
+            if cid:
+                b['webhook_comment_id_partials'].add(cid)
+            commenter = str(r.get('commenter_id_partial') or '')
+            if commenter:
+                b['webhook_commenter_id_partials'].add(commenter)
         elif stage == 'account_resolution_success':
             b['account_resolution_success_count'] += 1
             extra = r.get('extra') or {}
@@ -26228,6 +26237,18 @@ def _compute_fresh_comment_signal(
                 b['account_resolution_success_with_comment_payload_count'] += 1
         elif stage == 'automation_success' and source == 'webhook':
             b['automation_success_webhook_count'] += 1
+        elif (
+            stage == 'automation_skipped'
+            and source == 'webhook'
+            and r.get('skip_reason') == 'bot_own_reply'
+        ):
+            b['webhook_bot_own_skipped_count'] += 1
+            cid = str(r.get('comment_id_partial') or '')
+            if cid:
+                b['webhook_bot_own_comment_id_partials'].add(cid)
+            commenter = str(r.get('commenter_id_partial') or '')
+            if commenter:
+                b['webhook_commenter_id_partials'].add(commenter)
 
     sub_by_username: Dict[str, dict] = {}
     for sub in subscription_accounts or []:
@@ -26254,14 +26275,18 @@ def _compute_fresh_comment_signal(
         )
         if b.get('automation_success_webhook_count', 0):
             verdict = 'fresh_comment_webhook_completed'
+        elif (
+            b.get('webhook_bot_own_skipped_count', 0)
+            and b.get('webhook_comment_detected_count', 0)
+            <= len(b.get('webhook_bot_own_comment_id_partials') or set())
+        ):
+            verdict = 'only_bot_own_comment_seen_after_cutoff'
         elif b.get('webhook_comment_detected_count', 0):
             verdict = 'fresh_comment_webhook_detected'
         elif any_event and not comment_payload:
             verdict = 'webhook_received_after_comment_time_but_no_comment_payload'
-        elif not any_event and comments_subscribed:
-            verdict = 'comment_field_subscribed_but_fresh_comment_not_delivered'
         else:
-            verdict = 'fresh_comment_no_webhook_signal_after_comment_time'
+            verdict = 'fresh_external_comment_no_webhook_signal_after_comment_time'
         out_accounts.append({
             'username': u,
             'verdict': verdict,
@@ -26273,6 +26298,14 @@ def _compute_fresh_comment_signal(
                 b.get('webhook_comment_detected_count', 0),
             'automation_success_webhook_count_after_cutoff':
                 b.get('automation_success_webhook_count', 0),
+            'webhook_bot_own_skipped_count_after_cutoff':
+                b.get('webhook_bot_own_skipped_count', 0),
+            'webhook_comment_id_partials_after_cutoff':
+                sorted(list(b.get('webhook_comment_id_partials') or []))[:10],
+            'webhook_bot_own_comment_id_partials_after_cutoff':
+                sorted(list(b.get('webhook_bot_own_comment_id_partials') or []))[:10],
+            'webhook_commenter_id_partials_after_cutoff':
+                sorted(list(b.get('webhook_commenter_id_partials') or []))[:10],
             'latest_event_stage_after_cutoff': b.get('latest_event_stage'),
             'comments_subscribed': comments_subscribed,
         })
@@ -26284,18 +26317,19 @@ def _compute_fresh_comment_signal(
                 'automation_success source=webhook after the cutoff.',
             'fresh_comment_webhook_detected':
                 'webhook_comment_detected after the cutoff; flow still in progress.',
+            'only_bot_own_comment_seen_after_cutoff':
+                'Only the connected account own-comment webhook reached '
+                'the handler after the cutoff. The self-comment skip is '
+                'terminal and expected; it is not proof that the external '
+                'tester comment arrived.',
             'webhook_received_after_comment_time_but_no_comment_payload':
                 'Webhook delivery happened after the cutoff for this account '
                 'but no comments/live_comments payload was carried. Meta is '
                 'not delivering the fresh comment to this specific account.',
-            'comment_field_subscribed_but_fresh_comment_not_delivered':
-                'Cached subscription says comments are subscribed but no '
-                'webhook arrived at all after the cutoff. Force a fresh '
-                'Graph verify with /admin/instagram/subscription-verify-fresh '
-                'before contacting Meta.',
-            'fresh_comment_no_webhook_signal_after_comment_time':
-                'Nothing arrived for this account after the cutoff and '
-                'subscription is not asserted as ready in the cache.',
+            'fresh_external_comment_no_webhook_signal_after_comment_time':
+                'No external-comment webhook signal arrived after the '
+                'cutoff. If the tester posted after this time, the webhook '
+                'delivery gap is still outside the automation send path.',
         },
     }
 
@@ -26315,6 +26349,7 @@ def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
       * ``webhook_failed_at_public_reply``
       * ``webhook_failed_at_opening_dm``
       * ``webhook_partial_success_missing_final_automation_success``
+      * ``webhook_skipped_bot_own_reply``
       * ``webhook_in_flight``
       * ``webhook_polling_only``
 
@@ -26337,7 +26372,15 @@ def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
         last_stage = stages[-1] if stages else None
         verdict: Optional[str] = None
         reason_stage: Optional[str] = None
+        skip_reason: Optional[str] = None
+        commenter_id_partial: Optional[str] = None
+        is_bot_own_comment = False
         webhook_sourced = 'webhook' in sources
+        for e in evs:
+            if not commenter_id_partial and e.get('commenter_id_partial'):
+                commenter_id_partial = str(e.get('commenter_id_partial') or '')
+            if e.get('skip_reason'):
+                skip_reason = str(e.get('skip_reason') or '')
         if not webhook_sourced and ('polling' in sources):
             verdict = 'webhook_polling_only'
         elif any(
@@ -26346,6 +26389,16 @@ def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
             for e in evs
         ):
             verdict = 'webhook_completed'
+        elif any(
+            e.get('stage') == 'automation_skipped'
+            and e.get('source') == 'webhook'
+            and e.get('skip_reason') == 'bot_own_reply'
+            for e in evs
+        ):
+            verdict = 'webhook_skipped_bot_own_reply'
+            reason_stage = 'automation_skipped'
+            skip_reason = 'bot_own_reply'
+            is_bot_own_comment = True
         elif (
             'account_resolution_failed' in stage_set
             and 'webhook_comment_detected' not in stage_set
@@ -26400,6 +26453,10 @@ def _compute_webhook_flow_verdicts(rows: list) -> Dict[str, dict]:
             'stop_stage': reason_stage,
             'last_stage_seen': last_stage,
             'sources': sorted(s for s in sources if s),
+            'terminal': verdict != 'webhook_in_flight',
+            'skip_reason': skip_reason,
+            'commenter_id_partial': commenter_id_partial,
+            'is_bot_own_comment': is_bot_own_comment,
         }
     return flow_verdict_by_comment
 
@@ -28237,6 +28294,10 @@ async def admin_instagram_webhook_verification(
                 'stop_stage': info.get('stop_stage'),
                 'last_stage_seen': info.get('last_stage_seen'),
                 'sources': info.get('sources'),
+                'terminal': info.get('terminal'),
+                'skip_reason': info.get('skip_reason'),
+                'commenter_id_partial': info.get('commenter_id_partial'),
+                'is_bot_own_comment': info.get('is_bot_own_comment'),
             }
             for cid, info in flow_verdict_by_comment.items()
         ],
@@ -28263,6 +28324,11 @@ async def admin_instagram_webhook_verification(
                 'Reply / DM emitted success events but no final '
                 'automation_success was recorded — usually means the '
                 'handler raised after the send. Operator should re-run.',
+            'webhook_skipped_bot_own_reply':
+                'Webhook comment reached the handler and was skipped because '
+                'the commenter is the connected Instagram account itself. '
+                'This is terminal and expected; it is not a failure and not '
+                'proof that an external tester comment arrived.',
             'webhook_in_flight':
                 'Webhook events seen but the flow has not reached a '
                 'terminal stage yet.',

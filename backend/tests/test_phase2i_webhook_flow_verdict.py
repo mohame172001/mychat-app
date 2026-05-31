@@ -23,11 +23,13 @@ Spec verdicts:
   7. ``webhook_partial_success_missing_final_automation_success`` —
      reply or DM emitted success but neither automation_success nor
      automation_failed was recorded.
-  8. ``webhook_in_flight`` — events present but no terminal state.
-  9. ``webhook_polling_only`` — only polling saw this comment; no
+  8. ``webhook_skipped_bot_own_reply`` — self-comment reached handler
+     and was skipped terminally.
+  9. ``webhook_in_flight`` — events present but no terminal state.
+  10. ``webhook_polling_only`` — only polling saw this comment; no
      webhook event for it.
 
-Plus unchanged-contract guards 10-15: HMAC, Billing, dedupe, Phase
+Plus unchanged-contract guards 11-16: HMAC, Billing, dedupe, Phase
 2D cooldown, quick-reply copy, polling default OFF.
 """
 import os
@@ -171,7 +173,27 @@ def test_7_webhook_partial_success_missing_final_automation_success():
     assert out['flow_verdict'] == 'webhook_partial_success_missing_final_automation_success'
 
 
-def test_8_webhook_in_flight():
+def test_8_webhook_bot_own_reply_skip_is_terminal_not_in_flight():
+    rows = [
+        _ev('webhook_received', t_offset=0),
+        _ev('account_resolution_success', t_offset=1),
+        _ev('webhook_comment_detected', t_offset=2),
+        {
+            **_ev('automation_skipped', t_offset=3),
+            'skip_reason': 'bot_own_reply',
+            'commenter_id_partial': '178...615',
+        },
+    ]
+    out = _classify(rows)
+    assert out['flow_verdict'] == 'webhook_skipped_bot_own_reply'
+    assert out['stop_stage'] == 'automation_skipped'
+    assert out['skip_reason'] == 'bot_own_reply'
+    assert out['terminal'] is True
+    assert out['is_bot_own_comment'] is True
+    assert out['commenter_id_partial'] == '178...615'
+
+
+def test_9_webhook_in_flight():
     rows = [
         _ev('webhook_received', t_offset=0),
         _ev('account_resolution_success', t_offset=1),
@@ -179,9 +201,10 @@ def test_8_webhook_in_flight():
     ]
     out = _classify(rows)
     assert out['flow_verdict'] == 'webhook_in_flight'
+    assert out['terminal'] is False
 
 
-def test_9_webhook_polling_only():
+def test_10_webhook_polling_only():
     rows = [
         _ev('poller_comment_seen', source='polling', t_offset=0),
     ]
@@ -210,35 +233,35 @@ def test_classifier_keys_independent_comment_ids():
 # ---------------------------------------------------------------------------
 
 
-def test_10_polling_remains_disabled_by_default():
+def test_11_polling_remains_disabled_by_default():
     """Re-asserts Phase 2H production posture."""
     src = inspect.getsource(server)
     assert "os.environ.get('IG_POLL_ENABLED', '0')" in src
 
 
-def test_11_hmac_unchanged():
+def test_12_hmac_unchanged():
     src = inspect.getsource(server)
     assert 'hmac.compare_digest' in src
 
 
-def test_12_billing_unchanged():
+def test_13_billing_unchanged():
     assert hasattr(server, 'reserve_usage_limit')
     src = inspect.getsource(server._handle_new_comment)
     assert "'monthly_comments_processed_limit'" in src
 
 
-def test_13_dedupe_unchanged():
+def test_14_dedupe_unchanged():
     src = inspect.getsource(server)
     assert "'dedupe_checked'" in src
     assert "'namespace'" in src
 
 
-def test_14_phase2d_cooldown_unchanged():
+def test_15_phase2d_cooldown_unchanged():
     src = inspect.getsource(server)
     assert 'opening_dm_already_sent_for_commenter_media' in src
 
 
-def test_15_quick_reply_copy_unchanged():
+def test_16_quick_reply_copy_unchanged():
     src = inspect.getsource(server)
     assert 'public_reply_attempted' in src
     assert 'opening_dm_attempted' in src

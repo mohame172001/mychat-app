@@ -118,6 +118,8 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('provider_message_id_partial');
     expect(source).toContain('dm_provider_message_id_partial');
     expect(source).toContain('dm_provider_message_id_missing');
+    expect(source).toContain('after_utc: (afterUtc');
+    expect(source).toContain('after_time_utc_effective');
   });
 
   test('renders event created_at via local-time formatter with UTC tooltip', () => {
@@ -200,6 +202,9 @@ describe('Webhook Verification tab structural contract', () => {
     expect(source).toContain('fresh_comment_signal');
     expect(source).toContain('fresh_comment_webhook_completed');
     expect(source).toContain('fresh_comment_webhook_detected');
+    expect(source).toContain("params.set('after_utc'");
+    expect(source).toContain('only_bot_own_comment_seen_after_cutoff');
+    expect(source).toContain('fresh_external_comment_no_webhook_signal_after_comment_time');
   });
 
   test('Phase 2J: Graph comment-check control rendered with redacted inputs', () => {
@@ -224,12 +229,16 @@ describe('Webhook Verification tab structural contract', () => {
     // The two color-cued strings the JSX hard-codes for chip coloring.
     expect(source).toContain('webhook_completed');
     expect(source).toContain('webhook_in_flight');
+    expect(source).toContain('webhook_skipped_bot_own_reply');
     expect(source).toContain('webhook_partial_success_missing_final_automation_success');
     expect(source).toContain('webhook_polling_only');
     // The data fields the table reads off each verdict entry.
     expect(source).toContain('flow_verdict');
     expect(source).toContain('stop_stage');
     expect(source).toContain('last_stage_seen');
+    expect(source).toContain('commenter_id_partial');
+    expect(source).toContain('is_bot_own_comment');
+    expect(source).toContain('terminal');
   });
 
   test('Phase 2H: account parity panel structural contract', () => {

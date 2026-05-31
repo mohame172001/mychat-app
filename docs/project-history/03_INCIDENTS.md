@@ -18,6 +18,18 @@ Use this file to record production-impacting problems and the exact fix.
 
 ## Recorded Incidents
 
+### Fresh Comment Anchor Was Missing From Copied Diagnostics And Bot-Own Webhook Skips Looked In-Flight
+
+- Date/time: 2026-05-31
+- Symptom: Webhook Verification showed that comment webhooks were arriving and a self-comment was correctly skipped as `bot_own_reply`, but the per-comment verdict called it `webhook_in_flight`. The copied JSON also showed no active fresh-comment cutoff (`after_utc=null`/missing), so the operator could not prove whether the later external tester comment was inside the filtered window.
+- Affected area: Admin Webhook Verification diagnostics only: fresh-comment signal, flow verdict classifier, and UI Copy JSON/table rendering.
+- Root cause: The backend flow classifier had no terminal branch for `automation_skipped(skip_reason=bot_own_reply, source=webhook)`, so it fell through to the generic in-flight label. The frontend Copy JSON wrapper did not include the active fresh-comment anchor fields, even though the backend endpoint can accept and apply `after_utc`.
+- Fix commit: pending (this commit). Copy JSON now includes `after_utc`, `after_local`, and `after_time_utc_effective`. The backend now returns terminal `webhook_skipped_bot_own_reply` for self-comments, plus fresh-comment verdicts `only_bot_own_comment_seen_after_cutoff` and `fresh_external_comment_no_webhook_signal_after_comment_time`. The UI shows commenter id, bot-own, skip reason, and terminal status so self-comments, external comments, and missing external signals are visually separate.
+- Tests: Endpoint applies/echoes `after_utc`; bot-own webhook skip is terminal and not in-flight; fresh-comment signal distinguishes only self-comment from missing external webhook; frontend structural test covers copied cutoff and new verdict fields.
+- Deploy status: Local, deploy required.
+- Lesson learned: Diagnostic JSON must carry the exact operator-entered filter state, and expected terminal skips should not share the same label as incomplete webhook processing.
+- Preventive test added: Yes.
+
 ### Repair Comment Webhooks Returned HTTP 200 But Graph Readback Failed Generically
 
 - Date/time: 2026-05-31

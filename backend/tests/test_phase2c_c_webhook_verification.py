@@ -950,6 +950,80 @@ def test_response_carries_diagnostic_metadata(monkeypatch):
     assert af['limit'] == 42
 
 
+def test_after_utc_filter_is_applied_and_echoed(monkeypatch):
+    db = _DB()
+    base = datetime.utcnow() - timedelta(minutes=5)
+    cutoff = base + timedelta(minutes=2)
+    _seed(db, **_ev(
+        'automation_success',
+        source='webhook',
+        username='acca',
+        comment='old-c',
+        when=base,
+    ))
+    db.instagram_accounts.docs.append({
+        'id': 'accA',
+        'username': 'acca',
+        'instagramAccountId': '178000000615',
+        'webhookSubscriptionFields': ['comments', 'live_comments'],
+        'webhookSubscriptionLastCheckedAt': datetime.utcnow(),
+    })
+    _install(monkeypatch, db)
+
+    cutoff_iso = cutoff.isoformat() + 'Z'
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=30,
+        after_utc=cutoff_iso,
+        user_id='admin',
+    ))
+
+    af = result['applied_filters']
+    assert af['after_utc'] == cutoff_iso
+    assert af['after_time_utc_effective'] is not None
+    signal = {a['username']: a for a in result['fresh_comment_signal']['accounts']}
+    assert signal['acca']['automation_success_webhook_count_after_cutoff'] == 0
+    assert signal['acca']['verdict'] == 'fresh_external_comment_no_webhook_signal_after_comment_time'
+
+
+def test_only_bot_own_webhook_after_cutoff_is_terminal_signal(monkeypatch):
+    db = _DB()
+    base = datetime.utcnow() - timedelta(minutes=5)
+    cutoff = base + timedelta(minutes=1)
+    _seed(db, **_ev(
+        'webhook_comment_detected',
+        username='acca',
+        comment='181...233',
+        commenter='178...615',
+        when=cutoff + timedelta(seconds=1),
+    ))
+    _seed(db, **_ev(
+        'automation_skipped',
+        username='acca',
+        comment='181...233',
+        commenter='178...615',
+        when=cutoff + timedelta(seconds=2),
+        skip_reason='bot_own_reply',
+    ))
+    _install(monkeypatch, db)
+
+    result = _run(server.admin_instagram_webhook_verification(
+        username='AccA',
+        since_minutes=30,
+        after_utc=cutoff.isoformat() + 'Z',
+        user_id='admin',
+    ))
+
+    signal = {a['username']: a for a in result['fresh_comment_signal']['accounts']}
+    assert signal['acca']['verdict'] == 'only_bot_own_comment_seen_after_cutoff'
+    flow = {f['comment_id_partial']: f for f in result['flow_verdicts']}
+    assert flow['181...233']['flow_verdict'] == 'webhook_skipped_bot_own_reply'
+    assert flow['181...233']['terminal'] is True
+    assert flow['181...233']['skip_reason'] == 'bot_own_reply'
+    assert flow['181...233']['commenter_id_partial'] == '178...615'
+    assert flow['181...233']['is_bot_own_comment'] is True
+
+
 def test_no_username_specific_logic_in_endpoint():
     src = Path(server.__file__).read_text(encoding='utf-8')
     anchor = 'async def admin_instagram_webhook_verification('
