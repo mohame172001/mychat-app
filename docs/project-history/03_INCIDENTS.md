@@ -24,7 +24,7 @@ Use this file to record production-impacting problems and the exact fix.
 - Symptom: Repository hygiene scan found a root `.gitignore` containing a corrupted NUL-style `.env` entry, ignored cache/build artifacts in the workspace, and stale comments/docs that still described polling as default-off after Phase 2S made polling-primary the production posture.
 - Affected area: Repository hygiene and operator/developer documentation only.
 - Root cause: Rapid Phase 2 webhook/polling iteration left obsolete comments/history markers and local generated artifacts. Static search did not prove active automation code dead, so runtime paths were left intact.
-- Fix commit: pending cleanup commit. Normalize `.gitignore`, ignore cache/build/temp artifacts, remove misleading comments, update project-history cleanup notes, and remove ignored local cache/build output from the workspace only.
+- Fix commit: `4151922054d759eeef37181113ffe95f76cc771e`. Normalize `.gitignore`, ignore cache/build/temp artifacts, remove misleading comments, update project-history cleanup notes, and remove ignored local cache/build output from the workspace only.
 - Tests: Required backend/frontend safety suites and `git diff --check` before commit.
 - Deploy status: Local, deploy required.
 - Lesson learned: Cleanup should prefer documentation and artifact hygiene unless static search plus tests prove code unreachable.
