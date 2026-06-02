@@ -2,32 +2,23 @@
 
 Most pre-existing tests were written under the assumption that
 `_handle_new_comment(source='polling')` would actually send a public
-reply and opening DM when a matched rule fires. Phase 2G flipped the
-default: polling no longer sends by default — the SaaS product treats
-webhook as the primary path and the env flag
-`IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED=1` opts polling back
-into legacy "send on discovery" behavior.
+reply and opening DM when a matched rule fires. The production product
+now defaults to polling-primary delivery, and the send gate remains
+env-controlled so tests can still exercise diagnostics-only mode.
 
-To keep the legacy assertions passing without rewriting hundreds of
-tests, we default the env flag to "1" for every test process. New
-tests that specifically exercise the Phase 2G gate use
-`monkeypatch.delenv` / `monkeypatch.setenv` to restore the production
-default of OFF and assert the skip path.
+To keep legacy polling assertions passing without rewriting hundreds of
+tests, we default the poller/send flags to "1" for every test process.
+Tests that specifically exercise disabled or diagnostics-only polling
+use `monkeypatch.delenv` / `monkeypatch.setenv` to assert the skip path.
 """
 import os
 
 # Module-load defaults (run once before any test imports server).
 #
-# Phase 2H: the production default for IG_POLL_ENABLED is now '0' so the
-# poller loop does NOT run on a brand-new deployment — webhook is the
-# sole comment-automation send path. The legacy test suite, however,
-# was written when IG_POLL_ENABLED defaulted to '1' AND polling was the
-# primary sender. We restore that environment here so the 30+ polling
-# pipeline tests keep their existing assertions valid without rewrites.
-#
-# Tests that specifically exercise the Phase 2H default-OFF posture or
-# the Phase 2G send gate use `monkeypatch.delenv` / `monkeypatch.setenv`
-# to remove or flip these flags inside the test body.
+# The legacy polling tests expect the poller loop to be enabled and
+# polling sends to be allowed. Keep that explicit in test setup so
+# individual tests can monkeypatch the flags for disabled or
+# diagnostics-only cases without depending on production defaults.
 os.environ.setdefault('IG_POLLING_COMMENT_AUTOMATION_FALLBACK_ENABLED', '1')
 os.environ.setdefault('IG_POLL_ENABLED', '1')
 

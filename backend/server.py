@@ -18224,7 +18224,7 @@ async def _fetch_recent_media_ids(access_token: str, ig_user_id: str, limit: int
 # username branching, no per-account pipeline.
 #
 # Env-tunable knobs (all clamped to safe ranges):
-#   IG_POLL_RECENT_MEDIA_LIMIT     (default 25) — recent slice per tick
+#   IG_POLL_RECENT_MEDIA_LIMIT     (default 50) — recent slice per tick
 #   IG_POLL_ROUND_ROBIN_BATCH      (default 25) — round-robin slice per tick
 #   IG_MEDIA_CATALOG_SYNC_INTERVAL_SECONDS (default 600) — catalog sync TTL
 #   IG_MEDIA_CATALOG_MAX_PAGES     (default 20) — pagination hard cap (~500)
@@ -23083,7 +23083,7 @@ async def _collect_target_media_ids(user_doc: dict, automations: list) -> list:
         #
         # Composition per tick:
         #   (1) Recent slice from live /me/media (capped IG_POLL_RECENT
-        #       _MEDIA_LIMIT, default 25). Provides instant coverage of
+        #       _MEDIA_LIMIT, default 50). Provides instant coverage of
         #       fresh posts the catalog may not have synced yet.
         #   (2) Round-robin batch from the persisted media catalog
         #       (IG_POLL_ROUND_ROBIN_BATCH, default 25). The per-account
@@ -27818,10 +27818,9 @@ async def admin_instagram_webhook_verification(
     unmapped_webhook_entries = 0
     fallback_used_count = 0
     alias_self_heal_count = 0
-    # Phase 2G counters: surfaces whether polling discovered fresh
-    # comments AND whether the webhook-required send-gate fired so the
-    # operator can immediately see "webhook is the primary path; here
-    # is what polling saw but did not send".
+    # Polling counters: surface whether polling discovered fresh
+    # comments, whether polling sends were disabled by config, and
+    # whether polling-primary delivery is working.
     polling_seen_ids: set = set()
     polling_send_disabled_ids: set = set()
     latest_webhook_comment_at: Optional[datetime] = None
