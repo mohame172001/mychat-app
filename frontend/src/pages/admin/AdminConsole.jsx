@@ -2907,7 +2907,10 @@ function WebhookVerificationTab() {
   }, [load]);
 
   const summary = data?.summary || null;
-  const allEvents = Array.isArray(data?.events) ? data.events : [];
+  const allEvents = useMemo(
+    () => (Array.isArray(data?.events) ? data.events : []),
+    [data?.events],
+  );
   const appliedFilters = data?.applied_filters || null;
   const serverNowUtc = data?.server_now_utc || null;
   const windowStartUtc = data?.window_start_utc || null;
@@ -2977,7 +2980,7 @@ function WebhookVerificationTab() {
       });
       setGraphCheckState('failed');
     }
-  }, [api, ar, username, graphCheckMediaId, graphCheckPostUrl, graphCheckText, graphCheckCommenter, afterUtc, sinceMinutes]);
+  }, [ar, username, graphCheckMediaId, graphCheckPostUrl, graphCheckText, graphCheckCommenter, afterUtc, sinceMinutes]);
 
   // Phase 2F: per-username admin repair button. Calls the new
   // /api/admin/instagram/repair-comment-webhooks endpoint, then
@@ -3006,7 +3009,7 @@ function WebhookVerificationTab() {
       setFreshVerifyResult({ ok: false, verdict: 'request_failed', graph_error_message: e?.message });
       setFreshVerifyState('failed');
     }
-  }, [api, username, load]);
+  }, [username, load]);
 
   const onRepairWebhooks = useCallback(async () => {
     const u = (username || '').trim();
