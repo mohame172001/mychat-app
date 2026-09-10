@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 import httpx
+import runtime_scaling
 
 from models import (
     SignupIn, LoginIn, AuthOut, UserPublic, ProfileUpdateIn,
@@ -1749,6 +1750,12 @@ def _rate_limited(bucket: str, key: str, *, limit: int, window_seconds: int) -> 
             return True
         dq.append(now)
         return False
+
+
+async def _shared_rate_limited(bucket, key, *, limit, window_seconds):
+    return await runtime_scaling.shared_rate_limited(
+        bucket, key, limit=limit, window_seconds=window_seconds, fallback=_rate_limited,
+    )
 
 
 def _client_ip(request) -> str:
@@ -5132,7 +5139,7 @@ async def meta_data_deletion_callback(request: Request):
     never logs signed_request contents.
     """
     ip = _client_ip(request)
-    if _rate_limited('data_deletion', ip,
+    if await _shared_rate_limited('data_deletion', ip,
                      limit=RATE_LIMIT_DATA_DELETION_PER_HOUR, window_seconds=3600):
         logger.warning('rate_limit_hit bucket=data_deletion ip=%s', ip)
         raise HTTPException(429, 'Too many data deletion requests. Try again later.')
@@ -5185,12 +5192,12 @@ async def signup(data: SignupIn, request: Request):
     ip = _client_ip(request)
     _enforce_password_policy(data.password)
     normalized_email = _normalize_email_value(data.email)
-    if _rate_limited('signup', ip,
+    if await _shared_rate_limited('signup', ip,
                      limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
         logger.warning('rate_limit_hit bucket=signup ip=%s', ip)
         raise HTTPException(429, 'Too many signups from this IP. Try again later.')
     email_hash = _hash_identifier(normalized_email)
-    if email_hash and _rate_limited('signup_email', email_hash,
+    if email_hash and await _shared_rate_limited('signup_email', email_hash,
                                     limit=RATE_LIMIT_SIGNUP_PER_HOUR, window_seconds=3600):
         logger.warning('rate_limit_hit bucket=signup_email email_hash=%s', email_hash[:12])
         raise HTTPException(429, 'Too many signups for this email. Try again later.')
@@ -5265,12 +5272,12 @@ async def signup(data: SignupIn, request: Request):
 async def login(data: LoginIn, request: Request):
     ip = _client_ip(request)
     normalized_identifier = _normalize_email_value(data.username)
-    if _rate_limited('login', ip,
+    if await _shared_rate_limited('login', ip,
                      limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=login ip=%s', ip)
         raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
     identifier_hash = _hash_identifier(normalized_identifier)
-    if identifier_hash and _rate_limited('login_identifier', identifier_hash,
+    if identifier_hash and await _shared_rate_limited('login_identifier', identifier_hash,
                                          limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=login_identifier identifier_hash=%s', identifier_hash[:12])
         raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
@@ -5884,9 +5891,9 @@ async def resend_email_verification(body: dict = Body(...), request: Request = N
     ip = _client_ip(request) if request is not None else 'unknown'
     email = _normalize_email_value((body or {}).get('email'))
     email_hash = _hash_identifier(email)
-    if _rate_limited('email_verification_resend_ip', ip, limit=5, window_seconds=3600):
+    if await _shared_rate_limited('email_verification_resend_ip', ip, limit=5, window_seconds=3600):
         raise HTTPException(429, 'Too many verification requests. Try again later.')
-    if email_hash and _rate_limited('email_verification_resend_email', email_hash, limit=3, window_seconds=3600):
+    if email_hash and await _shared_rate_limited('email_verification_resend_email', email_hash, limit=3, window_seconds=3600):
         raise HTTPException(429, 'Too many verification requests. Try again later.')
     # Unknown/verified accounts get the same generic success to prevent enumeration.
     generic = {'ok': True, 'status': 'sent_if_account_exists'}
@@ -6054,13 +6061,13 @@ async def auth_forgot_password(
     callers cannot enumerate registered emails. Rate-limited per IP and
     per email-hash, mirroring /auth/resend-verification."""
     ip = _client_ip(request) if request is not None else 'unknown'
-    if _rate_limited('password_reset_request_ip', ip, limit=5, window_seconds=3600):
+    if await _shared_rate_limited('password_reset_request_ip', ip, limit=5, window_seconds=3600):
         # Generic — 429 is acceptable; the response shape never reveals
         # whether the email is known.
         raise HTTPException(429, 'Too many password reset requests. Try again later.')
     email = _normalize_email_value(data.email)
     email_hash = _hash_identifier(email)
-    if email_hash and _rate_limited('password_reset_request_email', email_hash,
+    if email_hash and await _shared_rate_limited('password_reset_request_email', email_hash,
                                     limit=3, window_seconds=3600):
         raise HTTPException(429, 'Too many password reset requests. Try again later.')
     if not email:
@@ -6262,7 +6269,7 @@ async def auth_google(data: dict = Body(...), request: Request = None):
     Always returns the same {token, user} shape as /auth/login.
     """
     ip = _client_ip(request) if request is not None else 'unknown'
-    if _rate_limited('login', ip,
+    if await _shared_rate_limited('login', ip,
                      limit=RATE_LIMIT_LOGIN_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=google_auth ip=%s', ip)
         raise HTTPException(429, 'Too many login attempts. Try again in a minute.')
@@ -7601,7 +7608,7 @@ async def retry_comment_reply(cid: str, user_id: str = Depends(get_current_activ
       attempts, reason. Never includes the reply text, access token,
       or raw Graph error body.
     """
-    if _rate_limited('retry_reply', user_id,
+    if await _shared_rate_limited('retry_reply', user_id,
                      limit=RATE_LIMIT_RETRY_REPLY_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=retry_reply user_id=%s', user_id)
         raise HTTPException(429, 'Too many retry requests. Try again in a minute.')
@@ -13065,7 +13072,7 @@ async def admin_metrics_reconciliation(
     raw collections. Read-only. Admin-only via admin.audit.view."""
     started = datetime.utcnow()
     await _require_admin_permission(user_id, _admin_roles.PERM_AUDIT_VIEW)
-    if _rate_limited('admin_metrics_reconciliation', user_id,
+    if await _shared_rate_limited('admin_metrics_reconciliation', user_id,
                      limit=RATE_LIMIT_ADMIN_HEAVY_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=admin_metrics_reconciliation user_id=%s', user_id)
         raise HTTPException(429, 'Too many reconciliation requests. Try again in a minute.')
@@ -13270,7 +13277,7 @@ async def admin_backfill_instagram_usage_subjects(
     instead of guessing.
     """
     actor, _role = await _require_admin_permission(user_id, _admin_roles.PERM_PLANS_ASSIGN)
-    if _rate_limited('admin_backfill_instagram_usage_subjects', user_id,
+    if await _shared_rate_limited('admin_backfill_instagram_usage_subjects', user_id,
                      limit=RATE_LIMIT_ADMIN_HEAVY_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=admin_backfill_instagram_usage_subjects user_id=%s', user_id)
         raise HTTPException(429, 'Too many backfill requests. Try again in a minute.')
@@ -14976,7 +14983,7 @@ async def instagram_auth_url(
     returnTo: str = Query('/app/settings?tab=instagram'),
     user_id: str = Depends(get_current_active_user_id),
 ):
-    if _rate_limited('instagram_connect', user_id,
+    if await _shared_rate_limited('instagram_connect', user_id,
                      limit=RATE_LIMIT_INSTAGRAM_CONNECT_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=instagram_connect user_id=%s', user_id)
         raise HTTPException(429, 'Too many Instagram connection attempts. Try again in a minute.')
@@ -18904,7 +18911,14 @@ async def instagram_webhook(request: Request):
     WEBHOOK_LAST_RECEIVED_AT = datetime.utcnow()
     logger.info('webhook_received')
     create_tracked_task(_write_webhook_log_async(payload, sig_result), 'webhook_log')
-    create_tracked_task(_supervised_process_webhook(payload), 'webhook_processor')
+    if runtime_scaling.queue_enabled():
+        try:
+            await asyncio.wait_for(runtime_scaling.WebhookInbox(db).enqueue(payload), timeout=3)
+        except Exception:
+            logger.error('webhook_inbox_enqueue_failed')
+            raise HTTPException(503, 'Webhook temporarily unavailable') from None
+    else:
+        create_tracked_task(_supervised_process_webhook(payload), 'webhook_processor')
     ack_ms = int((_time.monotonic() - ack_start) * 1000)
     logger.info('webhook_ack_duration_ms=%s', ack_ms)
     return {'ok': True}
@@ -22637,9 +22651,9 @@ async def _process_webhook(payload: dict):
                     if trigger.startswith('keyword:'):
                         keyword = trigger.split(':', 1)[1].strip()
                         if keyword and keyword.lower() in msg_text.lower():
-                            create_tracked_task(execute_flow(event_user_doc, auto, sender_id, msg_text), 'execute_flow')
+                            await execute_flow(event_user_doc, auto, sender_id, msg_text)
                     elif trigger == 'new follower' and event.get('follow'):
-                        create_tracked_task(execute_flow(event_user_doc, auto, sender_id, msg_text), 'execute_flow')
+                        await execute_flow(event_user_doc, auto, sender_id, msg_text)
 
                 # DM Automation handler was already called at the top of the
                 # loop with the raw messaging item.
@@ -22799,7 +22813,7 @@ async def _process_webhook(payload: dict):
                             'trigger': 'Story Reply',
                         }).to_list(20)
                         for auto in automations:
-                            create_tracked_task(execute_flow(user_doc, auto, replier_id, ''), 'execute_flow')
+                            await execute_flow(user_doc, auto, replier_id, '')
             logger.info(
                 'webhook_entry_processed entry_id=%s instagram_account_id=%s duration_ms=%s',
                 _safe_partial_identifier(entry.get('id')),
@@ -22808,6 +22822,7 @@ async def _process_webhook(payload: dict):
             )
     except Exception:
         logger.exception('Webhook processing error')
+        raise
 
 
 # ---------------- Comment polling service ----------------
@@ -24212,6 +24227,23 @@ async def _webhook_dlq_loop():
             await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=interval)
         except (asyncio.TimeoutError, RuntimeError):
             await asyncio.sleep(interval)
+
+
+async def _webhook_inbox_loop():
+    inbox = runtime_scaling.WebhookInbox(db)
+    while not IS_SHUTTING_DOWN:
+        try:
+            worked = await inbox.run_one(_process_webhook)
+            _bg_tick('webhook_inbox', success=True)
+        except Exception as exc:
+            worked = False
+            _bg_tick('webhook_inbox', success=False, error=exc)
+            logger.error('webhook_inbox_tick_failed reason=%s', type(exc).__name__)
+        if not worked:
+            try:
+                await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
 
 
 async def _automation_queue_loop():
@@ -29001,7 +29033,7 @@ async def instagram_process_unreplied_comments(user_id: str = Depends(get_curren
     media id. Broad rules are ignored, and _handle_new_comment still performs
     matching, activation-cutoff checks, rate caps, and duplicate protection.
     """
-    if _rate_limited('process_unreplied', user_id,
+    if await _shared_rate_limited('process_unreplied', user_id,
                      limit=RATE_LIMIT_PROCESS_UNREPLIED_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=process_unreplied user_id=%s', user_id)
         raise HTTPException(429, 'Too many catch-up requests. Try again in a minute.')
@@ -29150,7 +29182,7 @@ async def instagram_poll_now(email: str = '', key: str = ''):
 async def instagram_comments_poll_now(user_id: str = Depends(get_current_active_user_id)):
     """Authenticated trigger: poll comments for the calling user right now.
     Returns a summary in the documented shape."""
-    if _rate_limited('poll_now', user_id,
+    if await _shared_rate_limited('poll_now', user_id,
                      limit=RATE_LIMIT_POLL_NOW_PER_MIN, window_seconds=60):
         logger.warning('rate_limit_hit bucket=poll_now user_id=%s', user_id)
         raise HTTPException(429, 'Too many poll-now requests. Try again in a minute.')
@@ -31698,6 +31730,11 @@ async def _index_bootstrap():
 async def _startup():
     global _poll_task, IS_SHUTTING_DOWN
     IS_SHUTTING_DOWN = False
+    role = runtime_scaling.runtime_role()
+    if role in {'api', 'worker'} and not runtime_scaling.queue_enabled():
+        raise RuntimeError('Split API/worker roles require WEBHOOK_INBOX_ENABLED=1')
+    if runtime_scaling.queue_enabled():
+        await runtime_scaling.WebhookInbox(db).ensure_indexes()
     # Phase 2.5: optional Sentry init. No-ops cleanly when SENTRY_DSN is
     # missing or the SDK isn't installed.
     try:
@@ -31709,19 +31746,30 @@ async def _startup():
     # All heavy index creation and one-time migration work is scheduled
     # as a background tracked task so the startup hook returns quickly
     # and the /api/ healthcheck is not blocked on a cold-Mongo connect.
-    create_tracked_task(_index_bootstrap(), 'index_bootstrap')
+    if role in {'combined', 'scheduler'}:
+        create_tracked_task(_index_bootstrap(), 'index_bootstrap')
     if IS_PRODUCTION and _SINGLE_TENANT_FALLBACK_ENABLED:
         logger.warning(
             'instagram_single_tenant_fallback_enabled_in_production '
             '— SaaS-unsafe. Set INSTAGRAM_SINGLE_TENANT_FALLBACK=0 to disable.'
         )
-    if IG_POLL_ENABLED:
-        _register_bg_task('comment_poller', _comment_poller_loop)
-    else:
-        logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
+    if role == 'api':
+        logger.info('runtime_role_api background_loops_disabled')
+        return
+    if role in {'combined', 'scheduler'}:
+        if IG_POLL_ENABLED:
+            _register_bg_task('comment_poller', _comment_poller_loop)
+        else:
+            logger.info('Comment poller disabled via IG_POLL_ENABLED=0')
     logger.info('automation_queue_registering interval=%s batch_size=%s',
                 AUTOMATION_QUEUE_INTERVAL_SECONDS, AUTOMATION_QUEUE_BATCH_SIZE)
-    _register_bg_task('automation_queue', _automation_queue_loop)
+    if role in {'combined', 'worker'}:
+        _register_bg_task('automation_queue', _automation_queue_loop)
+        if runtime_scaling.queue_enabled():
+            _register_bg_task('webhook_inbox', _webhook_inbox_loop)
+    if role == 'worker':
+        _register_bg_task('watchdog', _watchdog_loop)
+        return
     _register_bg_task('webhook_dlq', _webhook_dlq_loop)
     _register_bg_task('collab_reclassifier', _collab_reclassifier_loop)
     _register_bg_task('follow_verifier', _follow_verifier_loop)
@@ -31801,4 +31849,5 @@ async def shutdown_db_client():
         logger.exception('shutdown_mongo_close_error')
 
     # Step 10 — done
+    await runtime_scaling.close_redis()
     logger.info('shutdown_complete')

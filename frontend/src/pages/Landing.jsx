@@ -26,7 +26,7 @@ const FEATURE_KEYS = Object.keys(FEATURE_ICONS);
 
 const Landing = () => {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
 
   const scrollToSection = (id) => (event) => {
     event?.preventDefault?.();
