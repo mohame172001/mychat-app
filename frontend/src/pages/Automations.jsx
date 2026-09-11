@@ -18,6 +18,7 @@ import { toast } from 'sonner';
 import { useTranslation } from '../lib/i18n';
 import { autoDirStyle, detectTextDirection } from '../lib/textDirection';
 import { extractAutomationPublicReplies } from '../lib/automationReplies';
+import { apiErrorMessage } from '../lib/apiErrors';
 
 const exampleWords = ['Price', 'Link', 'Shop'];
 
@@ -940,7 +941,10 @@ const Automations = () => {
       setEditingAutomation(null);
       setBuilderOpen(false);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || (ar ? 'تعذّر إنشاء الأتمتة' : 'Failed to create automation'));
+      toast.error(apiErrorMessage(
+        e,
+        ar ? 'تعذّر إنشاء الأتمتة' : 'Failed to create automation',
+      ));
     }
     setSaving(false);
   };
