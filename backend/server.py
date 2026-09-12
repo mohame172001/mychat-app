@@ -63,6 +63,7 @@ from app.services.instagram.account_resolver import (
     _active_instagram_account_owner as _active_instagram_account_owner_impl,
     INSTAGRAM_ACCOUNT_IDENTITY_FIELDS,
 )
+from app.security.mongo_token_guard import TokenGuardedDatabase
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -309,7 +310,7 @@ PASSWORD_RESET_EMAIL_TEMPLATE = (
 )
 
 client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+db = TokenGuardedDatabase(client[DB_NAME])
 
 _FASTAPI_KW = {'title': 'mychat API'}
 if IS_PRODUCTION:
