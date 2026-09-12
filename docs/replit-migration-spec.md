@@ -1,6 +1,6 @@
 # Replit PostgreSQL Migration Specification
 
-Status: Phase 1 specification only  
+Status: Phase 1 specification complete; Phase 2A development schema implemented
 Target: Replit-managed PostgreSQL  
 Source system: the MongoDB database used by the current FastAPI application  
 Scope verified against: `backend/server.py`, `backend/runtime_scaling.py`,
@@ -13,7 +13,9 @@ This document specifies how to replace the application's MongoDB persistence wit
 Replit-managed PostgreSQL without changing the public API contract or the
 application's externally observable behavior.
 
-This phase is documentation only. It does not authorize:
+Phase 1 was documentation only. The completed Phase 2A authorization is limited to
+versioned schema migrations and schema tests against the Replit development
+database. Neither phase authorizes:
 
 - runtime changes;
 - creation or modification of PostgreSQL objects;
@@ -21,6 +23,27 @@ This phase is documentation only. It does not authorize:
 - production data export or import;
 - changes to Railway configuration or production;
 - deployment or cutover.
+
+### 1.1 Phase 2A migration source summary
+
+The current Phase 2A schema consists of exactly four ordered, checksummed SQL
+migrations:
+
+1. `001_replit_postgres_foundation.sql` — the `mychat` schema, all 32 source
+   collection mappings, support tables, typed/JSONB columns, constraints, indexes,
+   and initial webhook claim function.
+2. `002_queue_accounting_and_index_fidelity.sql` — reservation/accounting fields,
+   source index fidelity, supporting foreign-key indexes, and fenced webhook
+   claim/complete/fail behavior.
+3. `003_exact_comments_queue_index.sql` — exact source-equivalent comments queue
+   index ordering.
+4. `004_block_raw_instagram_token_import.sql` — database-enforced prohibition on
+   importing raw `users.meta_access_token` and
+   `instagram_accounts.accessToken` values until application-level encryption is
+   implemented.
+
+FastAPI persistence remains on MongoDB. No production data import, Railway change,
+billing behavior change, deployment, or cutover is included in Phase 2A.
 
 The repository has no authoritative MongoDB schema. Collection names, operations,
 indexes, aggregation pipelines, and concurrency behavior below are verified from
@@ -249,16 +272,20 @@ are removed on terminal completion. The inbox ciphertext must be copied
 byte-for-byte. The same encryption key is required while any imported pending job
 exists.
 
-Source code verifies that Instagram access tokens are stored and read, but it does
-not prove that those token values are encrypted at rest. `docs/data-inventory.md`
-describes encrypted/secret token fields "where configured." Therefore:
+Source correction: `users.meta_access_token` and
+`instagram_accounts.accessToken` contain raw plaintext tokens. They are not
+encrypted at rest. Real token values must not be imported into PostgreSQL until an
+application-level encryption design has been reviewed and implemented. That design
+must define the ciphertext envelope, authenticated encryption and AAD, key
+ownership, rotation/version metadata, decrypt authorization, redaction, and
+migration rollback behavior. Until then:
 
-- never label all historical access-token values as encrypted without profiling;
-- preserve token bytes exactly during migration;
-- classify each source representation as ciphertext, plaintext, null, or unknown;
-- do not decrypt and re-encrypt as part of bulk import;
-- validate decryptability only in an isolated authorized environment;
-- never emit credential values in migration logs, rejects, hashes, or reports.
+- token target columns must remain null;
+- synthetic tests may use non-secret placeholders only where necessary;
+- raw token values must not appear in migration staging, `source_extra`, rejects,
+  hashes, reports, or logs;
+- migration reconciliation may count token presence but must not read or copy token
+  values.
 
 Password and one-time-token hashes remain hashes and are copied exactly. Secret
 columns must be excluded from `source_extra`, general audit JSON, reconciliation
@@ -411,8 +438,8 @@ PostgreSQL replacement:
 
 | Target table | Source | Typed critical data | JSONB policy |
 |---|---|---|---|
-| `app_users` | `users` | source ID, normalized email, username, status, auth/provider identity, verification/reset expiry, created/updated | profile and unclassified legacy fields only; never secrets |
-| `instagram_accounts` | `instagram_accounts` | source ID, owner FK, canonical/legacy external IDs, username, active/valid state, refresh status, token expiry, timestamps, token columns | non-secret provider profile metadata |
+| `app_users` | `users` | source ID, normalized email, username, status, auth/provider identity, verification/reset expiry, created/updated; raw legacy token import blocked | profile and unclassified legacy fields only; never secrets |
+| `instagram_accounts` | `instagram_accounts` | source ID, owner FK, canonical/legacy external IDs, username, active/valid state, refresh status, token expiry, timestamps; raw access-token import blocked | non-secret provider profile metadata |
 | `instagram_account_trial_claims` | same | account external ID, plan trial ID, claiming user, claimed time | source-only metadata |
 | `automations` | same | source ID, owner/account FKs, name, status, trigger/type, timestamps, counters | `nodes`, `edges`, variable action/trigger configuration |
 | `dm_rules` | same | source ID, owner/account FKs, active state, match type, timestamps | keyword/reply configuration where shape varies |
@@ -573,7 +600,8 @@ This section defines a later import; it does not authorize one.
 1. Obtain a consistent, owner-authorized snapshot while Railway remains untouched.
 2. Capture collection counts, source `listIndexes`, min/max timestamps, field/type
    frequencies, duplicate candidates, and orphan candidates.
-3. Preserve original IDs, timestamps, ciphertext, status values, and unknown fields.
+3. Preserve original IDs, timestamps, webhook-inbox ciphertext, status values, and
+   unknown fields. Do not copy raw Instagram access tokens.
 4. Normalize all timestamps to UTC while preserving the original value in rejected
    or ambiguous cases.
 5. Normalize `userId`/`user_id` and Instagram account aliases using documented
@@ -642,7 +670,9 @@ For an authorized non-production rehearsal:
   period, with receipt/provider identifiers compared through non-public keyed
   digests;
 - dashboard source totals and SQL recomputation match;
-- ciphertext bytes match and authorized decryptability checks pass;
+- webhook-inbox ciphertext bytes match and authorized decryptability checks pass;
+- raw `meta_access_token` and `accessToken` values are absent from staging and
+  PostgreSQL;
 - no secret appears in logs, reports, or rejects.
 
 Required threshold: zero unexplained loss, zero unexplained duplicate collapse, and
@@ -684,7 +714,8 @@ Before any future production cutover:
 
 1. Actual production field/type/cardinality profiles are unavailable.
 2. Actual production indexes may differ from source bootstrap.
-3. Historical token encryption/plaintext representation is unverified.
+3. Raw Instagram tokens cannot be imported until application-level encryption,
+   key management, and rotation are designed and implemented.
 4. Duplicate and orphan rates are unknown.
 5. Conversation embedded-message shape and maximum size need profiling.
 6. Queue throughput, lease-expiry frequency, and concurrent worker count are
