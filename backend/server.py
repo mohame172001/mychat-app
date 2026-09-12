@@ -853,27 +853,26 @@ async def record_usage_event(
     }
     await db.usage_events.insert_one(event)
 
+    counter = USAGE_COUNTER_BY_EVENT.get(event_type)
     set_on_insert = {
         '_id': secrets.token_urlsafe(12),
         'id': secrets.token_urlsafe(12),
-        'user_id': str(user_id),
-        'limit_subject_type': 'user',
-        'limit_subject_id': str(user_id),
-        'event_month': event_month,
         'created_at': now,
     }
     for field in USAGE_COUNTER_FIELDS:
-        set_on_insert[field] = 0
+        if field != counter:
+            set_on_insert[field] = 0
     update = {
         '$setOnInsert': set_on_insert,
         '$set': {
             'updated_at': now,
+            'user_id': str(user_id),
+            'event_month': event_month,
             'limit_subject_type': 'user',
             'limit_subject_id': str(user_id),
             **await _usage_snapshots_for_user(str(user_id)),
         },
     }
-    counter = USAGE_COUNTER_BY_EVENT.get(event_type)
     if counter:
         update['$inc'] = {counter: 1}
     await db.monthly_usage.update_one(
@@ -886,15 +885,15 @@ async def record_usage_event(
         account_set_on_insert.update({
             '_id': secrets.token_urlsafe(12),
             'id': secrets.token_urlsafe(12),
-            'limit_subject_type': 'instagram_account',
-            'limit_subject_id': str(instagram_account_id),
-            'instagram_account_id': str(instagram_account_id),
         })
         account_update = {
             '$setOnInsert': account_set_on_insert,
             '$set': {
                 'updated_at': now,
                 'user_id': str(user_id),
+                'event_month': event_month,
+                'limit_subject_type': 'instagram_account',
+                'limit_subject_id': str(instagram_account_id),
                 'instagram_account_id': str(instagram_account_id),
             },
         }

@@ -65,6 +65,47 @@ def test_record_usage_event_writes_event_and_increments_monthly_counter(monkeypa
     assert monthly['active_automations_snapshot'] == 1
 
 
+def test_monthly_usage_updates_do_not_conflict_across_mongo_operators(monkeypatch):
+    fake_db = FakeDB(
+        _account(id='accA', userId='u1', instagramAccountId='igA', connectionValid=True),
+        _user(id='u1'),
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    original_update = fake_db.monthly_usage.update_one
+    updates = []
+
+    async def strict_update(query, update, upsert=False):
+        paths = [
+            key
+            for operator in ('$setOnInsert', '$set', '$inc')
+            for key in update.get(operator, {})
+        ]
+        assert len(paths) == len(set(paths)), 'MongoDB update paths overlap'
+        updates.append(update)
+        return await original_update(query, update, upsert=upsert)
+
+    monkeypatch.setattr(fake_db.monthly_usage, 'update_one', strict_update)
+
+    for event_type in ('comment_processed', 'public_reply_sent', 'dm_sent'):
+        _run(server.record_usage_event(
+            user_id='u1',
+            event_type=event_type,
+            instagram_account_id='igA',
+            comment_id='comment1',
+        ))
+
+    assert len(updates) == 6
+    assert len(fake_db.usage_events.docs) == 3
+    user_row = next(row for row in fake_db.monthly_usage.docs
+                    if row.get('limit_subject_type') == 'user')
+    account_row = next(row for row in fake_db.monthly_usage.docs
+                       if row.get('limit_subject_type') == 'instagram_account')
+    for row in (user_row, account_row):
+        assert row['comments_processed'] == 1
+        assert row['public_replies_sent'] == 1
+        assert row['dms_sent'] == 1
+
+
 def test_record_usage_event_rejects_invalid_event_type(monkeypatch):
     monkeypatch.setattr(server, 'db', FakeDB())
 
