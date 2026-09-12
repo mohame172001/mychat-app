@@ -39,3 +39,10 @@ os.environ.setdefault('IG_AUTO_ENSURE_WEBHOOK_READY', '0')
 # scenarios continue to assert their original errors. The Phase 2M
 # tests explicitly monkeypatch the flag back ON inside the test body.
 os.environ.setdefault('IG_REQUIRE_COMMENT_WEBHOOK_CERT', '0')
+
+# Synthetic Fernet key used only by tests. Production and development must
+# provide their own backend-only Replit Secret.
+os.environ.setdefault(
+    'INSTAGRAM_TOKEN_ENCRYPTION_KEY',
+    'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=',
+)

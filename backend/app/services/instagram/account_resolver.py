@@ -153,15 +153,21 @@ def _with_instagram_account_context(user_doc: dict, account_doc: Optional[dict])
         or ''
     )
     merged = {**user_doc}
+    if 'accessToken' in account_doc:
+        account_token = account_doc.get('accessToken') or ''
+    else:
+        account_token = user_doc.get('meta_access_token') or ''
     merged.update({
         'active_instagram_account_id': account_doc.get('id') or user_doc.get('active_instagram_account_id'),
         'ig_user_id': instagram_account_id,
-        'meta_access_token': account_doc.get('accessToken') or user_doc.get('meta_access_token') or '',
+        'meta_access_token': account_token,
         'instagramHandle': account_doc.get('username') or user_doc.get('instagramHandle') or '',
         'instagram_connection_valid': bool(account_doc.get('connectionValid')),
         'instagramConnectionValid': bool(account_doc.get('connectionValid')),
         'instagram_token_source': account_doc.get('tokenSource') or user_doc.get('instagram_token_source'),
         'instagramTokenSource': account_doc.get('tokenSource') or user_doc.get('instagramTokenSource'),
+        'instagram_token_status': account_doc.get('token_security_status') or user_doc.get('instagram_token_status'),
+        'instagram_token_blocker': account_doc.get('token_security_blocker') or user_doc.get('instagram_token_blocker'),
     })
     return merged
 
@@ -177,6 +183,8 @@ async def get_active_instagram_account(
     user_doc = await db.users.find_one({'id': user_id})
     if not user_doc:
         raise http_exception_cls(404, 'User not found')
+    if user_doc.get('token_security_blocker'):
+        raise http_exception_cls(409, user_doc.get('token_security_blocker'))
     await sync_user_instagram_account_doc(user_doc)
 
     active_id = user_doc.get('active_instagram_account_id') or ''
@@ -211,6 +219,11 @@ async def get_active_instagram_account(
         })
     if not account:
         raise http_exception_cls(400, 'No Instagram account connected')
+    if account.get('token_security_blocker'):
+        raise http_exception_cls(
+            409,
+            account.get('token_security_blocker'),
+        )
 
     instagram_account_id = account.get('instagramAccountId') or account.get('igUserId') or ''
     token = account.get('accessToken') or ''

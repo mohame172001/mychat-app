@@ -395,6 +395,39 @@ def test_expired_token_is_marked_expired(monkeypatch):
     assert fake_db.users.docs[0]['instagram_connection_valid'] is False
 
 
+def test_refresh_reports_token_migration_blocker(monkeypatch):
+    account = _account(accessToken='')
+    account['token_security_status'] = 'migration_needed'
+    account['token_security_blocker'] = 'instagram_token_migration_required'
+    fake_db = FakeDB(account, {'id': 'u1', 'ig_user_id': 'ig1'})
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    result = _run(server.refreshInstagramToken('acc1', force=True))
+
+    assert result == {
+        'ok': False,
+        'status': 'instagram_token_migration_required',
+        'accountId': 'acc1',
+    }
+    assert account['refreshStatus'] == 'blocked'
+    assert account['connectionValid'] is False
+
+
+def test_graph_retry_never_falls_back_from_blocked_account(monkeypatch):
+    account = _account(accessToken='')
+    account['token_security_status'] = 'migration_needed'
+    account['token_security_blocker'] = 'instagram_token_migration_required'
+    fake_db = FakeDB(account)
+    monkeypatch.setattr(server, 'db', fake_db)
+
+    token = _run(server._current_account_token_for_graph_retry(
+        account_id='acc1',
+        fallback_token='must-not-be-used',
+    ))
+
+    assert token is None
+
+
 def test_token_expiring_after_15_days_is_skipped(monkeypatch):
     fake_db = FakeDB(_account(tokenExpiresAt=datetime.utcnow() + timedelta(days=30)))
     monkeypatch.setattr(server, 'db', fake_db)
@@ -757,7 +790,16 @@ def test_instagram_account_activate_rejects_other_user_account(monkeypatch):
         raise AssertionError('expected HTTPException')
 
 
-def test_instagram_auth_url_uses_signed_add_account_state():
+def test_instagram_auth_url_uses_signed_add_account_state(monkeypatch):
+    monkeypatch.setattr(server, 'db', _multi_account_db())
+    async def empty_account_snapshot(_user_id):
+        return {'instagram_accounts_connected_snapshot': 0}
+
+    monkeypatch.setattr(
+        server,
+        '_usage_snapshots_for_user',
+        empty_account_snapshot,
+    )
     result = _run(server.instagram_auth_url(
         mode='add_account',
         returnTo='/app',
@@ -778,6 +820,21 @@ def test_instagram_auth_url_uses_signed_add_account_state():
     # coincidentally contain "u1"; only the payload segment is relevant
     # for this "no raw user id in URL state" assertion.
     assert 'u1' not in state.split('.', 1)[0]
+
+
+def test_instagram_auth_url_blocks_when_token_encryption_is_unconfigured(monkeypatch):
+    monkeypatch.delenv('INSTAGRAM_TOKEN_ENCRYPTION_KEY', raising=False)
+    try:
+        _run(server.instagram_auth_url(
+            mode='reconnect',
+            returnTo='/app',
+            user_id='u1',
+        ))
+    except server.InstagramTokenSecurityError as exc:
+        assert exc.status == 'instagram_token_encryption_not_configured'
+        assert exc.http_status == 503
+    else:
+        raise AssertionError('expected token encryption configuration failure')
 
 
 def _oauth_success_responses(ig_id='igB', username='account_b', token='short-b', long_token='long-b'):

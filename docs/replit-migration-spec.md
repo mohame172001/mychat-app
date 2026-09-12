@@ -42,6 +42,16 @@ migrations:
    `instagram_accounts.accessToken` values until application-level encryption is
    implemented.
 
+The FastAPI/Mongo runtime now encrypts new Instagram and Meta token writes with
+authenticated encryption using the backend-only
+`INSTAGRAM_TOKEN_ENCRYPTION_KEY`. Encrypted values use a versioned envelope;
+reads decrypt only valid envelopes. Existing plaintext is returned to application
+code as an unusable empty token with
+`instagram_token_migration_required`/`migration_needed` status, so it is never
+silently sent to Meta. PostgreSQL token columns remain blocked by migration `004`
+until a separately reviewed import maps only encrypted envelopes and confirms key
+ownership and rotation behavior.
+
 FastAPI persistence remains on MongoDB. No production data import, Railway change,
 billing behavior change, deployment, or cutover is included in Phase 2A.
 

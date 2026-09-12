@@ -63,6 +63,12 @@ from app.services.instagram.account_resolver import (
     _active_instagram_account_owner as _active_instagram_account_owner_impl,
     INSTAGRAM_ACCOUNT_IDENTITY_FIELDS,
 )
+from app.security.instagram_tokens import (
+    InstagramTokenCipher,
+    InstagramTokenSecurityError,
+    TokenProtectedDatabase,
+    install_token_log_redaction,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -309,7 +315,7 @@ PASSWORD_RESET_EMAIL_TEMPLATE = (
 )
 
 client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+db = TokenProtectedDatabase(client[DB_NAME])
 
 _FASTAPI_KW = {'title': 'mychat API'}
 if IS_PRODUCTION:
@@ -319,6 +325,14 @@ if IS_PRODUCTION:
         _FASTAPI_KW.update(docs_url=None, redoc_url=None, openapi_url=None)
 app = FastAPI(**_FASTAPI_KW)
 api = APIRouter(prefix='/api')
+
+
+@app.exception_handler(InstagramTokenSecurityError)
+async def _instagram_token_security_handler(_request, exc):
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={'detail': exc.status, 'instagram_token_status': exc.status},
+    )
 
 
 # Phase 2.19: tame the default FastAPI 422 envelope. The raw shape
@@ -359,6 +373,8 @@ async def _pydantic_validation_handler(request: _Req, exc: _RVE):
 
 logger = logging.getLogger('mychat')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+install_token_log_redaction(logging.getLogger())
+install_token_log_redaction(logger)
 
 # Silence libraries that log full request URLs at INFO. httpx/httpcore otherwise
 # emit lines like "HTTP Request: GET .../comments?access_token=IGAA..." which
@@ -541,7 +557,8 @@ USAGE_COUNTER_FIELDS = (
 )
 
 _USAGE_UNSAFE_METADATA_KEYS = {
-    'access_token', 'accesstoken', 'meta_access_token', 'token', 'authorization',
+    'access_token', 'accesstoken', 'meta_access_token', 'fb_page_access_token',
+    'page_access_token', 'token', 'authorization',
     'client_secret', 'app_secret', 'secret', 'credential', 'google_credential',
     'id_token', 'google_id_token', 'refresh_token', 'jwt', 'code', 'raw', 'body',
     'payload', 'headers', 'graph_error', 'error_body', 'comment_text',
@@ -1979,6 +1996,8 @@ async def _current_account_token_for_graph_retry(*,
     )
     if not account:
         return fallback_token
+    if account.get('token_security_blocker'):
+        return None
     token = str(account.get('accessToken') or '').strip()
     return token or fallback_token
 
@@ -2198,9 +2217,11 @@ async def send_ig_message(access_token: str, ig_user_id: str, recipient_ig_id: s
             })
             return _detailed_send_result(False, r.status_code, error=safe_error)
     except Exception as e:
-        logger.exception('send_ig_message exception: %s', e)
+        logger.error('send_ig_message exception_type=%s', type(e).__name__)
         _LAST_DM_FAILURE.set({'failure_reason': 'temporary_graph_error', 'status_code': None})
-        return _detailed_send_result(False, None, error={'message': str(e)[:300]})
+        return _detailed_send_result(
+            False, None, error={'message': type(e).__name__}
+        )
 
 
 async def send_ig_dm_detailed(access_token: str, ig_user_id: str,
@@ -2952,8 +2973,14 @@ async def get_instagram_messaging_user_profile(access_token: str, ig_scoped_id: 
                 return {'ok': True, 'status_code': r.status_code, 'profile': _redact_secrets(body)}
             return {'ok': False, 'status_code': r.status_code, 'error': _redact_secrets(body)}
     except Exception as e:
-        logger.exception('instagram_user_profile_fetch_exception: %s', e)
-        return {'ok': False, 'status_code': None, 'error': str(e)[:500]}
+        logger.error(
+            'instagram_user_profile_fetch_exception type=%s', type(e).__name__
+        )
+        return {
+            'ok': False,
+            'status_code': None,
+            'error': type(e).__name__,
+        }
 
 
 # Meta Graph error codes that indicate the app or page lacks the permissions
@@ -4335,9 +4362,13 @@ async def reply_to_ig_comment_detailed(access_token: str, ig_comment_id: str, te
                          r.status_code, ms, classified['failure_reason'], classified['retryable'])
             return _detailed_send_result(False, r.status_code, error=safe_error)
     except Exception as e:
-        logger.exception('reply_to_ig_comment exception: %s', e)
+        logger.error(
+            'reply_to_ig_comment exception_type=%s', type(e).__name__
+        )
         _LAST_REPLY_FAILURE.set({'failure_reason': 'temporary_graph_error', 'status_code': None})
-        return _detailed_send_result(False, None, error={'message': str(e)[:300]})
+        return _detailed_send_result(
+            False, None, error={'message': type(e).__name__}
+        )
 
 
 async def reply_to_ig_comment(access_token: str, ig_comment_id: str, text: str) -> bool:
@@ -14293,6 +14324,23 @@ async def refreshInstagramToken(accountId: str, force: bool = False) -> dict:
     if not account:
         return {'ok': False, 'status': 'not_found', 'accountId': accountId}
 
+    token_blocker = account.get('token_security_blocker')
+    if token_blocker:
+        await db.instagram_accounts.update_one(
+            {'id': accountId},
+            {'$set': {
+                'refreshStatus': 'blocked',
+                'refreshError': {'reason': token_blocker},
+                'connectionValid': False,
+                'updatedAt': now,
+            }},
+        )
+        return {
+            'ok': False,
+            'status': token_blocker,
+            'accountId': accountId,
+        }
+
     token = account.get('accessToken') or ''
     if not token:
         await db.instagram_accounts.update_one(
@@ -14988,6 +15036,7 @@ async def instagram_auth_url(
         raise HTTPException(429, 'Too many Instagram connection attempts. Try again in a minute.')
     if not IG_APP_ID or not IG_APP_SECRET:
         raise HTTPException(503, 'IG_APP_ID and IG_APP_SECRET are not configured. Set them in .env')
+    InstagramTokenCipher().ensure_configured()
     redirect_uri = f"{BACKEND_PUBLIC_URL}/api/instagram/callback"
     oauth_mode = mode if mode in {'connect', 'add_account', 'reconnect'} else 'connect'
     # Phase 2.2 plan enforcement: block adding a NEW account if at cap.
@@ -15288,6 +15337,22 @@ async def instagram_callback(request: Request,
             clear_existing_connection=clear_existing_on_failure,
         )
         return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': 'missing_code'}))
+
+    try:
+        InstagramTokenCipher().ensure_configured()
+    except InstagramTokenSecurityError as exc:
+        await _store_oauth_failure(
+            user_id,
+            exc.status,
+            {'status': exc.status},
+            clear_existing_connection=False,
+        )
+        return RedirectResponse(
+            _frontend_redirect_url(
+                return_to,
+                {'ig': 'error', 'reason': exc.status},
+            )
+        )
 
     # Idempotency guard — the same OAuth code can be delivered to this
     # endpoint more than once (React 18 StrictMode double-mount, browser
@@ -15594,12 +15659,12 @@ async def instagram_callback(request: Request,
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception('IG callback failed')
+        logger.error('IG callback failed type=%s', type(e).__name__)
         from fastapi.responses import RedirectResponse
         await _store_oauth_failure(
             user_id,
             'server_error',
-            str(e)[:200],
+            {'exception_type': type(e).__name__},
             clear_existing_connection=clear_existing_on_failure,
         )
         return RedirectResponse(_frontend_redirect_url(return_to, {'ig': 'error', 'reason': 'server_error'}))
@@ -17390,7 +17455,10 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
                 if r.status_code == 200:
                     any_ok = True
             except Exception as e:
-                field_results[f] = {'status': 0, 'body': str(e)}
+                field_results[f] = {
+                    'status': 0,
+                    'body': type(e).__name__,
+                }
         ok = any_ok
         import json as _json
         body = _json.dumps(field_results)[:2000]
@@ -17417,7 +17485,7 @@ async def instagram_subscribe_webhook_legacy(user_id: str = Depends(get_current_
                 ig_sub_status = ig_sub.status_code
                 ig_sub_body = ig_sub.text
             except Exception as e:
-                ig_sub_body = str(e)
+                ig_sub_body = type(e).__name__
         # Persist legacy Page credentials separately. Do not overwrite
         # meta_access_token, which must remain the verified IG user token.
         await db.users.update_one(
@@ -18328,16 +18396,19 @@ async def _sync_instagram_media_catalog(user_doc: dict) -> dict:
 
     max_pages = _ig_media_catalog_max_pages()
     now = datetime.utcnow()
-    cursor_url: Optional[str] = (
-        f'https://graph.instagram.com/{ig_user_id}/media?'
-        f'access_token={token}&fields=id,timestamp,permalink,media_type&limit=50'
-    )
+    cursor_url: Optional[str] = f'https://graph.instagram.com/{ig_user_id}/media'
+    cursor_params: Optional[dict] = {
+        'access_token': token,
+        'fields': 'id,timestamp,permalink,media_type',
+        'limit': 50,
+    }
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             for _ in range(max_pages):
                 if not cursor_url:
                     break
-                r = await c.get(cursor_url)
+                r = await c.get(cursor_url, params=cursor_params)
+                cursor_params = None
                 if r.status_code != 200:
                     stats['errors'].append({
                         'http': r.status_code,
@@ -18388,14 +18459,25 @@ async def _sync_instagram_media_catalog(user_doc: dict) -> dict:
                             'media_id_partial': _safe_partial_identifier(media_id),
                             'err': type(exc).__name__,
                         })
-                cursor_url = (
+                next_url = (
                     ((payload.get('paging') or {}).get('next'))
                     if isinstance(payload.get('paging'), dict) else None
                 )
+                if next_url:
+                    parsed_next = urlparse(next_url)
+                    cursor_url = parsed_next._replace(query='').geturl()
+                    cursor_params = {
+                        key: values[-1]
+                        for key, values in parse_qs(parsed_next.query).items()
+                        if values and key.lower() != 'access_token'
+                    }
+                    cursor_params['access_token'] = token
+                else:
+                    cursor_url = None
+                    cursor_params = None
     except Exception as exc:
         stats['errors'].append({
             'err': type(exc).__name__,
-            'msg': str(exc)[:160],
         })
     return stats
 
@@ -28711,6 +28793,7 @@ async def admin_instagram_webhook_reply_visibility(
         account_query_parts.append({'username': username_key})
 
     access_token = None
+    account_token_blocked = False
     try:
         account_query = (
             {'$and': account_query_parts}
@@ -28730,6 +28813,10 @@ async def admin_instagram_webhook_reply_visibility(
             },
         ).limit(5).to_list(5)
         for account in account_rows:
+            if account.get('token_security_blocker'):
+                account_token_blocked = True
+                access_token = None
+                break
             access_token = (
                 account.get('accessToken')
                 or account.get('access_token')
@@ -28740,7 +28827,7 @@ async def admin_instagram_webhook_reply_visibility(
                 break
     except Exception:
         access_token = None
-    if not access_token and doc_user_id:
+    if not access_token and doc_user_id and not account_token_blocked:
         try:
             user_rows = await db.users.find(
                 {'id': doc_user_id},

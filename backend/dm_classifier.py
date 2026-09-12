@@ -45,6 +45,7 @@ TRANSIENT_GRAPH_FAILURE_REASONS = frozenset({
 
 _SECRET_KEYS = frozenset({
     'access_token', 'accesstoken', 'meta_access_token',
+    'fb_page_access_token', 'page_access_token',
     'client_secret', 'app_secret', 'refresh_token',
     'credential', 'google_credential', 'id_token',
     'google_id_token', 'token', 'authorization',
