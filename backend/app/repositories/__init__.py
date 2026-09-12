@@ -1,0 +1,1 @@
+"""Persistence repositories introduced during the Replit-only migration."""

@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "backend/db/migrations/001_replit_postgres_foundation.sql"
 MIGRATION_DIR = ROOT / "backend/db/migrations"
 MIGRATION_RUNNER = ROOT / "backend/db/apply_migrations.sh"
-MIGRATION_VERSIONS = ("001", "002", "003", "004")
+MIGRATION_VERSIONS = ("001", "002", "003", "004", "005", "006", "007")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 RUN_DB_TESTS = os.environ.get("RUN_REPLIT_DB_TESTS") == "1"
 TEST_SCHEMA_ACK = os.environ.get("REPLIT_DB_TEST_SCHEMA_ACK", "")
@@ -222,7 +222,77 @@ class PostgresSchemaTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertNotEqual(0, raw_user_token.returncode)
-            self.assertIn("users_raw_meta_token_import_blocked", raw_user_token.stderr)
+            self.assertIn("users_encrypted_meta_token_only", raw_user_token.stderr)
+
+            raw_page_token = subprocess.run(
+                [
+                    "psql",
+                    DATABASE_URL,
+                    "-X",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-c",
+                    "UPDATE mychat.users "
+                    "SET fb_page_access_token='synthetic-raw-token' "
+                    f"WHERE id='{user_id}'",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, raw_page_token.returncode)
+            self.assertIn(
+                "users_encrypted_page_token_only",
+                raw_page_token.stderr,
+            )
+
+            psql(
+                "UPDATE mychat.users "
+                "SET meta_access_token='mychat:ig-token:v1:synthetic-envelope', "
+                "fb_page_access_token='mychat:ig-token:v1:synthetic-envelope' "
+                f"WHERE id='{user_id}'"
+            )
+            nested_json_token = subprocess.run(
+                [
+                    "psql",
+                    DATABASE_URL,
+                    "-X",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-c",
+                    "UPDATE mychat.users "
+                    "SET source_extra="
+                    """'{"nested":{"access_token":"synthetic-raw-token"}}'::jsonb """
+                    f"WHERE id='{user_id}'",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, nested_json_token.returncode)
+            self.assertIn(
+                "users_source_extra_has_no_token_keys",
+                nested_json_token.stderr,
+            )
+            alternate_json_token = subprocess.run(
+                [
+                    "psql",
+                    DATABASE_URL,
+                    "-X",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-c",
+                    "UPDATE mychat.users "
+                    "SET source_extra="
+                    """'{"nested":{"instagram_token":"synthetic-raw-token"}}'::jsonb """
+                    f"WHERE id='{user_id}'",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, alternate_json_token.returncode)
+            self.assertIn(
+                "users_source_extra_has_no_token_keys",
+                alternate_json_token.stderr,
+            )
 
             psql(
                 "INSERT INTO mychat.instagram_accounts (id,user_id) "

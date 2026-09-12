@@ -13,12 +13,12 @@ This document specifies how to replace the application's MongoDB persistence wit
 Replit-managed PostgreSQL without changing the public API contract or the
 application's externally observable behavior.
 
-Phase 1 was documentation only. The completed Phase 2A authorization is limited to
-versioned schema migrations and schema tests against the Replit development
-database. Neither phase authorizes:
+Phase 1 was documentation only. Phase 2A established versioned schema migrations
+and schema tests against the Replit development database. The first runtime slice
+adds an isolated PostgreSQL users repository without selecting it in FastAPI.
+These phases do not authorize:
 
-- runtime changes;
-- creation or modification of PostgreSQL objects;
+- switching the application runtime away from MongoDB;
 - access to secrets;
 - production data export or import;
 - changes to Railway configuration or production;
@@ -26,7 +26,7 @@ database. Neither phase authorizes:
 
 ### 1.1 Phase 2A migration source summary
 
-The current Phase 2A schema consists of exactly four ordered, checksummed SQL
+The current development schema consists of exactly seven ordered, checksummed SQL
 migrations:
 
 1. `001_replit_postgres_foundation.sql` — the `mychat` schema, all 32 source
@@ -41,6 +41,15 @@ migrations:
    importing raw `users.meta_access_token` and
    `instagram_accounts.accessToken` values until application-level encryption is
    implemented.
+5. `005_encrypted_user_token_runtime.sql` — allows only versioned authenticated
+   encryption envelopes in PostgreSQL user Instagram/Page token columns while
+   continuing to reject plaintext.
+6. `006_block_tokens_in_user_json.sql` — rejects token-shaped keys recursively
+   in PostgreSQL user `profile` and `source_extra` JSONB so credentials cannot
+   bypass the typed encrypted columns.
+7. `007_reject_all_user_json_token_keys.sql` — tightens the JSONB guard to
+   reject authorization keys and every token-suffixed key, including unknown
+   provider aliases.
 
 The FastAPI/Mongo runtime now encrypts new Instagram and Meta token writes with
 authenticated encryption using the backend-only
@@ -48,12 +57,15 @@ authenticated encryption using the backend-only
 reads decrypt only valid envelopes. Existing plaintext is returned to application
 code as an unusable empty token with
 `instagram_token_migration_required`/`migration_needed` status, so it is never
-silently sent to Meta. PostgreSQL token columns remain blocked by migration `004`
-until a separately reviewed import maps only encrypted envelopes and confirms key
-ownership and rotation behavior.
+silently sent to Meta. Migration `005` permits encrypted user-runtime writes only;
+raw user tokens and all Instagram-account token writes remain blocked.
 
-FastAPI persistence remains on MongoDB. No production data import, Railway change,
-billing behavior change, deployment, or cutover is included in Phase 2A.
+FastAPI persistence remains on MongoDB. The isolated PostgreSQL users repository
+supports create/get/update parity testing but is not imported or selected by
+`server.py`. Auth cutover remains blocked until duplicate source emails are
+profiled and the remaining direct `db.users` dependencies move behind repository
+interfaces. No production data import, Railway change, billing behavior change,
+deployment, or cutover is included.
 
 The repository has no authoritative MongoDB schema. Collection names, operations,
 indexes, aggregation pipelines, and concurrency behavior below are verified from
