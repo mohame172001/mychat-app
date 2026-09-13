@@ -14,9 +14,11 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request, Response, BackgroundTasks, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -30975,6 +30977,21 @@ async def public_status() -> dict:
 
 
 app.include_router(api)
+
+# Replit can expose one web process, so serve the production React bundle from
+# the API process when it has been built. API routes above remain authoritative.
+FRONTEND_BUILD_DIR = ROOT_DIR.parent / 'frontend' / 'build'
+if FRONTEND_BUILD_DIR.is_dir():
+    class SPAStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code == 404 and not path.startswith('api/'):
+                    return await super().get_response('index.html', scope)
+                raise
+
+    app.mount('/', SPAStaticFiles(directory=str(FRONTEND_BUILD_DIR), html=True), name='frontend')
 
 
 # ---------------- WebSocket ----------------
