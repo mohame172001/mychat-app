@@ -379,6 +379,13 @@ class Collection:
         return AggregateCursor(self, pipeline)
 
     async def create_index(self, keys, **options):
+        try:
+            return await self._create_index(keys, **options)
+        except Exception:
+            self.db.index_failures.append((self.name, options.get("name", str(keys))))
+            raise
+
+    async def _create_index(self, keys, **options):
         if isinstance(keys, str):
             keys = [(keys, 1)]
         if set(options) - {"name", "unique", "sparse", "partialFilterExpression", "expireAfterSeconds", "background"}:
@@ -449,6 +456,7 @@ class PostgresDocumentDatabase:
             raise ValueError("DATABASE_URL is required")
         self.database_url = database_url
         self._gate = asyncio.Semaphore(10)
+        self.index_failures = []
 
     def __getattr__(self, name):
         return self[name]
@@ -480,6 +488,7 @@ class PostgresDocumentDatabase:
 RETURNS SETOF jsonb LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE item jsonb;
 BEGIN
+ IF doc IS NULL THEN RETURN; END IF;
  IF cardinality(path)=0 THEN RETURN NEXT doc; RETURN; END IF;
  IF jsonb_typeof(doc)='array' THEN
   IF path[1] ~ '^[0-9]+$' THEN

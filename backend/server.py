@@ -74,7 +74,8 @@ from app.security.instagram_tokens import (
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-MONGO_URL = os.environ['MONGO_URL']
+DB_BACKEND = os.environ.get('DB_BACKEND', 'mongo').strip().lower()
+MONGO_URL = os.environ.get('MONGO_URL', '')
 DB_NAME = os.environ.get('DB_NAME', 'mychat')
 META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
@@ -315,8 +316,19 @@ PASSWORD_RESET_EMAIL_TEMPLATE = (
     or 'mychat_password_reset'
 )
 
-client = AsyncIOMotorClient(MONGO_URL)
-db = TokenProtectedDatabase(client[DB_NAME])
+postgres_database = None
+if DB_BACKEND == 'postgres':
+    from app.repositories.postgres_documents import PostgresDocumentDatabase
+    client = None
+    postgres_database = PostgresDocumentDatabase(os.environ.get('DATABASE_URL', ''))
+    db = TokenProtectedDatabase(postgres_database)
+elif DB_BACKEND == 'mongo':
+    if not MONGO_URL:
+        raise RuntimeError('MONGO_URL is required when DB_BACKEND=mongo')
+    client = AsyncIOMotorClient(MONGO_URL)
+    db = TokenProtectedDatabase(client[DB_NAME])
+else:
+    raise RuntimeError('DB_BACKEND must be postgres or mongo')
 
 _FASTAPI_KW = {'title': 'mychat API'}
 if IS_PRODUCTION:
@@ -31815,10 +31827,21 @@ async def _index_bootstrap():
     logger.info('index_bootstrap_completed duration_ms=%s', duration_ms)
 
 
+async def _postgres_retention_loop():
+    while not SHUTDOWN_EVENT.is_set():
+        await postgres_database.purge_expired()
+        try:
+            await asyncio.wait_for(SHUTDOWN_EVENT.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+
+
 @app.on_event('startup')
 async def _startup():
     global _poll_task, IS_SHUTTING_DOWN
     IS_SHUTTING_DOWN = False
+    if postgres_database is not None:
+        await postgres_database.initialize()
     role = runtime_scaling.runtime_role()
     if role in {'api', 'worker'} and not runtime_scaling.queue_enabled():
         raise RuntimeError('Split API/worker roles require WEBHOOK_INBOX_ENABLED=1')
@@ -31835,7 +31858,12 @@ async def _startup():
     # All heavy index creation and one-time migration work is scheduled
     # as a background tracked task so the startup hook returns quickly
     # and the /api/ healthcheck is not blocked on a cold-Mongo connect.
-    if role in {'combined', 'scheduler'}:
+    if postgres_database is not None:
+        await _index_bootstrap()
+        if postgres_database.index_failures:
+            raise RuntimeError('PostgreSQL index bootstrap failed; refusing to accept traffic')
+        _register_bg_task('postgres_retention', _postgres_retention_loop)
+    elif role in {'combined', 'scheduler'}:
         create_tracked_task(_index_bootstrap(), 'index_bootstrap')
     if IS_PRODUCTION and _SINGLE_TENANT_FALLBACK_ENABLED:
         logger.warning(
@@ -31933,7 +31961,8 @@ async def shutdown_db_client():
 
     # Step 9 — close Mongo client AFTER all writes are done
     try:
-        client.close()
+        if client is not None:
+            client.close()
     except Exception:
         logger.exception('shutdown_mongo_close_error')
 
