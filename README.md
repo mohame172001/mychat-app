@@ -163,6 +163,19 @@ All endpoints prefixed with `/api` and protected with Bearer JWT unless noted.
 
 ## 🐞 Troubleshooting
 
+## Replit status
+
+The repository includes a Replit run and deployment command for the FastAPI
+service. Before starting it, configure the backend secrets in Replit Secrets,
+including `MONGO_URL`, `DB_NAME`, `JWT_SECRET`, `META_APP_ID`,
+`META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_WEBHOOK_APP_SECRET`, and
+`INSTAGRAM_TOKEN_ENCRYPTION_KEY`.
+
+The Replit PostgreSQL migrations and users repository are development-ready but
+are not selected by `backend/server.py` yet. The live application still uses
+MongoDB until all Mongo consumers have passed parity tests and a staged cutover
+is completed.
+
 **Backend won't start — bcrypt error**
 ```bash
 pip install --force-reinstall "passlib[bcrypt]" bcrypt==4.0.1
