@@ -33,7 +33,7 @@ end-to-end Instagram tests must be completed before publishing the new site.
 
 ### 1.1 Phase 2A migration source summary
 
-The current development schema consists of exactly seven ordered, checksummed SQL
+The current development schema consists of exactly eight ordered, checksummed SQL
 migrations:
 
 1. `001_replit_postgres_foundation.sql` — the `mychat` schema, all 32 source
@@ -57,6 +57,8 @@ migrations:
 7. `007_reject_all_user_json_token_keys.sql` — tightens the JSONB guard to
    reject authorization keys and every token-suffixed key, including unknown
    provider aliases.
+8. `008_encrypted_instagram_accounts.sql` - permits encrypted Instagram account
+   access/refresh tokens and rejects credential keys in both account JSONB columns.
 
 The FastAPI/Mongo runtime now encrypts new Instagram and Meta token writes with
 authenticated encryption using the backend-only
@@ -65,7 +67,9 @@ reads decrypt only valid envelopes. Existing plaintext is returned to applicatio
 code as an unusable empty token with
 `instagram_token_migration_required`/`migration_needed` status, so it is never
 silently sent to Meta. Migration `005` permits encrypted user-runtime writes only;
-raw user tokens and all Instagram-account token writes remain blocked.
+raw user tokens remain blocked. Migration `008` permits encrypted account tokens
+through the isolated tenant-scoped Instagram account repository. Neither
+repository is selected by the running FastAPI application yet.
 
 FastAPI persistence remains on MongoDB. The isolated PostgreSQL users repository
 supports create/get/update parity testing but is not imported or selected by

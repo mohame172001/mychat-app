@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "backend/db/migrations/001_replit_postgres_foundation.sql"
 MIGRATION_DIR = ROOT / "backend/db/migrations"
 MIGRATION_RUNNER = ROOT / "backend/db/apply_migrations.sh"
-MIGRATION_VERSIONS = ("001", "002", "003", "004", "005", "006", "007")
+MIGRATION_VERSIONS = ("001", "002", "003", "004", "005", "006", "007", "008")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 RUN_DB_TESTS = os.environ.get("RUN_REPLIT_DB_TESTS") == "1"
 TEST_SCHEMA_ACK = os.environ.get("REPLIT_DB_TEST_SCHEMA_ACK", "")
@@ -315,7 +315,7 @@ class PostgresSchemaTests(unittest.TestCase):
             )
             self.assertNotEqual(0, raw_account_token.returncode)
             self.assertIn(
-                "instagram_accounts_raw_token_import_blocked",
+                "instagram_accounts_encrypted_access_token_only",
                 raw_account_token.stderr,
             )
         finally:
