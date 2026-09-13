@@ -59,7 +59,16 @@ must agree on the same persistence backend before real account connection tests.
 - Existing development data was preserved before fresh initialization in
   `mychat_backup_20260913_160913_066522`. Do not rerun fresh initialization.
 
-Next integration work: queues/execution logs and remaining collection access,
+The isolated `postgres_webhook_inbox.py` now provides encrypted enqueue,
+digest-based deduplication, committed lease claims, fenced completion/failure,
+five-attempt retry limits and bounded expiry cleanup. It reuses migration `002`
+functions and is not yet selected by `runtime_scaling.py` or `server.py`.
+Its five integration tests plus thirteen schema tests passed on Replit PostgreSQL.
+They cover concurrent workers, encrypted payload disposal, retry exhaustion,
+expired-lease recovery, stale-worker rejection and retention of pending events.
+The inbox integration suite refuses a nonempty development inbox.
+
+Next integration work: execution logs and remaining collection access,
 then one coherent FastAPI persistence switch. Configuring `DATABASE_URL` alone
 does not yet switch this application away from MongoDB.
 
