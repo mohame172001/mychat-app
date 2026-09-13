@@ -1,6 +1,6 @@
 # Replit PostgreSQL Migration Specification
 
-Status: Phase 1 specification complete; Phase 2A development schema implemented
+Status: PostgreSQL schema and isolated users repository tested; runtime cutover pending
 Target: Replit-managed PostgreSQL  
 Source system: the MongoDB database used by the current FastAPI application  
 Scope verified against: `backend/server.py`, `backend/runtime_scaling.py`,
@@ -16,13 +16,20 @@ application's externally observable behavior.
 Phase 1 was documentation only. Phase 2A established versioned schema migrations
 and schema tests against the Replit development database. The first runtime slice
 adds an isolated PostgreSQL users repository without selecting it in FastAPI.
-These phases do not authorize:
+The owner has now selected a fresh start on Replit-managed PostgreSQL to avoid
+the engineering work of transferring legacy data. Do not import Railway records
+or create a MongoDB service. Keep existing Railway data untouched. Instagram
+accounts will need to be connected again and rules recreated on the new site.
 
-- switching the application runtime away from MongoDB;
-- access to secrets;
-- production data export or import;
-- changes to Railway configuration or production;
-- deployment or cutover.
+Use `python backend/db/prepare_fresh_postgres.py --fresh-start` once in the Replit
+development workspace to prepare a clean schema. It preserves an existing
+`mychat` schema under a timestamped backup name and applies the migrations in one
+transaction, rolling back the entire operation on failure. It refuses production
+environments. It is an initialization command, not a startup command.
+
+This decision does not mean runtime migration is complete: `server.py` still
+selects MongoDB. Remaining repositories, runtime selection, configuration and
+end-to-end Instagram tests must be completed before publishing the new site.
 
 ### 1.1 Phase 2A migration source summary
 
