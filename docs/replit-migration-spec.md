@@ -1,6 +1,6 @@
 # Replit PostgreSQL Migration Specification
 
-Status: PostgreSQL schema and isolated users repository tested; runtime cutover pending
+Status: PostgreSQL users/accounts tested; isolated automation repository added; runtime cutover pending
 Target: Replit-managed PostgreSQL  
 Source system: the MongoDB database used by the current FastAPI application  
 Scope verified against: `backend/server.py`, `backend/runtime_scaling.py`,
@@ -30,6 +30,19 @@ environments. It is an initialization command, not a startup command.
 This decision does not mean runtime migration is complete: `server.py` still
 selects MongoDB. Remaining repositories, runtime selection, configuration and
 end-to-end Instagram tests must be completed before publishing the new site.
+
+Current isolated repositories live in `backend/app/repositories/`:
+- `postgres_users.py`: users and encrypted legacy user-level Instagram tokens.
+- `postgres_instagram_accounts.py`: owned accounts, encrypted access/refresh
+  tokens, serialized reconnects, and tenant-scoped disconnect.
+- `postgres_automations.py`: account-scoped create/read/list/update, preserving
+  post IDs, messages and flow configuration. Internal account foreign keys and
+  Instagram provider IDs are resolved separately from the owned account.
+  Updates lock the rule row before merging configuration to prevent lost writes.
+
+None of these files substitutes for the existing Mongo collections yet. Do not
+enable a mixed users/Instagram-only cutover: rules, queues and execution logs
+must agree on the same persistence backend before real account connection tests.
 
 ### 1.1 Phase 2A migration source summary
 
