@@ -1,9 +1,39 @@
 import unittest
 
 from app.repositories.postgres_users import (
+    PostgresUserRepository,
+    PostgresUserRepositoryError,
     UnsafePostgresUsersEnvironment,
     development_postgres_users_repository,
 )
+
+
+class PostgresUserDocumentTests(unittest.TestCase):
+    def test_import_preserves_nested_metadata_without_mutation(self):
+        source = {
+            "id": "imported-user",
+            "name": "Current name",
+            "profile": {"name": "Old name", "timezone": "Europe/Berlin"},
+            "source_extra": {"legacy_flag": True},
+            "session_version": 3,
+        }
+        columns, profile, extra = PostgresUserRepository._split_document(source)
+        self.assertEqual(columns["id"], "imported-user")
+        self.assertEqual(profile, {"name": "Current name", "timezone": "Europe/Berlin"})
+        self.assertEqual(extra, {"legacy_flag": True, "session_version": 3})
+        self.assertEqual(source["profile"]["name"], "Old name")
+
+    def test_nested_import_does_not_bypass_token_protection(self):
+        for field in ("profile", "source_extra"):
+            with self.subTest(field=field):
+                with self.assertRaises(PostgresUserRepositoryError):
+                    PostgresUserRepository._split_document({field: {"nested": {"access_token": "secret"}}})
+
+    def test_invalid_metadata_is_rejected_instead_of_lost(self):
+        for value in (None, [], "metadata"):
+            with self.subTest(value=value):
+                with self.assertRaises(PostgresUserRepositoryError):
+                    PostgresUserRepository._split_document({"profile": value})
 
 
 class PostgresUsersRepositorySelectionTests(unittest.TestCase):

@@ -148,6 +148,36 @@ class PostgresUsersRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(0, missing.matched_count)
 
+    async def test_imported_metadata_survives_update(self) -> None:
+        source = self._user()
+        source["profile"] = {"timezone": "Europe/Berlin"}
+        source["source_extra"] = {"legacy_flag": True}
+        await self.repository.create(source)
+        await self.repository.update(source["id"], set_fields={"name": "New name"})
+        restored = await self.repository.get_by_id(source["id"])
+        self.assertEqual(restored["timezone"], "Europe/Berlin")
+        self.assertTrue(restored["legacy_flag"])
+
+    async def test_token_alias_update_replaces_and_unsets_stored_token(self) -> None:
+        source = self._user()
+        source["meta_access_token"] = "synthetic-old-token"
+        await self.repository.create(source)
+        await self.repository.update(source["id"], set_fields={"accessToken": "synthetic-new-token"})
+        restored = await self.repository.get_by_id(source["id"])
+        self.assertEqual(restored["meta_access_token"], "synthetic-new-token")
+        connection = await AsyncConnection.connect(DATABASE_URL)
+        try:
+            row = await (await connection.execute(
+                "SELECT meta_access_token FROM mychat.users WHERE id = %s", (source["id"],)
+            )).fetchone()
+            self.assertTrue(row[0].startswith(TOKEN_ENVELOPE_PREFIX))
+            self.assertNotIn("synthetic-new-token", row[0])
+        finally:
+            await connection.close()
+        await self.repository.update(source["id"], unset_fields=("accessToken",))
+        restored = await self.repository.get_by_id(source["id"])
+        self.assertNotIn("meta_access_token", restored)
+
     async def test_repository_enforces_case_insensitive_uniqueness(self) -> None:
         first = self._user("unique")
         await self.repository.create(first)

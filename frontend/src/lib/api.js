@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { clearApiCache } from './apiCache';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || '').trim().replace(/\/+$/, '');
 export const API_BASE = `${BACKEND_URL}/api`;
 
 const api = axios.create({ baseURL: API_BASE, timeout: 20000 });

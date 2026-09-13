@@ -187,22 +187,27 @@ class PostgresUserRepository:
             column: document.get(field)
             for field, column in _COLUMN_FIELDS.items()
         }
-        profile = {
+        for field in ("profile", "source_extra"):
+            if field in document and not isinstance(document[field], Mapping):
+                raise PostgresUserRepositoryError(f"user_{field}_must_be_mapping")
+        profile = deepcopy(dict(document.get("profile", {})))
+        profile.update({
             key: document[key]
             for key in _PROFILE_FIELDS
             if key in document
-        }
+        })
         excluded = (
             set(_COLUMN_FIELDS)
             | set(_PROFILE_FIELDS)
             | set(_TOKEN_ALIASES)
             | {"created", "updated", "profile", "source_extra"}
         )
-        source_extra = {
+        source_extra = deepcopy(dict(document.get("source_extra", {})))
+        source_extra.update({
             key: value
             for key, value in document.items()
             if key not in excluded
-        }
+        })
         _assert_json_has_no_token_keys(profile)
         _assert_json_has_no_token_keys(source_extra)
         return columns, profile, source_extra
@@ -450,8 +455,8 @@ class PostgresUserRepository:
         unset_fields: Iterable[str] = (),
         increments: Optional[Mapping[str, int]] = None,
     ) -> UserUpdateResult:
-        updates = dict(set_fields or {})
-        unsets = tuple(str(field) for field in unset_fields)
+        updates = self._canonicalize(set_fields or {})
+        unsets = tuple(_TOKEN_ALIASES.get(str(field), str(field)) for field in unset_fields)
         increment_values = dict(increments or {})
         if not filters:
             raise PostgresUserRepositoryError("user_update_filter_required")
