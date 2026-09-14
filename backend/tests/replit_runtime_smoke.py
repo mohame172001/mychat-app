@@ -39,14 +39,14 @@ def main():
             response=client.get("/api/health")
             assert response.status_code==200, ("health",response.status_code)
             response=client.post("/api/auth/signup",json={"username":identity,"email":email,"password":password})
-            assert response.status_code==200, ("signup",response.status_code,response.text[:200])
+            assert response.status_code==200, ("signup",response.status_code)
             body=response.json()
             user_id=body["user"]["id"]
             headers={"Authorization":"Bearer "+body["token"]}
             response=client.get("/api/auth/me",headers=headers)
             assert response.status_code==200 and response.json()["id"]==user_id, "auth/me"
-            response=client.post("/api/auth/login",json={"email":email,"password":password})
-            assert response.status_code==200, ("login",response.status_code,response.text[:200])
+            response=client.post("/api/auth/login",json={"username":email,"password":password})
+            assert response.status_code==200, ("login",response.status_code)
             response=client.get("/api/automations",headers=headers)
             assert response.status_code==200 and response.json()==[], ("automations",response.status_code)
             assert client.get("/api/auth/me").status_code in {401,403}

@@ -1,10 +1,15 @@
 modules = ["python-3.12", "nodejs-20", "web"]
 
 # Replit serves the built React app and API from one web process.
-run = "yarn --cwd frontend install --frozen-lockfile && yarn --cwd frontend build && cd backend && uvicorn server:app --host 0.0.0.0 --port 8000"
+run = "python backend/replit_start.py"
 
 [deployment]
-run = ["sh", "-c", "yarn --cwd frontend install --frozen-lockfile && yarn --cwd frontend build && cd backend && uvicorn server:app --host 0.0.0.0 --port $PORT"]
+build = ["sh", "-c", "python -m pip install -r backend/requirements.txt && yarn --cwd frontend install --frozen-lockfile && yarn --cwd frontend build"]
+run = ["python", "backend/replit_start.py"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
 
 [nix]
 channel = "stable-25_05"
