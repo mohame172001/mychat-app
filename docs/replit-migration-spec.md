@@ -1,6 +1,6 @@
 # Replit PostgreSQL Migration Specification
 
-Status: PostgreSQL users/accounts/automations tested in isolation; runtime cutover pending
+Status: Replit development runtime uses PostgreSQL; public deployment and live Instagram verification pending
 Target: Replit-managed PostgreSQL  
 Source system: the MongoDB database used by the current FastAPI application  
 Scope verified against: `backend/server.py`, `backend/runtime_scaling.py`,
@@ -27,9 +27,37 @@ development workspace to prepare a clean schema. It preserves an existing
 transaction, rolling back the entire operation on failure. It refuses production
 environments. It is an initialization command, not a startup command.
 
-This decision does not mean runtime migration is complete: `server.py` still
-selects MongoDB. Remaining repositories, runtime selection, configuration and
-end-to-end Instagram tests must be completed before publishing the new site.
+The runtime now selects `PostgresDocumentDatabase` when `DB_BACKEND=postgres`.
+`backend/replit_start.py` selects this backend explicitly for Replit and serves
+the built React frontend and API on port 8000. The active schema is
+`mychat_runtime`, not the earlier isolated relational `mychat` schema.
+All 32 collection paths share the PostgreSQL adapter; existing business logic
+and token encryption remain in place. No MongoDB service is required on Replit.
+Other environments retain the explicit legacy Mongo fallback by default.
+
+### Current Replit operation
+
+- Run: `python backend/replit_start.py`; deployment build/run live in `.replit`.
+- PostgreSQL uses Replit's `DATABASE_URL`. Runtime schema/index initialization
+  is idempotent and fails startup if required indexes cannot be created.
+- `SESSION_SECRET` supplies domain-separated application encryption/JWT keys
+  when individual keys are absent. Preserve it across redeploys; changing it
+  invalidates sessions and makes existing encrypted tokens unreadable.
+- Real `IG_APP_ID`, `IG_APP_SECRET`, `META_APP_ID`, `META_APP_SECRET` and
+  `META_VERIFY_TOKEN` were copied from the existing Railway backend into
+  Replit Secrets. Values are not committed or exposed by the frontend.
+- Frontend and callback origins derive from the Replit domain, unless explicit
+  `FRONTEND_URL` / `BACKEND_PUBLIC_URL` are provided. Register the final public
+  `/api/instagram/callback` and `/api/instagram/webhook` URLs in Meta after publish.
+- Fresh start: legacy Railway users, accounts, rules and logs were not imported.
+- Seven real PostgreSQL adapter tests, 49 auth/runtime regression tests,
+  three startup configuration tests and the real HTTP auth smoke passed.
+  React production build passed and the development landing page rendered.
+- Public publishing is not yet confirmed. Reserved VM is needed for the
+  current in-process background loops; do not claim autoscale preserves them.
+  The displayed smallest VM is $15/month, excluding other metered resources.
+- No real Instagram OAuth completion, comment reply or DM on Replit has yet
+  been verified. There is no verified capacity claim for 1,000/10,000 users.
 
 Current isolated repositories live in `backend/app/repositories/`:
 - `postgres_users.py`: users and encrypted legacy user-level Instagram tokens.
@@ -68,9 +96,10 @@ They cover concurrent workers, encrypted payload disposal, retry exhaustion,
 expired-lease recovery, stale-worker rejection and retention of pending events.
 The inbox integration suite refuses a nonempty development inbox.
 
-Next integration work: execution logs and remaining collection access,
-then one coherent FastAPI persistence switch. Configuring `DATABASE_URL` alone
-does not yet switch this application away from MongoDB.
+The isolated repositories below document the earlier migration stage. They are
+not the active runtime adapters. Runtime uses `postgres_documents.py` for users,
+accounts, rules, execution logs and queues together. Outside the Replit launcher,
+`DATABASE_URL` alone does not select PostgreSQL: set `DB_BACKEND=postgres` too.
 
 ### 1.1 Phase 2A migration source summary
 
@@ -112,12 +141,11 @@ raw user tokens remain blocked. Migration `008` permits encrypted account tokens
 through the isolated tenant-scoped Instagram account repository. Neither
 repository is selected by the running FastAPI application yet.
 
-FastAPI persistence remains on MongoDB. The isolated PostgreSQL users repository
-supports create/get/update parity testing but is not imported or selected by
-`server.py`. Auth cutover remains blocked until duplicate source emails are
-profiled and the remaining direct `db.users` dependencies move behind repository
-interfaces. No production data import, Railway change, billing behavior change,
-deployment, or cutover is included.
+The isolated PostgreSQL users repository supports parity testing but is not the
+runtime source. The active collection adapter preserves the existing `db.users`
+interface on PostgreSQL. No legacy production data import was performed. The
+following inventory and normalized-schema design describe the source and the
+earlier staged migration, not a second active persistence backend.
 
 The repository has no authoritative MongoDB schema. Collection names, operations,
 indexes, aggregation pipelines, and concurrency behavior below are verified from

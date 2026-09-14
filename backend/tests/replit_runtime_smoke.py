@@ -4,6 +4,7 @@ import secrets
 import sys
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
@@ -20,7 +21,8 @@ def main():
         count=connection.execute("SELECT count(*) FROM mychat_runtime.instagram_accounts").fetchone()[0]
         if count:
             raise RuntimeError("Smoke test requires an empty development account collection")
-    os.environ["DB_BACKEND"]="postgres"
+    from replit_start import configure
+    configure(os.environ)
     os.environ["JWT_SECRET"]=secrets.token_urlsafe(48)
     os.environ["IG_POLL_ENABLED"]="0"
     os.environ["MYCHAT_PROCESS_ROLE"]="combined"
@@ -50,6 +52,27 @@ def main():
             response=client.get("/api/automations",headers=headers)
             assert response.status_code==200 and response.json()==[], ("automations",response.status_code)
             assert client.get("/api/auth/me").status_code in {401,403}
+            for path in ("/", "/login", "/privacy", "/terms", "/data-deletion"):
+                response=client.get(path)
+                assert response.status_code==200 and 'id="root"' in response.text, ("frontend",path,response.status_code)
+            response=client.get("/api/instagram/webhook",params={"hub.mode":"subscribe","hub.verify_token":server.META_VERIFY_TOKEN,"hub.challenge":"replit-smoke-challenge"})
+            assert response.status_code==200 and response.text=="replit-smoke-challenge", "webhook challenge"
+            assert client.get("/api/instagram/webhook",params={"hub.mode":"subscribe","hub.verify_token":"invalid"}).status_code==403
+            if server.IG_APP_ID and server.IG_APP_SECRET:
+                response=client.get("/api/instagram/auth-url",headers=headers)
+                assert response.status_code==200, ("oauth URL",response.status_code)
+                url=response.json()["url"]
+                parsed=urlparse(url)
+                query=parse_qs(parsed.query)
+                assert parsed.hostname in {"www.instagram.com","api.instagram.com"}, "Instagram authorize host"
+                assert query["client_id"]==[server.IG_APP_ID], "Instagram product ID"
+                assert query["redirect_uri"]==["http://testserver/api/instagram/callback"], "callback origin"
+                assert query.get("state") and query.get("response_type")==["code"], "OAuth state/code"
+                assert server.IG_APP_SECRET not in response.text and server.META_APP_SECRET not in response.text, "no secret disclosure"
+                print("PASS: configured Instagram OAuth URL, state, callback and no secret disclosure (no provider request)")
+            else:
+                print("SKIP: Instagram OAuth URL requires configured product credentials")
+            print("PASS: frontend routes and webhook verification success/failure")
             print("PASS: real PostgreSQL startup, health, signup, login, session, empty automations and auth gate")
     finally:
         with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
