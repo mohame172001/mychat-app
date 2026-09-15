@@ -37,7 +37,7 @@ const PrivacyPolicy = () => {
       <p><strong>لا نبيع</strong> بياناتك ولا نؤجّرها ولا نُتاجر بها. نُشاركها فقط مع:</p>
       <ul className="list-disc ps-6 space-y-1">
         <li><strong>شركة Meta Platforms</strong> — لإرسال الردود/الرسائل وجلب بيانات التعليقات عبر واجهة Instagram Graph</li>
-        <li><strong>مزوّدي البنية التحتية</strong> (Railway للاستضافة، MongoDB Atlas لقاعدة البيانات) — حصراً لتشغيل الخدمة</li>
+        <li><strong>مزوّدي البنية التحتية</strong> — تستخدم نسخة Replit استضافة Replit وقاعدة PostgreSQL المُدارة من خلالها. قد تبقى بيانات النسخة السابقة لدى Railway إلى حين اكتمال نقل الخدمة أو حذف تلك البيانات وفق سياسة الاحتفاظ. تُستخدم هذه الخدمات حصراً لتشغيل المنصّة وحماية البيانات.</li>
         <li><strong>الجهات القانونية</strong> — فقط عند وجود إلزام قانوني</li>
       </ul>
     </> },
@@ -86,7 +86,7 @@ const PrivacyPolicy = () => {
       <p>We do <strong>not</strong> sell, rent, or trade your data. We share data only with:</p>
       <ul className="list-disc ps-6 space-y-1">
         <li><strong>Meta Platforms, Inc.</strong> — to send replies/DMs and fetch comment data via the Instagram Graph API</li>
-        <li><strong>Infrastructure providers</strong> (Railway for hosting, MongoDB Atlas for database) — strictly to run the service</li>
+        <li><strong>Infrastructure providers</strong> — the Replit deployment uses Replit hosting and its managed PostgreSQL database. Data from the previous deployment may remain on Railway until the transition is complete or those records are deleted under our retention policy. These services are used only to operate the platform and protect its data.</li>
         <li><strong>Law enforcement</strong> — only when required by valid legal process</li>
       </ul>
     </> },
@@ -125,7 +125,7 @@ const PrivacyPolicy = () => {
 
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
         <h1 className="text-4xl font-bold tracking-tight mb-2">{ar ? 'سياسة الخصوصية' : 'Privacy Policy'}</h1>
-        <p className="text-sm text-slate-500 mb-10">{ar ? 'آخر تحديث: ٩ مايو ٢٠٢٦' : 'Last updated: May 9, 2026'}</p>
+        <p className="text-sm text-slate-500 mb-10">{ar ? 'آخر تحديث: ١٥ سبتمبر ٢٠٢٦' : 'Last updated: September 15, 2026'}</p>
 
         <div className="prose prose-slate max-w-none space-y-6 text-slate-700 leading-relaxed">
           {SECTIONS.map((s, i) => (
