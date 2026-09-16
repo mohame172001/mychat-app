@@ -17,7 +17,11 @@ def configure(env):
         raise RuntimeError("Replit DATABASE_URL is required")
     env["DB_BACKEND"]="postgres"
     production=env.get("REPLIT_DEPLOYMENT")=="1" or env.get("APP_ENV") in {"production","prod"}
-    env.setdefault("APP_ENV","production" if production else "development")
+    # A published Replit must not inherit development security defaults.
+    if production:
+        env["APP_ENV"]="production"
+    else:
+        env.setdefault("APP_ENV","development")
     required=("JWT_SECRET","INSTAGRAM_TOKEN_ENCRYPTION_KEY","WEBHOOK_INBOX_ENCRYPTION_KEY")
     master=env.get("SESSION_SECRET","")
     if any(not env.get(key) for key in required) and len(master)<32:

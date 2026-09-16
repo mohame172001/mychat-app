@@ -1,4 +1,4 @@
-# Replit pause checkpoint - 2026-09-15
+# Replit pause checkpoint - 2026-09-16
 
 Paused at the owner's request. Do not publish or incur charges without approval.
 
@@ -41,5 +41,11 @@ Paused at the owner's request. Do not publish or incur charges without approval.
 - Leave the preexisting generated change in `frontend/src/buildInfo.generated.js`
   untouched. Preserve Replit's bundle and old database backup schemas.
 
-The 2026-09-15 checkpoint and privacy update are saved in a local commit.
+The 2026-09-15 checkpoint and privacy update are saved in local commit `34a91ab`.
+On 2026-09-16, the Replit launcher was corrected to force APP_ENV=production
+when REPLIT_DEPLOYMENT=1, even if development settings were inherited.
+Six startup tests passed, including published-domain selection, rejection of
+preview-domain fallback and preservation of explicitly configured origins.
+`git diff --check` passed. This fix is also local only, not pushed or deployed.
+No browser, Replit Agent, paid publishing or infrastructure changes were used.
 Resume from this file, check local git status/log, then push when needed.

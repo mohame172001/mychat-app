@@ -30,3 +30,28 @@ class ReplitConfigurationTests(unittest.TestCase):
         del env["SESSION_SECRET"]
         with self.assertRaises(RuntimeError):
             configure(env)
+
+    def test_deployment_overrides_inherited_development_mode(self):
+        env=self.environment()
+        env.update(REPLIT_DEPLOYMENT="1",APP_ENV="development",
+                   REPLIT_DOMAINS="published.example.com,alias.example.com")
+        configure(env)
+        self.assertEqual(env["APP_ENV"],"production")
+        self.assertEqual(env["FRONTEND_URL"],"https://published.example.com")
+        self.assertEqual(env["BACKEND_PUBLIC_URL"],"https://published.example.com")
+        self.assertNotIn("IG_APP_SECRET",env)
+
+    def test_deployment_does_not_fall_back_to_preview_domain(self):
+        env=self.environment()
+        env["REPLIT_DEPLOYMENT"]="1"
+        with self.assertRaises(RuntimeError):
+            configure(env)
+
+    def test_explicit_production_origins_are_preserved(self):
+        env=self.environment()
+        env.update(REPLIT_DEPLOYMENT="1",FRONTEND_URL="https://app.example.com",
+                   BACKEND_PUBLIC_URL="https://api.example.com")
+        configure(env)
+        self.assertEqual(env["APP_ENV"],"production")
+        self.assertEqual(env["FRONTEND_URL"],"https://app.example.com")
+        self.assertEqual(env["BACKEND_PUBLIC_URL"],"https://api.example.com")
