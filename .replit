@@ -4,8 +4,8 @@ modules = ["python-3.12", "nodejs-20", "web"]
 run = "python backend/replit_start.py"
 
 [deployment]
-build = ["sh", "-c", "python -m pip install -r backend/requirements.txt && yarn --cwd frontend install --frozen-lockfile && yarn --cwd frontend build"]
-run = ["python", "backend/replit_start.py"]
+build = ["sh", "-c", "python -m pip install --upgrade --target .replit-deps -r backend/requirements.txt && PYTHONPATH=$PWD/.replit-deps python -c 'import dotenv, uvicorn, psycopg' && yarn --cwd frontend install --frozen-lockfile && yarn --cwd frontend build"]
+run = ["sh", "-c", "PYTHONPATH=$PWD/.replit-deps python backend/replit_start.py"]
 
 [[ports]]
 localPort = 8000
