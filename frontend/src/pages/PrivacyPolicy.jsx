@@ -115,7 +115,7 @@ const PrivacyPolicy = () => {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
-            <span className="text-xl font-bold tracking-tight">mychat</span>
+            <span className="text-xl font-bold tracking-tight">MyChaat</span>
           </Link>
           <Link to="/" className="text-sm font-medium text-slate-600 hover:text-slate-900 flex items-center gap-1">
             <ArrowLeft className="w-4 h-4" /> {ar ? 'رجوع' : 'Back'}
@@ -139,7 +139,7 @@ const PrivacyPolicy = () => {
 
       <footer className="border-t border-slate-100 py-8">
         <div className="max-w-4xl mx-auto px-6 flex items-center justify-between text-sm text-slate-500">
-          <span>© 2026 mychat</span>
+          <span>© 2026 MyChaat</span>
           <div className="flex gap-6">
             <Link to="/privacy" className="hover:text-slate-900">{ar ? 'الخصوصية' : 'Privacy'}</Link>
             <Link to="/terms" className="hover:text-slate-900">{ar ? 'الشروط' : 'Terms'}</Link>

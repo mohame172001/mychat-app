@@ -56,7 +56,7 @@ const Signup = () => {
     setLoading(true);
     try {
       await signup(u, em, password);
-      toast.success(lang === 'ar' ? 'تم إنشاء الحساب — أهلاً بك في MyChat' : 'Account created! Welcome to mychat');
+      toast.success(lang === 'ar' ? 'تم إنشاء الحساب — أهلاً بك في MyChaat' : 'Account created! Welcome to MyChaat');
       navigate('/app');
     } catch (err) {
       toast.error(authErrorMessageFromApiError(err) || (lang === 'ar' ? 'تعذّر إنشاء الحساب' : 'Signup failed'));
@@ -87,7 +87,7 @@ const Signup = () => {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
-            <span className="text-xl font-bold font-display">mychat</span>
+            <span className="text-xl font-bold font-display">MyChaat</span>
           </Link>
           <LangSwitcher />
         </div>

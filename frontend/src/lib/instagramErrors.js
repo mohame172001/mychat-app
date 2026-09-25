@@ -12,9 +12,9 @@ function isArabic() {
 const MESSAGES = {
   en: {
     instagram_account_already_connected:
-      'This Instagram account is already linked to a different MyChat account. ' +
+      'This Instagram account is already linked to a different MyChaat account. ' +
       'Sign in to that account and disconnect it first, or contact support if you ' +
-      'own this Instagram account and lost access to the original MyChat account.',
+      'own this Instagram account and lost access to the original MyChaat account.',
     oauth_denied:
       'You declined the Instagram permissions, so we could not finish linking the account. ' +
       'Click Connect again and accept the requested permissions.',

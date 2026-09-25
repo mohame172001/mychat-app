@@ -7,6 +7,51 @@ from replit_start import configure, add_bundled_dependencies
 
 
 class ReplitConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        root_patch = patch('replit_start.ROOT', self.root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+
+    def write_site(self, origin):
+        import json
+        (self.root / 'backend').mkdir(exist_ok=True)
+        (self.root / 'backend' / 'public_site.json').write_text(json.dumps({'origin': origin}))
+
+    def test_canonical_domain_overrides_old_production_urls(self):
+        self.write_site('https://mychaat.net/')
+        env = self.environment()
+        env.update(REPLIT_DEPLOYMENT='1', FRONTEND_URL='https://old.example.com',
+                   BACKEND_PUBLIC_URL='https://old.example.com')
+        configure(env)
+        self.assertEqual(env['FRONTEND_URL'], 'https://mychaat.net')
+        self.assertEqual(env['BACKEND_PUBLIC_URL'], 'https://mychaat.net')
+
+    def test_canonical_domain_preserves_preview(self):
+        self.write_site('https://mychaat.net')
+        env = self.environment()
+        configure(env)
+        self.assertEqual(env['FRONTEND_URL'], 'https://preview.example.com')
+
+    def test_canonical_domain_without_generated_replit_hostname(self):
+        self.write_site('https://mychaat.net')
+        env = self.environment()
+        env['REPLIT_DEPLOYMENT'] = '1'
+        configure(env)
+        self.assertEqual(env['BACKEND_PUBLIC_URL'], 'https://mychaat.net')
+
+    def test_invalid_canonical_origin_rejected(self):
+        for origin in ('http://example.com', 'https://example.com/path',
+                       'https://user:password@example.com', 'https://example.com?x=1'):
+            with self.subTest(origin=origin):
+                self.write_site(origin)
+                env = self.environment()
+                env['REPLIT_DEPLOYMENT'] = '1'
+                with self.assertRaises(RuntimeError):
+                    configure(env)
+
     def test_bundled_dependencies_added_once(self):
         with tempfile.TemporaryDirectory() as directory, patch('sys.path', ['existing']):
             root = Path(directory)

@@ -15,7 +15,7 @@
 import { toast } from 'sonner';
 
 export const SUPPORT_EMAIL = 'mm.mohame172000@gmail.com';
-export const SUPPORT_MAILTO_SUBJECT = 'MyChat support request';
+export const SUPPORT_MAILTO_SUBJECT = 'MyChaat support request';
 
 export function buildSupportMailtoHref() {
   const subject = encodeURIComponent(SUPPORT_MAILTO_SUBJECT);

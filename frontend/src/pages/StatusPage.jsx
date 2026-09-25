@@ -36,14 +36,14 @@ function StatusChip({ status, labels }) {
 
 const BANNER_CONTENT = {
   en: {
-    operational: { title: 'All systems operational', body: 'Every MyChat subsystem is responding normally.' },
-    partial_outage: { title: 'Partial service disruption', body: 'Some MyChat subsystems are degraded. Automations may run slower than usual.' },
+    operational: { title: 'All systems operational', body: 'Every MyChaat subsystem is responding normally.' },
+    partial_outage: { title: 'Partial service disruption', body: 'Some MyChaat subsystems are degraded. Automations may run slower than usual.' },
     major_outage: { title: 'Major outage', body: 'One or more critical subsystems are unavailable. We are investigating.' },
     unknown: { title: 'Status unavailable', body: 'We could not determine the service status right now.' },
   },
   ar: {
-    operational: { title: 'جميع الأنظمة تعمل بشكل طبيعي', body: 'جميع خدمات MyChat تستجيب بشكل طبيعي.' },
-    partial_outage: { title: 'انقطاع جزئي في الخدمة', body: 'بعض خدمات MyChat تواجه تأخّراً. قد تعمل الأتمتات أبطأ من المعتاد.' },
+    operational: { title: 'جميع الأنظمة تعمل بشكل طبيعي', body: 'جميع خدمات MyChaat تستجيب بشكل طبيعي.' },
+    partial_outage: { title: 'انقطاع جزئي في الخدمة', body: 'بعض خدمات MyChaat تواجه تأخّراً. قد تعمل الأتمتات أبطأ من المعتاد.' },
     major_outage: { title: 'انقطاع كبير', body: 'إحدى الخدمات الأساسية غير متاحة. نحن نحقّق في الأمر.' },
     unknown: { title: 'لا تتوفّر بيانات الحالة', body: 'تعذّر علينا تحديد حالة الخدمة في هذه اللحظة.' },
   },
@@ -93,7 +93,7 @@ export default function StatusPage() {
       <div className="max-w-3xl mx-auto px-4 py-10">
         <header className="mb-8 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2 text-slate-900">
-            <span className="font-display font-extrabold text-xl">mychat</span>
+            <span className="font-display font-extrabold text-xl">MyChaat</span>
             <span className="text-xs text-slate-500 font-mono">{ar ? 'الحالة' : 'status'}</span>
           </Link>
           <button

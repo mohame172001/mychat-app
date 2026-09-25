@@ -128,14 +128,14 @@ export const dictionaries = {
       lessStats: 'Less stats',
       onboarding: {
         titleConnected: "You're set — create your first automation",
-        titleNew: 'Welcome to MyChat 👋',
+        titleNew: 'Welcome to MyChaat 👋',
         bodyConnected:
-          'Now build a comment automation: when someone comments on your post, MyChat will reply publicly and send them a DM.',
+          'Now build a comment automation: when someone comments on your post, MyChaat will reply publicly and send them a DM.',
         bodyNew:
           'To start automating Instagram comments + DMs, connect your business account first. It takes 30 seconds.',
         step1: 'Connect your Instagram business account',
         step2: 'Create a comment automation rule',
-        step3: 'Comments roll in — MyChat replies + DMs them automatically',
+        step3: 'Comments roll in — MyChaat replies + DMs them automatically',
         connectCta: 'Connect Instagram',
         createCta: 'Create automation',
       },
@@ -162,7 +162,7 @@ export const dictionaries = {
         invalidCreds: 'Invalid username or password',
       },
       signup: {
-        title: 'Create your MyChat account',
+        title: 'Create your MyChaat account',
         subtitle: 'Connect Instagram once you finish — takes 30 seconds.',
         email: 'Email',
         username: 'Username',
@@ -282,9 +282,9 @@ export const dictionaries = {
       majorOutage: 'Major outage',
       unknown: 'Unknown',
       allOperational: 'All systems operational',
-      allOperationalBody: 'Every MyChat subsystem is responding normally.',
+      allOperationalBody: 'Every MyChaat subsystem is responding normally.',
       partialTitle: 'Partial service disruption',
-      partialBody: 'Some MyChat subsystems are degraded. Automations may run slower than usual.',
+      partialBody: 'Some MyChaat subsystems are degraded. Automations may run slower than usual.',
       majorTitle: 'Major outage',
       majorBody: 'One or more critical subsystems are unavailable. We are investigating.',
       unknownTitle: 'Status unavailable',
@@ -399,7 +399,7 @@ export const dictionaries = {
     //   - "إنشاء حساب" / "تسجيل الدخول" (standard SaaS phrasing).
     //   - "الأتمتة / أتمتات" — accepted in Arabic tech writing.
     //   - "لوحة التحكم" for Dashboard (standard).
-    //   - Brand names (Instagram, MyChat) intentionally stay Latin.
+    //   - Brand names (Instagram, MyChaat) intentionally stay Latin.
     //   - No regional dialect, no slang. Confident, contemporary.
     //   - Sentences are REWRITTEN to read native, not translated word-
     //     for-word from English.
@@ -499,14 +499,14 @@ export const dictionaries = {
       lessStats: 'إخفاء الإحصاءات',
       onboarding: {
         titleConnected: 'حسابك جاهز — أنشئ أول أتمتة',
-        titleNew: 'أهلاً بك في MyChat 👋',
+        titleNew: 'أهلاً بك في MyChaat 👋',
         bodyConnected:
-          'الخطوة التالية: أنشئ أتمتة للتعليقات. عندما يعلّق أحد على منشورك، سيرد MyChat بشكل عام ويُرسل له رسالة خاصة.',
+          'الخطوة التالية: أنشئ أتمتة للتعليقات. عندما يعلّق أحد على منشورك، سيرد MyChaat بشكل عام ويُرسل له رسالة خاصة.',
         bodyNew:
           'لبدء أتمتة التعليقات والرسائل على Instagram، اربط حساب الأعمال أولاً. تستغرق العملية ٣٠ ثانية فقط.',
         step1: 'اربط حساب Instagram للأعمال',
         step2: 'أنشئ قاعدة أتمتة للتعليقات',
-        step3: 'تأتي التعليقات — MyChat يرد ويُرسل الرسائل تلقائياً',
+        step3: 'تأتي التعليقات — MyChaat يرد ويُرسل الرسائل تلقائياً',
         connectCta: 'ربط Instagram',
         createCta: 'إنشاء أتمتة',
       },
@@ -533,7 +533,7 @@ export const dictionaries = {
         invalidCreds: 'البريد الإلكتروني أو كلمة المرور غير صحيحة',
       },
       signup: {
-        title: 'أنشئ حسابك في MyChat',
+        title: 'أنشئ حسابك في MyChaat',
         subtitle: 'يمكنك ربط Instagram بعد الانتهاء — تستغرق العملية ٣٠ ثانية.',
         email: 'البريد الإلكتروني',
         username: 'اسم المستخدم',
@@ -654,7 +654,7 @@ export const dictionaries = {
       majorOutage: 'تعطّل كبير',
       unknown: 'الحالة غير معروفة',
       allOperational: 'جميع الأنظمة تعمل',
-      allOperationalBody: 'جميع مكوّنات MyChat تستجيب بشكل طبيعي.',
+      allOperationalBody: 'جميع مكوّنات MyChaat تستجيب بشكل طبيعي.',
       partialTitle: 'انقطاع جزئي في الخدمة',
       partialBody: 'بعض المكوّنات تعمل بأداء أقل من المعتاد. قد تكون الأتمتات أبطأ.',
       majorTitle: 'انقطاع كبير في الخدمة',

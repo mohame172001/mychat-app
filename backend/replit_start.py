@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -49,6 +50,14 @@ def configure(env):
             raise RuntimeError("Invalid Replit public domain")
         env.setdefault("FRONTEND_URL",origin.rstrip("/"))
         env.setdefault("BACKEND_PUBLIC_URL",origin.rstrip("/"))
+    site_file = ROOT / 'backend' / 'public_site.json'
+    if production and site_file.exists():
+        public_origin = json.loads(site_file.read_text())['origin'].rstrip('/')
+        parsed = urlparse(public_origin)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+            raise RuntimeError('Invalid canonical public origin')
+        env['FRONTEND_URL'] = public_origin
+        env['BACKEND_PUBLIC_URL'] = public_origin
     if not env.get("FRONTEND_URL") or not env.get("BACKEND_PUBLIC_URL"):
         raise RuntimeError("Set FRONTEND_URL and BACKEND_PUBLIC_URL to the Replit app HTTPS origin")
     env.setdefault("INSTAGRAM_SINGLE_TENANT_FALLBACK","0")

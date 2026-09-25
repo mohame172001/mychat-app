@@ -41,7 +41,7 @@ const DashboardLayout = () => {
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
                 <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
               </div>
-              <span className="text-lg font-bold font-display truncate">mychat</span>
+              <span className="text-lg font-bold font-display truncate">MyChaat</span>
             </Link>
             <Button onClick={logout} variant="ghost" size="icon" className="rounded-full" aria-label={ar ? 'تسجيل الخروج' : 'Log out'}>
               <LogOut className="w-4 h-4" />
@@ -69,7 +69,7 @@ const DashboardLayout = () => {
         </main>
         <footer className="border-t border-slate-200 bg-white px-4 py-3 md:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
           <span className="flex items-center gap-2" data-testid="build-marker">
-            © 2026 mychat
+            © 2026 MyChaat
             <span className="hidden font-mono text-[10px] text-slate-300" data-build-sha={BUILD_SHA} />
           </span>
           <div className="flex gap-4 md:gap-5">

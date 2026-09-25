@@ -55,7 +55,7 @@ const DataDeletion = () => {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
-            <span className="text-xl font-bold tracking-tight">mychat</span>
+            <span className="text-xl font-bold tracking-tight">MyChaat</span>
           </Link>
           <Link to="/" className="text-sm font-medium text-slate-600 hover:text-slate-900 flex items-center gap-1">
             <ArrowLeft className="w-4 h-4" /> {ar ? 'رجوع' : 'Back'}
@@ -66,7 +66,7 @@ const DataDeletion = () => {
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
         <h1 className="text-4xl font-bold tracking-tight mb-2">{ar ? 'حذف البيانات' : 'Data Deletion'}</h1>
         <p className="text-sm text-slate-500 mb-10">
-          {ar ? 'اطلب حذف بيانات حسابك في مايتشات وبيانات Instagram المرتبطة به.' : 'Request deletion of your MyChat account data and connected Instagram data.'}
+          {ar ? 'اطلب حذف بيانات حسابك في مايتشات وبيانات Instagram المرتبطة به.' : 'Request deletion of your MyChaat account data and connected Instagram data.'}
         </p>
 
         {confirmationCode && (
@@ -83,7 +83,7 @@ const DataDeletion = () => {
             <p>
               {ar
                 ? 'عند التحقّق من طلبك، نحذف أو نُجهِّل ملفّ حسابك في مايتشات، وسجلّات حساب Instagram المربوط، وقواعد الأتمتة، وسجلّات معالجة التعليقات والرسائل، وسجلّات الاستخدام المرتبطة بحسابك، ورموز الوصول المخزّنة. نتوقّف عن استلام بيانات Instagram الجديدة فور حذف الحساب أو فصل Instagram.'
-                : 'When your request is verified, we delete or anonymize your MyChat account profile, connected Instagram account records, automation rules, comment/DM processing records, usage records tied to your account, and stored access tokens. We stop new Instagram data ingestion when the account is deleted or Instagram is disconnected.'}
+                : 'When your request is verified, we delete or anonymize your MyChaat account profile, connected Instagram account records, automation rules, comment/DM processing records, usage records tied to your account, and stored access tokens. We stop new Instagram data ingestion when the account is deleted or Instagram is disconnected.'}
             </p>
           </section>
 
@@ -94,7 +94,7 @@ const DataDeletion = () => {
               <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>
               {ar
                 ? ' من البريد المرتبط بحسابك في مايتشات بعنوان "Data Deletion Request". سنؤكّد الاستلام خلال 72 ساعة ونُكمل طلبات الحذف الموثّقة خلال 30 يوماً.'
-                : ' from the email address associated with your MyChat account with the subject "Data Deletion Request". We confirm receipt within 72 hours and complete verified deletion requests within 30 days.'}
+                : ' from the email address associated with your MyChaat account with the subject "Data Deletion Request". We confirm receipt within 72 hours and complete verified deletion requests within 30 days.'}
             </p>
           </section>
 
@@ -162,7 +162,7 @@ const DataDeletion = () => {
 
       <footer className="border-t border-slate-100 py-8">
         <div className="max-w-4xl mx-auto px-6 flex items-center justify-between text-sm text-slate-500">
-          <span>© 2026 mychat</span>
+          <span>© 2026 MyChaat</span>
           <div className="flex gap-6">
             <Link to="/privacy" className="hover:text-slate-900">{ar ? 'الخصوصية' : 'Privacy'}</Link>
             <Link to="/terms" className="hover:text-slate-900">{ar ? 'الشروط' : 'Terms'}</Link>
