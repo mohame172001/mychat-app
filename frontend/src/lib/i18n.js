@@ -33,7 +33,7 @@ const STORAGE_KEY = 'mychat_lang';
 export const dictionaries = {
   en: {
     common: {
-      brand: 'mychat',
+      brand: 'MyChaat',
       login: 'Log in',
       signup: 'Get Started',
       logout: 'Log out',
@@ -404,7 +404,7 @@ export const dictionaries = {
     //   - Sentences are REWRITTEN to read native, not translated word-
     //     for-word from English.
     common: {
-      brand: 'mychat',
+      brand: 'MyChaat',
       login: 'تسجيل الدخول',
       signup: 'ابدأ مجاناً',
       logout: 'تسجيل الخروج',
