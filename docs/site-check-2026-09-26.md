@@ -67,9 +67,18 @@ and rejection of identity changes. No quota limits or old outcomes were reset.
 
 ## Not claimed
 
+The existing Google account successfully signed in to the live dashboard.
+Dashboard, Automations, Settings, and Billing navigation reached their
+expected routes. Instagram showed the connected username and the builder
+loaded real posts. Empty-keyword validation disabled Go Live; entering a
+test keyword enabled it, and DM preview displayed the input correctly.
+The builder has no separate save-draft action, so the test returned without
+clicking Go Live or changing the owner's existing active rule.
+
 No new account, real payment, password reset, Instagram comment, or outbound
-DM was created by this check. The available live-site browser session was
-signed out, so authenticated creation/activation needs the owner's session.
+DM was created by this check. Rule persistence/activation and actual Meta
+delivery were not tested end-to-end. Billing explicitly reports that paid
+upgrades are not enabled; no payment readiness is claimed.
 The status endpoint reported API/database operational and webhook activity
 unknown at the time of inspection; this does not prove webhook delivery.
 
