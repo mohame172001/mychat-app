@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../lib/api';
 import analytics from '../lib/analytics';
 import { clearApiCache, seedApiCacheEntry } from '../lib/apiCache';
+import { clearAdminMeCache } from '../lib/useIsAdmin';
 import { scheduleCoreAppWarmup } from '../lib/appWarmup';
 
 const AuthContext = createContext(null);
@@ -112,6 +113,7 @@ export const AuthProvider = ({ children }) => {
           console.error('[Auth] Failed to parse stored user:', err);
           localStorage.removeItem('mychat_user');
           clearApiCache();
+          clearAdminMeCache();
         }
         const data = await fetchBootstrap(restoredUser);
         if (data?.user) setUser(data.user);
@@ -126,6 +128,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
+    clearAdminMeCache();
     setUser(data.user);
     // Race the bootstrap in parallel with the React route transition
     // so by the time the dashboard mounts, its snapshot is already
@@ -144,6 +147,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
+    clearAdminMeCache();
     setUser(data.user);
     fetchBootstrap(data.user).then((b) => {
       if (b?.user) setUser(b.user);
@@ -165,6 +169,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('mychat_token', data.token);
     localStorage.setItem('mychat_user', JSON.stringify(data.user));
     clearApiCache();
+    clearAdminMeCache();
     setUser(data.user);
     fetchBootstrap(data.user).then((b) => {
       if (b?.user) setUser(b.user);
@@ -179,6 +184,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem('mychat_token');
     localStorage.removeItem('mychat_user');
     clearApiCache();
+    clearAdminMeCache();
     setUser(null);
     analytics.reset();
   };

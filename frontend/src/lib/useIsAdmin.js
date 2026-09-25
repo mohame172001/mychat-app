@@ -14,41 +14,57 @@ import api from './api';
  */
 let _adminMePromise = null;
 let _adminMeData = null;
+let _generation = 0;
+const listeners = new Set();
 
 export function fetchAdminMe() {
   if (_adminMeData) return Promise.resolve(_adminMeData);
   if (_adminMePromise) return _adminMePromise;
+  const generation = _generation;
   _adminMePromise = api.get('/admin/me')
     .then(({ data }) => {
+      if (generation !== _generation) return { is_admin: false };
       _adminMeData = data || { is_admin: false };
       return _adminMeData;
     })
     .catch(() => {
+      if (generation !== _generation) return { is_admin: false };
       _adminMeData = { is_admin: false };
       return _adminMeData;
     })
     .finally(() => {
-      _adminMePromise = null;
+      if (generation === _generation) _adminMePromise = null;
     });
   return _adminMePromise;
 }
 
-export function clearAdminMeCacheForTests() {
+export function clearAdminMeCache() {
+  _generation += 1;
   _adminMePromise = null;
   _adminMeData = null;
+  listeners.forEach((listener) => listener());
 }
+
+export const clearAdminMeCacheForTests = clearAdminMeCache;
 
 export function useIsAdmin() {
   const [isAdmin, setIsAdmin] = useState(Boolean(_adminMeData?.is_admin));
   const [loaded, setLoaded] = useState(Boolean(_adminMeData));
   useEffect(() => {
     let alive = true;
-    fetchAdminMe().then((data) => {
-      if (!alive) return;
-      setIsAdmin(Boolean(data?.is_admin));
-      setLoaded(true);
-    });
-    return () => { alive = false; };
+    const refresh = () => {
+      const generation = _generation;
+      setIsAdmin(false);
+      setLoaded(false);
+      fetchAdminMe().then((data) => {
+        if (!alive || generation !== _generation) return;
+        setIsAdmin(Boolean(data?.is_admin));
+        setLoaded(true);
+      });
+    };
+    listeners.add(refresh);
+    refresh();
+    return () => { alive = false; listeners.delete(refresh); };
   }, []);
   return { isAdmin, loaded };
 }
