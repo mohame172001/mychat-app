@@ -28,6 +28,24 @@ usage_reservation_buckets usage_reservations user_limit_overrides user_notificat
 user_plans users webhook_inbox webhook_log webhook_processing_failures""".split()
 
 
+async def valid_index_exists(connection, collection, name, *, unique=False):
+    # Even CREATE INDEX IF NOT EXISTS can wait for table locks during a rollout.
+    cursor = await connection.execute("""
+        SELECT i.indisvalid, i.indisready, i.indisunique, t.relname, tn.nspname
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_index i ON i.indexrelid=c.oid
+        LEFT JOIN pg_class t ON t.oid=i.indrelid
+        LEFT JOIN pg_namespace tn ON tn.oid=t.relnamespace
+        WHERE n.nspname=%s AND c.relname=%s
+    """, (SCHEMA, name))
+    row = await cursor.fetchone()
+    if row is None:
+        return False
+    if row != (True, True, bool(unique), collection, SCHEMA):
+        raise ValueError(f"Index {name} is invalid or belongs to an unexpected table/constraint")
+    return True
+
+
 def encode(value):
     if isinstance(value, datetime):
         return {"$date": value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()}
@@ -397,7 +415,8 @@ class Collection:
             predicate = join([predicate, join([sql.SQL("{} IS NOT NULL").format(direct(sql.SQL("document"), k)) for k,d in keys], "OR")])
         terms = [sql.SQL("(COALESCE({},'null'::jsonb)) "+("DESC" if d < 0 else "ASC")).format(direct(sql.SQL("document"), k)) for k,d in keys]
         async with self.db.connection() as connection:
-            await connection.execute(sql.SQL("CREATE "+("UNIQUE " if options.get("unique") else "")+"INDEX IF NOT EXISTS {} ON {} ({}) WHERE {}").format(sql.Identifier(physical), self.table, sql.SQL(",").join(terms), predicate))
+            if not await valid_index_exists(connection, self.name, physical, unique=options.get("unique", False)):
+                await connection.execute(sql.SQL("CREATE "+("UNIQUE " if options.get("unique") else "")+"INDEX IF NOT EXISTS {} ON {} ({}) WHERE {}").format(sql.Identifier(physical), self.table, sql.SQL(",").join(terms), predicate))
             if "expireAfterSeconds" in options:
                 if len(keys) != 1:
                     raise ValueError("TTL requires one field")
@@ -482,7 +501,8 @@ class PostgresDocumentDatabase:
             await connection.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(SCHEMA)))
             for name in COLLECTIONS:
                 await connection.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {} (id text PRIMARY KEY,document jsonb NOT NULL CHECK(jsonb_typeof(document)='object'))").format(sql.Identifier(SCHEMA,name)))
-                await connection.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} USING gin(document jsonb_path_ops)").format(sql.Identifier(name+"_doc_gin"),sql.Identifier(SCHEMA,name)))
+                if not await valid_index_exists(connection, name, name+"_doc_gin"):
+                    await connection.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} USING gin(document jsonb_path_ops)").format(sql.Identifier(name+"_doc_gin"),sql.Identifier(SCHEMA,name)))
             await connection.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {} (collection text,index_name text,field text NOT NULL,seconds bigint NOT NULL CHECK(seconds>=0),PRIMARY KEY(collection,index_name))").format(sql.Identifier(SCHEMA,"ttl_indexes")))
             await connection.execute('''CREATE OR REPLACE FUNCTION mychat_runtime.document_values(doc jsonb, path text[])
 RETURNS SETOF jsonb LANGUAGE plpgsql IMMUTABLE AS $$
