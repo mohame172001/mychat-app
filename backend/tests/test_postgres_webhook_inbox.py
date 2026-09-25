@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from . import test_postgres_users_repository as user_tests
+import test_postgres_users_repository as user_tests
 from app.repositories.postgres_webhook_inbox import PostgresWebhookInbox
 
 

@@ -27,6 +27,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
   const [busy, setBusy] = useState(false);
   const { loginWithGoogle } = useAuth();
   const navigate = useNavigate();
+  const [slotWidth, setSlotWidth] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +42,23 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
   }, []);
 
   useEffect(() => {
-    if (configStatus !== 'enabled') return;
+    if (configStatus !== 'enabled' || !slotRef.current) return;
+    const slot = slotRef.current;
+    const measure = () => {
+      if (!busy) setSlotWidth(Math.floor(slot.clientWidth));
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, [configStatus, busy]);
+
+  useEffect(() => {
+    if (configStatus !== 'enabled' || slotWidth <= 0) return;
     let cancelled = false;
     (async () => {
       const ok = await renderGoogleButton(slotRef.current, {
@@ -74,7 +91,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
       }
     })();
     return () => { cancelled = true; };
-  }, [ar, configStatus, loginWithGoogle, navigate, onComplete, redirectTo]);
+  }, [ar, configStatus, loginWithGoogle, navigate, onComplete, redirectTo, slotWidth]);
 
   if (configStatus !== 'enabled') {
     const diagnostics = {

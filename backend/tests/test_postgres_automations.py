@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from psycopg import AsyncConnection
 
-from . import test_postgres_users_repository as user_tests
+import test_postgres_users_repository as user_tests
 from app.repositories.postgres_instagram_accounts import PostgresInstagramAccountRepository
 from app.repositories.postgres_automations import AutomationAccountNotFound, PostgresAutomationRepository
 

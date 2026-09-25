@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from pymongo.errors import DuplicateKeyError
 from app.repositories.postgres_documents import PostgresDocumentDatabase, encode, decode
-from . import test_postgres_users_repository as guards
+import test_postgres_users_repository as guards
 
 
 class CodecTests(unittest.TestCase):

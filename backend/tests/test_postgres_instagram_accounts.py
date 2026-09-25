@@ -4,7 +4,7 @@ from uuid import uuid4
 from psycopg import AsyncConnection, errors
 from psycopg.types.json import Jsonb
 
-from . import test_postgres_users_repository as user_tests
+import test_postgres_users_repository as user_tests
 from app.repositories.postgres_instagram_accounts import (
     AccountOwnershipError, PostgresInstagramAccountRepository,
 )

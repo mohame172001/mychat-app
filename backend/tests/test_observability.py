@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 os.environ.setdefault('MONGO_URL', 'mongodb://localhost:27017/test')
 os.environ.setdefault('JWT_SECRET', 'test-secret')
@@ -59,6 +61,26 @@ def test_observability_status_with_dsn_does_not_echo_dsn(monkeypatch):
 
 
 # ── status endpoint ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('backend,label', [('postgres', 'PostgreSQL'), ('mongo', 'MongoDB')])
+@pytest.mark.parametrize('available', [True, False])
+def test_public_status_reports_actual_database_without_connection_details(monkeypatch, backend, label, available):
+    ping = AsyncMock(return_value={'ok': 1})
+    if not available:
+        ping.side_effect = RuntimeError('private-database-connection-details')
+    fake_db = SimpleNamespace(
+        command=ping,
+        webhook_processing_failures=SimpleNamespace(count_documents=AsyncMock(return_value=0)),
+    )
+    monkeypatch.setattr(server, 'db', fake_db)
+    monkeypatch.setattr(server, 'DB_BACKEND', backend)
+    result = _run(server.public_status())
+    database = next(item for item in result['components'] if item['key'] == 'database')
+    assert database['detail'] == f'{label} ' + ('reachable' if available else 'unreachable')
+    assert database['status'] == ('operational' if available else 'major_outage')
+    assert 'private-database-connection-details' not in str(result)
+    ping.assert_awaited_once_with('ping')
+
 
 def test_observability_status_endpoint_returns_safe_shape(monkeypatch):
     fake_db = FakeDB(
