@@ -39,6 +39,7 @@ const PrivacyPolicy = () => {
       <ul className="list-disc ps-6 space-y-1">
         <li><strong>شركة Meta Platforms</strong> — لإرسال الردود/الرسائل وجلب بيانات التعليقات عبر واجهة Instagram Graph</li>
         <li><strong>مزوّدي البنية التحتية</strong> — تستخدم نسخة Replit استضافة Replit وقاعدة PostgreSQL المُدارة من خلالها. قد تبقى بيانات النسخة السابقة لدى Railway إلى حين اكتمال نقل الخدمة أو حذف تلك البيانات وفق سياسة الاحتفاظ. تُستخدم هذه الخدمات حصراً لتشغيل المنصّة وحماية البيانات.</li>
+        <li><strong>Resend</strong> — لتوصيل رسائل تأكيد الحساب واستعادة كلمة المرور واستقبال رسائل الدعم. عند التواصل مع الدعم نرسل بريدك ونوع المشكلة ونص رسالتك إلى فريق الدعم عبر هذه الخدمة.</li>
         <li><strong>الجهات القانونية</strong> — فقط عند وجود إلزام قانوني</li>
       </ul>
     </> },
@@ -88,6 +89,7 @@ const PrivacyPolicy = () => {
       <ul className="list-disc ps-6 space-y-1">
         <li><strong>Meta Platforms, Inc.</strong> — to send replies/DMs and fetch comment data via the Instagram Graph API</li>
         <li><strong>Infrastructure providers</strong> — the Replit deployment uses Replit hosting and its managed PostgreSQL database. Data from the previous deployment may remain on Railway until the transition is complete or those records are deleted under our retention policy. These services are used only to operate the platform and protect its data.</li>
+        <li><strong>Resend</strong> — delivers account verification and password recovery emails and receives support requests. When you contact support, your email address, issue category and message are processed through this service for our support team.</li>
         <li><strong>Law enforcement</strong> — only when required by valid legal process</li>
       </ul>
     </> },

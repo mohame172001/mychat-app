@@ -24,6 +24,7 @@ from pymongo.errors import DuplicateKeyError
 import httpx
 import runtime_scaling
 from transactional_email import resend_configured, send_auth_email
+from support_mail import SupportMessage, send_support_message
 
 from models import (
     SignupIn, LoginIn, AuthOut, UserPublic, ProfileUpdateIn,
@@ -6109,6 +6110,21 @@ class ForgotPasswordIn(BaseModel):
     # Phase 2.19 hardening: cap email at RFC 5321's 254 chars so we never
     # spend hashing/normalisation CPU on absurdly-long bodies.
     email: str = Field(min_length=1, max_length=254)
+
+
+@api.post('/support')
+async def contact_support(data: SupportMessage, request: Request):
+    ip = _client_ip(request)
+    if await _shared_rate_limited('support_ip', ip, limit=5, window_seconds=3600):
+        raise HTTPException(429, 'Too many support requests. Please try again later.')
+    if data.website or len(data.message.strip()) < 20:
+        raise HTTPException(400, 'Please check your message and try again.')
+    email_hash = _hash_identifier(str(data.email).lower())
+    if await _shared_rate_limited('support_email', email_hash, limit=3, window_seconds=3600):
+        raise HTTPException(429, 'Too many support requests. Please try again later.')
+    if not await send_support_message(data):
+        raise HTTPException(503, 'Support delivery is temporarily unavailable. Please try again later.')
+    return {'status': 'accepted'}
 
 
 @api.post('/auth/forgot-password')
