@@ -30,3 +30,18 @@ Existing expiring, single-use hashed reset tokens, rate limits, and session
 revocation remain unchanged. The account owner should enter the new password.
 New password signups use the existing verification policy when delivery is
 configured. No existing user roles or passwords are changed by enabling email.
+
+## Deployment validation (2026-09-25)
+
+- Sending domain verified; TLS set to enforced; tracking not enabled.
+- Domain-scoped sending key and sender added to both project and production
+  secrets. No secret values are committed here.
+- 50 backend tests passed locally and on Replit; 14 frontend recovery tests
+  passed locally. Replit production build and deployment succeeded.
+- Production health returned `ok: true` after startup completed.
+- A real delivery-check email from Replit was marked `Delivered` by Resend.
+- The owner's actual forgot-password request reached production but logged
+  `password_reset_request_unknown`. No reset email was issued for that request.
+  The existing account must be located or migrated into this production database
+  before its reset can be tested end to end. Do not bypass this by silently
+  creating an admin, changing a password, or copying over the whole database.
