@@ -17,6 +17,8 @@ def migrate(root):
         after = after.replace('content="mychat"', 'content="MyChaat"')
         after = after.replace('"short_name": "mychat"', '"short_name": "MyChaat"')
         after = after.replace('run mychat.', 'run MyChaat.')
+        if path.name in {'PrivacyPolicy.jsx', 'Terms.jsx'}:
+            after = after.replace('mychat', 'MyChaat')
         if path.name == 'index.html' and 'rel="canonical"' not in after:
             after = after.replace('<head>', '<head>\n        <link rel="canonical" href="https://mychaat.net/" />\n        <meta property="og:url" content="https://mychaat.net/" />')
         if before != after:

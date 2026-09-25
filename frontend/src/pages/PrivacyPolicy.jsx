@@ -57,7 +57,7 @@ const PrivacyPolicy = () => {
     { h: '١٠. التعديلات', body: <p>قد نُحدّث هذه السياسة من وقت لآخر. سنُعلن عن التعديلات الجوهرية داخل لوحة التحكّم وعبر البريد. تاريخ "آخر تحديث" في الأعلى يعكس آخر مراجعة.</p> },
     { h: '١١. التواصل', body: <p>للأسئلة حول هذه السياسة أو بياناتك، راسلنا على <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</p> },
   ] : [
-    { h: '1. Introduction', body: <p>mychat ("we", "our", "us") is an Instagram automation platform that helps businesses respond to comments and direct messages on Instagram. This Privacy Policy explains what information we collect, how we use it, and the choices you have. By using mychat, you agree to this policy.</p> },
+    { h: '1. Introduction', body: <p>MyChaat ("we", "our", "us") is an Instagram automation platform that helps businesses respond to comments and direct messages on Instagram. This Privacy Policy explains what information we collect, how we use it, and the choices you have. By using MyChaat, you agree to this policy.</p> },
     { h: '2. Information We Collect', body: <>
       <p><strong>Account information.</strong> When you sign up we collect your name, email address, auth provider, and a hashed password if you use email/password login.</p>
       <p><strong>Instagram data.</strong> When you connect your Instagram Business or Creator account via Meta's official Login flow, we receive and store:</p>
@@ -68,7 +68,7 @@ const PrivacyPolicy = () => {
         <li>Public comments left on your media, including the commenter's Instagram-scoped ID, username, and the comment text</li>
         <li>Direct messages sent to your account through the Instagram Messaging API, including sender ID and message content needed to run enabled automations</li>
       </ul>
-      <p><strong>Automation configuration.</strong> The keywords, reply templates, and flow logic you create inside mychat.</p>
+      <p><strong>Automation configuration.</strong> The keywords, reply templates, and flow logic you create inside MyChaat.</p>
       <p><strong>Usage data.</strong> Usage counters, event timestamps, status codes, and limited server logs for security, reliability, and debugging. We redact tokens and private message bodies from operational logs.</p>
     </> },
     { h: '3. How We Use Your Information', body: <>
@@ -77,7 +77,7 @@ const PrivacyPolicy = () => {
         <li>Detect new comments and DMs on your Instagram account in near-real time</li>
         <li>Match incoming comments and DMs against the automation rules you configured</li>
         <li>Send replies and direct messages on your behalf using the Instagram Graph API</li>
-        <li>Display analytics about your automations inside the mychat dashboard</li>
+        <li>Display analytics about your automations inside the MyChaat dashboard</li>
         <li>Authenticate you and keep your account secure</li>
       </ul>
       <p>We do not use Instagram data to train machine-learning models, build advertising profiles, or for any purpose unrelated to operating the automation features you enabled.</p>
@@ -100,9 +100,9 @@ const PrivacyPolicy = () => {
         <li><strong>Request a copy</strong> of the personal data we hold about you</li>
       </ul>
     </> },
-    { h: '7. Data Deletion Requests', body: <p>To request deletion of all your personal data and Instagram data stored by mychat, use the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or send an email to <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a> with the subject "Data Deletion Request" from the email address associated with your account. We will confirm receipt within 72 hours and complete deletion within 30 days.</p> },
+    { h: '7. Data Deletion Requests', body: <p>To request deletion of all your personal data and Instagram data stored by MyChaat, use the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or send an email to <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a> with the subject "Data Deletion Request" from the email address associated with your account. We will confirm receipt within 72 hours and complete deletion within 30 days.</p> },
     { h: '8. Security', body: <p>Access tokens are stored only on the backend and are not returned to the frontend. All traffic is served over HTTPS in production. Passwords are hashed using industry-standard algorithms (bcrypt). Access to production data is restricted to authorized personnel. No method of transmission or storage is 100% secure, but we follow industry best practices.</p> },
-    { h: "9. Children's Privacy", body: <p>mychat is not directed to children under 13, and we do not knowingly collect data from them.</p> },
+    { h: "9. Children's Privacy", body: <p>MyChaat is not directed to children under 13, and we do not knowingly collect data from them.</p> },
     { h: '10. Changes to This Policy', body: <p>We may update this Privacy Policy from time to time. Material changes will be announced inside the dashboard and via email. The "Last updated" date at the top reflects the most recent revision.</p> },
     { h: '11. Contact', body: <p>Questions about this policy or your data can be sent to <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</p> },
   ];

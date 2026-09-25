@@ -25,20 +25,20 @@ const Terms = () => {
     { h: '٩. التعديلات', p: 'قد نُحدّث هذه الشروط. استمرارك في استخدام الخدمة بعد نشر التعديلات يُعدّ موافقة عليها.' },
     { h: '١٠. التواصل', p: <>لأي استفسار حول هذه الشروط، تواصل عبر <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</> },
   ] : [
-    { h: '1. Agreement', p: 'By creating an account or using mychat ("the Service"), you agree to these Terms. If you do not agree, do not use the Service.' },
-    { h: '2. The Service', p: "mychat lets you connect an Instagram Business or Creator account and configure rules that automatically reply to comments and direct messages. The Service relies on Meta's Instagram Graph API and is subject to Meta's platform policies." },
+    { h: '1. Agreement', p: 'By creating an account or using MyChaat ("the Service"), you agree to these Terms. If you do not agree, do not use the Service.' },
+    { h: '2. The Service', p: "MyChaat lets you connect an Instagram Business or Creator account and configure rules that automatically reply to comments and direct messages. The Service relies on Meta's Instagram Graph API and is subject to Meta's platform policies." },
     { h: '3. Eligibility', p: "You must be at least 18 years old and authorized to operate the Instagram account you connect. You agree to comply with Meta's Platform Terms, the Instagram Community Guidelines, and all applicable laws." },
-    { h: '4. Acceptable Use', p: 'You agree NOT to use mychat to:', list: [
+    { h: '4. Acceptable Use', p: 'You agree NOT to use MyChaat to:', list: [
       "Send spam, harassment, hate speech, or content that violates Instagram's policies",
       'Impersonate any person or entity',
       'Send unsolicited commercial messages to users who did not opt in',
       'Reverse engineer, scrape, or abuse the Service or the Instagram API',
       'Attempt to circumvent rate limits or access controls',
     ], post: 'Violations may result in immediate suspension and reporting to Meta.' },
-    { h: '5. Your Content', p: 'You retain ownership of the automation rules, reply templates, and any other content you create. You grant mychat a limited license to process this content solely to operate the Service for you.' },
+    { h: '5. Your Content', p: 'You retain ownership of the automation rules, reply templates, and any other content you create. You grant MyChaat a limited license to process this content solely to operate the Service for you.' },
     { h: '6. Account Termination', p: <>You may delete your account at any time through the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or by contacting support. We may suspend or terminate accounts that violate these Terms, abuse the API, or pose risk to other users or to Meta's platform.</> },
     { h: '7. Disclaimer', p: 'The Service is provided "as is" without warranties of any kind. We do not guarantee uninterrupted operation or that every comment or DM will be processed — Meta\'s API may impose rate limits or restrictions outside our control.' },
-    { h: '8. Limitation of Liability', p: 'To the maximum extent permitted by law, mychat shall not be liable for any indirect, incidental, or consequential damages arising from your use of the Service.' },
+    { h: '8. Limitation of Liability', p: 'To the maximum extent permitted by law, MyChaat shall not be liable for any indirect, incidental, or consequential damages arising from your use of the Service.' },
     { h: '9. Changes', p: 'We may update these Terms. Continued use of the Service after changes are posted constitutes acceptance.' },
     { h: '10. Contact', p: <>For questions about these Terms, contact <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</> },
   ];
