@@ -23,6 +23,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 import httpx
 import runtime_scaling
+from transactional_email import resend_configured, send_auth_email
 
 from models import (
     SignupIn, LoginIn, AuthOut, UserPublic, ProfileUpdateIn,
@@ -442,7 +443,7 @@ def _hash_email_verification_token(token: str) -> str:
 
 
 def _email_verification_delivery_configured() -> bool:
-    return bool(EMAIL_VERIFICATION_WEBHOOK_URL)
+    return resend_configured() or bool(EMAIL_VERIFICATION_WEBHOOK_URL)
 
 
 def _email_verification_url(token: str) -> str:
@@ -450,7 +451,13 @@ def _email_verification_url(token: str) -> str:
 
 
 async def _deliver_email_verification(user: dict, token: str) -> bool:
-    """Deliver verification through a configured webhook without logging the token."""
+    """Prefer direct Resend delivery; preserve the legacy webhook adapter."""
+    if resend_configured():
+        return await send_auth_email(
+            recipient=_normalize_email_value(user.get('email')),
+            link=_email_verification_url(token), kind='email_verification',
+            expires_in_minutes=EMAIL_VERIFICATION_TOKEN_TTL_HOURS * 60,
+        )
     if not EMAIL_VERIFICATION_WEBHOOK_URL:
         return False
     payload = {
@@ -5994,8 +6001,8 @@ async def verify_email_get(token: str = Query('')):
 # Mirrors the email-verification token primitive: cryptographically
 # random token, only the HMAC-SHA256 hash is stored on the user row,
 # single-use, expiring, generic responses so no user enumeration.
-# Reuses EMAIL_VERIFICATION_WEBHOOK_URL transport with a distinct
-# template name. Raw token NEVER logged, returned, or stored.
+# Uses server-only Resend or the legacy email webhook transport.
+# Raw token NEVER logged, returned to API callers, or stored.
 
 GENERIC_FORGOT_PASSWORD_RESPONSE = {'ok': True, 'status': 'sent_if_account_exists'}
 
@@ -6014,12 +6021,17 @@ def _password_reset_link(token: str) -> str:
 
 
 async def _deliver_password_reset(user: dict, token: str) -> bool:
-    """Send the reset link via the same webhook the verification flow uses.
-    Never logs the token. Returns True iff webhook responded 2xx."""
+    """Send through Resend or the legacy webhook, without logging the token."""
+    if resend_configured():
+        return await send_auth_email(
+            recipient=_normalize_email_value(user.get('email')),
+            link=_password_reset_link(token), kind='password_reset',
+            expires_in_minutes=PASSWORD_RESET_TOKEN_TTL_HOURS * 60,
+        )
     user_id = user.get('id')
     if not EMAIL_VERIFICATION_WEBHOOK_URL:
         logger.warning(
-            'password_reset_email_delivery_skipped user_id=%s reason=missing_env env=EMAIL_VERIFICATION_WEBHOOK_URL',
+            'password_reset_email_delivery_skipped user_id=%s reason=missing_env env=RESEND_API_KEY+AUTH_EMAIL_FROM_or_EMAIL_VERIFICATION_WEBHOOK_URL',
             user_id,
         )
         return False
