@@ -14,7 +14,8 @@
  */
 import { toast } from 'sonner';
 
-export const SUPPORT_EMAIL = 'mm.mohame172000@gmail.com';
+// Switch to support@mychaat.net only after receiving DNS and delivery are verified.
+export const SUPPORT_EMAIL = 'mm.mohame172001@gmail.com';
 export const SUPPORT_MAILTO_SUBJECT = 'MyChaat support request';
 
 export function buildSupportMailtoHref() {

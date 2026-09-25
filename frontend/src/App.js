@@ -15,6 +15,7 @@ function LocaleAwareToaster() {
 import analytics from './lib/analytics';
 import { registerRoute } from './lib/routePreloader';
 import { APP_CHILD_ROUTES, ROUTES } from './constants/routes';
+import { authDestination } from './lib/navigation';
 
 import DashboardLayout from './components/layout/DashboardLayout';
 import OfflineBanner from './components/OfflineBanner';
@@ -37,6 +38,8 @@ const specificReplyDebugFn = () => import('./pages/admin/SpecificReplyDebug');
 const notFoundFn = () => import('./pages/NotFound');
 const forgotPasswordFn = () => import('./pages/ForgotPassword');
 const resetPasswordFn = () => import('./pages/ResetPassword');
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
+const Support = lazy(() => import('./pages/Support'));
 
 const Landing = lazy(landingFn);
 const Login = lazy(loginFn);
@@ -81,9 +84,9 @@ function PageViewTracker() {
         debug = params.get('debug') === '1' || localStorage.getItem('mychat_debug') === '1';
       }
     } catch (_) { /* ignore */ }
-    if (elapsed > 200 && debug) console.log(`[route] ${location.pathname}${location.search} rendered in ${elapsed}ms`);
+    if (elapsed > 200 && debug) console.log(`[route] ${location.pathname} rendered in ${elapsed}ms`);
     navStart.current = performance.now();
-    analytics.pageView(location.pathname + (location.search || ''));
+    analytics.pageView(location.pathname);
   }, [location.pathname, location.search]);
   return null;
 }
@@ -99,6 +102,7 @@ const PageLoading = () => {
 
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) {
     const ar = typeof document !== 'undefined' && document.documentElement?.lang === 'ar';
     return (
@@ -107,7 +111,7 @@ const ProtectedRoute = ({ children }) => {
       </div>
     );
   }
-  if (!user) return <Navigate to={ROUTES.LOGIN} replace />;
+  if (!user) return <Navigate to={authDestination(ROUTES.LOGIN, location.pathname + location.search + location.hash)} replace />;
   return children;
 };
 
@@ -191,6 +195,9 @@ function App() {
               <Route path={ROUTES.SIGNUP} element={<Signup />} />
               <Route path={ROUTES.FORGOT_PASSWORD} element={<ForgotPassword />} />
               <Route path={ROUTES.RESET_PASSWORD} element={<ResetPassword />} />
+              <Route path={ROUTES.VERIFY_EMAIL} element={<VerifyEmail />} />
+              <Route path={ROUTES.SUPPORT} element={<Support />} />
+              <Route path="/contact" element={<Navigate to={ROUTES.SUPPORT} replace />} />
               <Route path={ROUTES.PRIVACY} element={<PrivacyPolicy />} />
               <Route path={ROUTES.TERMS} element={<Terms />} />
               <Route path={ROUTES.DATA_DELETION} element={<DataDeletion />} />
@@ -204,7 +211,7 @@ function App() {
                 <Route path={APP_CHILD_ROUTES.BILLING} element={<Billing />} />
                 <Route path={APP_CHILD_ROUTES.ADMIN} element={<AdminConsole />} />
                 <Route path={APP_CHILD_ROUTES.ADMIN_SPECIFIC_REPLY_DEBUG} element={<SpecificReplyDebug />} />
-                <Route path="*" element={<Navigate to={ROUTES.APP} replace />} />
+                <Route path="*" element={<NotFound />} />
               </Route>
               <Route path="*" element={<NotFound />} />
             </Routes>

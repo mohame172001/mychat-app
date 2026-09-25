@@ -719,12 +719,22 @@ const Automations = () => {
   };
 
   useEffect(() => {
+    if (routeSearchParams.get('create') === '1' && !builderOpen) {
+      const next = new URLSearchParams(routeSearchParams);
+      next.delete('create');
+      next.delete('edit');
+      setRouteSearchParams(next, { replace: true });
+      openBuilder();
+      return;
+    }
     const editId = routeSearchParams.get('edit');
     if (!editId || loading || builderOpen) return;
     const automation = list.find(item => item.id === editId);
     if (!automation) return;
     openEditBuilder(automation);
-    setRouteSearchParams({}, { replace: true });
+    const next = new URLSearchParams(routeSearchParams);
+    next.delete('edit');
+    setRouteSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeSearchParams, loading, list, builderOpen]);
 

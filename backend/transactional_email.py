@@ -53,6 +53,9 @@ async def send_auth_email(*, recipient: str, link: str, kind: str,
             '</body></html>'
         ),
     }
+    reply_to = os.environ.get('AUTH_EMAIL_REPLY_TO', '').strip()
+    if reply_to:
+        payload['reply_to'] = reply_to
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(RESEND_ENDPOINT, json=payload, headers={

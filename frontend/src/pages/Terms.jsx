@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { MessageCircle, ArrowLeft } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import { SUPPORT_EMAIL } from '../lib/contactSupport';
 
 const Terms = () => {
   const { lang } = useTranslation();
@@ -23,7 +24,7 @@ const Terms = () => {
     { h: '٧. إخلاء المسؤولية', p: 'تُقدَّم الخدمة "كما هي" دون أي ضمانات. لا نضمن استمرارية التشغيل ولا معالجة كل تعليق أو رسالة — فقد تفرض واجهة Meta حدوداً أو قيوداً خارجة عن إرادتنا.' },
     { h: '٨. تحديد المسؤولية', p: 'إلى أقصى حدّ يسمح به القانون، لا تتحمّل مايتشات أي مسؤولية عن الأضرار غير المباشرة أو العرضية أو التبعية الناشئة عن استخدامك للخدمة.' },
     { h: '٩. التعديلات', p: 'قد نُحدّث هذه الشروط. استمرارك في استخدام الخدمة بعد نشر التعديلات يُعدّ موافقة عليها.' },
-    { h: '١٠. التواصل', p: <>لأي استفسار حول هذه الشروط، تواصل عبر <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</> },
+    { h: '١٠. التواصل', p: <>لأي استفسار حول هذه الشروط، تواصل عبر <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>.</> },
   ] : [
     { h: '1. Agreement', p: 'By creating an account or using MyChaat ("the Service"), you agree to these Terms. If you do not agree, do not use the Service.' },
     { h: '2. The Service', p: "MyChaat lets you connect an Instagram Business or Creator account and configure rules that automatically reply to comments and direct messages. The Service relies on Meta's Instagram Graph API and is subject to Meta's platform policies." },
@@ -40,7 +41,7 @@ const Terms = () => {
     { h: '7. Disclaimer', p: 'The Service is provided "as is" without warranties of any kind. We do not guarantee uninterrupted operation or that every comment or DM will be processed — Meta\'s API may impose rate limits or restrictions outside our control.' },
     { h: '8. Limitation of Liability', p: 'To the maximum extent permitted by law, MyChaat shall not be liable for any indirect, incidental, or consequential damages arising from your use of the Service.' },
     { h: '9. Changes', p: 'We may update these Terms. Continued use of the Service after changes are posted constitutes acceptance.' },
-    { h: '10. Contact', p: <>For questions about these Terms, contact <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</> },
+    { h: '10. Contact', p: <>For questions about these Terms, contact <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>.</> },
   ];
 
   return (

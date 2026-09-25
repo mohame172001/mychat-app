@@ -12,9 +12,15 @@ environment variables or commit a real key.
 - Request a reset on `https://mychaat.net/forgot-password` for an existing
   password-based account and check Resend's delivery status, then the inbox.
 
-`FRONTEND_URL` supplies the reset link origin and `BACKEND_PUBLIC_URL` supplies
-the verification link origin. Production Replit startup resolves both from
-`backend/public_site.json`. Auth emails require HTTPS links.
+`FRONTEND_URL` supplies both the reset and verification link origin. Verification
+opens `/verify-email`; the user explicitly confirms before the POST consumes the
+token. Old `/api/auth/verify-email` GET links redirect to that page without
+consuming the token, so ordinary email scanner GET requests cannot verify users.
+Production Replit startup resolves the public origin from `backend/public_site.json`.
+Auth emails require HTTPS links.
+
+Optional `AUTH_EMAIL_REPLY_TO` sets Resend's `reply_to` header. Set it only to a
+working receiving address; it does not create a mailbox or configure DNS.
 
 The optional legacy `EMAIL_VERIFICATION_WEBHOOK_URL` transport remains supported
 when Resend is not configured. A failed Resend request does not fall through to

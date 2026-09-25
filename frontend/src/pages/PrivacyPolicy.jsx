@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { MessageCircle, ArrowLeft } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import { SUPPORT_EMAIL } from '../lib/contactSupport';
 
 const PrivacyPolicy = () => {
   const { lang } = useTranslation();
@@ -51,11 +52,11 @@ const PrivacyPolicy = () => {
         <li><strong>طلب نسخة</strong> من البيانات الشخصية التي نحتفظ بها عنك</li>
       </ul>
     </> },
-    { h: '٧. طلبات حذف البيانات', body: <p>لطلب حذف جميع بياناتك وبيانات Instagram المخزّنة لدى مايتشات، استخدم <Link to="/data-deletion" className="text-blue-600 hover:underline">صفحة حذف البيانات</Link> أو راسلنا على <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a> بعنوان "Data Deletion Request" من البريد المرتبط بحسابك. سنؤكّد الاستلام خلال 72 ساعة ونُكمل الحذف خلال 30 يوماً.</p> },
+    { h: '٧. طلبات حذف البيانات', body: <p>لطلب حذف جميع بياناتك وبيانات Instagram المخزّنة لدى مايتشات، استخدم <Link to="/data-deletion" className="text-blue-600 hover:underline">صفحة حذف البيانات</Link> أو راسلنا على <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a> بعنوان "Data Deletion Request" من البريد المرتبط بحسابك. سنؤكّد الاستلام خلال 72 ساعة ونُكمل الحذف خلال 30 يوماً.</p> },
     { h: '٨. الأمان', body: <p>رموز الوصول تُخزَّن في الخادم فقط ولا تُعاد إلى الواجهة. كل الاتصالات تتمّ عبر HTTPS في الإنتاج. كلمات المرور مشفّرة بخوارزميات قياسية (bcrypt). الوصول إلى بيانات الإنتاج مقصور على الموظّفين المخوّلين. ما من وسيلة آمنة بنسبة 100٪، لكنّنا نتّبع أفضل ممارسات الصناعة.</p> },
     { h: '٩. خصوصية الأطفال', body: <p>مايتشات ليست موجّهة لمن هم دون الـ13 من العمر، ولا نجمع بياناتهم عن قصد.</p> },
     { h: '١٠. التعديلات', body: <p>قد نُحدّث هذه السياسة من وقت لآخر. سنُعلن عن التعديلات الجوهرية داخل لوحة التحكّم وعبر البريد. تاريخ "آخر تحديث" في الأعلى يعكس آخر مراجعة.</p> },
-    { h: '١١. التواصل', body: <p>للأسئلة حول هذه السياسة أو بياناتك، راسلنا على <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</p> },
+    { h: '١١. التواصل', body: <p>للأسئلة حول هذه السياسة أو بياناتك، راسلنا على <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>.</p> },
   ] : [
     { h: '1. Introduction', body: <p>MyChaat ("we", "our", "us") is an Instagram automation platform that helps businesses respond to comments and direct messages on Instagram. This Privacy Policy explains what information we collect, how we use it, and the choices you have. By using MyChaat, you agree to this policy.</p> },
     { h: '2. Information We Collect', body: <>
@@ -100,11 +101,11 @@ const PrivacyPolicy = () => {
         <li><strong>Request a copy</strong> of the personal data we hold about you</li>
       </ul>
     </> },
-    { h: '7. Data Deletion Requests', body: <p>To request deletion of all your personal data and Instagram data stored by MyChaat, use the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or send an email to <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a> with the subject "Data Deletion Request" from the email address associated with your account. We will confirm receipt within 72 hours and complete deletion within 30 days.</p> },
+    { h: '7. Data Deletion Requests', body: <p>To request deletion of all your personal data and Instagram data stored by MyChaat, use the <Link to="/data-deletion" className="text-blue-600 hover:underline">Data Deletion page</Link> or send an email to <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a> with the subject "Data Deletion Request" from the email address associated with your account. We will confirm receipt within 72 hours and complete deletion within 30 days.</p> },
     { h: '8. Security', body: <p>Access tokens are stored only on the backend and are not returned to the frontend. All traffic is served over HTTPS in production. Passwords are hashed using industry-standard algorithms (bcrypt). Access to production data is restricted to authorized personnel. No method of transmission or storage is 100% secure, but we follow industry best practices.</p> },
     { h: "9. Children's Privacy", body: <p>MyChaat is not directed to children under 13, and we do not knowingly collect data from them.</p> },
     { h: '10. Changes to This Policy', body: <p>We may update this Privacy Policy from time to time. Material changes will be announced inside the dashboard and via email. The "Last updated" date at the top reflects the most recent revision.</p> },
-    { h: '11. Contact', body: <p>Questions about this policy or your data can be sent to <a href="mailto:mm.mohame172000@gmail.com" className="text-blue-600 hover:underline">mm.mohame172000@gmail.com</a>.</p> },
+    { h: '11. Contact', body: <p>Questions about this policy or your data can be sent to <a href={`mailto:${SUPPORT_EMAIL}`} className="text-blue-600 hover:underline">{SUPPORT_EMAIL}</a>.</p> },
   ];
 
   return (

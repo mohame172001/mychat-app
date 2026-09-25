@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { PasswordInput } from '../components/ui/password-input';
@@ -8,7 +8,8 @@ import { MessageCircle, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
 import GoogleSignInButton from '../components/auth/GoogleSignInButton';
-import { authErrorMessageFromApiError } from '../lib/authErrors';
+import { authErrorCode, authErrorMessageFromApiError } from '../lib/authErrors';
+import { safeAppReturnTo, authDestination } from '../lib/navigation';
 import { useTranslation } from '../lib/i18n';
 import LangSwitcher from '../components/LangSwitcher';
 
@@ -19,6 +20,8 @@ const Signup = () => {
   const [loading, setLoading] = useState(false);
   const { signup } = useAuth();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const returnTo = safeAppReturnTo(params.get('next'));
   const { t, lang } = useTranslation();
 
   const handleSubmit = async (e) => {
@@ -57,8 +60,12 @@ const Signup = () => {
     try {
       await signup(u, em, password);
       toast.success(lang === 'ar' ? 'تم إنشاء الحساب — أهلاً بك في MyChaat' : 'Account created! Welcome to MyChaat');
-      navigate('/app');
+      navigate(returnTo, { replace: true });
     } catch (err) {
+      if (authErrorCode(err?.response?.data?.detail) === 'email_verification_required') {
+        navigate('/verify-email', { state: { email: em, returnTo } });
+        return;
+      }
       toast.error(authErrorMessageFromApiError(err) || (lang === 'ar' ? 'تعذّر إنشاء الحساب' : 'Signup failed'));
     } finally {
       setLoading(false);
@@ -96,7 +103,7 @@ const Signup = () => {
             <h1 className="font-display text-3xl md:text-4xl font-extrabold tracking-tight">{t('auth.signup.title')}</h1>
             <p className="mt-2 text-slate-600">{t('auth.signup.subtitle')}</p>
             <div className="mt-6">
-              <GoogleSignInButton redirectTo="/app" />
+              <GoogleSignInButton redirectTo={returnTo} />
             </div>
             <form onSubmit={handleSubmit} className="mt-6 space-y-4">
               <div className="space-y-2">
@@ -116,7 +123,7 @@ const Signup = () => {
               </Button>
             </form>
             <p className="mt-6 text-sm text-center text-slate-600">
-              {t('auth.signup.haveAccount')} <Link to="/login" className="font-semibold text-slate-900 hover:underline">{t('auth.signup.loginLink')}</Link>
+              {t('auth.signup.haveAccount')} <Link to={authDestination('/login', returnTo)} className="font-semibold text-slate-900 hover:underline">{t('auth.signup.loginLink')}</Link>
             </p>
             <p className="mt-4 text-xs text-center text-slate-500">
               {lang === 'ar' ? (

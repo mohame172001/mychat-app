@@ -6,7 +6,7 @@ import { Input } from '../components/ui/input';
 import api from '../lib/api';
 import { useTranslation } from '../lib/i18n';
 
-const SUPPORT_EMAIL = 'mm.mohame172000@gmail.com';
+import { SUPPORT_EMAIL } from '../lib/contactSupport';
 
 function useConfirmationCode() {
   const location = useLocation();

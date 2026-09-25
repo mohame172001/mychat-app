@@ -372,7 +372,7 @@ const Dashboard = () => {
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
           </Button>
-          <Link to={ROUTES.APP_AUTOMATIONS}>
+          <Link to={ROUTES.APP_CREATE_AUTOMATION}>
             <Button size="sm" className="bg-slate-900 hover:bg-slate-800 text-white rounded-full">
               <Plus className="w-4 h-4 me-1.5" /> {t('common.newAutomation')}
             </Button>
@@ -419,13 +419,13 @@ const Dashboard = () => {
             </div>
             <div className="flex flex-col gap-2 shrink-0">
               {!igConnected ? (
-                <Link to="/app/settings">
+                <Link to={ROUTES.APP_INSTAGRAM_SETTINGS}>
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
                     {t('dashboard.onboarding.connectCta')}
                   </Button>
                 </Link>
               ) : (
-                <Link to={ROUTES.APP_AUTOMATIONS}>
+                <Link to={ROUTES.APP_CREATE_AUTOMATION}>
                   <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl">
                     <Plus className="w-4 h-4 me-1.5" /> {t('dashboard.onboarding.createCta')}
                   </Button>

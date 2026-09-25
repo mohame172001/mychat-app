@@ -52,7 +52,7 @@ export default function GoogleSignInButton({ onComplete, redirectTo = '/app' }) 
             await loginWithGoogle(credential);
             toast.success(ar ? 'تم تسجيل الدخول عبر Google' : 'Signed in with Google');
             if (onComplete) onComplete();
-            else navigate(redirectTo);
+            else navigate(redirectTo, { replace: true });
           } catch (err) {
             const detail = err?.response?.data?.detail;
             toast.error(googleErrorMessage(detail));

@@ -11,6 +11,7 @@ import transactional_email as mail
 def email_env(monkeypatch):
     monkeypatch.setenv('RESEND_API_KEY', 'test-sending-key')
     monkeypatch.setenv('AUTH_EMAIL_FROM', 'MyChaat <no-reply@mail.example.com>')
+    monkeypatch.delenv('AUTH_EMAIL_REPLY_TO', raising=False)
 
 
 def client_for(monkeypatch, status=200, body=None, error=None):
@@ -92,6 +93,13 @@ def test_html_link_is_escaped(monkeypatch):
     calls = client_for(monkeypatch)
     assert send(link='https://example.com/reset?token=a&value="b"')
     assert 'token=a&amp;value=&quot;b&quot;' in calls[0][1]['json']['html']
+
+
+def test_support_reply_to_uses_backend_configuration(monkeypatch):
+    monkeypatch.setenv('AUTH_EMAIL_REPLY_TO', 'support@mychaat.net')
+    calls = client_for(monkeypatch)
+    assert send()
+    assert calls[0][1]['json']['reply_to'] == 'support@mychaat.net'
 
 
 @pytest.mark.parametrize('link', ['http://example.com/reset', 'javascript:alert(1)',

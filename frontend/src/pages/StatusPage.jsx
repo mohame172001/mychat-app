@@ -147,7 +147,7 @@ export default function StatusPage() {
 
         <p className="mt-8 text-xs text-slate-400 text-center">
           {ar ? 'للحوادث غير المُسجّلة هنا، تواصل عبر ' : 'For incidents not yet reflected here, email '}
-          <a href="mailto:mm.mohame172000@gmail.com" className="underline">{ar ? 'الدعم' : 'support'}</a>.
+          <Link to="/support" className="underline">{ar ? 'الدعم' : 'support'}</Link>.
         </p>
       </div>
     </div>

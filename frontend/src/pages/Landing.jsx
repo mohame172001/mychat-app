@@ -7,7 +7,6 @@ import {
   MessageCircle, Sparkles, Target, Users, X, Zap, MousePointerClick,
   Shield, Languages,
 } from 'lucide-react';
-import { buildSupportMailtoHref, handleContactClick } from '../lib/contactSupport';
 import { useTranslation } from '../lib/i18n';
 import LangSwitcher from '../components/LangSwitcher';
 
@@ -221,13 +220,9 @@ const Landing = () => {
             <Link to="/privacy" className="hover:text-slate-900">{t('common.privacy')}</Link>
             <Link to="/terms" className="hover:text-slate-900">{t('common.terms')}</Link>
             <Link to="/data-deletion" className="hover:text-slate-900">{t('common.dataDeletion')}</Link>
-            <a
-              href={buildSupportMailtoHref()}
-              onClick={handleContactClick}
-              className="hover:text-slate-900"
-            >
+            <Link to="/support" className="hover:text-slate-900">
               {t('common.contact')}
-            </a>
+            </Link>
           </div>
         </div>
       </footer>

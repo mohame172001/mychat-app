@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useLocation, Link } from 'react-router-dom';
+import { useLocation, useSearchParams, Link } from 'react-router-dom';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -27,7 +27,14 @@ const Settings = () => {
   const { user, refreshUser } = useAuth();
   const { t, lang } = useTranslation();
   const location = useLocation();
-  const [tab, setTab] = useState('profile');
+  const [settingsParams, setSettingsParams] = useSearchParams();
+  const requestedTab = settingsParams.get('tab');
+  const tab = tabs.some(item => item.id === requestedTab) ? requestedTab : 'profile';
+  const setTab = (value) => {
+    const next = new URLSearchParams(settingsParams);
+    next.set('tab', value);
+    setSettingsParams(next);
+  };
   const [notif, setNotif] = useState({ email: true, push: false, weekly: false });
   const [notifLoading, setNotifLoading] = useState(true);
   const [notifSaving, setNotifSaving] = useState(false);
@@ -141,20 +148,18 @@ const Settings = () => {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    const requestedTab = params.get('tab');
-    if (tabs.some(t => t.id === requestedTab)) {
-      setTab(requestedTab);
-    }
     const igStatus = params.get('ig');
     if (igStatus === 'connected') {
-      setTab('instagram');
       refreshUser().then(() => toast.success(lang === 'ar' ? 'تم ربط Instagram بنجاح!' : 'Instagram connected successfully!'));
-      window.history.replaceState({}, '', location.pathname);
     } else if (igStatus === 'error') {
-      setTab('instagram');
       const reason = params.get('reason') || 'unknown';
       toast.error(instagramErrorMessage(reason));
-      window.history.replaceState({}, '', location.pathname);
+    }
+    if (igStatus === 'connected' || igStatus === 'error') {
+      params.delete('ig');
+      params.delete('reason');
+      params.set('tab', 'instagram');
+      setSettingsParams(params, { replace: true });
     }
   }, [location.search]); // eslint-disable-line
 

@@ -447,7 +447,7 @@ def _email_verification_delivery_configured() -> bool:
 
 
 def _email_verification_url(token: str) -> str:
-    return f"{BACKEND_PUBLIC_URL.rstrip('/')}/api/auth/verify-email?token={token}"
+    return f"{FRONTEND_URL.rstrip('/')}/verify-email?{urlencode({'token': token})}"
 
 
 async def _deliver_email_verification(user: dict, token: str) -> bool:
@@ -5994,7 +5994,11 @@ async def verify_email(body: dict = Body(...)):
 
 @api.get('/auth/verify-email')
 async def verify_email_get(token: str = Query('')):
-    return await _verify_email_token_value(token)
+    # Old email links must open the UI, not consume tokens in email scanners.
+    return RedirectResponse(
+        _email_verification_url(token if len(token) <= 256 else ''), status_code=303,
+        headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'},
+    )
 
 
 # ---------------- Phase 2.14 password reset ----------------

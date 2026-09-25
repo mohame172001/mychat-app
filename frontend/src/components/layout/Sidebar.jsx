@@ -20,7 +20,6 @@ import { startInstagramConnect } from '../../lib/instagramConnect';
 import { instagramApi } from '../../api/instagramApi';
 import { ROUTES } from '../../constants/routes';
 import { useIsAdmin } from '../../lib/useIsAdmin';
-import { buildSupportMailtoHref, handleContactClick } from '../../lib/contactSupport';
 import { useTranslation } from '../../lib/i18n';
 import { cachedApiGetSWR, getCachedApiData, invalidateApiCache } from '../../lib/apiCache';
 import { preloadRoute } from '../../lib/routePreloader';
@@ -315,13 +314,9 @@ const Sidebar = () => {
           className="w-full justify-start text-slate-600"
           size="sm"
         >
-          <a
-            href={buildSupportMailtoHref()}
-            onClick={handleContactClick}
-            rel="noopener noreferrer"
-          >
+          <Link to={ROUTES.SUPPORT}>
             <HelpCircle className="w-4 h-4 me-2" /> {t('nav.helpSupport')}
-          </a>
+          </Link>
         </Button>
         <Button onClick={logout} variant="ghost" className="w-full justify-start text-slate-600" size="sm">
           <LogOut className="w-4 h-4 me-2" /> {t('common.logout')}
