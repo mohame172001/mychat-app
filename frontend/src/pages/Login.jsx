@@ -64,8 +64,8 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen grid md:grid-cols-2 bg-white">
-      <div className="flex flex-col p-8 md:p-12">
+    <div className="min-h-screen grid grid-cols-1 md:grid-cols-2 bg-white">
+      <div className="min-w-0 flex flex-col p-8 md:p-12">
         <div className="flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
@@ -76,7 +76,7 @@ const Login = () => {
           <LangSwitcher />
         </div>
         <div className="flex-1 flex items-center justify-center">
-          <div className="w-full max-w-sm">
+          <div className="min-w-0 w-full max-w-sm">
             <h1 className="font-display text-3xl md:text-4xl font-extrabold tracking-tight">{t('auth.login.title')}</h1>
             <p className="mt-2 text-slate-600">{t('auth.login.subtitle')}</p>
             <div className="mt-6">

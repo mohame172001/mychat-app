@@ -30939,21 +30939,22 @@ async def public_status() -> dict:
         'detail': 'Responding to requests',
     })
 
-    # Mongo — quick admin command, ~100ms.
+    database_name = 'PostgreSQL' if DB_BACKEND == 'postgres' else 'MongoDB'
+    # Both repository backends expose the same connectivity check.
     try:
         await db.command('ping')
         components.append({
             'key': 'database',
             'name': 'Database',
             'status': 'operational',
-            'detail': 'MongoDB primary reachable',
+            'detail': f'{database_name} reachable',
         })
     except Exception:
         components.append({
             'key': 'database',
             'name': 'Database',
             'status': 'major_outage',
-            'detail': 'MongoDB unreachable',
+            'detail': f'{database_name} unreachable',
         })
 
     # Instagram webhook intake — heuristic: did Meta deliver an event
