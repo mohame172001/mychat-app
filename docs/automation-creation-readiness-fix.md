@@ -31,3 +31,19 @@ They use isolated database/Graph fixtures, not live Instagram actions.
 After deployment, verify the real account's newly persisted certification
 after the startup heal. A warning does not prove Meta comment delivery or
 reply execution: those still require a real comment on the selected post.
+
+## Live verification
+
+The patch was committed as `262510a`, cherry-picked in Replit as `e388b69`,
+and published successfully on the existing deployment/resources. Production
+database copying stayed disabled. The startup heal then persisted
+`commentWebhookReady=true` and
+`subscription_verified_scope_proof_inconclusive`, with readback HTTP 200,
+all required subscription fields present, and no missing fields. This was
+verified through a read-only production query after the heal completed at
+2026-09-25 21:10:25 UTC. No manual readiness/database override was used.
+
+Validation passed: 231 focused backend tests locally and in Replit, 277
+frontend tests locally, and the production frontend build. The available
+browser session was signed out, so authenticated live rule creation and
+an actual Instagram comment/reply were not claimed as tested in this pass.
