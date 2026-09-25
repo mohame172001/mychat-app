@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "@/index.css";
+import "@/styles/arabicTypography.css";
 import App from "@/App";
 import analytics from "@/lib/analytics";
 import { initSentry } from "@/lib/sentryClient";
