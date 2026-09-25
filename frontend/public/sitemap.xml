@@ -1,27 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://frontend-production-6eb2.up.railway.app/</loc>
+    <loc>https://mychaat.net/</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://frontend-production-6eb2.up.railway.app/login</loc>
+    <loc>https://mychaat.net/login</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://frontend-production-6eb2.up.railway.app/signup</loc>
+    <loc>https://mychaat.net/signup</loc>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://frontend-production-6eb2.up.railway.app/privacy</loc>
+    <loc>https://mychaat.net/privacy</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://frontend-production-6eb2.up.railway.app/terms</loc>
+    <loc>https://mychaat.net/terms</loc>
+    <changefreq>yearly</changefreq>
+    <priority>0.3</priority>
+  </url>
+  <url>
+    <loc>https://mychaat.net/data-deletion</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>

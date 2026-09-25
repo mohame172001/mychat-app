@@ -5,4 +5,4 @@ Disallow: /admin/
 Disallow: /reset-password
 Disallow: /data-deletion
 
-Sitemap: https://frontend-production-6eb2.up.railway.app/sitemap.xml
+Sitemap: https://mychaat.net/sitemap.xml

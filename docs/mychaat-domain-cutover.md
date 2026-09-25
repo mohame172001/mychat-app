@@ -28,3 +28,16 @@ External configuration checklist (not completed by this document):
 
 Validate homepage, login, signup, legal pages, API health, signed webhook,
 real account connection and existing data before retiring old domains.
+
+## Verified configuration changes (2026-09-25)
+
+- Meta display name saved as MyChaat; Instagram product name synced to MyChaat - IG.
+- Meta website, privacy and terms updated to the new origin; mychaat.net added
+  alongside the existing Railway app domains.
+- Instagram OAuth redirect added without removing the working Railway redirect.
+- Meta rejected the new deletion-instructions URL as invalid despite public HTTP
+  200; the previous deletion URL is deliberately retained pending revalidation.
+- Google config on the new domain reports enabled=false. It needs provider setup,
+  not only a domain replacement.
+- Webhook delivery remains on Railway until real accounts and their encrypted
+  tokens are ready on Replit. No user data migration is implied by these changes.
