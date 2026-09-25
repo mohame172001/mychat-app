@@ -16987,12 +16987,13 @@ async def certify_instagram_account_for_comment_webhooks(
                 'subscription_partially_ready'
             )
     elif (
-        reason == 'admin_repair'
-        and
         comments_subscribed
         and not missing_subscriptions
+        and parity.get('subscribe_status') == 200
+        and parity.get('verify_status') == 200
+        and not parity.get('subscription_readback_failed')
         and (
-            comment_permission is None
+            (comment_permission is None and reason == 'admin_repair')
             or (
                 comment_permission is False
                 and scope_context.get('scope_check_proven') is not True
@@ -17001,11 +17002,21 @@ async def certify_instagram_account_for_comment_webhooks(
     ):
         # Graph POST + fresh readback proves the account is subscribed,
         # but debug_token could not prove the active token's comment
-        # scope. This is not the same as a missing permission. Keep the
-        # state usable and explicit so operators run a live webhook test
-        # or inspect debug_token configuration instead of reconnecting.
-        status = COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE
-        blocker = COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE
+        # scope. An unproven cached denial is not a missing permission,
+        # regardless of whether certification was triggered by an admin
+        # or a background heal. Preserve any contrary delivery evidence.
+        delivery = await _measure_account_webhook_delivery_signal(
+            username_key=username_key,
+            instagram_account_id=ig_user_id,
+            minutes=_COMMENT_WEBHOOK_DELIVERY_LOOKBACK_MINUTES,
+        )
+        if delivery['webhook_event_count'] > 0 and not delivery['comment_payload_seen']:
+            status = COMMENT_WEBHOOK_STATUS_META_DELIVERY_BLOCKED
+            blocker = 'comment_fields_subscribed_but_not_delivered'
+            meta_delivery_blocked = True
+        else:
+            status = COMMENT_WEBHOOK_STATUS_SUBSCRIPTION_VERIFIED_SCOPE_INCONCLUSIVE
+            blocker = COMMENT_WEBHOOK_BLOCKER_ACTIVE_SCOPE_INCONCLUSIVE
     elif comment_permission is False:
         # Cached or user-level scope evidence can be stale after
         # reconnects or duplicate account rows. Do not falsely tell

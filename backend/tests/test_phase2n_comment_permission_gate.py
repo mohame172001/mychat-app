@@ -286,8 +286,8 @@ def test_unproven_missing_comment_scope_is_inconclusive(monkeypatch):
     report = _run(
         server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
     )
-    assert report['comment_webhook_ready'] is False
-    assert report['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert report['comment_webhook_ready'] is True
+    assert report['comment_webhook_status'] == 'subscription_verified_scope_proof_inconclusive'
     assert report['comment_webhook_blocker'] == 'active_token_scope_proof_inconclusive'
     assert report['comment_webhook_reconnect_required'] is False
     assert report['comment_permission_granted'] is False
@@ -435,7 +435,8 @@ def test_stale_user_audit_scope_mismatch_is_inconclusive(monkeypatch):
     report = _run(
         server.certify_instagram_account_for_comment_webhooks(account, reason='sync')
     )
-    assert report['comment_webhook_status'] == 'certification_scope_check_inconclusive'
+    assert report['comment_webhook_ready'] is True
+    assert report['comment_webhook_status'] == 'subscription_verified_scope_proof_inconclusive'
     assert report['comment_webhook_blocker'] == 'active_token_scope_proof_inconclusive'
     assert report['comment_permission_token_prefix_matches'] is False
 
