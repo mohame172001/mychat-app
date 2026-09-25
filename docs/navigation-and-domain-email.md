@@ -49,3 +49,20 @@ link alone activates receiving.
 - Backend: 88 auth, identity, Google, password-reset, and mail tests passed.
 - Tests use isolated fixtures; they do not prove live delivery or migrate the
   owner's legacy account. Existing roles, passwords and Instagram data are unchanged.
+
+## Live validation (2026-09-25)
+
+- Changes were cherry-picked into Replit. Its auth/mail tests, all 34 frontend
+  suites (281 tests in that checkout), and production build passed. Legacy
+  reset tests now clear delivery credentials to avoid using workspace secrets.
+- Replit republish completed with status Live, keeping 0.5 vCPU / 2 GiB and
+  leaving production-database overwrite disabled.
+- Live browser checks: home Contact -> Support; Support -> Forgot Password;
+  `/contact` -> `/support`; protected Instagram settings -> login with `next`;
+  signup/login links preserve that same destination.
+- An old verification API link redirected to the UI and removed its token from
+  the address bar. Explicitly submitting a synthetic invalid token showed the
+  invalid/expired message and resend form, not a false success.
+- No real account was created, verified or reset in these checks. Authenticated
+  builder/tab behavior is covered by code checks, not a claimed live owner login.
+- Root-domain mail receiving and sender cutover still await owner confirmation.
