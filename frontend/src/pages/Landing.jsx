@@ -1,233 +1,118 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Button } from '../components/ui/button';
-import { Badge } from '../components/ui/badge';
-import {
-  ArrowRight, BarChart3, Bot, ChevronRight, Instagram, Menu,
-  MessageCircle, Sparkles, Target, Users, X, Zap, MousePointerClick,
-  Shield, Languages,
-} from 'lucide-react';
+import { ArrowDown, ArrowUpRight, Check, ChevronDown, Instagram, Menu, MessageCircle, ShieldCheck, X } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import LangSwitcher from '../components/LangSwitcher';
+import ConversationPreview from '../components/landing/ConversationPreview';
+import { landingCopy } from '../components/landing/landingCopy';
+import './Landing.css';
 
+function useReducedMotion() {
+  const [reduced, setReduced] = useState(true);
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  return reduced;
+}
 
-// Feature key → icon. The actual copy comes from i18n dictionaries.
-const FEATURE_ICONS = {
-  commentTrigger: { Icon: Zap, color: 'from-blue-500 to-cyan-400' },
-  dmAutomation: { Icon: MessageCircle, color: 'from-pink-500 to-orange-400' },
-  dashboard: { Icon: BarChart3, color: 'from-emerald-500 to-teal-400' },
-  deliveryAware: { Icon: Shield, color: 'from-purple-500 to-pink-400' },
-  multiAccount: { Icon: Users, color: 'from-indigo-500 to-blue-400' },
-  conversionTracking: { Icon: MousePointerClick, color: 'from-amber-500 to-orange-400' },
-};
-const FEATURE_KEYS = Object.keys(FEATURE_ICONS);
+function Brand() {
+  return <Link to="/" className="landing-brand" aria-label="MyChaat" onClick={() => window.scrollTo({ top: 0, behavior: 'auto' })}><span className="landing-brand-icon"><MessageCircle size={21} /></span><span dir="ltr">MyChaat<span className="brand-dot">.</span></span></Link>;
+}
 
-
-const Landing = () => {
+export default function Landing() {
+  const { lang, t } = useTranslation();
+  const copy = landingCopy[lang] || landingCopy.en;
   const [menuOpen, setMenuOpen] = useState(false);
-  const { t, lang } = useTranslation();
+  const pageRef = useRef(null);
+  const menuButton = useRef(null);
+  const reducedMotion = useReducedMotion();
 
-  const scrollToSection = (id) => (event) => {
-    event?.preventDefault?.();
-    setMenuOpen(false);
-    if (typeof window === 'undefined' || typeof document === 'undefined') return;
-    const el = document.getElementById(id);
-    if (!el) return;
-    const NAV_OFFSET = 72;
-    const top = el.getBoundingClientRect().top + window.pageYOffset - NAV_OFFSET;
-    window.scrollTo({ top, behavior: 'smooth' });
-    if (window.history?.replaceState) {
-      window.history.replaceState(null, '', `#${id}`);
+  useEffect(() => {
+    if (reducedMotion || !window.IntersectionObserver) return undefined;
+    const nodes = pageRef.current.querySelectorAll('[data-reveal]');
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.dataset.reveal = 'visible';
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+    nodes.forEach(node => { node.dataset.reveal = 'pending'; observer.observe(node); });
+    return () => { observer.disconnect(); nodes.forEach(node => { node.dataset.reveal = 'visible'; }); };
+  }, [reducedMotion]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    function onKey(event) {
+      if (event.key === 'Escape') { setMenuOpen(false); menuButton.current?.focus(); }
     }
-  };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [menuOpen]);
 
-  const previewSidebarItems = ['Dashboard', 'Automations', 'DM Automation', 'Billing', 'Settings'];
+  function goTo(id) {
+    return event => {
+      event.preventDefault();
+      setMenuOpen(false);
+      document.getElementById(id)?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
+      window.history.replaceState(null, '', `#${id}`);
+    };
+  }
 
   return (
-    <div className="min-h-screen bg-white text-slate-900 overflow-x-hidden">
-      <nav className="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-white/80 border-b border-slate-100" aria-label={lang === 'ar' ? 'شريط التنقّل' : 'Site navigation'}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
-              <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
-            </div>
-            <span className="text-xl font-bold font-display tracking-tight">{t('common.brand')}</span>
-          </Link>
-          <div className="hidden md:flex items-center gap-8">
-            <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('landing.nav.features')}</a>
-            <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('landing.nav.how')}</a>
-            <Link to="/privacy" className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">{t('common.privacy')}</Link>
-          </div>
-          <div className="hidden md:flex items-center gap-3">
-            <LangSwitcher />
-            <Link to="/login"><Button variant="ghost" className="text-slate-700">{t('common.login')}</Button></Link>
-            <Link to="/signup">
-              <Button className="bg-slate-900 hover:bg-slate-800 text-white rounded-full px-5">
-                {t('common.signup')}
-              </Button>
-            </Link>
-          </div>
-          <button className="md:hidden" onClick={() => setMenuOpen(!menuOpen)}>
-            {menuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
-          </button>
-        </div>
-        {menuOpen && (
-          <div className="md:hidden border-t border-slate-100 bg-white">
-            <div className="px-6 py-4 flex flex-col gap-4">
-              <a href="#features" onClick={scrollToSection('features')} className="text-sm font-medium">{t('landing.nav.features')}</a>
-              <a href="#how" onClick={scrollToSection('how')} className="text-sm font-medium">{t('landing.nav.how')}</a>
-              <Link to="/privacy" onClick={() => setMenuOpen(false)} className="text-sm font-medium">{t('common.privacy')}</Link>
-              <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                <span className="text-xs text-slate-500">{lang === "ar" ? "اللغة" : "Language"}</span>
-                <LangSwitcher />
-              </div>
-              <Link to="/login"><Button variant="outline" className="w-full">{t('common.login')}</Button></Link>
-              <Link to="/signup"><Button className="w-full bg-slate-900 text-white">{t('common.signup')}</Button></Link>
-            </div>
-          </div>
-        )}
-      </nav>
+    <div className="landing-page" ref={pageRef} lang={lang} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+      <a className="landing-skip" href="#main">{lang === 'ar' ? 'انتقل إلى المحتوى' : 'Skip to content'}</a>
+      <header className="landing-header">
+        <nav className="landing-nav landing-shell" aria-label={lang === 'ar' ? 'شريط التنقل' : 'Site navigation'}>
+          <Brand />
+          <div className="landing-desktop-links"><a href="#features" onClick={goTo('features')}>{copy.nav[0]}</a><a href="#how" onClick={goTo('how')}>{copy.nav[1]}</a><a href="#questions" onClick={goTo('questions')}>{copy.nav[2]}</a></div>
+          <div className="landing-nav-actions"><LangSwitcher /><Link className="landing-login" to="/login">{t('common.login')}<ArrowUpRight size={17} /></Link><button ref={menuButton} type="button" className="landing-menu-button" aria-label={menuOpen ? copy.close : copy.menu} aria-expanded={menuOpen} aria-controls="landing-mobile-menu" onClick={() => setMenuOpen(open => !open)}>{menuOpen ? <X /> : <Menu />}</button></div>
+        </nav>
+        {menuOpen && <nav id="landing-mobile-menu" className="landing-mobile-menu landing-shell" aria-label={copy.menu}><a href="#features" onClick={goTo('features')}>{copy.nav[0]}</a><a href="#how" onClick={goTo('how')}>{copy.nav[1]}</a><a href="#questions" onClick={goTo('questions')}>{copy.nav[2]}</a><Link to="/login" onClick={() => setMenuOpen(false)}>{t('common.login')}</Link><Link to="/signup" onClick={() => setMenuOpen(false)}>{copy.cta}</Link></nav>}
+      </header>
 
-      <section className="relative pt-28 pb-16 px-4 sm:px-6 md:pt-32 md:pb-20">
-        <div className="max-w-6xl mx-auto relative">
-          <div className="text-center animate-fade-up">
-            <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-blue-100 rounded-full px-4 py-1.5 mb-6">
-              <Sparkles className="w-3.5 h-3.5 me-1.5" />
-              {t('landing.hero.badge')}
-            </Badge>
-            <h1 className="font-display text-4xl sm:text-6xl md:text-7xl font-extrabold leading-[1.05] tracking-tight">
-              {t('landing.hero.title1')} <br />
-              {t('landing.hero.title2')} <span className="gradient-text">{t('landing.hero.titleEm')}</span>
-            </h1>
-            <p className="mt-6 text-lg md:text-xl text-slate-600 max-w-2xl mx-auto">
-              {t('landing.hero.subtitle')}
-            </p>
-            <div className="mt-10 flex items-center justify-center gap-3 flex-wrap">
-              <Link to="/signup">
-                <Button size="lg" className="bg-slate-900 hover:bg-slate-800 text-white rounded-full px-8 h-14 text-base">
-                  {t('landing.hero.cta')} <ArrowRight className="ms-2 w-4 h-4" />
-                </Button>
-              </Link>
-            </div>
+      <main id="main">
+        <section className="landing-hero landing-shell">
+          <div className="hero-copy">
+            <p className="landing-eyebrow hero-enter"><span className="eyebrow-dot" />{copy.eyebrow}</p>
+            <h1 className="landing-display hero-title hero-enter">{copy.title.map((line, index) => <span key={line} className={index === 2 ? 'hero-accent' : ''}>{line}</span>)}</h1>
+            <p className="hero-description hero-enter">{copy.intro}</p>
+            <div className="hero-actions hero-enter"><Link to="/signup" className="landing-button">{copy.cta}<ArrowUpRight size={22} /></Link><a href="#demo" onClick={goTo('demo')} className="landing-text-link">{copy.watch}<ArrowDown size={16} /></a></div>
+            <p className="hero-note"><Instagram size={14} />{copy.note}</p>
           </div>
+          <div id="demo" className="hero-demo"><ConversationPreview copy={copy} reducedMotion={reducedMotion} /></div>
+        </section>
+        <div className="landing-principles landing-shell">{copy.principles.map(item => <span key={item}><Check size={16} />{item}</span>)}</div>
 
-          <div className="mt-12 relative animate-fade-up md:mt-16" style={{ animationDelay: '0.2s' }}>
-            <div className="relative rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white">
-              <div className="h-10 bg-slate-50 border-b border-slate-100 flex items-center px-4 gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-red-400" />
-                <div className="w-3 h-3 rounded-full bg-amber-400" />
-                <div className="w-3 h-3 rounded-full bg-green-400" />
-              </div>
-              <div className="grid md:grid-cols-[240px_1fr] min-h-[400px]" dir="ltr">
-                <div className="bg-slate-50 border-r border-slate-100 p-3 sm:p-4 space-y-1">
-                  {previewSidebarItems.map((item, i) => (
-                    <div key={item} className={`px-3 py-2 rounded-lg text-sm font-medium ${i === 1 ? 'bg-blue-50 text-blue-700' : 'text-slate-600'}`}>{item}</div>
-                  ))}
-                </div>
-                <div className="p-4 sm:p-6 flow-grid">
-                  <div className="flex gap-6 flex-wrap">
-                    <div className="w-56 rounded-2xl bg-gradient-to-br from-pink-500 to-orange-400 text-white p-4 shadow-lg">
-                      <div className="text-xs opacity-90 font-medium">{t('landing.preview.triggerLabel')}</div>
-                      <div className="mt-1 font-semibold">{t('landing.preview.triggerTitle')}</div>
-                      <div className="mt-2 text-xs opacity-90">{t('landing.preview.triggerHint')}</div>
-                    </div>
-                    <div className="w-56 rounded-2xl bg-gradient-to-br from-blue-500 to-cyan-400 text-white p-4 shadow-lg">
-                      <div className="text-xs opacity-90 font-medium">{t('landing.preview.messageLabel')}</div>
-                      <div className="mt-1 font-semibold">{t('landing.preview.messageTitle')}</div>
-                      <div className="mt-2 text-xs opacity-90">{t('landing.preview.messageHint')}</div>
-                    </div>
-                    <div className="w-56 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-400 text-white p-4 shadow-lg">
-                      <div className="text-xs opacity-90 font-medium">{t('landing.preview.actionLabel')}</div>
-                      <div className="mt-1 font-semibold">{t('landing.preview.actionTitle')}</div>
-                      <div className="mt-2 text-xs opacity-90">{t('landing.preview.actionHint')}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+        <section id="how" className="landing-how">
+          <div className="landing-shell">
+            <div className="how-heading" data-reveal="visible"><p className="landing-eyebrow">{copy.howLabel}</p><h2 className="landing-display">{copy.howTitle[0]}<br /><span>{copy.howTitle[1]}</span></h2><span className="how-asterisk" aria-hidden="true">✳</span></div>
+            <div className="how-steps">{copy.steps.map((step, index) => <article key={step.title} data-reveal="visible"><span className="step-number" dir="ltr">0{index + 1}</span><h3>{step.title}</h3><p>{step.body}</p></article>)}</div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="features" className="py-16 px-4 sm:px-6 md:py-24">
-        <div className="max-w-6xl mx-auto">
-          <div className="max-w-2xl">
-            <Badge className="bg-pink-50 text-pink-700 border-pink-100 rounded-full">{t('landing.features.badge')}</Badge>
-            <h2 className="mt-4 font-display text-4xl md:text-5xl font-extrabold tracking-tight">
-              {t('landing.features.title')}
-            </h2>
-            <p className="mt-4 text-lg text-slate-600">{t('landing.features.subtitle')}</p>
+        <section id="features" className="landing-features landing-shell">
+          <div className="features-heading" data-reveal="visible"><p className="landing-eyebrow">{copy.featuresLabel}</p><h2 className="landing-display">{copy.featuresTitle[0]}<br /><span>{copy.featuresTitle[1]}</span></h2></div>
+          <div className="features-layout">
+            <div className="word-poster" data-reveal="visible"><p className="landing-eyebrow">{copy.specimenLabel}</p><div className="word-poster-orbit" aria-hidden="true" /><strong className="landing-display">{copy.specimenWord}<span aria-hidden="true">↗</span></strong><div className="word-poster-tags">{copy.specimenTags.map(tag => <span key={tag}>{tag}</span>)}</div><div className="word-poster-foot">{copy.specimenFoot}<MessageCircle size={25} /></div></div>
+            <div className="feature-rows">{copy.features.map((feature, index) => <article key={feature.title} data-reveal="visible"><span className="feature-index" dir="ltr">0{index + 1}</span><div><h3>{feature.title}</h3><p>{feature.body}</p></div><ArrowUpRight size={22} aria-hidden="true" /></article>)}</div>
           </div>
-          <div className="mt-14 grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {FEATURE_KEYS.map((key) => {
-              const { Icon, color } = FEATURE_ICONS[key];
-              return (
-                <div key={key} className="group relative rounded-2xl p-6 border border-slate-100 hover:border-slate-200 hover:shadow-xl transition-all bg-white">
-                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${color} flex items-center justify-center shadow-lg`}>
-                    <Icon className="w-6 h-6 text-white" strokeWidth={2.2} />
-                  </div>
-                  <h3 className="mt-5 text-xl font-bold font-display">{t(`landing.features.items.${key}.title`)}</h3>
-                  <p className="mt-2 text-slate-600 text-sm leading-relaxed">{t(`landing.features.items.${key}.description`)}</p>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="how" className="py-16 px-4 sm:px-6 md:py-24 bg-slate-50">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center max-w-2xl mx-auto">
-            <Badge className="bg-blue-50 text-blue-700 border-blue-100 rounded-full">{t('landing.how.badge')}</Badge>
-            <h2 className="mt-4 font-display text-4xl md:text-5xl font-extrabold tracking-tight">{t('landing.how.title')}</h2>
-          </div>
-          <div className="mt-14 grid md:grid-cols-3 gap-6">
-            {t('landing.how.steps').map((s) => (
-              <div key={s.num} className="rounded-2xl bg-white border border-slate-100 p-8">
-                <div className="text-6xl font-display font-extrabold text-slate-100">{s.num}</div>
-                <h3 className="mt-4 text-xl font-bold font-display">{s.title}</h3>
-                <p className="mt-2 text-slate-600">{s.desc}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+        <section className="landing-trust landing-shell" data-reveal="visible"><span className="trust-icon"><ShieldCheck size={30} /></span><div><h2>{copy.trustTitle}</h2><p>{copy.trustBody}</p></div><Link to="/privacy" className="landing-text-link">{copy.trustLink}<ArrowUpRight size={17} /></Link></section>
 
-      <section className="py-16 px-4 sm:px-6 md:py-24">
-        <div className="max-w-5xl mx-auto relative rounded-3xl overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6 sm:p-12 md:p-16 text-center">
-          <div className="relative">
-            <h2 className="font-display text-4xl md:text-5xl font-extrabold text-white tracking-tight">{t('landing.cta.title')}</h2>
-            <p className="mt-4 text-lg text-slate-300 max-w-xl mx-auto">{t('landing.cta.body')}</p>
-            <Link to="/signup">
-              <Button size="lg" className="mt-8 bg-white text-slate-900 hover:bg-slate-100 rounded-full px-8 h-14">
-                {t('landing.cta.button')} <ArrowRight className="ms-2 w-4 h-4" />
-              </Button>
-            </Link>
-          </div>
-        </div>
-      </section>
+        <section id="questions" className="landing-faq landing-shell"><div data-reveal="visible"><p className="landing-eyebrow">{copy.faqLabel}</p><h2 className="landing-display">{copy.faqTitle}</h2></div><div className="faq-list" data-reveal="visible">{copy.questions.map(question => <details key={question.title}><summary>{question.title}<ChevronDown size={20} /></summary><p>{question.body}</p></details>)}</div></section>
 
-      <footer className="border-t border-slate-100 py-10 px-4 sm:px-6 md:py-12">
-        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
-              <MessageCircle className="w-4 h-4 text-white" strokeWidth={2.5} />
-            </div>
-            <span className="font-bold font-display">{t('common.brand')}</span>
-            <span className="text-sm text-slate-500 ms-2">{t('common.copyright')}</span>
-          </div>
-          <div className="flex gap-6 text-sm text-slate-500 items-center flex-wrap">
-            <Link to="/privacy" className="hover:text-slate-900">{t('common.privacy')}</Link>
-            <Link to="/terms" className="hover:text-slate-900">{t('common.terms')}</Link>
-            <Link to="/data-deletion" className="hover:text-slate-900">{t('common.dataDeletion')}</Link>
-            <Link to="/support" className="hover:text-slate-900">
-              {t('common.contact')}
-            </Link>
-          </div>
-        </div>
-      </footer>
+        <section className="landing-finale"><div className="landing-shell" data-reveal="visible"><p className="landing-eyebrow">{copy.finalLabel}</p><div className="finale-row"><h2 className="landing-display">{copy.finalTitle[0]}<br /><span>{copy.finalTitle[1]}</span></h2><Link to="/signup" className="finale-link"><span className="finale-arrow"><ArrowUpRight strokeWidth={1.2} /></span>{copy.finalCta}</Link></div><p className="finale-note">{copy.finalNote}</p></div></section>
+      </main>
+
+      <footer className="landing-footer landing-shell"><div className="footer-top"><Brand /><nav className="landing-footer-links" aria-label={lang === 'ar' ? 'روابط المساعدة والسياسات' : 'Help and policies'}><Link to="/privacy">{t('common.privacy')}</Link><Link to="/terms">{t('common.terms')}</Link><Link to="/data-deletion">{t('common.dataDeletion')}</Link><Link to="/support">{t('common.contact')}</Link><Link to="/status">{t('landing.nav.status')}</Link></nav></div><div className="footer-bottom"><span dir="ltr">© {new Date().getFullYear()} MyChaat</span><p>{copy.legal}</p></div></footer>
     </div>
   );
-};
-
-export default Landing;
+}
