@@ -5,7 +5,7 @@ const path = require('path');
 test('Instagram duplicate account error is explicit and points to a recovery path', () => {
   const message = instagramErrorMessage('instagram_account_already_connected');
   expect(message).toContain('already linked');
-  expect(message).toMatch(/different MyChat account/i);
+  expect(message).toMatch(/different MyChaat account/i);
   expect(message).toMatch(/contact support/i);
 });
 
