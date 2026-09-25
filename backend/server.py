@@ -31134,9 +31134,10 @@ async def response_timing_middleware(request, call_next):
     if csp_override:
         headers.setdefault('Content-Security-Policy', csp_override)
     elif IS_PRODUCTION:
+        from public_site_security import default_content_security_policy
         headers.setdefault(
             'Content-Security-Policy',
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            default_content_security_policy(str(path), headers.get('content-type', '')),
         )
     if IS_PRODUCTION:
         proto = (request.headers.get('x-forwarded-proto') or request.url.scheme).lower()
