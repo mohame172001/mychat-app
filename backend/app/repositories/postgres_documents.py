@@ -294,6 +294,8 @@ class Collection:
         for operator, fields in update.items():
             if operator not in {"$set", "$unset", "$inc", "$setOnInsert", "$push", "$addToSet", "$pull", "$max", "$min"}:
                 raise ValueError(f"Unsupported update operator: {operator}")
+            if operator == "$setOnInsert" and not inserting:
+                continue
             for key, value in fields.items():
                 if key == "_id" and (operator != "$setOnInsert" or not inserting):
                     raise ValueError("_id is immutable")
