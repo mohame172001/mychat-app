@@ -1,9 +1,27 @@
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 from cryptography.fernet import Fernet
-from replit_start import configure
+from replit_start import configure, add_bundled_dependencies
 
 
 class ReplitConfigurationTests(unittest.TestCase):
+    def test_bundled_dependencies_added_once(self):
+        with tempfile.TemporaryDirectory() as directory, patch('sys.path', ['existing']):
+            root = Path(directory)
+            (root / '.replit-deps').mkdir()
+            add_bundled_dependencies(root)
+            add_bundled_dependencies(root)
+            import sys
+            self.assertEqual(sys.path, [str(root / '.replit-deps'), 'existing'])
+
+    def test_missing_bundle_preserves_development_imports(self):
+        with tempfile.TemporaryDirectory() as directory, patch('sys.path', ['existing']):
+            add_bundled_dependencies(Path(directory))
+            import sys
+            self.assertEqual(sys.path, ['existing'])
+
     def environment(self):
         return {"DATABASE_URL":"synthetic-dsn","SESSION_SECRET":"s"*48,"REPLIT_DEV_DOMAIN":"preview.example.com"}
 

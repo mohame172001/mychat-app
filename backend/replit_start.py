@@ -12,6 +12,13 @@ from urllib.parse import urlparse
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def add_bundled_dependencies(root=ROOT):
+    # Published builds install here; resolve before importing third-party code.
+    bundled = root / '.replit-deps'
+    if bundled.is_dir() and str(bundled) not in sys.path:
+        sys.path.insert(0, str(bundled))
+
+
 def configure(env):
     if not env.get("DATABASE_URL"):
         raise RuntimeError("Replit DATABASE_URL is required")
@@ -48,6 +55,7 @@ def configure(env):
 
 
 def main():
+    add_bundled_dependencies()
     from dotenv import load_dotenv
     load_dotenv(ROOT/"backend"/".env")
     configure(os.environ)
