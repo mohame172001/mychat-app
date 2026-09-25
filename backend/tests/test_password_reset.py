@@ -43,6 +43,13 @@ from test_google_auth import _full_user  # noqa: E402
 _REAL_RATE_LIMITED = server._rate_limited
 
 
+@pytest.fixture(autouse=True)
+def isolate_delivery_credentials(monkeypatch):
+    # Legacy transport tests must never use the workspace's real Resend account.
+    for key in ('RESEND_API_KEY', 'AUTH_EMAIL_FROM', 'AUTH_EMAIL_REPLY_TO'):
+        monkeypatch.delenv(key, raising=False)
+
+
 def _request(ip='1.2.3.4'):
     return SimpleNamespace(client=SimpleNamespace(host=ip), headers={})
 
