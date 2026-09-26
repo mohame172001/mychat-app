@@ -20,7 +20,7 @@ from pymongo.errors import DuplicateKeyError
 
 
 SCHEMA = "mychat_runtime"
-COLLECTIONS = """admin_audit_logs admin_members automations broadcasts comment_dm_sessions
+COLLECTIONS = """admin_audit_logs admin_members automation_rate_limits automations broadcasts comment_dm_sessions
 comments contacts conversations dashboard_summaries data_deletion_requests dm_logs dm_rules
 instagram_account_trial_claims instagram_accounts instagram_automation_events instagram_media_catalog
 invoices link_click_events monthly_usage oauth_code_consumed subscriptions tracked_links usage_events

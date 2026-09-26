@@ -14,6 +14,15 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
+async def test_automation_send_spacing_collection_is_initialized(monkeypatch):
+    database, statements = fake_database(monkeypatch, existing=False)
+    assert database.automation_rate_limits is not None
+    await database.initialize()
+    assert any('CREATE TABLE' in text and 'automation_rate_limits' in text
+               for text, _ in statements)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("row,exists", [(None, False), ((True, True, False, "users", SCHEMA), True)])
 async def test_catalog_lookup(row, exists):
     connection = AsyncMock()
