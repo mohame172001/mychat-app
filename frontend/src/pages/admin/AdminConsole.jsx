@@ -3245,7 +3245,7 @@ function WebhookVerificationTab() {
         </Button>
         {freshVerifyResult && (
           <span className="ms-2 text-[11px] font-mono" data-testid="webhook-verification-subscription-verify-fresh-result">
-            {freshVerifyResult.verdict || '—'}
+            {freshVerifyResult.verdict || freshVerifyResult.error || '—'}
             {Array.isArray(freshVerifyResult.fresh_fields_from_graph) && (
               <span className="ms-2 text-slate-500">
                 fields={freshVerifyResult.fresh_fields_from_graph.join(',') || '—'}
@@ -4042,8 +4042,8 @@ function WebhookVerificationTab() {
               response keys: {(repairResult.readback_response_keys || []).join(', ')}
             </div>
           )}
-          {repairResult.actionable_error && (
-            <div className="mt-1">{repairResult.actionable_error}</div>
+          {(repairResult.actionable_error || repairResult.message || repairResult.error) && (
+            <div className="mt-1">{repairResult.actionable_error || repairResult.message || repairResult.error}</div>
           )}
           {repairResult.note && (
             <div className="mt-1 text-slate-500">{repairResult.note}</div>
