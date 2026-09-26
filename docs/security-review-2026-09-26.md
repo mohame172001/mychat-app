@@ -37,3 +37,21 @@
 - These local fixes must be deployed before they protect the production site.
 
 This checkpoint is not a claim that the site is free of vulnerabilities.
+
+## Follow-up dependency remediation
+
+- Updated build dependencies with tested resolutions, including Babel, ws,
+  YAML parsers, SVGR/SVGO, qs and CSS tooling.
+- Latest Yarn dependency audit: 0 critical, 0 high, 0 low, 7 moderate findings.
+  Remaining findings are webpack-dev-server and its sockjs/uuid dependency.
+  Production serves the compiled frontend from Python, not webpack-dev-server.
+  Development tooling migration remains open; do not expose its server publicly.
+- Tested FastAPI 0.141.1 / Starlette 1.4.1, cryptography 50.0.0, PyJWT 2.13.0,
+  multipart 0.0.31 and patched supporting packages in an isolated environment.
+- Removed unused python-jose dependency (the application uses PyJWT), avoiding
+  the unnecessary ecdsa dependency in fresh installs.
+- Full backend tests still pass: 1054 passed, 55 skipped, 12 subtests passed.
+  Frontend: 306 passed; production build succeeds.
+- The installed-machine pip audit includes unrelated applications and is not
+  a production dependency inventory. Deployment environment still needs its own
+  complete resolved dependency audit. No zero-vulnerability claim is made.
