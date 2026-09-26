@@ -24,7 +24,7 @@ const DashboardLayout = () => {
   }, [isAdmin]);
 
   return (
-    <div className="h-[100dvh] flex bg-slate-50 overflow-hidden">
+    <div className="workspace-shell h-[100dvh] flex bg-slate-50 overflow-hidden">
       {/* Skip link for keyboard users — only visible when focused. */}
       <a
         href="#main-content"
@@ -37,7 +37,7 @@ const DashboardLayout = () => {
         <div className="md:hidden shrink-0 border-b border-slate-200 bg-white">
           <div className="h-14 px-4 flex items-center justify-between">
             <Link to="/app" className="flex items-center gap-2 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
+              <div className="brand-flow w-9 h-9 rounded-xl flex items-center justify-center">
                 <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
               </div>
               <span className="text-lg font-bold font-display truncate">MyChaat</span>

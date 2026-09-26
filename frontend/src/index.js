@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import "@/index.css";
 import "@/styles/arabicTypography.css";
 import App from "@/App";
+import "@/pages/Landing.css";
+import "@/styles/flowTheme.css";
 import analytics from "@/lib/analytics";
 import { initSentry } from "@/lib/sentryClient";
 

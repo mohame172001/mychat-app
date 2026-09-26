@@ -87,11 +87,11 @@ const Signup = () => {
       ];
 
   return (
-    <div className="min-h-screen grid grid-cols-1 md:grid-cols-2 bg-white">
+    <div className="auth-flow min-h-screen grid grid-cols-1 md:grid-cols-2">
       <div className="min-w-0 flex flex-col p-8 md:p-12">
         <div className="flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
+            <div className="brand-flow w-9 h-9 rounded-xl flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
             <span className="text-xl font-bold font-display">MyChaat</span>
@@ -149,7 +149,7 @@ const Signup = () => {
           </div>
         </div>
       </div>
-      <div className="hidden md:flex relative bg-gradient-to-br from-pink-500 via-orange-400 to-amber-400 overflow-hidden items-center justify-center p-12">
+      <div className="auth-flow-art hidden md:flex relative overflow-hidden items-center justify-center p-12">
         <div className="text-white max-w-md">
           <h2 className="font-display text-4xl font-extrabold leading-tight">
             {lang === 'ar'

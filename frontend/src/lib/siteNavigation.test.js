@@ -43,7 +43,8 @@ test.each(files)('%s points static navigation at real routes', file => {
 test('landing section links have matching targets', () => {
   const source = fs.readFileSync(path.join(__dirname, '../pages/Landing.jsx'), 'utf8');
   for (const [, anchor] of source.matchAll(/href="#([\w-]+)"/g)) {
-    expect(source).toContain(`id="${anchor}"`);
+    const storySource = fs.readFileSync(path.join(__dirname, '../components/landing/ScrollStory.jsx'), 'utf8');
+    expect(source + storySource).toContain(`id="${anchor}"`);
   }
 });
 

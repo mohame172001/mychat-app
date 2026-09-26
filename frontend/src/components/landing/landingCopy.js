@@ -2,8 +2,8 @@
 export const landingCopy = {
   en: {
     nav: ['The possibilities', 'How it works', 'Questions'], menu: 'Open navigation', close: 'Close navigation',
-    eyebrow: 'A little automation. A lot more conversation.',
-    title: ['Make content.', 'Leave room for', 'connection.'],
+    eyebrow: 'SMALL COMMENT / BIG POSSIBILITY',
+    title: ['More than a comment', 'A new conversation'],
     intro: 'Your next conversation starts with a comment. Give it a thoughtful reply, a useful link, and a next step. Without doing it all by hand.',
     cta: 'Create your first flow', watch: 'See it in motion', note: 'For Instagram Business & Creator accounts',
     edition: 'THE CONVERSATION STUDIO', demo: 'A comment. A connection.', demoNote: 'Illustrative example. No real messages are sent.',
@@ -39,22 +39,22 @@ export const landingCopy = {
   },
   ar: {
     nav: ['ماذا يمكنك أن تفعل؟', 'كيف يعمل؟', 'أسئلة شائعة'], menu: 'فتح التنقل', close: 'إغلاق التنقل',
-    eyebrow: 'أتمتة أقل تعقيدًا. محادثات أكثر معنى.', title: ['اصنع المحتوى.', 'واترك مساحة', 'للحوار.'],
-    intro: 'خلف كل تعليق شخص مهتم. استقبله برد يشبهك، ورابط يفيده، وخطوة تفتح الحديث. بدون أن تكرر كل شيء بنفسك.',
+    eyebrow: 'كل تعليق ممكن يكون بداية', title: ['مش مجرد تعليق', 'دي بداية محادثة'],
+    intro: 'محتواك يلفت النظر وإحنا نكمّل الحكاية انزل وشوف تعليق واحد ممكن يعمل إيه',
     cta: 'أنشئ أول أتمتة', watch: 'شاهد الفكرة تتحرك', note: 'لحسابات Instagram للأعمال وصنّاع المحتوى',
     edition: 'مساحة للمحادثات التي تبدأ منك', demo: 'من تعليق… إلى حوار.', demoNote: 'مثال توضيحي فقط. لا تُرسل أي رسائل حقيقية.',
     play: 'تشغيل المثال', pause: 'إيقاف الحركة', replay: 'إعادة التجربة', stages: ['اختر منشورًا', 'يصل تعليق', 'تتطابق القاعدة', 'تُجهّز الرسالة'],
     postLabel: 'المنشور الذي اخترته', postTitle: ['فكرة.', 'تستحق', 'المشاركة.'], postCaption: 'دليل صغير لفكرتك الكبيرة القادمة.',
     visitor: 'متابع مهتم', comment: 'ممكن ترسل لي الدليل؟', keyword: 'الدليل', match: 'تطابقت الكلمة',
     messageLabel: 'رسالة بصوتك', message: 'بالتأكيد! هذا رابط الدليل الذي طلبته.', messageLink: 'افتح الدليل',
-    principles: ['بدون كود. بكلماتك أنت.', 'لكل منشور رحلته.', 'القرار دائمًا لك.'],
-    howLabel: '٠١ / من الاهتمام إلى المحادثة', howTitle: ['أنت تبدأ الفكرة.', 'والأتمتة تكمل معك.'],
+    principles: ['بدون كود بكلماتك أنت', 'لكل منشور رحلته', 'القرار دائمًا لك'],
+    howLabel: '٠١ / من الاهتمام إلى المحادثة', howTitle: ['أنت تبدأ الفكرة', 'والأتمتة تكمل معك'],
     steps: [
       { title: 'ابدأ بحسابك.', body: 'اربط حسابك الاحترافي من خلال Instagram نفسه. كلمة مرور حسابك لا تصل إلينا.' },
       { title: 'امنح المنشور خطوة تالية.', body: 'اختر المنشور والكلمة المفتاحية، واكتب الرد الذي تريد أن يصل. لا تعمل القاعدة حتى تفعّلها.' },
       { title: 'اترك مجالًا للحوار.', body: 'تُشغّل التعليقات الجديدة قواعدك. تابع الردود والرسائل وأي تعثّر في التسليم من مساحة عملك.' },
     ],
-    featuresLabel: '٠٢ / تكرار أقل. مساحة أكبر لك.', featuresTitle: ['اجعلها شخصية.', 'حتى لو كانت تلقائية.'],
+    featuresLabel: '٠٢ / تكرار أقل ومساحة أكبر لك', featuresTitle: ['اجعلها شخصية', 'حتى لو كانت تلقائية'],
     features: [
       { title: 'منشورك. وقواعدك.', body: 'إطلاق جديد، شرح مفيد، أو مجموعة منتجات. امنح كل منشور تختاره كلمة مفتاحية وردًا يناسبه.' },
       { title: 'كلمات تشبهك.', body: 'اكتب تعليقًا عامًا أو رسالة افتتاحية أو أرسل رابطًا مفيدًا. أنت تختار الكلمات، لا نص جاهز يُفرض عليك.' },

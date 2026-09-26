@@ -64,11 +64,11 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen grid grid-cols-1 md:grid-cols-2 bg-white">
+    <div className="auth-flow min-h-screen grid grid-cols-1 md:grid-cols-2">
       <div className="min-w-0 flex flex-col p-8 md:p-12">
         <div className="flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
+            <div className="brand-flow w-9 h-9 rounded-xl flex items-center justify-center">
               <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
             <span className="text-xl font-bold font-display">MyChaat</span>
@@ -133,15 +133,15 @@ const Login = () => {
           </div>
         </div>
       </div>
-      <div className="hidden md:block relative bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 overflow-hidden">
+      <div className="auth-flow-art hidden md:block relative overflow-hidden">
         <div className="absolute inset-0 flex items-center justify-center p-12">
-          <div className="text-white max-w-md">
+          <div className="text-slate-900 max-w-md">
             <h2 className="font-display text-4xl font-extrabold leading-tight">
               {lang === 'ar'
                 ? 'أتمت المحادثات التي تنمّي عملك.'
                 : 'Automate the conversations that grow your business.'}
             </h2>
-            <p className="mt-4 text-white/90 text-lg">
+            <p className="mt-4 text-slate-600 text-lg">
               {lang === 'ar'
                 ? 'اربط Instagram، صمّم قواعد التحوّل من تعليق إلى رسالة، وراقب المحادثات الحقيقية وهي تتحول إلى نتائج.'
                 : 'Connect your Instagram, build comment-to-DM rules, and watch real conversations turn into action.'}

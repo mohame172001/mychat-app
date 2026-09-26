@@ -209,7 +209,7 @@ const Sidebar = () => {
   return (
     <aside className="hidden md:flex w-64 flex-col bg-white border-r border-slate-200">
       <Link to="/app" className="h-16 px-6 flex items-center gap-2 border-b border-slate-100">
-        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 via-cyan-400 to-pink-400 flex items-center justify-center">
+        <div className="brand-flow w-9 h-9 rounded-xl flex items-center justify-center">
           <MessageCircle className="w-5 h-5 text-white" strokeWidth={2.5} />
         </div>
         <span className="text-xl font-bold font-display">MyChaat</span>

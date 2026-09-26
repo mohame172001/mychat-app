@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowDown, ArrowUpRight, Check, ChevronDown, Instagram, Menu, MessageCircle, ShieldCheck, X } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import LangSwitcher from '../components/LangSwitcher';
-import ConversationPreview from '../components/landing/ConversationPreview';
+import ScrollStory from '../components/landing/ScrollStory';
 import { landingCopy } from '../components/landing/landingCopy';
 import './Landing.css';
 
@@ -81,13 +81,14 @@ export default function Landing() {
         <section className="landing-hero landing-shell">
           <div className="hero-copy">
             <p className="landing-eyebrow hero-enter"><span className="eyebrow-dot" />{copy.eyebrow}</p>
-            <h1 className="landing-display hero-title hero-enter">{copy.title.map((line, index) => <span key={line} className={index === 2 ? 'hero-accent' : ''}>{line}</span>)}</h1>
+            <h1 className="landing-display hero-title hero-enter">{copy.title.map((line, index) => <span key={line} className={index === copy.title.length - 1 ? 'hero-accent' : ''}>{line}</span>)}</h1>
             <p className="hero-description hero-enter">{copy.intro}</p>
             <div className="hero-actions hero-enter"><Link to="/signup" className="landing-button">{copy.cta}<ArrowUpRight size={22} /></Link><a href="#demo" onClick={goTo('demo')} className="landing-text-link">{copy.watch}<ArrowDown size={16} /></a></div>
             <p className="hero-note"><Instagram size={14} />{copy.note}</p>
           </div>
-          <div id="demo" className="hero-demo"><ConversationPreview copy={copy} reducedMotion={reducedMotion} /></div>
+          <div className="hero-float" aria-hidden="true"><span>LET IT FLOW</span><p>{lang === 'ar' ? 'ممكن التفاصيل' : 'Can I get the details?'}</p><ArrowUpRight size={24} /></div>
         </section>
+        <ScrollStory copy={copy} lang={lang} reducedMotion={reducedMotion} />
         <div className="landing-principles landing-shell">{copy.principles.map(item => <span key={item}><Check size={16} />{item}</span>)}</div>
 
         <section id="how" className="landing-how">

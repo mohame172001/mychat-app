@@ -67,7 +67,8 @@ html { scroll-behavior: smooth; }
 @media (max-width: 640px) {
   html, body, #root, .App {
     min-width: 0;
-    overflow-x: hidden;
+    /* Clip horizontal spill without creating a scroll container around sticky scenes. */
+    overflow-x: clip;
   }
 
   h1 {
