@@ -42,6 +42,7 @@ from auth_utils import (
     get_current_user_id,
     get_current_session_version,
     decode_token,
+    decode_token_payload,
     JWT_SECRET,
 )
 from app.services.instagram.rule_normalizer import (
@@ -31037,10 +31038,12 @@ app.include_router(api)
 @app.websocket('/ws/{user_id}')
 async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...)):
     try:
-        uid = decode_token(token)
+        payload = decode_token_payload(token)
+        uid = payload.get('sub')
         if uid != user_id:
             await ws.close(code=4003)
             return
+        await get_current_active_user_id(uid, payload.get('session_version', 0))
     except Exception:
         await ws.close(code=4001)
         return
@@ -31049,6 +31052,16 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...
     try:
         while True:
             data = await ws.receive_json()
+            # Recheck expiry and revocation for connections kept open after logout.
+            try:
+                payload = decode_token_payload(token)
+                await get_current_active_user_id(user_id, payload.get('session_version', 0))
+            except Exception:
+                await ws.close(code=4001)
+                return
+            if not isinstance(data, dict):
+                await ws.close(code=1008)
+                return
             msg_type = data.get('type')
 
             if msg_type == 'message':
@@ -31074,7 +31087,7 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...
                        'time': datetime.utcnow().strftime('%I:%M %p'),
                        'delivered': delivered}
                 await db.conversations.update_one(
-                    {'id': conv_id},
+                    {'id': conv_id, 'user_id': user_id},
                     {'$push': {'messages': msg},
                      '$set': {'lastMessage': text, 'time': 'now', 'unread': 0}}
                 )
@@ -31084,6 +31097,8 @@ async def websocket_endpoint(ws: WebSocket, user_id: str, token: str = Query(...
                 await ws_manager.send(user_id, {'type': 'pong'})
 
     except WebSocketDisconnect:
+        pass
+    finally:
         ws_manager.disconnect(user_id)
 
 mount_frontend(app, ROOT_DIR.parent / 'frontend' / 'build')
@@ -31110,20 +31125,9 @@ app.add_middleware(
 REQUEST_BODY_MAX_BYTES = int(os.environ.get('REQUEST_BODY_MAX_BYTES', 2 * 1024 * 1024))
 
 
-@app.middleware('http')
-async def body_size_limit_middleware(request, call_next):
-    declared = request.headers.get('content-length')
-    if declared is not None:
-        try:
-            if int(declared) > REQUEST_BODY_MAX_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={'detail': 'request_body_too_large'},
-                )
-        except (TypeError, ValueError):
-            # Malformed Content-Length — let the framework handle it.
-            pass
-    return await call_next(request)
+from request_limits import RequestBodyLimitMiddleware
+
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=REQUEST_BODY_MAX_BYTES)
 
 
 @app.middleware('http')
